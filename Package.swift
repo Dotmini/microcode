@@ -96,7 +96,9 @@ let package = Package(
                 "Services/AgentCore/AgentExecutor.swift",
                 "Services/AuthService.swift",
                 "Services/CollaborationService.swift",
-                "Views/AuthView.swift",
+                "Views/EmbeddedToolsView.swift",
+                "Views/EmbeddedStudioView.swift",
+                "Views/EmbeddedProjectWizard.swift",
                 "Views/CollaborationView.swift",
                 "Models/TaskModels.swift",
                 "Models/SASProcedures.swift", // New Phase 12

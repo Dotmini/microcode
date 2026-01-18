@@ -2166,17 +2166,18 @@ struct NotebookCellView: View {
                     .foregroundColor(.secondary)
                     .frame(width: 40)
                 
-                if isHovering || isSelected {
-                    Button(action: onRun) {
-                        Image(systemName: cell.isExecuting ? "stop.circle" : "play.circle.fill")
-                            .foregroundColor(cell.isExecuting ? .red : .green)
-                    }
-                    .buttonStyle(.plain)
-                    .disabled(cell.type != .code)
+                // Play Button
+                Button(action: onRun) {
+                    Image(systemName: cell.isExecuting ? "stop.circle.fill" : "play.circle.fill")
+                        .font(.system(size: 16))
+                        .foregroundColor(cell.isExecuting ? .red : .green)
+                        .opacity(isHovering || isSelected || cell.isExecuting ? 1 : 0)
                 }
+                .buttonStyle(.plain)
+                .disabled(cell.type != .code)
             }
             .frame(width: 50)
-            .padding(.top, 8)
+            .padding(.top, 12)
             
             // Main Cell Content - All same background color
             VStack(alignment: .leading, spacing: 0) {
@@ -2326,13 +2327,18 @@ struct NotebookCellView: View {
                     }
                 }
             }
-            .background(appState.appTheme == .transparent ? Color.clear : cell.backgroundColor)
-            .cornerRadius(8)
-            .overlay(
-                RoundedRectangle(cornerRadius: 8)
-                    .stroke(isSelected ? Color.accentColor : cell.borderColorValue, lineWidth: isSelected ? 2 : 1)
-            )
+            .cornerRadius(6) 
+            .padding(.horizontal, 4)
+            .padding(.bottom, 8)
         }
+        .background(cell.backgroundColor)
+        .cornerRadius(12)
+        .overlay(
+            RoundedRectangle(cornerRadius: 12)
+                .stroke(isSelected ? Color.accentColor : cell.borderColorValue.opacity(0.5), lineWidth: isSelected ? 2 : 1)
+        )
+        .shadow(color: Color.black.opacity(0.05), radius: 4, x: 0, y: 2)
+        .padding(.horizontal, 16)
         .contentShape(Rectangle())
         .onTapGesture(perform: onSelect)
         .onHover { isHovering = $0 }

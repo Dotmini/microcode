@@ -197,24 +197,104 @@ class ExtensionManager: ObservableObject {
         applyExtensionChanges()
     }
     
-    // MARK: - Install Extension
+    // MARK: - Install Extension (Universal)
     func installExtension(from url: URL) async throws {
+        if url.pathExtension.lowercased() == "vsix" {
+            try await installVSIX(from: url)
+        } else {
+            try await installStandardExtension(from: url)
+        }
+    }
+
+    // MARK: - Standard Install
+    private func installStandardExtension(from url: URL) async throws {
         let destName = url.deletingPathExtension().lastPathComponent
         let destPath = extensionsDirectory.appendingPathComponent(destName)
         
         // If it's a zip, extract it
-        if url.pathExtension == "zip" {
-            let process = Process()
-            process.executableURL = URL(fileURLWithPath: "/usr/bin/unzip")
-            process.arguments = ["-o", url.path, "-d", destPath.path]
-            try process.run()
-            process.waitUntilExit()
+        if url.pathExtension.lowercased() == "zip" {
+            try unzip(url, to: destPath)
         } else {
             // Copy directory
             try FileManager.default.copyItem(at: url, to: destPath)
         }
         
         await loadExtensions()
+    }
+    
+    // MARK: - VSIX Install Logic
+    private func installVSIX(from url: URL) async throws {
+        // 1. Create Temp Directory
+        let tempDir = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        try FileManager.default.createDirectory(at: tempDir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: tempDir) }
+        
+        // 2. Unzip VSIX (it's a zip)
+        try unzip(url, to: tempDir)
+        
+        // 3. Find package.json (usually in 'extension' subdir)
+        let packageJsonPath = tempDir.appendingPathComponent("extension/package.json")
+        guard FileManager.default.fileExists(atPath: packageJsonPath.path) else {
+            throw NSError(domain: "ExtensionManager", code: 2, userInfo: [NSLocalizedDescriptionKey: "Invalid VSIX: package.json not found"])
+        }
+        
+        // 4. Parse package.json
+        let data = try Data(contentsOf: packageJsonPath)
+        let vscodePkg = try JSONDecoder().decode(VSCodePackageJSON.self, from: data)
+        
+        // 5. Convert to ExtensionManifest
+        let manifest = convertToManifest(vscodePkg)
+        
+        // 6. Install to Destination
+        // VSIX contents are typically in 'extension/' folder inside the archive
+        let sourceContent = tempDir.appendingPathComponent("extension")
+        let destReqName = "\(vscodePkg.publisher).\(vscodePkg.name)"
+        let destPath = extensionsDirectory.appendingPathComponent(destReqName)
+        
+        if FileManager.default.fileExists(atPath: destPath.path) {
+            try FileManager.default.removeItem(at: destPath)
+        }
+        
+        try FileManager.default.moveItem(at: sourceContent, to: destPath)
+        
+        // 7. Write new manifest.json
+        let manifestData = try JSONEncoder().encode(manifest)
+        try manifestData.write(to: destPath.appendingPathComponent("manifest.json"))
+        
+        await loadExtensions()
+    }
+    
+    private func unzip(_ url: URL, to dest: URL) throws {
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: "/usr/bin/unzip")
+        process.arguments = ["-o", url.path, "-d", dest.path]
+        try process.run()
+        process.waitUntilExit()
+    }
+    
+    private func convertToManifest(_ pkg: VSCodePackageJSON) -> ExtensionManifest {
+        // Determine type based on contributions
+        var type: ExtensionType = .tool
+        if pkg.contributes?.themes != nil {
+            type = .theme
+        } else if pkg.contributes?.languages != nil {
+            type = .language
+        }
+        
+        return ExtensionManifest(
+            id: "\(pkg.publisher).\(pkg.name)",
+            name: pkg.displayName ?? pkg.name,
+            version: pkg.version,
+            author: pkg.publisher,
+            description: pkg.description ?? "No description",
+            type: type,
+            runtime: .javascript, // VSIX implies JS/TS runtime
+            main: pkg.main ?? "index.js",
+            icon: nil, // TODO: Extract icon if exists
+            repository: nil,
+            license: nil,
+            keywords: nil
+        )
     }
     
     // MARK: - Uninstall Extension
@@ -285,3 +365,32 @@ struct ThemeColors: Codable {
     let colors: [String: String]
     let syntaxColors: [String: String]?
 }
+
+// MARK: - VS Code Compatibility Models
+struct VSCodePackageJSON: Codable {
+    let name: String
+    let displayName: String?
+    let publisher: String
+    let version: String
+    let description: String?
+    let main: String?
+    let engines: [String: String]?
+    let contributes: VSCodeContributions?
+}
+
+struct VSCodeContributions: Codable {
+    let themes: [VSCodeTheme]?
+    let languages: [VSCodeLanguage]?
+}
+
+struct VSCodeTheme: Codable {
+    let label: String?
+    let uiTheme: String?
+    let path: String?
+}
+
+struct VSCodeLanguage: Codable {
+    let id: String
+    let extensions: [String]?
+}
+

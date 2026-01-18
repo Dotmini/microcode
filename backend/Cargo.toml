@@ -10,6 +10,11 @@ version = "2.0.0"
 edition = "2021"
 authors = ["SPU AI CLUB"]
 
+[lib]
+name = "codetunner_embedded"
+path = "src/lib.rs"
+crate-type = ["staticlib"]
+
 [features]
 default = ["shm"]
 shm = []
@@ -134,10 +139,11 @@ assert_cmd = "2.0"
 predicates = "3.0"
 
 [profile.release]
-opt-level = 3
-lto = true
-codegen-units = 1
+opt-level = 2 # Reduced from 3
+lto = false
+codegen-units = 16
 strip = true
+debug = false
 
 [[bin]]
 name = "codetunner-backend"

@@ -263,7 +263,12 @@ public final class SyntaxCache: @unchecked Sendable {
             // But we avoid allocating a whole new Dictionary.
             
             for (line, entry) in cache {
-                if line >= changeStart + linesAdded {
+                // Fix: Do NOT shift the modified line itself (line == changeStart).
+                // It contains modified content, so its old tokens are invalid and determining exact
+                // shift per token is complex/impossible without re-lexing.
+                // We rely on dirty region marking to re-lex it.
+                // Only shift lines strictly AFTER the modified region.
+                if line > changeStart + linesAdded {
                    cache[line] = entry.shifted(lineDelta: 0, offsetDelta: charDelta)
                 }
             }

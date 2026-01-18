@@ -107,15 +107,8 @@ struct ContentView: View {
             NewFileSheet()
                 .environmentObject(appState)
         }
-        .sheet(isPresented: $appState.showingAuthView) {
-            AuthView()
-        }
-        .sheet(isPresented: $appState.showingUserProfile) {
-            UserProfileView()
-        }
-        .sheet(isPresented: $appState.showingUserProfile) {
-            UserProfileView()
-        }
+
+
         .sheet(isPresented: $appState.showingProjectManager) {
             TaskDashboardView()
                 .frame(minWidth: 900, minHeight: 600)
@@ -144,7 +137,7 @@ struct ContentView: View {
         .sheet(isPresented: $appState.showingProjectRuntime) {
             ProjectRuntimeView()
         }
-        .alert("CodeTunner", isPresented: .constant(appState.alertMessage != nil)) {
+        .alert("MicroCode", isPresented: .constant(appState.alertMessage != nil)) {
             Button("OK") { appState.alertMessage = nil }
         } message: {
             Text(appState.alertMessage ?? "")
@@ -396,27 +389,14 @@ struct MainToolbar: View {
                 }
                 .help("Project & Task Manager")
                 
-                // User Profile / Login
-                if AuthService.shared.currentUser != nil {
-                    Button {
-                        appState.showingUserProfile = true
-                    } label: {
-                        Circle()
-                            .fill(LinearGradient(colors: [.blue, .purple], startPoint: .topLeading, endPoint: .bottomTrailing))
-                            .frame(width: 24, height: 24)
-                            .overlay(
-                                Text(AuthService.shared.currentUser?.displayName.prefix(1).uppercased() ?? "U")
-                                    .font(.system(size: 11, weight: .bold))
-                                    .foregroundColor(.white)
-                            )
-                    }
-                    .buttonStyle(.plain)
-                    .help("User Profile")
-                } else {
-                    ToolbarButton(icon: "person.circle", color: .green) {
-                        appState.showingAuthView = true
-                    }
-                    .help("Sign In / Register")
+                // Embedded Tools (Replaces IDX Cloud Login)
+                ToolbarButton(icon: "cpu.fill", color: .orange) {
+                    appState.showingEmbeddedTools = true
+                }
+                .help("Embedded Project Tools")
+                .popover(isPresented: $appState.showingEmbeddedTools) {
+                    EmbeddedStudioView()
+                        .frame(minWidth: 900, minHeight: 600)
                 }
                 
                 Divider().frame(height: 16).padding(.horizontal, 6)

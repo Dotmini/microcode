@@ -68,15 +68,24 @@ namespace MicroLexer {
             } else if (lang == "javascript" || lang == "js" || lang == "typescript" || lang == "ts" || lang == "jsx" || lang == "tsx") {
                 keywords = {"if", "else", "return", "for", "while", "do", "switch", "case", "default", "break", "continue", "try", "catch", "finally", "throw", "new", "this", "super", "import", "export", "from", "as", "await", "async", "yield", "void", "typeof", "instanceof", "delete", "in", "of", "null", "undefined", "true", "false", "NaN", "Infinity"};
                 declarationKeywords = {"function", "var", "let", "const", "class", "enum", "interface", "type", "namespace", "module"};
-            } else if (lang == "java" || lang == "kotlin" || lang == "kt") {
+            } else if (lang == "java") {
                  keywords = {"if", "else", "return", "for", "while", "do", "switch", "case", "default", "break", "continue", "try", "catch", "finally", "throw", "new", "this", "super", "import", "package", "null", "true", "false", "synchronized", "volatile", "transient", "native", "strictfp"};
-                 declarationKeywords = {"class", "interface", "enum", "record", "extends", "implements", "public", "private", "protected", "static", "final", "abstract", "void", "int", "boolean", "char", "byte", "short", "long", "float", "double", "fun", "val", "var"};
+                 declarationKeywords = {"class", "interface", "enum", "record", "extends", "implements", "public", "private", "protected", "static", "final", "abstract", "void", "int", "boolean", "char", "byte", "short", "long", "float", "double"};
+            } else if (lang == "kotlin" || lang == "kt") {
+                keywords = {"if", "else", "when", "for", "while", "do", "break", "continue", "return", "throw", "try", "catch", "finally", "package", "import", "package", "this", "super", "null", "true", "false", "is", "in", "as", "fun", "val", "var"};
+                declarationKeywords = {"class", "interface", "object", "enum", "annotation", "data", "sealed", "open", "final", "public", "private", "protected", "internal", "override", "abstract", "companion", "init", "constructor", "get", "set", "field", "it"};
+            } else if (lang == "objective-c" || lang == "objc" || lang == "m" || lang == "objective-cpp" || lang == "objcpp" || lang == "mm") {
+                keywords = {"if", "else", "for", "while", "do", "switch", "case", "default", "break", "continue", "return", "try", "catch", "throw", "finally", "import", "include", "YES", "NO", "nil", "NULL", "self", "super", "new", "alloc", "init", "copy", "retain", "release", "autorelease", "strong", "weak", "readonly", "readwrite", "nonatomic", "atomic", "assign", "copy", "getter", "setter"};
+                declarationKeywords = {"@interface", "@implementation", "@end", "@protocol", "@property", "@synthesize", "@dynamic", "@class", "@selector", "@try", "@catch", "@finally", "@throw", "@synchronized", "@autoreleasepool", "int", "float", "double", "char", "void", "bool", "long", "short", "id", "instancetype", "BOOL", "NSInteger", "NSUInteger", "CGFloat", "NSString", "NSArray", "NSDictionary"};
             } else if (lang == "sql") {
                 keywords = {"SELECT", "FROM", "WHERE", "INSERT", "INTO", "UPDATE", "DELETE", "CREATE", "DROP", "ALTER", "TABLE", "INDEX", "VIEW", "JOIN", "INNER", "LEFT", "RIGHT", "OUTER", "ON", "GROUP", "BY", "ORDER", "HAVING", "LIMIT", "OFFSET", "UNION", "ALL", "DISTINCT", "AS", "AND", "OR", "NOT", "NULL", "IS", "IN", "BETWEEN", "LIKE", "EXISTS", "CASE", "WHEN", "THEN", "ELSE", "END"};
                 declarationKeywords = {"INT", "VARCHAR", "TEXT", "DATE", "DATETIME", "TIMESTAMP", "BOOLEAN", "FLOAT", "DECIMAL", "PRIMARY", "KEY", "FOREIGN", "REFERENCES", "DEFAULT", "UNIQUE"};
             } else if (lang == "ruby" || lang == "rb") {
                  keywords = {"if", "else", "elsif", "unless", "return", "while", "until", "for", "in", "break", "next", "redo", "retry", "begin", "rescue", "ensure", "end", "case", "when", "then", "def", "class", "module", "self", "super", "yield", "alias", "and", "or", "not", "true", "false", "nil"};
                  declarationKeywords = {"def", "class", "module", "attr_reader", "attr_writer", "attr_accessor"};
+            } else if (lang == "julia" || lang == "jl") {
+                keywords = {"if", "else", "elseif", "for", "while", "return", "break", "continue", "try", "catch", "finally", "throw", "import", "using", "export", "module", "baremodule", "quote", "do", "begin", "end", "true", "false", "nothing", "NaN", "Inf"};
+                declarationKeywords = {"function", "macro", "struct", "mutable", "abstract", "primitive", "type", "const", "global", "local"};
             } else {
                 // C/C++ Default
                 keywords = {"return", "if", "else", "for", "while", "do", "switch", "case", "default", "break", "continue", "goto", "try", "catch", "throw", "new", "delete", "using", "namespace", "include", "import", "define", "ifdef", "ifndef", "endif", "pragma", "nullptr", "true", "false"};
@@ -200,45 +209,55 @@ namespace MicroLexer {
     
     // 3. NULL check for UTF8String (can return NULL for encoding errors)
     if (!utf8Source) {
-        NSLog(@"[AuthenticSyntaxEngine] Error: source UTF8String is NULL");
+        NSLog(@"[AuthenticSyntaxEngine] Error: source UTF8String is NULL (Encoding issue?)");
         return @[];
     }
-    if (!utf8Lang) {
-        // Fallback to "text" or safe default if language name is weird
-        utf8Lang = "text";
-    }
+    
+    // Fallback language
+    std::string cppLang = (utf8Lang) ? std::string(utf8Lang) : "text";
     
     try {
-        // 4. Construct std::string safely
         std::string cppSource(utf8Source);
-        std::string cppLang(utf8Lang);
-        
         MicroLexer::Engine engine(cppLang);
         std::vector<MicroLexer::Token> cppTokens = engine.tokenize(cppSource);
         
         NSMutableArray<AuthenticToken *> *result = [NSMutableArray arrayWithCapacity:cppTokens.size()];
+        NSUInteger sourceLength = source.length; // UTF-16 code units
         
-        NSUInteger sourceLength = source.length;
+        // Approximate mapping:
+        // C++ lexer returns Byte Offsets. NSString uses UTF-16 offsets.
+        // For ASCII, 1 Byte = 1 Char.
+        // For multi-byte, Byte Offset > Char Offset.
+        // We MUST prevent out-of-bounds access.
         
         for (const auto& t : cppTokens) {
-            // 5. Range Safety Check
-            // Verify that byte offsets don't exceed source bounds
-            // Note: This matches byte length, but NSString expects unicode char indices.
-            // For now, we perform a basic clamp to prevent NSRangeException.
-            // TODO: Proper byte-to-char index mapping.
+            size_t tokenStartByte = t.start;
+            size_t tokenLenByte = t.length;
             
-            if (t.start >= sourceLength) continue;
+            // Safety Clamp 1: Byte limits
+            if (tokenStartByte >= cppSource.size()) continue;
             
-            NSUInteger length = t.length;
-            if (t.start + length > sourceLength) {
-                length = sourceLength - t.start;
+            // VERY STRICT SAFETY:
+            // Since we don't do full Byte->UTF16 mapping here (too slow for now),
+            // We clamp the ranges to the sourceLength (NSString length).
+            // This might result in slightly shifted colors for Emojis/Thai, but PREVENTS CRASH.
+            
+            NSUInteger finalStart = tokenStartByte;
+            NSUInteger finalLen = tokenLenByte;
+            
+            // Clamp Start
+            if (finalStart >= sourceLength) {
+                continue; // Completely out of bounds (trailing bytes of multi-byte char?)
             }
             
-            if (length == 0) continue;
+            // Clamp Length
+            if (finalStart + finalLen > sourceLength) {
+                finalLen = sourceLength - finalStart;
+            }
             
-            NSRange range = NSMakeRange(t.start, length);
+            if (finalLen == 0) continue;
             
-            // Optimization: Pass empty content string as we only need the range/type in the editor
+            NSRange range = NSMakeRange(finalStart, finalLen);
             [result addObject:[AuthenticToken tokenWithType:t.type range:range content:@""]];
         }
         

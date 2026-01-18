@@ -89,9 +89,11 @@ public final class SyntaxHighlightingEngine: @unchecked Sendable {
         register("zsh") { createPythonLexer() }
         register("fish") { createPythonLexer() }
         
-        // Data Science
-        register("r") { createPythonLexer() }
-        register("julia") { createPythonLexer() }
+        // Data Science (Native ObjC++ Engine)
+        register("r") { AuthenticLexerAdapter(languageId: "r") }
+        register("julia") { AuthenticLexerAdapter(languageId: "julia") }
+        register("jl") { AuthenticLexerAdapter(languageId: "julia") }
+        
         register("sql") { createJavaScriptLexer() }
         register("graphql") { createJavaScriptLexer() }
         
@@ -186,7 +188,10 @@ public final class SyntaxHighlightingEngine: @unchecked Sendable {
         lock.lock()
         defer { lock.unlock() }
         
-        let langKey = language.lowercased()
+        let langKey = language.lowercased().trimmingCharacters(in: .whitespaces)
+        if langKey.isEmpty {
+            return // Or fallback to plain text if needed
+        }
         let currentLangKey = activeLexer?.baseLexer.languageId
         
         // Optimization: If content and language haven't changed, skip re-initialization.
@@ -750,11 +755,12 @@ public struct SyntaxHighlightedCodeView: NSViewRepresentable {
     public let fontName: String
     public let fontWeight: Int // 0-5
     public let fileURL: URL?
+    public let isScrollEnabled: Bool
     
     /// Local engine instance - MOVED TO COORDINATOR
     // private let engine = SyntaxHighlightingEngine()
     
-    public init(text: Binding<String>, language: String, fontSize: CGFloat = 13, isDark: Bool = true, themeName: String? = nil, fontName: String = "Menlo", fontWeight: Int = 2, fileURL: URL? = nil) {
+    public init(text: Binding<String>, language: String, fontSize: CGFloat = 13, isDark: Bool = true, themeName: String? = nil, fontName: String = "Menlo", fontWeight: Int = 2, fileURL: URL? = nil, isScrollEnabled: Bool = true) {
         self._text = text
         self.language = language
         self.fontSize = fontSize
@@ -763,6 +769,7 @@ public struct SyntaxHighlightedCodeView: NSViewRepresentable {
         self.fontName = fontName
         self.fontWeight = fontWeight
         self.fileURL = fileURL
+        self.isScrollEnabled = isScrollEnabled
     }
     
     public func makeNSView(context: Context) -> NSScrollView {
@@ -848,9 +855,15 @@ public struct SyntaxHighlightedCodeView: NSViewRepresentable {
         // scrollView.hasVerticalRuler = true
         // scrollView.rulersVisible = true
         
-        scrollView.hasVerticalScroller = true
-        scrollView.hasHorizontalScroller = true
+        scrollView.hasVerticalScroller = isScrollEnabled
+        scrollView.hasHorizontalScroller = isScrollEnabled
         scrollView.autohidesScrollers = true
+        
+        if !isScrollEnabled {
+            scrollView.scrollsDynamically = false
+            // Disable elastic bounce if possible (not exposed directly on NSScrollView easily without subclass)
+            // But removing scrollers usually helps.
+        }
         
         // FIX BLINK: Disable [.width] mask which fights with 'No Wrap' mode.
         // Use [.height] to fill vertically.
@@ -949,10 +962,17 @@ public struct SyntaxHighlightedCodeView: NSViewRepresentable {
         // Let's guard it anyway for safety.
         let currentSelColor = textView.selectedTextAttributes[.backgroundColor] as? NSColor
         if currentSelColor != selectionColor {
-            textView.selectedTextAttributes = [
-                NSAttributedString.Key.backgroundColor: selectionColor,
-                NSAttributedString.Key.foregroundColor: NSColor.white
+            var attributes: [NSAttributedString.Key: Any] = [
+                .backgroundColor: selectionColor
             ]
+            // Only force white text if selection color is very dark, otherwise keep original syntax/theme color
+            // Actually, for "transparent beautiful", we usually just want the background selection 
+            // and keep the syntax highlighting visible underneath if possible, 
+            // OR use the system default which does that automatically if we don't override foreground.
+            // But if we override background, we might need to be careful.
+            
+            // Fix: Don't force foreground color to white. Let syntax highlighting shine through or use system default behavior.
+            textView.selectedTextAttributes = attributes
         }
         
         // Update Font

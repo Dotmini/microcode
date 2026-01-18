@@ -50,6 +50,8 @@ mod rag;
 mod ai_ultra;
 mod ftp;
 pub mod ai_engine; /// Hybrid AI Engine (Fast + Smart Tier)
+pub mod device_manager;
+pub mod crash_decoder;
 
 use crate::error::Result;
 use crate::state::AppState;

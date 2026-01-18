@@ -9,6 +9,7 @@
 //
 
 import SwiftUI
+import UniformTypeIdentifiers
 
 struct ExtensionSettingsView: View {
     @StateObject private var extensionManager = ExtensionManager.shared
@@ -128,7 +129,7 @@ struct ExtensionSettingsView: View {
             }
         }
         .frame(minWidth: 500, minHeight: 400)
-        .fileImporter(isPresented: $showInstallSheet, allowedContentTypes: [.folder, .zip]) { result in
+        .fileImporter(isPresented: $showInstallSheet, allowedContentTypes: [.folder, .zip, UTType(filenameExtension: "vsix") ?? .data]) { result in
             switch result {
             case .success(let url):
                 Task {

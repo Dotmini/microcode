@@ -42,23 +42,8 @@ compile_arch() {
     ARCH_BUILD_DIR="${BUILD_ROOT}/${ARCH}"
     mkdir -p "${ARCH_BUILD_DIR}"
 
-    # 1.1 Swift App (Main)
-    echo "   🔨 Compiling Swift App..."
-    if [ "$DEV_MODE" = "true" ]; then
-        # For dev mode, we still want faster compilation but we'll use release flags minus some optimizations
-        # to get a smaller binary than pure debug, then strip it.
-        swift build -c release --product CodeTunner --arch "${ARCH}"
-        SWIFT_CONFIG="release"
-    else
-        swift build -c release --product CodeTunner --arch "${ARCH}"
-        SWIFT_CONFIG="release"
-    fi
-    
-    # Copy Swift Binary
-    cp ".build/${ARCH}-apple-macosx/${SWIFT_CONFIG}/CodeTunner" "${ARCH_BUILD_DIR}/CodeTunner"
-
-    # 1.2 Rust Backend
-    echo "   🦀 Compiling Rust Backend..."
+    # 1.0 Rust Backend & Embedded Lib (Build First for Linking)
+    echo "   🦀 Compiling Rust Backend & Embedded Lib..."
     if [ "$ARCH" = "arm64" ]; then
         RUST_TARGET="aarch64-apple-darwin"
     else
@@ -66,17 +51,31 @@ compile_arch() {
     fi
     
     cd backend
-    # Prevent Ardium binary (ar) from conflicting with system ar (archiver) during build
     PATH="/usr/bin:/bin:/usr/sbin:/sbin:$PATH" 
-    if [ "$DEV_MODE" = "true" ]; then
-        # Use release but without full LTO for speed, then strip
-        cargo build --release --target "${RUST_TARGET}" --bin codetunner-backend
-        RUST_CONFIG="release"
-    else
-        cargo build --release --target "${RUST_TARGET}" --bin codetunner-backend
-        RUST_CONFIG="release"
-    fi
+    # Build Bin and Lib
+    cargo build --release --target "${RUST_TARGET}" --bin codetunner-backend
+    cargo build --release --target "${RUST_TARGET}" --lib
+    RUST_CONFIG="release"
     cd ..
+    
+    RUST_LIB_PATH="$(pwd)/backend/target/${RUST_TARGET}/${RUST_CONFIG}"
+
+    # 1.1 Swift App (Main) -- Linking Rust Lib
+    echo "   🔨 Compiling Swift App..."
+    if [ "$DEV_MODE" = "true" ]; then
+        swift build -c release --product CodeTunner --arch "${ARCH}" \
+            -Xlinker -L"${RUST_LIB_PATH}" \
+            -Xlinker -lcodetunner_embedded
+        SWIFT_CONFIG="release"
+    else
+        swift build -c release --product CodeTunner --arch "${ARCH}" \
+            -Xlinker -L"${RUST_LIB_PATH}" \
+            -Xlinker -lcodetunner_embedded
+        SWIFT_CONFIG="release"
+    fi
+    
+    # Copy Swift Binary
+    cp ".build/${ARCH}-apple-macosx/${SWIFT_CONFIG}/CodeTunner" "${ARCH_BUILD_DIR}/CodeTunner"
     
     # Copy Rust Binary
     cp "backend/target/${RUST_TARGET}/${RUST_CONFIG}/codetunner-backend" "${ARCH_BUILD_DIR}/codetunner-backend"

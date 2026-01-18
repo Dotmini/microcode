@@ -1,6 +1,8 @@
 #import "ExceptionCatcher.h"
+#import "AuthenticFileTreeController.h"
 #import "AuthenticPreview.h"
 #import "AuthenticLineNumberRuler.h"
 #import "AuthenticSyntaxEngine.h"
 #import "AuthenticLanguageCore.h"
 #import "AuthenticAIContext.h"
+#import "USBDetector.h"

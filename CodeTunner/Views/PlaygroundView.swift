@@ -59,7 +59,7 @@ struct PlaygroundView: View {
     
     // All languages supported by backend runner
     let supportedLanguages = [
-        "python", "r", "ruby",                     // Scripting
+        "python", "r", "julia", "ruby",            // Scripting
         "swift", "objective-c", "objective-c++",   // Apple
         "rust", "go", "c", "c++", "d",             // Systems
         "javascript", "typescript",                 // Web
@@ -1197,6 +1197,8 @@ struct PlaygroundView: View {
         case "rust": return "gearshape.2"
         case "javascript", "typescript": return "j.square"
         case "go": return "g.square"
+        case "r": return "r.square"
+        case "julia": return "j.circle"
         default: return "doc.text"
         }
     }
@@ -1729,6 +1731,26 @@ struct PlaygroundView: View {
             
             # Mean of age
             print(paste("Mean age:", mean(df["age"][[1]])))
+            """
+
+        case "julia":
+            code = """
+            # Julia Playground
+            println("Hello, Julia!")
+            
+            # Simple math and plotting (mock)
+            x = 1:10
+            y = x .^ 2
+            println("Squares: ", y)
+            
+            # Struct example
+            struct User
+                name::String
+                age::Int
+            end
+            
+            user = User("John", 30)
+            println("User: ", user.name, " (", user.age, ")")
             """
 
         case "d":

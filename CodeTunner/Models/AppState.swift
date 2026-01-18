@@ -456,7 +456,7 @@ enum AppTheme: String, CaseIterable {
             tokenColors: [
                 "keyword": TokenStyleConfig(foreground: keywordColor.hexString),
                 "string": TokenStyleConfig(foreground: stringColor.hexString),
-                "comment": TokenStyleConfig(foreground: commentColor.hexString, fontStyle: "italic"),
+                "comment": TokenStyleConfig(foreground: commentColor.hexString), // FIXED: Removed italic to prevent shake
                 "number": TokenStyleConfig(foreground: numberColor.hexString),
                 "type": TokenStyleConfig(foreground: typeColor.hexString),
                 "function": TokenStyleConfig(foreground: functionColor.hexString),
@@ -608,6 +608,7 @@ class AppState: ObservableObject {
     @Published var showingUserProfile: Bool = false
     @Published var showingContainerView: Bool = false
     @Published var showingPreviewView: Bool = false
+    @Published var showingEmbeddedTools: Bool = false
 
     
     // Build Configuration
@@ -2350,40 +2351,25 @@ class AppState: ObservableObject {
         
         let folderURL = folder
         
-        // Run I/O in background
-        // Detached task ensures it doesn't block MainActor
+        // Use Authentic Native Backend (Obj-C++)
         let rootNodes = await Task.detached(priority: .userInitiated) { () -> [FileNode] in
-            let fileManager = FileManager.default
-            var nodes: [FileNode] = []
+            let controller = AuthenticFileTreeController.shared() // shared() might be inferred as sharedController()
             
             do {
-                let contents = try fileManager.contentsOfDirectory(
-                    at: folderURL,
-                    includingPropertiesForKeys: [.isDirectoryKey],
-                    options: [.skipsHiddenFiles]
-                )
+                // Swift renamed 'contentsOfDirectory:error:' to 'contents(ofDirectory:)'
+                let authenticNodes = try controller.contents(ofDirectory: folderURL.path)
                 
-                for url in contents {
-                    let isDirectory = (try? url.resourceValues(forKeys: [.isDirectoryKey]))?.isDirectory ?? false
-                    let node = FileNode(
-                        name: url.lastPathComponent,
-                        path: url.path,
-                        isDirectory: isDirectory,
+                return authenticNodes.map { authNode in
+                    FileNode(
+                        name: authNode.name,
+                        path: authNode.path,
+                        isDirectory: authNode.isDirectory,
                         children: [],
                         hasLoadedChildren: false
                     )
-                    nodes.append(node)
-                }
-                
-                // Sort in background
-                return nodes.sorted {
-                    if $0.isDirectory != $1.isDirectory {
-                        return $0.isDirectory
-                    }
-                    return $0.name.lowercased() < $1.name.lowercased()
                 }
             } catch {
-                print("Error scanning folder: \(error)")
+                print("Error scanning folder (Native): \(error.localizedDescription)")
                 return []
             }
         }.value
@@ -2403,42 +2389,22 @@ class AppState: ObservableObject {
         if node.hasLoadedChildren { return }
         
         let path = node.path
-        let url = URL(fileURLWithPath: path)
+        // let url = URL(fileURLWithPath: path) // Unused now
         
-        // Run I/O in background
+        // Run I/O in background using Authentic Backend
         let children = await Task.detached(priority: .userInitiated) { () -> [FileNode] in
-             // We need a thread-safe way to load children.
-             // Since 'loadChildren(at:)' is currently an instance method which might be isolated to MainActor,
-             // we should duplicate the logic here or make a static helper.
-             // To be safe and simple: Inline the logic or assume we can call a non-isolated helper.
-             // Let's implement the scanning logic here to ensure background execution.
+             let controller = AuthenticFileTreeController.shared()
              
-             let fileManager = FileManager.default
-             var nodes: [FileNode] = []
              do {
-                 let contents = try fileManager.contentsOfDirectory(
-                     at: url,
-                     includingPropertiesForKeys: [.isDirectoryKey],
-                     options: [.skipsHiddenFiles]
-                 )
-                 
-                 for childUrl in contents {
-                     let isDirectory = (try? childUrl.resourceValues(forKeys: [.isDirectoryKey]))?.isDirectory ?? false
-                     let childNode = FileNode(
-                         name: childUrl.lastPathComponent,
-                         path: childUrl.path,
-                         isDirectory: isDirectory,
+                 let authenticNodes = try controller.contents(ofDirectory: path)
+                 return authenticNodes.map { authNode in
+                     FileNode(
+                         name: authNode.name,
+                         path: authNode.path,
+                         isDirectory: authNode.isDirectory,
                          children: [],
                          hasLoadedChildren: false
                      )
-                     nodes.append(childNode)
-                 }
-                 
-                 return nodes.sorted {
-                     if $0.isDirectory != $1.isDirectory {
-                         return $0.isDirectory
-                     }
-                     return $0.name.lowercased() < $1.name.lowercased()
                  }
              } catch {
                  return []
@@ -2791,7 +2757,8 @@ class AppState: ObservableObject {
         case "go": return "go"
         case "rb": return "ruby"
         case "java": return "java"
-        case "cpp", "cc", "cxx": return "cpp"
+        case "kt", "kts": return "kotlin" // ADDED: Kotlin
+        case "cpp", "cc", "cxx", "c++": return "cpp"
         case "m": return "objective-c"
         case "mm": return "objective-cpp"
         case "c": return "c"
@@ -2801,9 +2768,11 @@ class AppState: ObservableObject {
         case "html": return "html"
         case "css": return "css"
         case "md": return "markdown"
-        case "sh": return "shell"
+        case "sh", "zsh", "bash": return "shell"
         case "yaml", "yml": return "yaml"
         case "ar": return "ardium"
+        case "dart": return "dart"
+        case "php": return "php"
         default: return "text"
         }
     }
