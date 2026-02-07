@@ -1,107 +1,241 @@
-# 🚀 CodeTunner Native: The Future of High-Performance Engineering
+MICROCODE NATIVE --- HIGH-PERFORMANCE macOS IDE
 
-```text
-// TIRAWAT NANTAMAS | FOUNDER OF DOTMINI SOFTWARE & SPU AI CLUB
-// AGENT: MAJOR (INTERDISCIPLINARY TECHNOLOGY AND INNOVATION)
-// PROJECT: CODETUNNER NATIVE ENGINE
-```
+Repository: https://github.com/XevilA/microcode/
 
-**CodeTunner Native** is a state-of-the-art, high-performance Integrated Development Environment (IDE) engineered for modern developers. It represents a paradigm shift in software craftsmanship—blending the pixel-perfect, lightning-fast response of a native **macOS SwiftUI** interface with the industrial-grade power of a **Rust-based** backend and **Objective-C++** core.
+----------------------------------------------------------------------
 
----
+HEADER
 
-## ⚡ Core Philosophy: "Smart by Design"
+----------------------------------------------------------------------
 
-CodeTunner isn't just an editor; it's an intelligent companion. Built from the ground up to leverage the efficiency of **Hardware-Accelerated Rendering (Metal)** and the safety of **Zero-Cost Abstractions**, it offers a development experience that is both cognitively frictionless and technically superior.
+TIRAWAT NANTAMAS | FOUNDER OF DOTMINI SOFTWARE & SPU AI CLUB
 
-### 💎 Elite Feature Set
+PROGRAM: MAJOR (INTERDISCIPLINARY TECHNOLOGY AND INNOVATION)
 
-* **Hybrid Native Architecture**: A sophisticated orchestration of **SwiftUI (AppKit integration)** for the frontend, **Rust (Axum/Tokio)** for high-concurrency backend services, and **Objective-C++** for low-level performance-critical modules.
-* **AI-First Intelligence**: Deeply integrated support for **Gemini, OpenAI (GPT-4), and Claude**. Experience AI-powered refactoring, semantic code explanation, and intelligent completion that understands your project's intent.
-* **WASM-Powered Extension System**: A groundbreaking modular architecture using **Wasmtime**, allowing you to extend the IDE's capabilities with near-native performance and absolute sandboxed safety.
-* **Playground Cell Mode**: A flexible multi-block execution environment featuring **"Run By Color"** categorization and a comprehensive **Catalogue Sidebar** for reusable snippets and SAS procedures.
-* **Native Performance UI**:
-  * **AuthenticFileTree**: Ultra-fast file navigation powered by `NSOutlineView`.
-  * **AuthenticTerminal**: A fully integrated PTY terminal for raw CLI power.
-  * **Metal Shaders**: Fluid UI backgrounds and grid overlays rendered directly on the GPU.
+PROJECT: MICROCODE NATIVE ENGINE
 
----
+----------------------------------------------------------------------
 
-## 🛠️ Infrastructure & Build System
+OVERVIEW
 
-CodeTunner utilizes a unified build system to manage its multi-language codebase.
+----------------------------------------------------------------------
 
-### Prerequisites
+MicroCode Native is a high-performance Integrated Development Environment (IDE) engineered for modern software engineering workflows. The system combines:
 
-| Requirement | Version | Link |
-| :--- | :--- | :--- |
-| **macOS** | 13.0+ | |
-| **Xcode** | 15.0+ | [App Store](https://apps.apple.com/us/app/xcode/id497799835) |
-| **Rust** | 1.70+ | [Rustup](https://rustup.rs/) |
-| **Node.js** | 18.0+ | [Node](https://nodejs.org/) |
+- Native macOS user interface (SwiftUI with AppKit integration)
 
-### Fast-Track Build (Developer Bundle)
+- Rust-based asynchronous backend services
 
-To build the entire ecosystem (Backend + Frontend) in one command:
+- Objective-C++ core for performance-critical subsystems
 
-```bash
-# Clone the repository
-git clone https://github.com/dotmini/codetunner-native.git
-cd codetunner-native
+Primary objectives:
 
-# Build the developer bundle (Debug Mode)
-./build.sh --debug
+- Native responsiveness with GPU-accelerated rendering (Metal)
 
-# For a production-ready optimized build
-./build.sh --release
-```
+- Deterministic performance for large repositories and long sessions
 
-### Modular Build Options
+- Safe and scalable concurrency using Rust async patterns
 
-| Command | Purpose |
-| :--- | :--- |
-| `./build.sh --backend-only` | Compiles only the Rust binary |
-| `./build.sh --frontend-only` | Compiles the SwiftUI app via SPM |
-| `./build.sh --clean` | Wipes build caches for a fresh start |
+- Extensibility with strong isolation using WebAssembly sandboxing
 
----
+----------------------------------------------------------------------
 
-## 🏗️ Technical Architecture
+KEY CAPABILITIES
 
-CodeTunner's power lies in its specialized layers:
+----------------------------------------------------------------------
 
-```mermaid
-graph TD
-    A[macOS App - SwiftUI] --> B[AuthenticLanguageCore - ObjC++]
-    A --> C[Backend Server - Rust]
-    B --> D[Lexing & Highlighting]
-    C --> E[AI Engine - Gemini/Claude]
-    C --> F[Extension Host - WASM]
-    C --> G[Git Manager]
-```
+1) Hybrid Native Architecture
 
-* **Frontend**: Native macOS views, AppKit ruler integration, and gesture-driven UI.
-* **Backend**: Async I/O, WebSocket communication, and LSP (Language Server Protocol) multiplexing.
-* **Kernel**: Performance-critical text buffers and syntax engines implemented in C++/Objective-C++.
+- Frontend: SwiftUI + AppKit interoperability for native macOS controls and interaction
 
----
+- Core Kernel: Objective-C++ modules for low-level performance and text pipeline efficiency
 
-## 🌎 Vision & Community
+- Backend Services: Rust (Axum/Tokio) for concurrency, orchestration, and system services
 
-CodeTunner is a mission to redefine the intersection of **AI** and **Software Engineering**. We are building a platform where the friction between idea and execution is zero.
+2) AI Integration (AI-First Workflow)
 
-### Credits & Leadership
+- Integrated support for AI providers in the Gemini / OpenAI / Claude class
 
-CodeTunner is developed and maintained with prestige by:
+- Intended use cases:
 
-* **Tirawat Nantamas** ([Dotmini Software](https://dotmini.com)) - Lead Architect & Visionary.
-* **SPU AI CLUB** (Interdisciplinary Technology and Innovation, Seattle Pacific University) - Theoretical Research & Community Drive.
+  - Assisted refactoring and code transformation
 
----
+  - Semantic explanations and project-aware guidance
 
-## 📜 License
+  - Context-aware completion aligned to project intent
 
-This project is licensed under the **Elite Commercial License** of Dotmini Software. Use for innovation, build for the future.
+3) WASM Extension System
 
----
-*Generated by MAJOR AI Engine | 2026 Evolution*
+- Modular extension architecture using a Wasmtime-based host
+
+- Goals:
+
+  - Near-native execution speed
+
+  - Strict sandbox boundaries
+
+  - Controlled capability exposure for security and stability
+
+4) Playground Cell Mode
+
+- Multi-block execution environment designed for experimentation and repeatable workflows
+
+- Includes categorized execution logic (e.g., run-grouping policies) and snippet catalog management
+
+5) Native macOS Performance UI Components
+
+- AuthenticFileTree: high-speed file navigation aligned with native AppKit patterns (e.g., NSOutlineView-style)
+
+- AuthenticTerminal: integrated PTY terminal for direct CLI workflows
+
+- GPU-rendered visual effects for smooth rendering and consistent frame pacing
+
+----------------------------------------------------------------------
+
+REPOSITORY STRUCTURE (HIGH-LEVEL)
+
+----------------------------------------------------------------------
+
+This repository contains multiple modules and build utilities. Typical top-level components include:
+
+- GUI/
+
+- backend/
+
+- extension-host/
+
+- microcode_core/
+
+- vscode-compat-host/
+
+- build and signing scripts
+
+Reference documents commonly included:
+
+- QUICKSTART.txt (or QUICKSTART.md in the repo)
+
+- PROJECT_STRUCTURE.txt (or PROJECT_STRUCTURE.md)
+
+- PROJECT_SUMMARY.txt (or PROJECT_SUMMARY.md)
+
+- SIGNING_GUIDE.txt (or SIGNING_GUIDE.md)
+
+Note:
+
+If any legacy naming remains in folders/files, it should be treated as historical naming pending migration. Prefer "MicroCode" as the official product name.
+
+----------------------------------------------------------------------
+
+REQUIREMENTS
+
+----------------------------------------------------------------------
+
+- macOS 13.0+
+
+- Xcode 15.0+
+
+- Rust 1.70+
+
+- Node.js 18.0+
+
+----------------------------------------------------------------------
+
+BUILD
+
+----------------------------------------------------------------------
+
+1) Clone
+
+Command:
+
+  git clone https://github.com/XevilA/microcode.git
+
+  cd microcode
+
+2) Developer Build (Debug)
+
+Command:
+
+  ./build.sh --debug
+
+3) Production Build (Release)
+
+Command:
+
+  ./build.sh --release
+
+4) Modular Build Options
+
+Commands:
+
+  ./build.sh --backend-only
+
+  ./build.sh --frontend-only
+
+  ./build.sh --clean
+
+Additional build/distribution/signing scripts may exist, for example:
+
+- build_distribution.sh
+
+- build_extensions.sh
+
+- bundle_runtimes.sh
+
+- sign_and_notarize.sh
+
+- verify_checksums.sh
+
+Operational note:
+
+If script flags differ across branches, treat the local build scripts as the source of truth.
+
+----------------------------------------------------------------------
+
+ARCHITECTURE OVERVIEW
+
+----------------------------------------------------------------------
+
+- macOS App (SwiftUI) communicates with:
+
+  - Language Core (Objective-C++)
+
+  - Backend Server (Rust)
+
+- Backend Server provides:
+
+  - AI Engine integration
+
+  - WASM Extension Host
+
+  - Git Manager
+
+- Language Core provides:
+
+  - Lexing, highlighting, and performance-critical text operations
+
+----------------------------------------------------------------------
+
+CREDITS AND LEADERSHIP
+
+----------------------------------------------------------------------
+
+- Tirawat Nantamas --- Lead Architect and Project Owner (Dotmini Software)
+
+- SPU AI CLUB, Sripatum University (มหาวิทยาลัยศรีปทุม) --- Research and community collaboration
+
+----------------------------------------------------------------------
+
+LICENSE
+
+----------------------------------------------------------------------
+
+Elite Commercial License --- Dotmini Software
+
+Use is governed by commercial licensing terms.
+
+----------------------------------------------------------------------
+
+END OF FILE
+
+----------------------------------------------------------------------
