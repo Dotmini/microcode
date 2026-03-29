@@ -73,10 +73,14 @@ class AIClient: ObservableObject {
     
     // MARK: - Send Message with Streaming
     
+    /// Maximum number of history messages to include (sliding window)
+    private let maxHistoryMessages = 20
+    
     func sendMessage(
         prompt: String,
         attachments: [AIAttachment] = [],
         systemPrompt: String? = nil,
+        conversationHistory: [(role: String, content: String)] = [],
         provider: StreamableAIProvider,
         model: String,
         apiKey: String,
@@ -92,15 +96,18 @@ class AIClient: ObservableObject {
         isStreaming = true
         currentStreamedText = ""
         
+        // Apply sliding window to history
+        let trimmedHistory = Array(conversationHistory.suffix(maxHistoryMessages))
+        
         streamTask = Task {
             do {
                 switch provider {
                 case .gemini:
-                    try await streamGemini(prompt: prompt, attachments: attachments, systemPrompt: systemPrompt, model: model, apiKey: apiKey, onToken: onToken)
+                    try await streamGemini(prompt: prompt, attachments: attachments, systemPrompt: systemPrompt, conversationHistory: trimmedHistory, model: model, apiKey: apiKey, onToken: onToken)
                 case .openai, .deepseek:
-                    try await streamOpenAI(prompt: prompt, attachments: attachments, systemPrompt: systemPrompt, model: model, apiKey: apiKey, baseURL: provider.baseURL, onToken: onToken)
+                    try await streamOpenAI(prompt: prompt, attachments: attachments, systemPrompt: systemPrompt, conversationHistory: trimmedHistory, model: model, apiKey: apiKey, baseURL: provider.baseURL, onToken: onToken)
                 case .anthropic:
-                    try await streamAnthropic(prompt: prompt, attachments: attachments, systemPrompt: systemPrompt, model: model, apiKey: apiKey, onToken: onToken)
+                    try await streamAnthropic(prompt: prompt, attachments: attachments, systemPrompt: systemPrompt, conversationHistory: trimmedHistory, model: model, apiKey: apiKey, onToken: onToken)
                 }
                 
                 await MainActor.run {
@@ -123,7 +130,7 @@ class AIClient: ObservableObject {
     
     // MARK: - Gemini Streaming
     
-    private func streamGemini(prompt: String, attachments: [AIAttachment], systemPrompt: String?, model: String, apiKey: String, onToken: @escaping (String) -> Void) async throws {
+    private func streamGemini(prompt: String, attachments: [AIAttachment], systemPrompt: String?, conversationHistory: [(role: String, content: String)], model: String, apiKey: String, onToken: @escaping (String) -> Void) async throws {
         let url = URL(string: "\(StreamableAIProvider.gemini.baseURL)/models/\(model):streamGenerateContent?alt=sse&key=\(apiKey)")!
         
         var request = URLRequest(url: url)
@@ -134,7 +141,13 @@ class AIClient: ObservableObject {
         
         if let sys = systemPrompt {
             contents.append(["role": "user", "parts": [["text": sys]]])
-            contents.append(["role": "model", "parts": [["text": "Understood."]]])
+            contents.append(["role": "model", "parts": [["text": "Understood. I'll follow these instructions."]]])
+        }
+        
+        // Add conversation history
+        for msg in conversationHistory {
+            let geminiRole = msg.role == "assistant" ? "model" : "user"
+            contents.append(["role": geminiRole, "parts": [["text": msg.content]]])
         }
         
         var userParts: [[String: Any]] = []
@@ -146,7 +159,6 @@ class AIClient: ObservableObject {
         for attachment in attachments {
             switch attachment.type {
             case .image(let format):
-                // Gemini uses "inlineData" for images
                 userParts.append([
                     "inlineData": [
                         "mimeType": "image/\(format)",
@@ -158,8 +170,6 @@ class AIClient: ObservableObject {
                     userParts.append(["text": "\n[File: \(attachment.name)]\n\(text)\n[/File]\n"])
                 }
             case .pdf:
-                // Note: For now, treat PDF as base64 image or text if extracted. 
-                // Gemini 1.5 Pro natively supports PDF via inlineData (application/pdf)
                 userParts.append([
                     "inlineData": [
                         "mimeType": "application/pdf",
@@ -209,7 +219,7 @@ class AIClient: ObservableObject {
     
     // MARK: - OpenAI/DeepSeek Streaming
     
-    private func streamOpenAI(prompt: String, attachments: [AIAttachment], systemPrompt: String?, model: String, apiKey: String, baseURL: String, onToken: @escaping (String) -> Void) async throws {
+    private func streamOpenAI(prompt: String, attachments: [AIAttachment], systemPrompt: String?, conversationHistory: [(role: String, content: String)], model: String, apiKey: String, baseURL: String, onToken: @escaping (String) -> Void) async throws {
         let url = URL(string: "\(baseURL)/chat/completions")!
         
         var request = URLRequest(url: url)
@@ -223,7 +233,12 @@ class AIClient: ObservableObject {
             messages.append(["role": "system", "content": sys])
         }
         
-        // OpenAI Vision requires "content" to be an array for [image_url, text]
+        // Add conversation history
+        for msg in conversationHistory {
+            messages.append(["role": msg.role, "content": msg.content])
+        }
+        
+        // Current message with attachments
         var contentArray: [[String: Any]] = []
         contentArray.append(["type": "text", "text": prompt])
         
@@ -241,8 +256,6 @@ class AIClient: ObservableObject {
                     contentArray.append(["type": "text", "text": "\n[File: \(attachment.name)]\n\(text)\n"])
                 }
             case .pdf:
-                // OpenAI API doesn't support PDF upload in Chat Completions directly.
-                // Fallback: Append prompt note (Real implementation needs local PDF extraction)
                  contentArray.append(["type": "text", "text": "\n[System: PDF '\(attachment.name)' ignored. Please extract text.]\n"])
             }
         }
@@ -284,19 +297,25 @@ class AIClient: ObservableObject {
     
     // MARK: - Anthropic Streaming
     
-    private func streamAnthropic(prompt: String, attachments: [AIAttachment], systemPrompt: String?, model: String, apiKey: String, onToken: @escaping (String) -> Void) async throws {
+    private func streamAnthropic(prompt: String, attachments: [AIAttachment], systemPrompt: String?, conversationHistory: [(role: String, content: String)], model: String, apiKey: String, onToken: @escaping (String) -> Void) async throws {
         let url = URL(string: "\(StreamableAIProvider.anthropic.baseURL)/messages")!
-        // ... (Anthropic implementation handles Base64 images similarly to OpenAI/Gemini)
-        // Keeping it simple for brevity, using same logic flow
         var request = URLRequest(url: url)
         request.httpMethod = "POST"
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
         request.setValue(apiKey, forHTTPHeaderField: "x-api-key")
         request.setValue("2023-06-01", forHTTPHeaderField: "anthropic-version")
         
+        // Build messages array with history
+        var allMessages: [[String: Any]] = []
+        
+        // Add conversation history
+        for msg in conversationHistory {
+            allMessages.append(["role": msg.role, "content": msg.content])
+        }
+        
+        // Current message with attachments
         var messageContent: [[String: Any]] = []
         
-        // Add images first
         for attachment in attachments {
             if case .image(let format) = attachment.type {
                 messageContent.append([
@@ -313,14 +332,13 @@ class AIClient: ObservableObject {
         }
         
         messageContent.append(["type": "text", "text": prompt])
+        allMessages.append(["role": "user", "content": messageContent])
         
         var body: [String: Any] = [
             "model": model,
             "max_tokens": 8192,
             "stream": true,
-            "messages": [
-                ["role": "user", "content": messageContent]
-            ]
+            "messages": allMessages
         ]
          if let sys = systemPrompt { body["system"] = sys }
         

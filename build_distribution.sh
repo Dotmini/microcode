@@ -99,7 +99,7 @@ compile_arch() {
     echo "   🔨 Compiling Swift App..."
     
     # Common flags
-    LINK_FLAGS="-Xlinker -L${RUST_LIB_PATH} -Xlinker -lcodetunner_embedded -Xlinker -L${MICROCORE_LIB_PATH} -Xlinker -lmicrocode_core"
+    LINK_FLAGS="-Xlinker -L${RUST_LIB_PATH} -Xlinker -lcodetunner_embedded -Xlinker -L${MICROCORE_LIB_PATH} -Xlinker -lmicrocode_core -Xswiftc -strict-concurrency=minimal"
     
     if [ "$DEV_MODE" = "true" ]; then
         swift build -c release --product CodeTunner --arch "${ARCH}" ${LINK_FLAGS}
@@ -287,10 +287,10 @@ if [ "$DEV_MODE" = "true" ]; then
     HOST_ARCH=$(uname -m)
     if [ "$HOST_ARCH" = "arm64" ]; then
         compile_arch "arm64"
-        package_variant "MicroCode_Dev" "arm64" "false" "Dist/Dev"
+        package_variant "microcode" "arm64" "false" "Dist/Dev"
     elif [ "$HOST_ARCH" = "x86_64" ]; then
         compile_arch "x86_64"
-        package_variant "MicroCode_Dev" "x86_64" "false" "Dist/Dev"
+        package_variant "microcode" "x86_64" "false" "Dist/Dev"
     else
         echo "❌ Unsupported architecture: $HOST_ARCH"
         exit 1
@@ -299,7 +299,7 @@ if [ "$DEV_MODE" = "true" ]; then
     echo "========================================"
     echo "✅ Dev Build Complete!"
     echo "========================================"
-    echo "Artifact: Dist/Dev/MicroCode.app"
+    echo "Artifact: Dist/Dev/microcode.app"
     exit 0
 fi
 
@@ -327,18 +327,18 @@ lipo -create "${BUILD_ROOT}/arm64/codetunner-backend" "${BUILD_ROOT}/x86_64/code
 # ==============================================================================
 
 # Target 1: ARM64 Full
-package_variant "MicroCode_ARM64_Full" "arm64" "true" "Dist/arm64"
+package_variant "microcode_ARM64_Full" "arm64" "true" "Dist/arm64"
 
 # Target 2: Intel Full
-package_variant "MicroCode_Intel_Full" "x86_64" "true" "Dist/x86_64"
+package_variant "microcode_Intel_Full" "x86_64" "true" "Dist/x86_64"
 
 # Target 3: Lite Universal
-package_variant "MicroCode_Lite" "universal" "false" "Dist/Lite"
+package_variant "microcode_Lite" "universal" "false" "Dist/Lite"
 
 echo "========================================"
 echo "🎉 3-Version Build Cycle Complete!"
 echo "========================================"
 echo "Artifacts:"
-echo "1. Dist/arm64/MicroCode_ARM64_Full.dmg"
-echo "2. Dist/x86_64/MicroCode_Intel_Full.dmg"
-echo "3. Dist/Lite/MicroCode_Lite.dmg (< 50MB)"
+echo "1. Dist/arm64/microcode_ARM64_Full.dmg"
+echo "2. Dist/x86_64/microcode_Intel_Full.dmg"
+echo "3. Dist/Lite/microcode_Lite.dmg (< 50MB)"

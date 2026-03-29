@@ -1,0 +1,105 @@
+name: MicroCode CI/CD Bundle Pipeline
+
+on:
+  push:
+    branches: [ "main", "release/*" ]
+  pull_request:
+    branches: [ "main" ]
+  workflow_dispatch:
+    inputs:
+      build_type:
+        description: 'Build Type (Full vs Dev)'
+        required: true
+        default: 'full'
+        type: choice
+        options:
+        - full
+        - dev
+
+jobs:
+  build-macos:
+    name: Build & Pack macOS Bundle
+    runs-on: macos-14
+
+    steps:
+    - name: Checkout Repository
+      uses: actions/checkout@v4
+
+    - name: Ensure Xcode is correctly configured
+      uses: maxim-lobanov/setup-xcode@v1
+      with:
+        xcode-version: latest-stable
+
+    - name: Set up Rust
+      uses: actions-rs/toolchain@v1
+      with:
+        profile: minimal
+        toolchain: stable
+        target: aarch64-apple-darwin
+        override: true
+        components: rustfmt, clippy
+
+    - name: Add Intel Rust Target
+      run: rustup target add x86_64-apple-darwin
+
+    - name: Setup caching for Rust/Cargo
+      uses: Swatinem/rust-cache@v2
+      with:
+        workspaces: |
+          backend -> target
+          microcode_core -> target
+
+    - name: Setup caching for Swift PM
+      uses: actions/cache@v3
+      with:
+        path: .build
+        key: ${{ runner.os }}-spm-${{ hashFiles('**/Package.resolved') }}
+        restore-keys: |
+          ${{ runner.os }}-spm-
+
+    - name: Verify build script permissions
+      run: chmod +x build_distribution.sh bundle_runtimes.sh || true
+
+    - name: Run Full Distribution Build
+      if: github.event.inputs.build_type != 'dev'
+      run: ./build_distribution.sh
+      env:
+        CI: true
+
+    - name: Run Quick Dev Build (Arm64 Only)
+      if: github.event.inputs.build_type == 'dev'
+      run: ./build_distribution.sh --dev
+      env:
+        CI: true
+
+    - name: Upload ARM64 DMG & PKG
+      if: github.event.inputs.build_type != 'dev'
+      uses: actions/upload-artifact@v4
+      with:
+        name: MicroCode-ARM64-macOS
+        path: Dist/arm64/*.dmg
+        retention-days: 7
+
+    - name: Upload Intel DMG & PKG
+      if: github.event.inputs.build_type != 'dev'
+      uses: actions/upload-artifact@v4
+      with:
+        name: MicroCode-Intel-macOS
+        path: Dist/x86_64/*.dmg
+        retention-days: 7
+
+    - name: Upload Universal Lite DMG
+      if: github.event.inputs.build_type != 'dev'
+      uses: actions/upload-artifact@v4
+      with:
+        name: MicroCode-Lite-Universal-macOS
+        path: Dist/Lite/*.dmg
+        retention-days: 7
+
+    - name: Upload Dev App Bundle (.app)
+      if: github.event.inputs.build_type == 'dev'
+      uses: actions/upload-artifact@v4
+      with:
+        name: MicroCode-App-Bundle
+        path: Dist/Dev/microcode.app
+        retention-days: 3

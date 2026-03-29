@@ -1,6 +1,6 @@
 pub mod fast_tier;
 pub mod handlers;
-// pub mod smart_tier;
+pub mod smart_tier;
 
 use serde::{Deserialize, Serialize};
 
@@ -15,6 +15,11 @@ pub struct CompletionRequest {
 pub struct CompletionResponse {
     pub completion: String,
     pub latency_ms: u64,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct IndexRequest {
+    pub workspace_path: String,
 }
 
 #[derive(Debug, Serialize, Deserialize)]

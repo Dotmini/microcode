@@ -75,6 +75,8 @@ pub async fn format_with_ai(code: &str, language: &str, instructions: &str) -> R
         api_key: "".to_string(), // Will use env var
         temperature: 0.1, // Low temperature for deterministic formatting
         max_tokens: 8192, // High token limit for long code
+        microrent_token: None,
+        use_microrent_proxy: false,
     };
 
     let prompt = format!(

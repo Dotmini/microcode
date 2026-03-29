@@ -230,6 +230,10 @@ class AgentService: ObservableObject {
     @Published var activeChatId: String?
     @Published var showChatSidebar: Bool = false
     
+    // Memory Service (semantic recall)
+    private let memoryService = AgentMemoryService.shared
+    private let toolExecutor = AgentToolExecutor.shared
+    
     private let chatStorageKey = "microcode_agent_chats"
     private let baseURL = "http://127.0.0.1:3000"
     
@@ -353,11 +357,55 @@ class AgentService: ObservableObject {
         // Add BMAD agent context
         body["agent_role"] = selectedAgent.rawValue
         body["phase"] = selectedPhase.rawValue
-        body["system_prompt"] = selectedAgent.systemPrompt
+        
+        // Recall relevant memories and inject into system prompt
+        let relevantMemories = memoryService.recallMemories(query: content, limit: 5)
+        var systemPrompt = selectedAgent.systemPrompt
+        if !relevantMemories.isEmpty {
+            let memoryContext = memoryService.formatMemoriesForContext(relevantMemories)
+            systemPrompt += "\n\n" + memoryContext
+        }
+        body["system_prompt"] = systemPrompt
         
         if !apiKey.isEmpty {
             body["api_key"] = apiKey
         }
+        
+        if let chatId = activeChatId {
+            memoryService.storeMemory(content: content, chatId: chatId, role: "user")
+        }
+        
+        // Inject Tool Instructions
+        let toolInstructions = """
+        
+        ## AVAILABLE TOOLS
+        You have access to the following tools to control the local environment. To use a tool, you MUST output a VALID JSON object wrapped in <tool_code> tags.
+        
+        Format:
+        <tool_code>
+        {
+          "tool": "tool_name",
+          "params": {
+            "param1": "value1"
+          }
+        }
+        </tool_code>
+        
+        Tools:
+        \(toolExecutor.availableTools.map { "- \($0.name): \($0.description) Protocol: \($0.parameters)" }.joined(separator: "\n"))
+        
+        Example: To create a file
+        <tool_code>
+        {
+          "tool": "create_file",
+          "params": {
+             "path": "/Users/me/project/main.swift",
+             "content": "print('hello')"
+          }
+        }
+        </tool_code>
+        """
+        body["system_prompt"] = (body["system_prompt"] as? String ?? "") + toolInstructions
         
         request.httpBody = try? JSONSerialization.data(withJSONObject: body)
         
@@ -371,6 +419,7 @@ class AgentService: ObservableObject {
                     for r in results {
                         toolResults.append(ToolResultModel(
                             toolCallId: r["tool_call_id"] as? String ?? "",
+                            toolName: r["tool_name"] as? String ?? "Unknown Tool",
                             success: r["success"] as? Bool ?? false,
                             output: r["output"] as? String ?? "",
                             error: r["error"] as? String
@@ -396,15 +445,114 @@ class AgentService: ObservableObject {
                     pendingChanges.append(contentsOf: changes)
                 }
                 
+                // Detect and Execute Local Tools
+                var finalContent = responseContent
+                var localToolResults: [ToolResultModel] = []
+                
+                // Regex to find <tool_code>...</tool_code>
+                let pattern = "<tool_code>([\\s\\S]*?)</tool_code>"
+                if let regex = try? NSRegularExpression(pattern: pattern) {
+                    let nsString = finalContent as NSString
+                    let matches = regex.matches(in: finalContent, range: NSRange(location: 0, length: nsString.length))
+                    
+                    for match in matches {
+                        if match.numberOfRanges > 1 {
+                            let jsonString = nsString.substring(with: match.range(at: 1))
+                            
+                            // Execute Tool
+                            if let data = jsonString.data(using: .utf8),
+                               let jsonCall = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+                               let toolName = jsonCall["tool"] as? String,
+                               let params = jsonCall["params"] as? [String: Any] {
+                                
+                                // Run synchronously for now (or await if we make this function async properly)
+                                // Since we are in an async function, we can await!
+                                let result = await toolExecutor.execute(toolName: toolName, params: params)
+                                
+                                var output = ""
+                                var isSuccess = false
+                                
+                                switch result {
+                                case .success(let out, let metadata):
+                                    output = out
+                                    isSuccess = true
+                                    
+                                    // Handle Diff / Pending Change
+                                    if let meta = metadata, meta["type"] as? String == "edit_file" {
+                                        let oldContent = meta["old_content"] as? String ?? ""
+                                        let newContent = meta["new_content"] as? String ?? ""
+                                        let path = meta["path"] as? String ?? ""
+                                        
+                                        // Calculate rough stats (simplified)
+                                        let oldLines = oldContent.components(separatedBy: .newlines)
+                                        let newLines = newContent.components(separatedBy: .newlines)
+                                        let deletions = max(0, oldLines.count - newLines.count) // Very rough
+                                        let additions = max(0, newLines.count - oldLines.count)
+                                        
+                                        let change = PendingChangeModel(
+                                            id: UUID().uuidString,
+                                            filePath: path,
+                                            description: "Edited by Agent",
+                                            additions: additions,
+                                            deletions: deletions,
+                                            oldContent: oldContent,
+                                            newContent: newContent,
+                                            status: .accepted // Auto-applied by tool
+                                        )
+                                        // Append to changes list
+                                        localToolResults.append(ToolResultModel(
+                                            toolCallId: UUID().uuidString,
+                                            toolName: "diff_viewer", // psuedo-tool for UI
+                                            success: true,
+                                            output: "Diff generated",
+                                            error: nil
+                                        ))
+                                        
+                                        // We need to append to the MAIN changes list, but that's local scope.
+                                        // We'll append it to the message's pendingChanges
+                                        changes.append(change)
+                                    }
+                                    
+                                case .failure(let err):
+                                    output = err
+                                    isSuccess = false
+                                }
+                                
+                                localToolResults.append(ToolResultModel(
+                                    toolCallId: UUID().uuidString,
+                                    toolName: toolName,
+                                    success: isSuccess,
+                                    output: output,
+                                    error: isSuccess ? nil : output
+                                ))
+                            }
+                        }
+                    }
+                    
+                    // Remove tool blocks from content to avoid clutter (optional, but requested "As Others IDE")
+                    // Actually, keeping the "Thinking" or "Action" visible is often good. 
+                    // Let's strip it for cleaner chat, relying on the UI to show the tool result.
+                    finalContent = regex.stringByReplacingMatches(in: finalContent, range: NSRange(location: 0, length: nsString.length), withTemplate: "")
+                        .trimmingCharacters(in: .whitespacesAndNewlines)
+                }
+                
+                // Merge remote and local tool results
+                toolResults.append(contentsOf: localToolResults)
+                
                 let assistantMessage = AgentMessageModel(
                     id: UUID().uuidString,
                     role: .assistant,
-                    content: responseContent,
+                    content: finalContent, // Use cleaned content
                     toolResults: toolResults,
                     pendingChanges: changes,
                     timestamp: Date()
                 )
                 messages.append(assistantMessage)
+                
+                // Store assistant response as memory
+                if let chatId = activeChatId {
+                    memoryService.storeMemory(content: responseContent, chatId: chatId, role: "assistant")
+                }
             }
         } catch {
             let errorMessage = AgentMessageModel(
@@ -697,6 +845,7 @@ struct AgentMessageModel: Identifiable {
 
 struct ToolResultModel {
     let toolCallId: String
+    let toolName: String
     let success: Bool
     let output: String
     let error: String?

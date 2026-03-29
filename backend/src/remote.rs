@@ -89,17 +89,51 @@ impl RemoteConnectionManager {
         }
 
         let mut ssh_config = client::Config::default();
-        // Network Hardening: We use tokio::time::timeout instead of this invalid field
         
+        // Compatibility: Enable a wide range of algorithms to support older and newer servers
+        // This solves "No common key algorithm" errors.
+        ssh_config.preferred = Preferred {
+            kex: std::borrow::Cow::Borrowed(&[
+                russh::kex::CURVE25519,
+                russh::kex::DH_G14_SHA256,
+                russh::kex::DH_G14_SHA1,
+                russh::kex::DH_G1_SHA1,
+            ]),
+            cipher: std::borrow::Cow::Borrowed(&[
+                russh::cipher::CHACHA20_POLY1305,
+                russh::cipher::AES_256_GCM,
+                russh::cipher::AES_256_CTR,
+                russh::cipher::AES_192_CTR,
+                russh::cipher::AES_128_CTR,
+            ]),
+            key: std::borrow::Cow::Borrowed(&[
+                russh_keys::key::ED25519,
+                russh_keys::key::ECDSA_SHA2_NISTP256,
+                russh_keys::key::RSA_SHA2_512,
+                russh_keys::key::RSA_SHA2_256,
+                russh_keys::key::SSH_RSA,
+            ]),
+            compression: std::borrow::Cow::Borrowed(&[
+                russh::compression::NONE,
+                russh::compression::ZLIB,
+            ]),
+            ..Default::default()
+        };
+
+        // Stability: Add KeepAlive to prevent timeouts
+        ssh_config.keepalive_interval = Some(std::time::Duration::from_secs(10));
+
+
         let config_arc = Arc::new(ssh_config);
         let sh = Client {};
         
+        // Increase initial connection timeout slightly to account for slow handshakes
         let mut session = match tokio::time::timeout(
-            tokio::time::Duration::from_secs(30),
+            tokio::time::Duration::from_secs(45),
             client::connect(config_arc, (config.host.as_str(), config.port), sh)
         ).await {
             Ok(res) => res.map_err(|e| format!("Connection failed: {}", e))?,
-            Err(_) => return Err("Connection timed out (30s)".to_string()),
+            Err(_) => return Err("Connection timed out (45s)".to_string()),
         };
 
         let auth_res = if let Some(key_path) = config.key_path {

@@ -207,7 +207,6 @@ struct RefactorProWindow: View {
                             .stroke(Color.secondary.opacity(0.2), lineWidth: 1)
                     )
                 
-                // Quick Templates
                 ScrollView(.horizontal, showsIndicators: false) {
                     HStack(spacing: 8) {
                         if selectedMode == .migration {
@@ -216,6 +215,19 @@ struct RefactorProWindow: View {
                             refactorTemplates
                         }
                     }
+                }
+                
+                if isUltraMode {
+                    HStack(spacing: 6) {
+                         Image(systemName: "memory.chip")
+                            .foregroundColor(.orange)
+                            .font(.system(size: 10))
+                         Text("Smart Vector Memory Active")
+                            .font(.caption2)
+                            .foregroundColor(.secondary)
+                         Spacer()
+                    }
+                    .padding(.top, 4)
                 }
             }
             .padding(12)
@@ -541,10 +553,31 @@ struct RefactorProWindow: View {
         refactoredCode = ""
         selectedTab = 0 // Switch to Code tab
         
+        Task {
+             // Vector Context Retrieval (Background)
+             var vectorContext = ""
+             if isUltraMode && !instructions.isEmpty {
+                 let query = instructions + " " + String(originalCode.prefix(100))
+                 if let response = try? await BackendService.shared.searchVectors(query: query, limit: 3) {
+                     if !response.results.isEmpty {
+                         vectorContext = "\n\n[Relevant Project Context]:\n" + response.results.map {
+                             "File: \($0.file_path)\nSnippet: \($0.snippet)"
+                         }.joined(separator: "\n---\n")
+                     }
+                 }
+             }
+             
+             let enhancedInstructions = instructions + vectorContext
+             
+             await MainActor.run {
+                 performRefactor(with: enhancedInstructions)
+             }
+        }
+    }
 
-
+    private func performRefactor(with enhancedInstructions: String) {
         if !folderFiles.isEmpty && selectedMode == .migration {
-            generateBulkMigration()
+            generateBulkMigration() // Pass instructions TODO: Update Bulk too
             return
         }
 
@@ -563,7 +596,7 @@ struct RefactorProWindow: View {
                     
                     let request = AgentChatRequest(
                         session_id: appState.agentSessionId ?? "default",
-                        message: instructions,
+                        message: enhancedInstructions, // Use enhanced instructions
                         editor_context: editorContext,
                         provider: appState.aiConfig.provider,
                         model: appState.aiConfig.model,
@@ -581,12 +614,13 @@ struct RefactorProWindow: View {
                         self.agentResults = response.tool_results
                         self.refactoredCode = response.content
                         self.isProcessing = false
+                        generateReport() // Auto generate report
                     }
                 } else {
                     // Standard refactor
                     let result = try await BackendService.shared.refactorCode(
                         code: originalCode,
-                        instructions: instructions,
+                        instructions: enhancedInstructions, // Use enhanced instructions
                         provider: appState.aiConfig.provider,
                         model: appState.aiConfig.model,
                         apiKey: appState.aiConfig.apiKey
@@ -595,6 +629,7 @@ struct RefactorProWindow: View {
                     await MainActor.run {
                         self.refactoredCode = result
                         self.isProcessing = false
+                        generateReport()
                     }
                 }
             } catch {
@@ -793,34 +828,134 @@ struct RefactorProWindow: View {
         
         if panel.runModal() == .OK, let url = panel.url {
             Task {
-                do {
-                    if format == .pdf {
-                        let request = AIRefactorReportRequest(
-                            source_code: originalCode,
-                            refactored_code: refactoredCode,
-                            source_language: report.sourceLanguage,
-                            target_language: report.targetLanguage,
-                            changes: report.changes,
-                            recommendations: report.recommendations
-                        )
-                        let pdfData = try await BackendService.shared.generateRefactorReport(request: request)
-                        try pdfData.write(to: url)
-                    } else {
+                if format == .pdf {
+                     await MainActor.run {
+                         isProcessing = true
+                     }
+                     
+                     let html = generateFormalHTML(report: report)
+                     
+                     // Use PDFGenerator
+                     PDFGenerator.shared.generatePDF(htmlContent: html) { result in
+                         Task {
+                             await MainActor.run {
+                                 isProcessing = false
+                                 switch result {
+                                 case .success(let data):
+                                     do {
+                                         try data.write(to: url)
+                                         errorMessage = "Report exported to \(url.lastPathComponent)"
+                                     } catch {
+                                         errorMessage = "Failed to save PDF: \(error.localizedDescription)"
+                                     }
+                                 case .failure(let error):
+                                     errorMessage = "PDF Generation failed: \(error.localizedDescription)"
+                                 }
+                             }
+                         }
+                     }
+                } else {
+                    do {
                         let content = try await generateReportContent(report: report, format: format)
                         try content.write(to: url, atomically: true, encoding: .utf8)
-                    }
-                    
-                    await MainActor.run {
-                        errorMessage = "Report exported to \(url.lastPathComponent)"
-                    }
-                } catch {
-                    await MainActor.run {
-                        errorMessage = "Export failed: \(error.localizedDescription)"
+                        await MainActor.run {
+                            errorMessage = "Report exported to \(url.lastPathComponent)"
+                        }
+                    } catch {
+                        await MainActor.run {
+                            errorMessage = "Export failed: \(error.localizedDescription)"
+                        }
                     }
                 }
             }
         }
     }
+    
+    // MARK: - Official Report Template
+    private func generateFormalHTML(report: RefactorReport) -> String {
+        return """
+        <!DOCTYPE html>
+        <html>
+        <head>
+            <meta charset="UTF-8">
+            <style>
+                body { font-family: 'Helvetica Neue', Helvetica, Arial, sans-serif; line-height: 1.6; color: #333; max-width: 800px; margin: 0 auto; padding: 40px; }
+                .header { border-bottom: 2px solid #FF6F00; padding-bottom: 20px; margin-bottom: 30px; display: flex; justify-content: space-between; align-items: center; }
+                .title { font-size: 28px; font-weight: bold; color: #003366; }
+                .subtitle { font-size: 14px; color: #666; text-transform: uppercase; letter-spacing: 1px; }
+                .meta-table { width: 100%; border-collapse: collapse; margin-bottom: 30px; }
+                .meta-table th { text-align: left; color: #666; font-weight: normal; padding: 8px 0; border-bottom: 1px solid #eee; }
+                .meta-table td { text-align: right; font-weight: bold; padding: 8px 0; border-bottom: 1px solid #eee; }
+                .section { margin-bottom: 30px; background: #f9f9f9; padding: 20px; border-radius: 8px; border-left: 4px solid #003366; }
+                .section-title { font-size: 18px; font-weight: bold; margin-bottom: 15px; color: #003366; }
+                .stat-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 20px; margin-bottom: 20px; }
+                .stat-box { background: white; padding: 15px; border-radius: 6px; box-shadow: 0 1px 3px rgba(0,0,0,0.1); }
+                .stat-label { font-size: 12px; color: #666; display: block; margin-bottom: 4px; }
+                .stat-value { font-size: 24px; font-weight: bold; color: #FF6F00; }
+                ul { padding-left: 20px; margin: 0; }
+                li { margin-bottom: 8px; }
+                .footer { margin-top: 50px; border-top: 1px solid #eee; padding-top: 20px; font-size: 12px; color: #999; text-align: center; }
+                .badge { display: inline-block; padding: 4px 8px; border-radius: 4px; font-size: 11px; font-weight: bold; color: white; background: #003366; }
+                code { background: #f0f0f0; padding: 2px 5px; border-radius: 3px; font-family: Menlo, monospace; font-size: 0.9em; }
+            </style>
+        </head>
+        <body>
+            <div class="header">
+                <div>
+                    <div class="title">Code Refactor Report</div>
+                    <div class="subtitle">Official Analysis Document</div>
+                </div>
+                <div class="badge">CONFIDENTIAL</div>
+            </div>
+            
+            <div class="stat-grid">
+                 <div class="stat-box">
+                    <span class="stat-label">Source Language</span>
+                    <span class="stat-value">\(report.sourceLanguage.capitalized)</span>
+                 </div>
+                 <div class="stat-box">
+                    <span class="stat-label">Target Language</span>
+                    <span class="stat-value">\(report.targetLanguage.capitalized)</span>
+                 </div>
+                 <div class="stat-box">
+                    <span class="stat-label">Lines Refactored</span>
+                    <span class="stat-value">\(report.linesBefore) → \(report.linesAfter)</span>
+                 </div>
+                 <div class="stat-box">
+                    <span class="stat-label">Complexity Reduction</span>
+                    <span class="stat-value">\(report.complexityBefore) → \(report.complexityAfter)</span>
+                 </div>
+            </div>
+            
+            <div class="section">
+                <div class="section-title">Executive Summary</div>
+                <p>This report details the automated refactoring process performed by CodeTunner AI. The source code has been analyzed, optimized, and transformed to meet modern standards and specific user requirements.</p>
+            </div>
+            
+            <div class="section">
+                <div class="section-title">Key Changes Implemented</div>
+                <ul>
+                    \(report.changes.map { "<li>\($0)</li>" }.joined(separator: "\n"))
+                </ul>
+            </div>
+            
+            \(report.recommendations.isEmpty ? "" : """
+            <div class="section" style="border-left-color: #FF6F00;">
+                <div class="section-title">AI Recommendations</div>
+                <ul>
+                    \(report.recommendations.map { "<li>\($0)</li>" }.joined(separator: "\n"))
+                </ul>
+            </div>
+            """)
+            
+            <div class="footer">
+                Generated by CodeTunner AI • \(report.timestamp.formatted(date: .long, time: .shortened))
+            </div>
+        </body>
+        </html>
+        """
+    }
+    
     
     private func generateReportContent(report: RefactorReport, format: ReportFormat) async throws -> String {
         // For now, generate text format. PDF/DOCX will need backend support.

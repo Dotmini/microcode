@@ -174,6 +174,10 @@ pub struct AIConfig {
     pub temperature: f32,
     #[serde(default)]
     pub max_tokens: usize,
+    #[serde(default)]
+    pub use_microrent_proxy: bool,
+    #[serde(default)]
+    pub microrent_token: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

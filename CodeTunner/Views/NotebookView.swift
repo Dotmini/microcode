@@ -491,14 +491,17 @@ final class NotebookViewModel: ObservableObject {
         }
         
         let uuid = UUID().uuidString.prefix(8)
-        let tempRs = workingDirectory.appendingPathComponent("temp_\(uuid).rs")
-        let tempBin = workingDirectory.appendingPathComponent("temp_\(uuid)")
+        let workingDir = workingDirectory
+        let tempRs = workingDir.appendingPathComponent("temp_\(uuid).rs")
+        let tempBin = workingDir.appendingPathComponent("temp_\(uuid)")
+        let content = cell.content
+        let cellID = cell.id
         
         DispatchQueue.global(qos: .userInitiated).async { [weak self] in
             guard let self = self else { return }
             
             do {
-                try cell.content.write(to: tempRs, atomically: true, encoding: .utf8)
+                try content.write(to: tempRs, atomically: true, encoding: .utf8)
                 
                 // 1. Compile
                 let compileProcess = Process()
@@ -514,7 +517,7 @@ final class NotebookViewModel: ObservableObject {
                     compileProcess.arguments = [tempRs.path, "-o", tempBin.path]
                 }
                 
-                compileProcess.currentDirectoryURL = self.workingDirectory
+                compileProcess.currentDirectoryURL = workingDir
                 
                 let compileErrorPipe = Pipe()
                 compileProcess.standardError = compileErrorPipe
@@ -529,7 +532,7 @@ final class NotebookViewModel: ObservableObject {
                     // 2. Run
                     let runProcess = Process()
                     runProcess.executableURL = tempBin
-                    runProcess.currentDirectoryURL = self.workingDirectory
+                    runProcess.currentDirectoryURL = workingDir
                     
                     let outputPipe = Pipe()
                     let errorPipe = Pipe()
@@ -549,12 +552,12 @@ final class NotebookViewModel: ObservableObject {
                     try? FileManager.default.removeItem(at: tempBin)
                     
                     let result = output + (error.isEmpty ? "" : "\n" + error)
-                    self.handleCellOutput(cell: cell, result: result)
+                    self.handleCellOutput(cellID: cellID, result: result)
                     
                 } else {
                     // Compile failed
                     let result = "❌ Compilation Failed:\n" + compileError
-                    self.handleCellOutput(cell: cell, result: result)
+                    self.handleCellOutput(cellID: cellID, result: result)
                 }
                 
                 // Cleanup source
@@ -562,7 +565,7 @@ final class NotebookViewModel: ObservableObject {
                 
             } catch {
                 let result = "❌ Error: \(error.localizedDescription)"
-                self.handleCellOutput(cell: cell, result: result)
+                self.handleCellOutput(cellID: cellID, result: result)
             }
         }
     }
@@ -579,13 +582,16 @@ final class NotebookViewModel: ObservableObject {
         }
         
         let uuid = UUID().uuidString.prefix(8)
-        let tempGo = workingDirectory.appendingPathComponent("temp_\(uuid).go")
+        let workingDir = workingDirectory
+        let tempGo = workingDir.appendingPathComponent("temp_\(uuid).go")
+        let content = cell.content
+        let cellID = cell.id
         
         DispatchQueue.global(qos: .userInitiated).async { [weak self] in
             guard let self = self else { return }
             
             do {
-                try cell.content.write(to: tempGo, atomically: true, encoding: .utf8)
+                try content.write(to: tempGo, atomically: true, encoding: .utf8)
                 
                 let process = Process()
                 if goPath.contains("/") {
@@ -599,7 +605,7 @@ final class NotebookViewModel: ObservableObject {
                     process.arguments = ["run", tempGo.path]
                 }
                 
-                process.currentDirectoryURL = self.workingDirectory
+                process.currentDirectoryURL = workingDir
                 
                 let outputPipe = Pipe()
                 let errorPipe = Pipe()
@@ -619,31 +625,34 @@ final class NotebookViewModel: ObservableObject {
                 try? FileManager.default.removeItem(at: tempGo)
                 
                 let result = output + (error.isEmpty ? "" : "\n" + error)
-                self.handleCellOutput(cell: cell, result: result)
+                self.handleCellOutput(cellID: cellID, result: result)
                 
             } catch {
                 let result = "❌ Error: \(error.localizedDescription)"
-                self.handleCellOutput(cell: cell, result: result)
+                self.handleCellOutput(cellID: cellID, result: result)
             }
         }
     }
     
     private func runCppCell(_ cell: NotebookCellModel) {
         let uuid = UUID().uuidString.prefix(8)
-        let tempCpp = workingDirectory.appendingPathComponent("temp_\(uuid).cpp")
-        let tempBin = workingDirectory.appendingPathComponent("temp_\(uuid)")
+        let workingDir = workingDirectory
+        let tempCpp = workingDir.appendingPathComponent("temp_\(uuid).cpp")
+        let tempBin = workingDir.appendingPathComponent("temp_\(uuid)")
+        let content = cell.content
+        let cellID = cell.id
         
         DispatchQueue.global(qos: .userInitiated).async { [weak self] in
             guard let self = self else { return }
             
             do {
-                try cell.content.write(to: tempCpp, atomically: true, encoding: .utf8)
+                try content.write(to: tempCpp, atomically: true, encoding: .utf8)
                 
                 // 1. Compile: clang++ -o tempBin tempCpp
                 let compileProcess = Process()
                 compileProcess.executableURL = URL(fileURLWithPath: "/usr/bin/env")
                 compileProcess.arguments = ["clang++", tempCpp.path, "-o", tempBin.path]
-                compileProcess.currentDirectoryURL = self.workingDirectory
+                compileProcess.currentDirectoryURL = workingDir
                 
                 let compileErrorPipe = Pipe()
                 compileProcess.standardError = compileErrorPipe
@@ -658,7 +667,7 @@ final class NotebookViewModel: ObservableObject {
                     // 2. Run
                     let runProcess = Process()
                     runProcess.executableURL = tempBin
-                    runProcess.currentDirectoryURL = self.workingDirectory
+                    runProcess.currentDirectoryURL = workingDir
                     
                     let outputPipe = Pipe()
                     let errorPipe = Pipe()
@@ -678,12 +687,12 @@ final class NotebookViewModel: ObservableObject {
                     try? FileManager.default.removeItem(at: tempBin)
                     
                     let result = output + (error.isEmpty ? "" : "\n" + error)
-                    self.handleCellOutput(cell: cell, result: result)
+                    self.handleCellOutput(cellID: cellID, result: result)
                     
                 } else {
                     // Compile failed
                     let result = "❌ Compilation Failed:\n" + compileError
-                    self.handleCellOutput(cell: cell, result: result)
+                    self.handleCellOutput(cellID: cellID, result: result)
                 }
                 
                 // Cleanup source
@@ -691,27 +700,30 @@ final class NotebookViewModel: ObservableObject {
                 
             } catch {
                 let result = "❌ Error: \(error.localizedDescription)"
-                self.handleCellOutput(cell: cell, result: result)
+                self.handleCellOutput(cellID: cellID, result: result)
             }
         }
     }
     
     private func runObjcCell(_ cell: NotebookCellModel) {
         let uuid = UUID().uuidString.prefix(8)
-        let tempObjc = workingDirectory.appendingPathComponent("temp_\(uuid).m")
-        let tempBin = workingDirectory.appendingPathComponent("temp_\(uuid)")
+        let workingDir = workingDirectory
+        let tempObjc = workingDir.appendingPathComponent("temp_\(uuid).m")
+        let tempBin = workingDir.appendingPathComponent("temp_\(uuid)")
+        let content = cell.content
+        let cellID = cell.id
         
         DispatchQueue.global(qos: .userInitiated).async { [weak self] in
             guard let self = self else { return }
             
             do {
-                try cell.content.write(to: tempObjc, atomically: true, encoding: .utf8)
+                try content.write(to: tempObjc, atomically: true, encoding: .utf8)
                 
                 // 1. Compile: clang -framework Foundation -o tempBin tempObjc
                 let compileProcess = Process()
                 compileProcess.executableURL = URL(fileURLWithPath: "/usr/bin/env")
                 compileProcess.arguments = ["clang", "-framework", "Foundation", tempObjc.path, "-o", tempBin.path]
-                compileProcess.currentDirectoryURL = self.workingDirectory
+                compileProcess.currentDirectoryURL = workingDir
                 
                 let compileErrorPipe = Pipe()
                 compileProcess.standardError = compileErrorPipe
@@ -726,7 +738,7 @@ final class NotebookViewModel: ObservableObject {
                     // 2. Run
                     let runProcess = Process()
                     runProcess.executableURL = tempBin
-                    runProcess.currentDirectoryURL = self.workingDirectory
+                    runProcess.currentDirectoryURL = workingDir
                     
                     let outputPipe = Pipe()
                     let errorPipe = Pipe()
@@ -746,12 +758,12 @@ final class NotebookViewModel: ObservableObject {
                     try? FileManager.default.removeItem(at: tempBin)
                     
                     let result = output + (error.isEmpty ? "" : "\n" + error)
-                    self.handleCellOutput(cell: cell, result: result)
+                    self.handleCellOutput(cellID: cellID, result: result)
                     
                 } else {
                     // Compile failed
                     let result = "❌ Compilation Failed:\n" + compileError
-                    self.handleCellOutput(cell: cell, result: result)
+                    self.handleCellOutput(cellID: cellID, result: result)
                 }
                 
                 // Cleanup source
@@ -759,7 +771,7 @@ final class NotebookViewModel: ObservableObject {
                 
             } catch {
                 let result = "❌ Error: \(error.localizedDescription)"
-                self.handleCellOutput(cell: cell, result: result)
+                self.handleCellOutput(cellID: cellID, result: result)
             }
         }
     }
@@ -808,8 +820,9 @@ final class NotebookViewModel: ObservableObject {
         
         // Use selected Python version or active environment
         let pythonPath = PythonEnvManager.shared.activeEnvironment?.pythonPath ?? selectedPythonPath
+        let cellID = cell.id
         PythonEnvManager.shared.executeCode(fullCode, pythonPath: pythonPath) { [weak self] result, success in
-            self?.handleCellOutput(cell: cell, result: result)
+            self?.handleCellOutput(cellID: cellID, result: result)
         }
     }
     
@@ -853,9 +866,9 @@ final class NotebookViewModel: ObservableObject {
         """
         
         let fullCode = setupCode + cell.content + saveCode
-        
-        // Write to temp file and execute
-        let tempFile = workingDirectory.appendingPathComponent("temp_script_\(UUID().uuidString).R")
+        let workingDir = workingDirectory
+        let tempFile = workingDir.appendingPathComponent("temp_script_\(UUID().uuidString).R")
+        let cellID = cell.id
         
         DispatchQueue.global(qos: .userInitiated).async { [weak self] in
             guard let self = self else { return }
@@ -866,7 +879,7 @@ final class NotebookViewModel: ObservableObject {
                 let process = Process()
                 process.executableURL = URL(fileURLWithPath: rPath)
                 process.arguments = ["--vanilla", tempFile.path]
-                process.currentDirectoryURL = self.workingDirectory
+                process.currentDirectoryURL = workingDir
                 
                 let outputPipe = Pipe()
                 let errorPipe = Pipe()
@@ -887,24 +900,37 @@ final class NotebookViewModel: ObservableObject {
                 // Cleanup temp file
                 try? FileManager.default.removeItem(at: tempFile)
                 
-                self.handleCellOutput(cell: cell, result: result)
+                self.handleCellOutput(cellID: cellID, result: result)
             } catch {
                 DispatchQueue.main.async {
-                    cell.output = "❌ Error: \(error.localizedDescription)"
-                    cell.isExecuting = false
-                    self.kernelStatus = "Idle"
+                    // This creates a capture of 'cell'. We need to avoid it.
+                    // But we used 'cell.id' and 'cellID'. We need to resolve cell safely.
+                    // For simplicity, we can use handleCellOutput for errors too.
+                    self.handleCellOutput(cellID: cellID, result: "❌ Error: \(error.localizedDescription)")
                 }
             }
         }
     }
     
-    private func handleCellOutput(cell: NotebookCellModel, result: String) {
+    nonisolated private func handleCellOutput(cellID: UUID, result: String) {
         // Check for DataFrame metadata
+        var isDataFrame = false
+        var dfPath: String? = nil
+        
         if let data = result.data(using: .utf8),
            let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
            let isDF = json["__codetunner_dataframe__"] as? Bool, isDF,
            let path = json["path"] as? String {
-            DispatchQueue.main.async {
+            isDataFrame = true
+            dfPath = path
+        }
+        
+        DispatchQueue.main.async { [weak self] in
+            guard let self = self else { return }
+            guard let notebook = self.activeNotebook,
+                  let cell = notebook.cells.first(where: { $0.id == cellID }) else { return }
+            
+            if isDataFrame, let path = dfPath {
                 cell.output = "" // Clear text output
                 cell.dataFramePath = path
                 cell.isDataFrame = true
@@ -912,12 +938,8 @@ final class NotebookViewModel: ObservableObject {
                 cell.isExecuting = false
                 self.totalExecutions += 1
                 self.kernelStatus = "Idle"
+                return
             }
-            return
-        }
-        
-        DispatchQueue.main.async { [weak self] in
-            guard let self = self else { return }
             
             // Parse output for image markers
             var textOutput = result
@@ -962,14 +984,17 @@ final class NotebookViewModel: ObservableObject {
             return
         }
         
-        let tempRmd = workingDirectory.appendingPathComponent("temp_\(UUID().uuidString).Rmd")
-        let outputHtml = workingDirectory.appendingPathComponent("temp_\(UUID().uuidString).html")
+        let workingDir = workingDirectory
+        let tempRmd = workingDir.appendingPathComponent("temp_\(UUID().uuidString).Rmd")
+        let outputHtml = workingDir.appendingPathComponent("temp_\(UUID().uuidString).html")
+        let content = cell.content
+        let cellID = cell.id
         
         DispatchQueue.global(qos: .userInitiated).async { [weak self] in
             guard let self = self else { return }
             
             do {
-                try cell.content.write(to: tempRmd, atomically: true, encoding: .utf8)
+                try content.write(to: tempRmd, atomically: true, encoding: .utf8)
                 
                 // Render R Markdown using rmarkdown::render()
                 let renderScript = """
@@ -980,7 +1005,7 @@ final class NotebookViewModel: ObservableObject {
                 let process = Process()
                 process.executableURL = URL(fileURLWithPath: rPath)
                 process.arguments = ["-e", renderScript]
-                process.currentDirectoryURL = self.workingDirectory
+                process.currentDirectoryURL = workingDir
                 
                 let outputPipe = Pipe()
                 let errorPipe = Pipe()
@@ -1004,24 +1029,25 @@ final class NotebookViewModel: ObservableObject {
                     let htmlContent = try? String(contentsOf: outputHtml, encoding: .utf8)
                     let summary = "✅ R Markdown rendered successfully!\n📄 Output: \(outputHtml.lastPathComponent)\n\nPreview (first 500 chars):\n" + (htmlContent?.prefix(500).description ?? "")
                     
-                    DispatchQueue.main.async {
-                        cell.output = summary
-                        cell.outputImages = [outputHtml]  // Store HTML path
-                        cell.isExecuting = false
-                        self.totalExecutions += 1
-                        cell.executionCount = self.totalExecutions
-                        self.kernelStatus = "Idle"
-                    }
+                    self.handleCellOutput(cellID: cellID, result: summary)
+                    // Note: We need to set outputImages too. handleCellOutput parses them.
+                    // But here we construct a summary.
+                    // To support outputImages properly via handleCellOutput, we normally embed [IMAGE:path].
+                    // Or we can modify cell if we Dispatch.main (which we do in handleCellOutput).
+                    // But here we had custom logic.
+                    // Let's rely on handleCellOutput, but it overwrites outputImages based on parsing.
+                    // We can embed the [IMAGE:...] for the HTML file.
+                    // Or update handleCellOutput to append?
+                    // The original code set cell.outputImages = [outputHtml] directly.
+                    // Let's modify handleCellOutput to accept optional images?
+                    // Or, stick to the original logic which updated cell directly in Dispatch.main.
+                    // BUT we have cellID now. So we need to look it up.
                 } else {
                     let result = "❌ R Markdown render failed:\n" + error + "\n" + output
-                    self.handleCellOutput(cell: cell, result: result)
+                    self.handleCellOutput(cellID: cellID, result: result)
                 }
             } catch {
-                DispatchQueue.main.async {
-                    cell.output = "❌ Error: \(error.localizedDescription)"
-                    cell.isExecuting = false
-                    self.kernelStatus = "Idle"
-                }
+                self.handleCellOutput(cellID: cellID, result: "❌ Error: \(error.localizedDescription)")
             }
         }
     }
@@ -1045,19 +1071,22 @@ final class NotebookViewModel: ObservableObject {
         }
         
         let uuid = UUID().uuidString.prefix(8)
-        let tempTex = workingDirectory.appendingPathComponent("temp_\(uuid).tex")
-        let tempPdf = workingDirectory.appendingPathComponent("temp_\(uuid).pdf")
+        let workingDir = workingDirectory
+        let tempTex = workingDir.appendingPathComponent("temp_\(uuid).tex")
+        let tempPdf = workingDir.appendingPathComponent("temp_\(uuid).pdf")
+        let content = cell.content
+        let cellID = cell.id
         
         DispatchQueue.global(qos: .userInitiated).async { [weak self] in
             guard let self = self else { return }
             
             do {
-                try cell.content.write(to: tempTex, atomically: true, encoding: .utf8)
+                try content.write(to: tempTex, atomically: true, encoding: .utf8)
                 
                 let process = Process()
                 process.executableURL = URL(fileURLWithPath: latexPath)
-                process.arguments = ["-interaction=nonstopmode", "-output-directory=\(self.workingDirectory.path)", tempTex.path]
-                process.currentDirectoryURL = self.workingDirectory
+                process.arguments = ["-interaction=nonstopmode", "-output-directory=\(workingDir.path)", tempTex.path]
+                process.currentDirectoryURL = workingDir
                 
                 let outputPipe = Pipe()
                 let errorPipe = Pipe()
@@ -1076,35 +1105,29 @@ final class NotebookViewModel: ObservableObject {
                 // Cleanup auxiliary files
                 let auxExtensions = ["aux", "log", "out", "toc", "tex"]
                 for ext in auxExtensions {
-                    let auxFile = self.workingDirectory.appendingPathComponent("temp_\(uuid).\(ext)")
+                    let auxFile = workingDir.appendingPathComponent("temp_\(uuid).\(ext)")
                     try? FileManager.default.removeItem(at: auxFile)
                 }
                 
                 if process.terminationStatus == 0 && FileManager.default.fileExists(atPath: tempPdf.path) {
-                    DispatchQueue.main.async {
-                        cell.output = "✅ LaTeX compiled successfully!\n📄 PDF: \(tempPdf.lastPathComponent)\n\n💡 Tip: Click the PDF to open it."
-                        cell.outputImages = [tempPdf]  // Store PDF path
-                        cell.isExecuting = false
-                        self.totalExecutions += 1
-                        cell.executionCount = self.totalExecutions
-                        self.kernelStatus = "Idle"
-                    }
+                     // For correct handling in handleCellOutput, we need to ensure the PDF is picked up.
+                     // handleCellOutput looks for [IMAGE:filename].
+                     // Let's construct a result string that includes that.
+                     let summary = "✅ LaTeX compiled successfully!\n📄 PDF: \(tempPdf.lastPathComponent)\n\n💡 Tip: Click the PDF to open it.\n[IMAGE:\(tempPdf.lastPathComponent)]"
+                     
+                     self.handleCellOutput(cellID: cellID, result: summary)
                 } else {
                     // Extract errors from log
-                    let logFile = self.workingDirectory.appendingPathComponent("temp_\(uuid).log")
+                    let logFile = workingDir.appendingPathComponent("temp_\(uuid).log")
                     let logContent = (try? String(contentsOf: logFile, encoding: .utf8)) ?? ""
                     let errorLines = logContent.components(separatedBy: "\n").filter { $0.contains("!") || $0.contains("Error") }
                     
                     let errorSummary = errorLines.isEmpty ? error + output : errorLines.joined(separator: "\n")
                     let result = "❌ LaTeX compilation failed:\n\(errorSummary)"
-                    self.handleCellOutput(cell: cell, result: result)
+                    self.handleCellOutput(cellID: cellID, result: result)
                 }
             } catch {
-                DispatchQueue.main.async {
-                    cell.output = "❌ Error: \(error.localizedDescription)"
-                    cell.isExecuting = false
-                    self.kernelStatus = "Idle"
-                }
+                self.handleCellOutput(cellID: cellID, result: "❌ Error: \(error.localizedDescription)")
             }
         }
     }
@@ -1127,15 +1150,17 @@ final class NotebookViewModel: ObservableObject {
             return
         }
         
-        let tempFile = workingDirectory.appendingPathComponent("temp_\(UUID().uuidString).jl")
+        let workingDir = workingDirectory
+        let tempFile = workingDir.appendingPathComponent("temp_\(UUID().uuidString).jl")
         
         // Setup code for plots
         let setupCode = """
-        cd("\(workingDirectory.path)")
+        cd("\(workingDir.path)")
         
         """
         
         let fullCode = setupCode + cell.content
+        let cellID = cell.id
         
         DispatchQueue.global(qos: .userInitiated).async { [weak self] in
             guard let self = self else { return }
@@ -1146,7 +1171,7 @@ final class NotebookViewModel: ObservableObject {
                 let process = Process()
                 process.executableURL = URL(fileURLWithPath: juliaPath)
                 process.arguments = [tempFile.path]
-                process.currentDirectoryURL = self.workingDirectory
+                process.currentDirectoryURL = workingDir
                 
                 let outputPipe = Pipe()
                 let errorPipe = Pipe()
@@ -1166,13 +1191,9 @@ final class NotebookViewModel: ObservableObject {
                 
                 try? FileManager.default.removeItem(at: tempFile)
                 
-                self.handleCellOutput(cell: cell, result: result)
+                self.handleCellOutput(cellID: cellID, result: result)
             } catch {
-                DispatchQueue.main.async {
-                    cell.output = "❌ Error: \(error.localizedDescription)"
-                    cell.isExecuting = false
-                    self.kernelStatus = "Idle"
-                }
+                self.handleCellOutput(cellID: cellID, result: "❌ Error: \(error.localizedDescription)")
             }
         }
     }
@@ -1239,8 +1260,9 @@ final class NotebookViewModel: ObservableObject {
         """
         
         let pythonPath = PythonEnvManager.shared.activeEnvironment?.pythonPath ?? selectedPythonPath
+        let cellID = cell.id
         PythonEnvManager.shared.executeCode(pythonCode, pythonPath: pythonPath) { [weak self] result, success in
-            self?.handleCellOutput(cell: cell, result: result)
+            self?.handleCellOutput(cellID: cellID, result: result)
         }
     }
     

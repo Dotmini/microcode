@@ -378,7 +378,7 @@ public final class SyntaxHighlightingEngine: @unchecked Sendable {
             }
             
             // 3. Shift subsequent offsets
-            let shiftAmount = changeInLength - originalLength // can be negative
+            let shiftAmount = changeInLength 
             // Ensure we don't crash if startLine + 1 + addedOffsets.count is OOB
             let shiftStart = startLine + 1 + addedOffsets.count
             if shiftStart < offsets.count {
@@ -400,7 +400,7 @@ public final class SyntaxHighlightingEngine: @unchecked Sendable {
             changeStart: startLine,
             linesRemoved: removedLinesCount,
             linesAdded: addedLinesCount,
-            charDelta: changeInLength - originalLength
+            charDelta: changeInLength
         )
         
         // 6. Explicitly mark the start line as dirty to ensure it's re-lexed
@@ -1096,7 +1096,8 @@ public struct SyntaxHighlightedCodeView: NSViewRepresentable {
                     let endLocation = range.location + range.length
                     let checkLocation = max(0, endLocation - 1)
                     
-                    if checkLocation < textStorage.length {
+                    // CRASH FIX: Validate bounds before accessing attributes
+                    if textStorage.length > 0 && checkLocation < textStorage.length {
                         let attributes = textStorage.attributes(at: checkLocation, effectiveRange: nil)
                         if let color = attributes[.foregroundColor] as? NSColor {
                             var newAttributes = textView.typingAttributes
@@ -1144,6 +1145,10 @@ public struct SyntaxHighlightedCodeView: NSViewRepresentable {
                   let range = textView.selectedRanges.first?.rangeValue,
                   range.length == 0 else { return } // Only for insertion point
             
+            // CRASH FIX: Early return if text storage is empty
+            guard let textStorage = textView.textStorage,
+                  textStorage.length > 0 else { return }
+            
             // Context-Aware Typing Attributes (Zero-Flash Typing)
             // When cursor moves, checking the token at the cursor allows us to pre-set the color
             // So if I click inside a green string, I type green immediately.
@@ -1152,7 +1157,8 @@ public struct SyntaxHighlightedCodeView: NSViewRepresentable {
             // Check character BEFORE cursor (to inherit)
             let checkLocation = max(0, location - 1)
             
-            if let textStorage = textView.textStorage, checkLocation < textStorage.length {
+            // CRASH FIX: Double-check bounds
+            if checkLocation < textStorage.length {
                 // Get attributes at check location
                 let attributes = textStorage.attributes(at: checkLocation, effectiveRange: nil)
                 if let color = attributes[.foregroundColor] as? NSColor {

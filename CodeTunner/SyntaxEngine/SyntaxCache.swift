@@ -315,8 +315,6 @@ public final class SyntaxCache: @unchecked Sendable {
         cache = newCache
         lineCount += lineDelta
         
-        lineCount += lineDelta
-        
         // Mark affected lines as dirty
         // CRITICAL FIX: When lines are added (e.g. split line), we must mark the start line AND the new lines as dirty.
         // If linesAdded = 1 (split), we affect line N and line N+1.

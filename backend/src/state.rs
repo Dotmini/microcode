@@ -30,12 +30,18 @@ pub struct AppState {
     /// Fast Tier Hybrid AI Engine
     pub fast_tier: Arc<tokio::sync::Mutex<Option<crate::ai_engine::fast_tier::FastTierEngine>>>,
     
+    /// Smart Tier (Vector Store)
+    pub smart_tier: Arc<tokio::sync::Mutex<Option<crate::ai_engine::smart_tier::SmartTierEngine>>>,
+    
     /// AI Agent RAG Engine
     pub rag_engine: Arc<tokio::sync::Mutex<Option<crate::rag::RagEngine>>>,
     
     /// DataFrames Manager
     pub data_frames: crate::data::dataframe::DataFrameManager,
     pub terminal_manager: std::sync::Arc<crate::terminal::TerminalManager>,
+    
+    /// Pipeline Engine (Local CI/CD)
+    pub pipeline_engine: crate::pipeline::PipelineEngine,
 }
 
 impl AppState {
@@ -48,9 +54,11 @@ impl AppState {
             remote_manager: crate::remote::RemoteConnectionManager::new(),
             node_settings: Arc::new(RwLock::new(crate::nodejs::NodeSettings::default())),
             fast_tier: Arc::new(tokio::sync::Mutex::new(None)),
+            smart_tier: Arc::new(tokio::sync::Mutex::new(None)),
             rag_engine: Arc::new(tokio::sync::Mutex::new(None)),
             data_frames: crate::data::dataframe::DataFrameManager::new(),
             terminal_manager: std::sync::Arc::new(crate::terminal::TerminalManager::new()),
+            pipeline_engine: crate::pipeline::PipelineEngine::new(),
         }
     }
 
@@ -258,6 +266,8 @@ impl Default for AIConfig {
             api_key: std::env::var("GEMINI_API_KEY").unwrap_or_default(),
             temperature: 0.7,
             max_tokens: 2048,
+            microrent_token: None,
+            use_microrent_proxy: false,
         }
     }
 }

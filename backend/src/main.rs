@@ -44,6 +44,7 @@ mod remote;
 mod nodejs;
 mod database;
 mod cicd;
+mod pipeline;
 mod ai_report;
 mod indexer;
 mod rag;
@@ -112,6 +113,8 @@ async fn main() -> Result<()> {
         .route("/api/ai/refactor/report", post(handlers::ai_refactor_report))
         .route("/api/ai/explain", post(handlers::ai_explain))
         .route("/api/ai/models", get(handlers::list_ai_models))
+        .route("/api/ai/vector/search", post(ai_engine::handlers::search_vectors))
+        .route("/api/ai/vector/index", post(ai_engine::handlers::index_workspace))
 
         // Git operations
         .route("/api/git/status", post(handlers::git_status))
@@ -261,11 +264,27 @@ async fn main() -> Result<()> {
         // Network Proxy
         .route("/api/network/proxy", post(handlers::proxy_request))
         
-        // CI/CD
+        // CI/CD (GitHub)
         .route("/api/cicd/runs", post(handlers::cicd_list_runs))
         .route("/api/cicd/jobs", post(handlers::cicd_run_jobs))
         .route("/api/cicd/trigger", post(handlers::cicd_trigger))
         .route("/api/cicd/logs", post(handlers::cicd_get_logs))
+
+        // Pipeline Engine (Local CI/CD)
+        .route("/api/pipeline/list", post(handlers::pipeline_list_workflows))
+        .route("/api/pipeline/parse", post(handlers::pipeline_parse_workflow))
+        .route("/api/pipeline/save", post(handlers::pipeline_save_workflow))
+        .route("/api/pipeline/delete", post(handlers::pipeline_delete_workflow))
+        .route("/api/pipeline/content", post(handlers::pipeline_get_content))
+        .route("/api/pipeline/trigger", post(handlers::pipeline_trigger))
+        .route("/api/pipeline/runs", post(handlers::pipeline_list_runs))
+        .route("/api/pipeline/run", post(handlers::pipeline_get_run))
+        .route("/api/pipeline/set-project", post(handlers::pipeline_set_project))
+        .route("/ws/pipeline/logs", get(handlers::pipeline_logs_ws))
+
+        // Offline Agent
+        .route("/api/agent/offline/status", get(handlers::offline_status))
+        .route("/api/agent/offline/install", post(handlers::offline_install))
 
         // WebSocket for real-time updates
         .route("/ws", get(ws_handler))
@@ -1572,6 +1591,163 @@ mod handlers {
         }
     }
 
+    // Pipeline Engine Handlers (Local CI/CD)
+    
+    #[derive(Debug, Deserialize)]
+    pub struct PipelineProjectRequest {
+        pub project_path: String,
+    }
+
+    pub async fn pipeline_set_project(
+        State(state): State<Arc<RwLock<AppState>>>,
+        Json(payload): Json<PipelineProjectRequest>,
+    ) -> impl IntoResponse {
+        let st = state.read().await;
+        st.pipeline_engine.set_project_dir(std::path::PathBuf::from(&payload.project_path)).await;
+        Json(json!({ "success": true }))
+    }
+
+    pub async fn pipeline_list_workflows(
+        State(state): State<Arc<RwLock<AppState>>>,
+        Json(payload): Json<PipelineProjectRequest>,
+    ) -> impl IntoResponse {
+        let st = state.read().await;
+        st.pipeline_engine.set_project_dir(std::path::PathBuf::from(&payload.project_path)).await;
+        match st.pipeline_engine.list_workflows().await {
+            Ok(workflows) => Json(json!({ "workflows": workflows })).into_response(),
+            Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, e).into_response(),
+        }
+    }
+
+    #[derive(Debug, Deserialize)]
+    pub struct PipelineFileRequest {
+        pub project_path: String,
+        pub filename: String,
+    }
+
+    pub async fn pipeline_parse_workflow(
+        State(state): State<Arc<RwLock<AppState>>>,
+        Json(payload): Json<PipelineFileRequest>,
+    ) -> impl IntoResponse {
+        let st = state.read().await;
+        st.pipeline_engine.set_project_dir(std::path::PathBuf::from(&payload.project_path)).await;
+        match st.pipeline_engine.parse_workflow(&payload.filename).await {
+            Ok(workflow) => Json(json!(workflow)).into_response(),
+            Err(e) => (StatusCode::BAD_REQUEST, e).into_response(),
+        }
+    }
+
+    #[derive(Debug, Deserialize)]
+    pub struct PipelineSaveRequest {
+        pub project_path: String,
+        pub filename: String,
+        pub content: String,
+    }
+
+    pub async fn pipeline_save_workflow(
+        State(state): State<Arc<RwLock<AppState>>>,
+        Json(payload): Json<PipelineSaveRequest>,
+    ) -> impl IntoResponse {
+        let st = state.read().await;
+        st.pipeline_engine.set_project_dir(std::path::PathBuf::from(&payload.project_path)).await;
+        match st.pipeline_engine.save_workflow(&payload.filename, &payload.content).await {
+            Ok(_) => Json(json!({ "success": true })).into_response(),
+            Err(e) => (StatusCode::BAD_REQUEST, e).into_response(),
+        }
+    }
+
+    pub async fn pipeline_delete_workflow(
+        State(state): State<Arc<RwLock<AppState>>>,
+        Json(payload): Json<PipelineFileRequest>,
+    ) -> impl IntoResponse {
+        let st = state.read().await;
+        st.pipeline_engine.set_project_dir(std::path::PathBuf::from(&payload.project_path)).await;
+        match st.pipeline_engine.delete_workflow(&payload.filename).await {
+            Ok(_) => Json(json!({ "success": true })).into_response(),
+            Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, e).into_response(),
+        }
+    }
+
+    pub async fn pipeline_get_content(
+        State(state): State<Arc<RwLock<AppState>>>,
+        Json(payload): Json<PipelineFileRequest>,
+    ) -> impl IntoResponse {
+        let st = state.read().await;
+        st.pipeline_engine.set_project_dir(std::path::PathBuf::from(&payload.project_path)).await;
+        match st.pipeline_engine.get_workflow_content(&payload.filename).await {
+            Ok(content) => Json(json!({ "content": content })).into_response(),
+            Err(e) => (StatusCode::NOT_FOUND, e).into_response(),
+        }
+    }
+
+    #[derive(Debug, Deserialize)]
+    pub struct PipelineTriggerRequest {
+        pub project_path: String,
+        pub workflow_file: String,
+        #[serde(default)]
+        pub env_overrides: std::collections::HashMap<String, String>,
+    }
+
+    pub async fn pipeline_trigger(
+        State(state): State<Arc<RwLock<AppState>>>,
+        Json(payload): Json<PipelineTriggerRequest>,
+    ) -> impl IntoResponse {
+        let st = state.read().await;
+        st.pipeline_engine.set_project_dir(std::path::PathBuf::from(&payload.project_path)).await;
+        match st.pipeline_engine.trigger(&payload.workflow_file, payload.env_overrides).await {
+            Ok(run_id) => Json(json!({ "run_id": run_id, "success": true })).into_response(),
+            Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, e).into_response(),
+        }
+    }
+
+    pub async fn pipeline_list_runs(
+        State(state): State<Arc<RwLock<AppState>>>,
+        Json(payload): Json<PipelineProjectRequest>,
+    ) -> impl IntoResponse {
+        let st = state.read().await;
+        st.pipeline_engine.set_project_dir(std::path::PathBuf::from(&payload.project_path)).await;
+        let runs = st.pipeline_engine.list_runs().await;
+        Json(json!({ "runs": runs }))
+    }
+
+    #[derive(Debug, Deserialize)]
+    pub struct PipelineRunRequest {
+        pub run_id: String,
+    }
+
+    pub async fn pipeline_get_run(
+        State(state): State<Arc<RwLock<AppState>>>,
+        Json(payload): Json<PipelineRunRequest>,
+    ) -> impl IntoResponse {
+        let st = state.read().await;
+        match st.pipeline_engine.get_run(&payload.run_id).await {
+            Some(run) => Json(json!(run)).into_response(),
+            None => (StatusCode::NOT_FOUND, "Run not found").into_response(),
+        }
+    }
+
+    pub async fn pipeline_logs_ws(
+        ws: WebSocketUpgrade,
+        State(state): State<Arc<RwLock<AppState>>>,
+    ) -> impl IntoResponse {
+        ws.on_upgrade(|socket| async move {
+            use axum::extract::ws::Message;
+            let st = state.read().await;
+            let mut rx = st.pipeline_engine.subscribe_logs();
+            drop(st);
+
+            let (mut sender, mut _receiver) = socket.split();
+
+            while let Ok(event) = rx.recv().await {
+                if let Ok(json) = serde_json::to_string(&event) {
+                    if sender.send(Message::Text(json)).await.is_err() {
+                        break;
+                    }
+                }
+            }
+        })
+    }
+
     // DataFrame Handlers
     pub async fn load_dataframe(
         State(state): State<Arc<RwLock<AppState>>>,
@@ -1768,4 +1944,54 @@ mod handlers {
             _ = (&mut recv_task) => send_task.abort(),
         };
     }
+
+    // ==========================================
+    // Offline AI (Ollama) Endpoints
+    // ==========================================
+
+    pub async fn offline_status() -> impl IntoResponse {
+        let client = reqwest::Client::new();
+        match client.get("http://127.0.0.1:11434/api/tags").send().await {
+            Ok(res) if res.status().is_success() => {
+                if let Ok(json) = res.json::<serde_json::Value>().await {
+                    Json(serde_json::json!({
+                        "status": "running",
+                        "models": json["models"]
+                    }))
+                } else {
+                    Json(serde_json::json!({ "status": "running", "models": [] }))
+                }
+            }
+            _ => {
+                Json(serde_json::json!({ "status": "stopped", "models": [] }))
+            }
+        }
+    }
+
+    #[derive(serde::Deserialize)]
+    pub struct OfflineInstallReq {
+        pub model: String,
+    }
+
+    pub async fn offline_install(Json(req): Json<OfflineInstallReq>) -> impl IntoResponse {
+        let client = reqwest::Client::new();
+        let payload = serde_json::json!({
+            "name": req.model,
+            "stream": false
+        });
+
+        match client.post("http://127.0.0.1:11434/api/pull").json(&payload).send().await {
+            Ok(res) if res.status().is_success() => {
+                Json(serde_json::json!({ "success": true, "message": format!("Successfully installed {}", req.model) }))
+            }
+            Ok(res) => {
+                let err = res.text().await.unwrap_or_default();
+                Json(serde_json::json!({ "success": false, "error": format!("Ollama returned error: {}", err) }))
+            }
+            Err(e) => {
+                Json(serde_json::json!({ "success": false, "error": format!("Failed to connect to Ollama: {}", e) }))
+            }
+        }
+    }
+
 }

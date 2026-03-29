@@ -1,0 +1,87 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1024 1024" width="1024" height="1024">
+  <defs>
+    <!-- Deep Space Background Gradient -->
+    <linearGradient id="bgGrad" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0%" stop-color="#0f172a"/>
+      <stop offset="50%" stop-color="#020617"/>
+      <stop offset="100%" stop-color="#000000"/>
+    </linearGradient>
+
+    <!-- Metallic Rim Inner Stroke Gradient -->
+    <linearGradient id="rimGrad" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0%" stop-color="#ffffff" stop-opacity="0.15"/>
+      <stop offset="100%" stop-color="#ffffff" stop-opacity="0.02"/>
+    </linearGradient>
+
+    <!-- Glowing Blue Cyan/Teal Gradient for Left -->
+    <linearGradient id="cyanGrad" x1="0" y1="1" x2="1" y2="0">
+      <stop offset="0%" stop-color="#06b6d4"/>
+      <stop offset="100%" stop-color="#3b82f6"/>
+    </linearGradient>
+
+    <!-- Glowing Purple/Pink Gradient for Right -->
+    <linearGradient id="purpleGrad" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0%" stop-color="#8b5cf6"/>
+      <stop offset="100%" stop-color="#ec4899"/>
+    </linearGradient>
+
+    <!-- Center Bridge Gradient -->
+    <linearGradient id="centerGrad" x1="0" y1="0" x2="1" y2="0">
+      <stop offset="0%" stop-color="#3b82f6"/>
+      <stop offset="50%" stop-color="#6366f1"/>
+      <stop offset="100%" stop-color="#8b5cf6"/>
+    </linearGradient>
+
+    <!-- Drop Shadows for depth -->
+    <filter id="shadowHeavy" x="-20%" y="-20%" width="140%" height="140%">
+      <feDropShadow dx="0" dy="24" stdDeviation="32" flood-color="#000000" flood-opacity="0.8"/>
+    </filter>
+
+    <filter id="glowCyan" x="-50%" y="-50%" width="200%" height="200%">
+      <feGaussianBlur stdDeviation="40" result="blur" />
+      <feComponentTransfer in="blur" result="glow">
+        <feFuncA type="linear" slope="0.5"/>
+      </feComponentTransfer>
+      <feMerge>
+        <feMergeNode in="glow" />
+        <feMergeNode in="SourceGraphic" />
+      </feMerge>
+    </filter>
+
+    <filter id="glowPurple" x="-50%" y="-50%" width="200%" height="200%">
+      <feGaussianBlur stdDeviation="40" result="blur" />
+      <feComponentTransfer in="blur" result="glow">
+        <feFuncA type="linear" slope="0.5"/>
+      </feComponentTransfer>
+      <feMerge>
+        <feMergeNode in="glow" />
+        <feMergeNode in="SourceGraphic" />
+      </feMerge>
+    </filter>
+  </defs>
+
+  <!-- Base App Icon Squircle shape -->
+  <!-- We use standard macOS icon corner rounding (~224px for 1024px) -->
+  <rect width="1024" height="1024" rx="224" fill="url(#bgGrad)"/>
+  
+  <!-- Premium Glossy Rim Outline -->
+  <rect x="2" y="2" width="1020" height="1020" rx="222" fill="none" stroke="url(#rimGrad)" stroke-width="4"/>
+
+  <!-- Logo Group - Modern interconnected M -->
+  <!-- Represents "Micro" and "Code Brackets" simultaneously -->
+  <g transform="translate(192, 180)" filter="url(#shadowHeavy)">
+    <!-- Left Pillar (Cyan/Blue) -->
+    <path d="M 100 600 C 100 640 160 640 160 600 L 160 200 C 160 160 220 160 220 200 L 320 380 C 335 400 365 400 380 380 L 420 300 C 440 260 500 280 480 320 L 380 500 C 350 560 290 560 260 500 L 180 380 L 180 600 C 180 680 100 680 100 600 Z" fill="url(#cyanGrad)" filter="url(#glowCyan)"/>
+
+    <!-- Right Pillar (Purple/Pink) -->
+    <path d="M 540 600 C 540 640 480 640 480 600 L 480 200 C 480 160 420 160 420 200 L 320 380 C 305 400 275 400 260 380 L 220 300 C 200 260 140 280 160 320 L 260 500 C 290 560 350 560 380 500 L 460 380 L 460 600 C 460 680 540 680 540 600 Z" fill="url(#purpleGrad)" filter="url(#glowPurple)" opacity="0.95"/>
+    
+    <!-- Center Bridge Connectors (Creates the M shape overlap) -->
+    <path d="M 280 430 L 320 360 L 360 430 Z" fill="url(#centerGrad)" opacity="0.8"/>
+  </g>
+
+  <!-- Typography: Clean, Modern, Sleek -->
+  <text x="512" y="820" font-family="-apple-system, BlinkMacSystemFont, 'SF Pro Display', 'Helvetica Neue', sans-serif" font-size="88" font-weight="700" fill="#f8fafc" text-anchor="middle" letter-spacing="0">MicroCode</text>
+  
+  <text x="512" y="880" font-family="-apple-system, BlinkMacSystemFont, 'SF Pro Text', 'Helvetica Neue', sans-serif" font-size="28" font-weight="600" fill="#64748b" text-anchor="middle" letter-spacing="14">PRO</text>
+</svg>

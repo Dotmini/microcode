@@ -68,7 +68,8 @@ struct PlaygroundView: View {
         "java", "kotlin",                          // JVM
         "lua", "perl", "php",                      // Other Scripting
         "sql", "shell", "bash",                    // Data/DevOps
-        "ardium"                                   // Custom
+        "ardium",                                   // Custom
+        "latex", "markdown"                        // Document (with preview)
     ]
     
     // Playground data directory
@@ -175,6 +176,10 @@ struct PlaygroundView: View {
                     Button(lang.capitalized) {
                         language = lang
                         updateDefaultCode(for: lang)
+                        // Auto-show preview for latex
+                        if lang == "latex" || lang == "markdown" {
+                            showGUIPreview = true
+                        }
                     }
                 }
             } label: {
@@ -785,9 +790,9 @@ struct PlaygroundView: View {
         VStack(alignment: .leading, spacing: 0) {
             // Header
             HStack {
-                Image(systemName: "macwindow")
-                    .foregroundColor(.purple)
-                Text("SwiftUI Preview")
+                Image(systemName: language == "latex" ? "function" : "macwindow")
+                    .foregroundColor(language == "latex" ? .orange : .purple)
+                Text(language == "latex" ? "LaTeX Preview" : "SwiftUI Preview")
                     .font(.system(size: 11, weight: .semibold))
                 
                 Spacer()
@@ -797,11 +802,13 @@ struct PlaygroundView: View {
                         .scaleEffect(0.6)
                 }
                 
-                Button("⟳ Refresh") {
-                    renderSwiftUIPreview()
+                if language != "latex" {
+                    Button("⟳ Refresh") {
+                        renderSwiftUIPreview()
+                    }
+                    .buttonStyle(.borderless)
+                    .font(.system(size: 11))
                 }
-                .buttonStyle(.borderless)
-                .font(.system(size: 11))
             }
             .padding(.horizontal, 12)
             .padding(.vertical, 8)
@@ -809,8 +816,13 @@ struct PlaygroundView: View {
             
             Divider()
             
+            // LaTeX Real-time Preview
+            if language == "latex" {
+                LaTeXPreviewWebView(latexCode: code)
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+            }
             // Preview Content
-            if language == "swift" && detectedGUIFramework == "SwiftUI" {
+            else if language == "swift" && detectedGUIFramework == "SwiftUI" {
                 // Real SwiftUI Preview in iPhone Frame
                 ScrollView {
                     iPhoneFrameView(
@@ -1954,6 +1966,63 @@ struct PlaygroundView: View {
                 print("Sum:", x + y)
             }
             """
+        
+        case "latex":
+            code = """
+            # LaTeX Playground
+            
+            Welcome to the **LaTeX Playground**! Write math equations with real-time preview.
+            
+            ## Inline Math
+            
+            The quadratic formula is $x = \\frac{-b \\pm \\sqrt{b^2 - 4ac}}{2a}$.
+            
+            ## Block Math
+            
+            $$
+            \\int_{-\\infty}^{\\infty} e^{-x^2} dx = \\sqrt{\\pi}
+            $$
+            
+            ## More Examples
+            
+            - Einstein's famous equation: $E = mc^2$
+            - Euler's identity: $e^{i\\pi} + 1 = 0$
+            - Sum: $\\sum_{k=1}^{n} k = \\frac{n(n+1)}{2}$
+            
+            ---
+            
+            ### Matrix Example
+            
+            $$
+            \\begin{pmatrix}
+            a & b \\\\
+            c & d
+            \\end{pmatrix}
+            $$
+            """
+        
+        case "markdown":
+            code = """
+            # Markdown Playground
+            
+            This is **bold** and this is *italic*.
+            
+            ## Features
+            
+            - Lists work
+            - Math is supported: $\\alpha + \\beta = \\gamma$
+            - Code blocks too:
+            
+            ```python
+            print("Hello World!")
+            ```
+            
+            ## Equation
+            
+            $$
+            f(x) = \\int_{-\\infty}^{x} e^{-t^2} dt
+            $$
+            """
             
         default:
             code = "print('Hello, World!')"
@@ -2095,12 +2164,155 @@ struct GUIPreviewWebView: NSViewRepresentable {
     
     func makeNSView(context: Context) -> WKWebView {
         let webView = WKWebView()
-        webView.configuration.preferences.javaScriptEnabled = true
+        let pagePrefs = WKWebpagePreferences()
+        pagePrefs.allowsContentJavaScript = true
+        webView.configuration.defaultWebpagePreferences = pagePrefs
         return webView
     }
     
     func updateNSView(_ webView: WKWebView, context: Context) {
         webView.loadHTMLString(htmlContent, baseURL: nil)
+    }
+}
+
+// MARK: - LaTeX Preview with KaTeX (Fast Rendering)
+
+/// Real-time LaTeX preview using KaTeX (10x faster than MathJax)
+struct LaTeXPreviewWebView: NSViewRepresentable {
+    let latexCode: String
+    
+    func makeNSView(context: Context) -> WKWebView {
+        let config = WKWebViewConfiguration()
+        let pagePrefs = WKWebpagePreferences()
+        pagePrefs.allowsContentJavaScript = true
+        config.defaultWebpagePreferences = pagePrefs
+        let webView = WKWebView(frame: .zero, configuration: config)
+        webView.setValue(false, forKey: "drawsBackground")
+        return webView
+    }
+    
+    func updateNSView(_ webView: WKWebView, context: Context) {
+        // Escape content for safe JavaScript injection
+        let escapedLatex = latexCode
+            .replacingOccurrences(of: "\\", with: "\\\\")
+            .replacingOccurrences(of: "`", with: "\\`")
+            .replacingOccurrences(of: "$", with: "\\$")
+            .replacingOccurrences(of: "\n", with: "\\n")
+            .replacingOccurrences(of: "\r", with: "")
+        
+        let html = """
+        <!DOCTYPE html>
+        <html>
+        <head>
+            <meta charset="utf-8">
+            <meta name="viewport" content="width=device-width, initial-scale=1">
+            <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.css">
+            <script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.js"></script>
+            <script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/contrib/auto-render.min.js"></script>
+            <style>
+                * { box-sizing: border-box; }
+                body {
+                    font-family: -apple-system, BlinkMacSystemFont, 'SF Pro Text', sans-serif;
+                    margin: 0;
+                    padding: 24px;
+                    background: #1a1a1a;
+                    color: #f0f0f0;
+                    line-height: 1.8;
+                    font-size: 16px;
+                }
+                .katex { font-size: 1.2em; color: #f0f0f0; }
+                .katex-display { margin: 1.5em 0; overflow-x: auto; }
+                .katex-display > .katex { text-align: left; }
+                pre, code {
+                    background: #2a2a2a;
+                    padding: 2px 6px;
+                    border-radius: 4px;
+                    font-family: 'SF Mono', 'Fira Code', monospace;
+                    font-size: 14px;
+                }
+                pre {
+                    padding: 12px;
+                    overflow-x: auto;
+                }
+                h1, h2, h3, h4 {
+                    color: #FF6F00;
+                    margin-top: 1.5em;
+                    margin-bottom: 0.5em;
+                }
+                h1 { font-size: 2em; border-bottom: 2px solid #FF6F00; padding-bottom: 0.3em; }
+                h2 { font-size: 1.5em; }
+                h3 { font-size: 1.2em; }
+                hr { border: 0; height: 1px; background: #444; margin: 2em 0; }
+                .error { color: #ff6b6b; background: #3a2020; padding: 8px 12px; border-radius: 6px; }
+                #content { max-width: 800px; margin: 0 auto; }
+                /* Scrollbar styling */
+                ::-webkit-scrollbar { width: 8px; height: 8px; }
+                ::-webkit-scrollbar-track { background: #1a1a1a; }
+                ::-webkit-scrollbar-thumb { background: #444; border-radius: 4px; }
+                ::-webkit-scrollbar-thumb:hover { background: #555; }
+            </style>
+        </head>
+        <body>
+            <div id="content"></div>
+            <script>
+                document.addEventListener('DOMContentLoaded', function() {
+                    const raw = `\(escapedLatex)`;
+                    const content = document.getElementById('content');
+                    
+                    try {
+                        // Process the content - handle display math, inline math, and regular text
+                        let processed = raw;
+                        
+                        // First, protect code blocks
+                        const codeBlocks = [];
+                        processed = processed.replace(/```([\\s\\S]*?)```/g, (match, code) => {
+                            codeBlocks.push('<pre><code>' + code.replace(/</g, '&lt;').replace(/>/g, '&gt;') + '</code></pre>');
+                            return '%%CODEBLOCK' + (codeBlocks.length - 1) + '%%';
+                        });
+                        
+                        // Convert headers
+                        processed = processed.replace(/^#### (.*$)/gm, '<h4>$1</h4>');
+                        processed = processed.replace(/^### (.*$)/gm, '<h3>$1</h3>');
+                        processed = processed.replace(/^## (.*$)/gm, '<h2>$1</h2>');
+                        processed = processed.replace(/^# (.*$)/gm, '<h1>$1</h1>');
+                        
+                        // Convert horizontal rules
+                        processed = processed.replace(/^---$/gm, '<hr>');
+                        
+                        // Convert line breaks to paragraphs
+                        processed = processed.split(/\\n\\n+/).map(para => {
+                            if (para.startsWith('<h') || para.startsWith('<hr') || para.includes('%%CODEBLOCK')) return para;
+                            return '<p>' + para.replace(/\\n/g, '<br>') + '</p>';
+                        }).join('');
+                        
+                        // Restore code blocks
+                        codeBlocks.forEach((block, i) => {
+                            processed = processed.replace('%%CODEBLOCK' + i + '%%', block);
+                        });
+                        
+                        content.innerHTML = processed;
+                        
+                        // Render LaTeX with KaTeX auto-render
+                        renderMathInElement(content, {
+                            delimiters: [
+                                {left: '$$', right: '$$', display: true},
+                                {left: '$', right: '$', display: false},
+                                {left: '\\\\[', right: '\\\\]', display: true},
+                                {left: '\\\\(', right: '\\\\)', display: false}
+                            ],
+                            throwOnError: false,
+                            errorColor: '#ff6b6b'
+                        });
+                    } catch (e) {
+                        content.innerHTML = '<div class="error">⚠️ LaTeX Error: ' + e.message + '</div><pre>' + raw + '</pre>';
+                    }
+                });
+            </script>
+        </body>
+        </html>
+        """
+        
+        webView.loadHTMLString(html, baseURL: nil)
     }
 }
 

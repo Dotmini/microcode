@@ -10,6 +10,7 @@ import SwiftUI
 import Combine
 import CodeTunnerSupport
 import AppKit
+import WebKit
 
 // MARK: - AI Agent View (Professional)
 
@@ -20,6 +21,8 @@ struct AIAgentView: View {
     @State private var inputText = ""
     @State private var attachments: [AIAttachment] = []
     @State private var isHoveringInput = false
+    @State private var isPaperMode = false  // A4 Paper reading mode
+    @State private var currentPaperPage = 0
     @FocusState private var isInputFocused: Bool
     
     // Aesthetic Constants
@@ -44,12 +47,21 @@ struct AIAgentView: View {
                 Divider().background(borderColor)
                 
                 // 2. Main Content Area
-                ZStack(alignment: .bottom) {
-                    // Chat Scroll
-                    AgentChatStage(messages: agent.messages, isLoading: agent.isLoading)
-                    
-                    // Input Container (Docked at bottom, not floating)
-                    inputArea
+                if isPaperMode {
+                    // A4 Paper Reading Mode
+                    A4PaperView(
+                        messages: agent.messages,
+                        currentPage: $currentPaperPage
+                    )
+                } else {
+                    // Normal Chat Mode
+                    ZStack(alignment: .bottom) {
+                        // Chat Scroll
+                        AgentChatStage(messages: agent.messages, isLoading: agent.isLoading)
+                        
+                        // Input Container (Docked at bottom, not floating)
+                        inputArea
+                    }
                 }
             }
         }
@@ -185,6 +197,25 @@ struct AIAgentView: View {
                 ) {
                     Task { await appState.microCodeService?.indexProject() }
                 }
+                
+                Divider()
+                    .frame(height: 14)
+                    .padding(.horizontal, 4)
+                
+                // Paper Mode Toggle (Slide Button Redesign)
+                Toggle(isOn: $isPaperMode.animation(.easeInOut(duration: 0.2))) {
+                    HStack(spacing: 6) {
+                        Image(systemName: isPaperMode ? "doc.text.fill" : "doc.text")
+                            .font(.system(size: 11))
+                        Text(isPaperMode ? "Report Mode" : "Chat Mode")
+                            .font(.system(size: 11, weight: .medium))
+                    }
+                }
+                .toggleStyle(.button)
+                .buttonStyle(.plain)
+                .padding(.vertical, 4)
+                .tint(Color.accentColor)
+                .help("Toggle between Chat and Report (Paper) Mode")
                 
                 Divider()
                     .frame(height: 14)
@@ -407,10 +438,17 @@ struct AIAgentView: View {
         
         let systemPrompt = "You are MicroCode, a senior software engineer. Provide professional, concise, and correct solutions. Use code blocks for all code snippets."
         
+        // Build conversation history from existing messages (exclude the 2 we just added: user + streaming placeholder)
+        let history: [(role: String, content: String)] = agent.messages.dropLast(2)
+            .filter { $0.role == .user || $0.role == .assistant }
+            .filter { !$0.content.isEmpty }
+            .map { (role: $0.role.rawValue, content: $0.content) }
+        
         AIClient.shared.sendMessage(
             prompt: userText,
             attachments: currentAttachments,
             systemPrompt: systemPrompt,
+            conversationHistory: history,
             provider: provider,
             model: model,
             apiKey: apiKey,
@@ -512,12 +550,73 @@ struct MessageContentParser {
         var blocks: [MessageBlock] = []
         var remaining = content
         
-        // First, extract code blocks
-        let codePattern = "```([a-zA-Z0-9]*)\n([\\s\\S]*?)```"
-        if let regex = try? NSRegularExpression(pattern: codePattern, options: []) {
-            var offset = 0
+        // First, extract LaTeX blocks ($$...$$) - can be multi-line
+        // First, extract LaTeX blocks ($$...$$ or \[...\])
+        // Regex captures content INSIDE the delimiters
+        let latexPattern = "\\$\\$([\\s\\S]*?)\\$\\$|\\\\\\[([\\s\\S]*?)\\\\\\]"
+        if let latexRegex = try? NSRegularExpression(pattern: latexPattern, options: []) {
             let nsContent = remaining as NSString
-            let matches = regex.matches(in: remaining, options: [], range: NSRange(location: 0, length: nsContent.length))
+            let latexMatches = latexRegex.matches(in: remaining, options: [], range: NSRange(location: 0, length: nsContent.length))
+            
+            var processedRanges: [NSRange] = []
+            var lastEnd = 0
+            var tempBlocks: [MessageBlock] = []
+            
+            for match in latexMatches {
+                // Text before LaTeX block
+                if match.range.location > lastEnd {
+                    let beforeRange = NSRange(location: lastEnd, length: match.range.location - lastEnd)
+                    let beforeText = nsContent.substring(with: beforeRange)
+                    tempBlocks.append(.text(beforeText))
+                }
+                
+                // LaTeX block content (check which group matched)
+                var latexContent = ""
+                if match.numberOfRanges > 1, match.range(at: 1).location != NSNotFound {
+                    latexContent = nsContent.substring(with: match.range(at: 1))
+                } else if match.numberOfRanges > 2, match.range(at: 2).location != NSNotFound {
+                    latexContent = nsContent.substring(with: match.range(at: 2))
+                }
+                
+                tempBlocks.append(.latex(latexContent.trimmingCharacters(in: .whitespacesAndNewlines), true))
+                
+                lastEnd = match.range.location + match.range.length
+                processedRanges.append(match.range)
+            }
+            
+            // Remaining text
+            if lastEnd < nsContent.length {
+                let afterText = nsContent.substring(from: lastEnd)
+                tempBlocks.append(.text(afterText))
+            }
+            
+            // If we found LaTeX blocks, process the text portions for code blocks
+            if !processedRanges.isEmpty {
+                for block in tempBlocks {
+                    switch block {
+                    case .text(let text):
+                        blocks.append(contentsOf: parseCodeBlocks(text))
+                    default:
+                        blocks.append(block)
+                    }
+                }
+                return blocks
+            }
+        }
+        
+        // No LaTeX blocks found, process code blocks
+        blocks.append(contentsOf: parseCodeBlocks(remaining))
+        return blocks
+    }
+    
+    private static func parseCodeBlocks(_ content: String) -> [MessageBlock] {
+        var blocks: [MessageBlock] = []
+        
+        // Extract code blocks, converting latex/math to LaTeX blocks
+        let codePattern = "```([a-zA-Z0-9]*)\\n([\\s\\S]*?)```"
+        if let regex = try? NSRegularExpression(pattern: codePattern, options: []) {
+            let nsContent = content as NSString
+            let matches = regex.matches(in: content, options: [], range: NSRange(location: 0, length: nsContent.length))
             
             var lastEnd = 0
             for match in matches {
@@ -533,7 +632,14 @@ struct MessageContentParser {
                 let codeRange = match.range(at: 2)
                 let lang = langRange.location != NSNotFound ? nsContent.substring(with: langRange) : ""
                 let code = codeRange.location != NSNotFound ? nsContent.substring(with: codeRange) : ""
-                blocks.append(.code(lang, code.trimmingCharacters(in: .whitespacesAndNewlines)))
+                let trimmedCode = code.trimmingCharacters(in: .whitespacesAndNewlines)
+                
+                // Check if this is a LaTeX/math code block - render as LaTeX
+                if lang.lowercased() == "latex" || lang.lowercased() == "math" || lang.lowercased() == "tex" {
+                    blocks.append(.latex(trimmedCode, true))
+                } else {
+                    blocks.append(.code(lang, trimmedCode))
+                }
                 
                 lastEnd = match.range.location + match.range.length
             }
@@ -703,6 +809,399 @@ struct AgentChatStage: View {
     }
 }
 
+// MARK: - A4 Paper Reading Mode
+
+struct A4PaperView: View {
+    let messages: [AgentMessageModel]
+    @Binding var currentPage: Int
+    
+    // A4 Paper dimensions at 72dpi (scaled for display)
+    private let paperWidth: CGFloat = 595 * 0.9
+    private let paperHeight: CGFloat = 842 * 0.9
+    private let paperMargin: CGFloat = 48
+    
+    // Combine all message content into pages
+    private var allContent: String {
+        messages.map { $0.content }.joined(separator: "\n\n---\n\n")
+    }
+    
+    // Rough estimate: ~60 chars per line, ~45 lines per page
+    private var totalPages: Int {
+        max(1, (allContent.count / 2700) + 1)
+    }
+    
+    var body: some View {
+        VStack(spacing: 0) {
+            // Paper Container
+            ScrollView {
+                VStack(spacing: 24) {
+                    // The Paper
+                    ZStack {
+                        // Paper Shadow
+                        RoundedRectangle(cornerRadius: 4)
+                            .fill(Color.black.opacity(0.3))
+                            .offset(x: 4, y: 4)
+                            .blur(radius: 8)
+                        
+                        // Paper Background
+                        RoundedRectangle(cornerRadius: 4)
+                            .fill(Color.white)
+                        
+                        // Paper Content
+                        VStack(alignment: .leading, spacing: 16) {
+                            // Header
+                            if currentPage == 0 {
+                                VStack(alignment: .center, spacing: 8) {
+                                    Text("MicroCode Agent")
+                                        .font(.system(size: 20, weight: .bold))
+                                        .foregroundColor(.black)
+                                    Text("Generated Report")
+                                        .font(.system(size: 12))
+                                        .foregroundColor(.gray)
+                                    Text(Date().formatted(date: .long, time: .shortened))
+                                        .font(.system(size: 10))
+                                        .foregroundColor(.gray)
+                                }
+                                .frame(maxWidth: .infinity)
+                                .padding(.bottom, 16)
+                                
+                                Divider().background(Color.gray.opacity(0.3))
+                            }
+                            
+                            // Content
+                            PaperContentView(content: allContent, page: currentPage)
+                            
+                            Spacer()
+                            
+                            // Footer
+                            HStack {
+                                Spacer()
+                                Text("Page \(currentPage + 1) of \(totalPages)")
+                                    .font(.system(size: 10))
+                                    .foregroundColor(.gray)
+                            }
+                        }
+                        .padding(paperMargin)
+                    }
+                    .frame(width: paperWidth, height: paperHeight)
+                }
+                .padding(32)
+                .frame(maxWidth: .infinity)
+            }
+            .background(Color(nsColor: .controlBackgroundColor).opacity(0.5))
+            
+            // Page Navigation Bar
+            HStack(spacing: 16) {
+                Button(action: { if currentPage > 0 { currentPage -= 1 }}) {
+                    Image(systemName: "chevron.left")
+                        .font(.system(size: 12, weight: .medium))
+                }
+                .buttonStyle(.plain)
+                .disabled(currentPage == 0)
+                .foregroundColor(currentPage > 0 ? .accentColor : .secondary.opacity(0.5))
+                
+                // Page Dots
+                HStack(spacing: 6) {
+                    ForEach(0..<min(totalPages, 10), id: \.self) { page in
+                        Circle()
+                            .fill(page == currentPage ? Color.accentColor : Color.secondary.opacity(0.3))
+                            .frame(width: 8, height: 8)
+                            .onTapGesture { currentPage = page }
+                    }
+                    if totalPages > 10 {
+                        Text("...")
+                            .font(.system(size: 10))
+                            .foregroundColor(.secondary)
+                    }
+                }
+                
+                Button(action: { if currentPage < totalPages - 1 { currentPage += 1 }}) {
+                    Image(systemName: "chevron.right")
+                        .font(.system(size: 12, weight: .medium))
+                }
+                .buttonStyle(.plain)
+                .disabled(currentPage >= totalPages - 1)
+                .foregroundColor(currentPage < totalPages - 1 ? .accentColor : .secondary.opacity(0.5))
+                
+                Spacer()
+                
+                // Export Button
+                Button(action: {
+                    // TODO: Export to PDF
+                }) {
+                    HStack(spacing: 4) {
+                        Image(systemName: "square.and.arrow.up")
+                            .font(.system(size: 10))
+                        Text("Export PDF")
+                            .font(.system(size: 10, weight: .medium))
+                    }
+                    .foregroundColor(.secondary)
+                    .padding(.horizontal, 10)
+                    .padding(.vertical, 6)
+                    .background(Color.white.opacity(0.05))
+                    .cornerRadius(4)
+                }
+                .buttonStyle(.plain)
+            }
+            .padding(.horizontal, 16)
+            .padding(.vertical, 10)
+            .background(Color(nsColor: .controlBackgroundColor))
+        }
+    }
+}
+
+// MARK: - Paper Content Renderer
+
+struct PaperContentView: View {
+    let content: String
+    let page: Int
+    
+    private let charsPerPage = 2700
+    
+    private var pageContent: String {
+        let startIndex = page * charsPerPage
+        guard startIndex < content.count else { return "" }
+        
+        let start = content.index(content.startIndex, offsetBy: startIndex)
+        let endOffset = min(startIndex + charsPerPage, content.count)
+        let end = content.index(content.startIndex, offsetBy: endOffset)
+        
+        return String(content[start..<end])
+    }
+    
+    var body: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            // Parse and render content blocks
+            let blocks = MessageContentParser.parse(pageContent)
+            
+            ForEach(blocks) { block in
+                switch block {
+                case .text(let text):
+                    if !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                        PaperTextView(text: text)
+                    }
+                    
+                case .code(let lang, let code):
+                    PaperCodeBlockView(language: lang, code: code)
+                    
+                case .heading(let level, let heading):
+                    Text(heading)
+                        .font(.system(size: paperHeadingSize(level), weight: .bold))
+                        .foregroundColor(.black)
+                        .padding(.top, level <= 2 ? 12 : 6)
+                    
+                case .list(let items, let isOrdered):
+                    VStack(alignment: .leading, spacing: 4) {
+                        ForEach(items.indices, id: \.self) { i in
+                            HStack(alignment: .top, spacing: 8) {
+                                Text(isOrdered ? "\(i + 1)." : "•")
+                                    .font(.system(size: 11))
+                                    .foregroundColor(.gray)
+                                Text(items[i])
+                                    .font(.system(size: 11))
+                                    .foregroundColor(.black)
+                            }
+                        }
+                    }
+                    
+                case .blockquote(let quote):
+                    HStack(spacing: 0) {
+                        Rectangle()
+                            .fill(Color.gray.opacity(0.4))
+                            .frame(width: 2)
+                        Text(quote)
+                            .font(.system(size: 11))
+                            .italic()
+                            .foregroundColor(.gray)
+                            .padding(.leading, 8)
+                    }
+                    
+                case .latex(let expr, let isBlock):
+                    // Show LaTeX as styled text with formula indicators
+                    PaperLaTeXView(expression: expr, isBlock: isBlock)
+                    
+                case .html(let html):
+                    Text(html.replacingOccurrences(of: "<[^>]+>", with: "", options: .regularExpression))
+                        .font(.system(size: 11))
+                        .foregroundColor(.black)
+                }
+            }
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+    }
+    
+    private func paperHeadingSize(_ level: Int) -> CGFloat {
+        switch level {
+        case 1: return 18
+        case 2: return 15
+        case 3: return 13
+        default: return 11
+        }
+    }
+}
+
+// MARK: - Paper Text View (Print-friendly)
+
+struct PaperTextView: View {
+    let text: String
+    
+    var body: some View {
+        Text(parsedText)
+            .font(.system(size: 11))
+            .foregroundColor(.black)
+            .lineSpacing(4)
+            .frame(maxWidth: .infinity, alignment: .leading)
+    }
+    
+    private var parsedText: AttributedString {
+        var str = AttributedString(text)
+        let nsText = text as NSString
+        
+        // Bold
+        if let regex = try? NSRegularExpression(pattern: "\\*\\*(.+?)\\*\\*", options: []) {
+            for match in regex.matches(in: text, options: [], range: NSRange(location: 0, length: nsText.length)) {
+                let matched = nsText.substring(with: match.range)
+                if let range = str.range(of: matched) {
+                    str[range].font = .system(size: 11, weight: .bold)
+                }
+            }
+        }
+        
+        // Italic
+        if let regex = try? NSRegularExpression(pattern: "(?<![*])\\*([^*]+)\\*(?![*])", options: []) {
+            for match in regex.matches(in: text, options: [], range: NSRange(location: 0, length: nsText.length)) {
+                let matched = nsText.substring(with: match.range)
+                if let range = str.range(of: matched) {
+                    str[range].font = .system(size: 11).italic()
+                }
+            }
+        }
+        
+        // Inline code
+        if let regex = try? NSRegularExpression(pattern: "`([^`]+)`", options: []) {
+            for match in regex.matches(in: text, options: [], range: NSRange(location: 0, length: nsText.length)) {
+                let matched = nsText.substring(with: match.range)
+                if let range = str.range(of: matched) {
+                    str[range].font = .system(size: 10, design: .monospaced)
+                    str[range].backgroundColor = Color.gray.opacity(0.15)
+                }
+            }
+        }
+        
+        // Inline LaTeX ($...$)
+        if let regex = try? NSRegularExpression(pattern: "\\$([^$]+)\\$", options: []) {
+            for match in regex.matches(in: text, options: [], range: NSRange(location: 0, length: nsText.length)) {
+                let matched = nsText.substring(with: match.range)
+                if let range = str.range(of: matched) {
+                    str[range].font = .system(size: 11).italic()
+                    str[range].foregroundColor = .blue
+                }
+            }
+        }
+        
+        return str
+    }
+}
+
+// MARK: - Paper Code Block View
+
+struct PaperCodeBlockView: View {
+    let language: String
+    let code: String
+    
+    var body: some View {
+        VStack(alignment: .leading, spacing: 4) {
+            // Re-use the native code block view but force light mode for paper aesthetic
+            NativeCodeBlockView(language: language, code: code)
+                .colorScheme(.light) // Force light mode for "Print/Paper" look
+                .overlay(
+                    RoundedRectangle(cornerRadius: 8)
+                        .stroke(Color.black.opacity(0.1), lineWidth: 1)
+                )
+        }
+    }
+}
+
+// MARK: - Paper LaTeX View
+
+struct PaperLaTeXView: View {
+    let expression: String
+    let isBlock: Bool
+    
+    var body: some View {
+        HStack {
+            if isBlock { Spacer() }
+            
+            LatexBlockWebView(latex: expression, isBlock: isBlock)
+                .frame(minHeight: isBlock ? 100 : 40) // Minimum height
+                .fixedSize(horizontal: false, vertical: true) // Allow expansion if possible, or scroll
+                .frame(maxWidth: isBlock ? .infinity : 300)
+                .background(Color.clear)
+            
+            if isBlock { Spacer() }
+        }
+        .padding(.vertical, 4)
+    }
+}
+
+struct LatexBlockWebView: NSViewRepresentable {
+    let latex: String
+    let isBlock: Bool
+    
+    func makeNSView(context: Context) -> WKWebView {
+        let config = WKWebViewConfiguration()
+        config.preferences.javaScriptEnabled = true
+        let webView = WKWebView(frame: .zero, configuration: config)
+        webView.setValue(false, forKey: "drawsBackground") // Transparent
+        return webView
+    }
+    
+    func updateNSView(_ webView: WKWebView, context: Context) {
+        // Prepare HTML for Light/Paper Mode
+        let displayMode = isBlock ? "true" : "false"
+        let fontSize = isBlock ? "1.2em" : "1.0em"
+        
+        let html = """
+        <!DOCTYPE html>
+        <html>
+        <head>
+            <meta charset="utf-8">
+            <meta name="viewport" content="width=device-width, initial-scale=1">
+            <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.css">
+            <script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.js"></script>
+            <script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/contrib/auto-render.min.js"></script>
+            <style>
+                body {
+                    margin: 0;
+                    padding: 4px;
+                    background: transparent;
+                    color: black;
+                    font-family: 'Times New Roman', serif;
+                    display: flex;
+                    justify-content: \(isBlock ? "center" : "flex-start");
+                    align-items: center;
+                    height: 100vh;
+                }
+                .katex { font-size: \(fontSize); }
+            </style>
+        </head>
+        <body>
+            <div id="content"></div>
+            <script>
+                document.addEventListener("DOMContentLoaded", function() {
+                    katex.render(String.raw`\(latex)`, document.getElementById('content'), {
+                        throwOnError: false,
+                        displayMode: \(displayMode)
+                    });
+                });
+            </script>
+        </body>
+        </html>
+        """
+        webView.loadHTMLString(html, baseURL: nil)
+    }
+}
+
 // MARK: - Rich Message Row
 
 struct RichMessageRow: View {
@@ -710,97 +1209,281 @@ struct RichMessageRow: View {
     
     var isUser: Bool { message.role == .user }
     
+    // Premium gradient for AI avatar
+    private var aiGradient: LinearGradient {
+        LinearGradient(
+            colors: [Color.accentColor, Color.accentColor.opacity(0.7)],
+            startPoint: .topLeading,
+            endPoint: .bottomTrailing
+        )
+    }
+    
     var body: some View {
-        HStack(alignment: .top, spacing: 0) {
-            // Icon
-            VStack {
-                if isUser {
-                    Circle()
-                        .fill(Color.secondary.opacity(0.2))
-                        .frame(width: 20, height: 20)
-                        .overlay(Image(systemName: "person.fill").font(.system(size: 10)).foregroundColor(.secondary))
-                } else {
-                    Rectangle()
-                        .fill(Color.accentColor)
-                        .frame(width: 20, height: 20)
-                        .cornerRadius(4)
-                        .overlay(Image(systemName: "command").font(.system(size: 10)).foregroundColor(.white))
-                }
-            }
-            .padding(.top, 10)
-            .padding(.leading, 16)
-            .padding(.trailing, 12)
-            
-            // Content
-            VStack(alignment: .leading, spacing: 12) {
-                // Header
-                HStack {
-                    Text(isUser ? "USER" : "MICROCODE")
-                        .font(.system(size: 10, weight: .bold))
-                        .foregroundColor(isUser ? .secondary : .accentColor)
+        if isUser {
+            // User Message (Right Aligned Bubble)
+            HStack(alignment: .bottom, spacing: 8) {
+                Spacer(minLength: 40)
+                
+                VStack(alignment: .trailing, spacing: 4) {
+                    VStack(alignment: .leading, spacing: 8) {
+                        let blocks = MessageContentParser.parse(message.content)
+                        ForEach(blocks) { block in
+                            switch block {
+                            case .text(let text):
+                                Text(text)
+                                    .font(.system(size: 13))
+                                    .foregroundColor(.white)
+                            case .code(let lang, let code):
+                                NativeCodeBlockView(language: lang, code: code)
+                            case .latex(let expression, _):
+                                Text(LocalizedStringKey(expression)) // Markdown Parsing user input
+                                    .foregroundColor(.white.opacity(0.9))
+                            default:
+                                EmptyView()
+                            }
+                        }
+                    }
+                    .padding(12)
+                    .background(Color.accentColor)
+                    .foregroundColor(.white)
+                    .cornerRadius(12, corners: [.topLeft, .topRight, .bottomLeft])
                     
                     Text(message.timestamp.formatted(date: .omitted, time: .shortened))
-                        .font(.system(size: 10))
-                        .foregroundColor(.secondary.opacity(0.5))
-                }
-                .padding(.top, 12)
-                
-                // Blocks
-                let blocks = MessageContentParser.parse(message.content)
-                ForEach(blocks) { block in
-                    switch block {
-                    case .text(let text):
-                        if !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-                            MarkdownTextView(text: text)
-                        }
-                        
-                    case .code(let lang, let code):
-                        NativeCodeBlockView(language: lang, code: code)
-                        
-                    case .heading(let level, let content):
-                        HeadingView(level: level, content: content)
-                        
-                    case .list(let items, let isOrdered):
-                        ListView(items: items, isOrdered: isOrdered)
-                        
-                    case .blockquote(let content):
-                        BlockquoteView(content: content)
-                        
-                    case .latex(let expression, let isBlock):
-                        LaTeXBlockView(expression: expression, isBlock: isBlock)
-                        
-                    case .html(let content):
-                        HTMLBlockView(content: content)
-                    }
+                        .font(.caption2)
+                        .foregroundColor(.secondary)
                 }
                 
-                // Tool Outputs (if any)
-                if !message.toolResults.isEmpty {
-                    VStack(alignment: .leading, spacing: 4) {
-                        ForEach(message.toolResults, id: \.toolCallId) { result in
-                            HStack(spacing: 6) {
-                                Image(systemName: result.success ? "checkmark" : "xmark")
-                                    .font(.system(size: 9, weight: .bold))
-                                    .foregroundColor(result.success ? .green : .red)
-                                Text(result.output)
-                                    .font(.system(size: 11, design: .monospaced))
-                                    .foregroundColor(.secondary)
-                                    .lineLimit(1)
-                            }
-                            .padding(6)
-                            .background(Color.black.opacity(0.2))
-                            .cornerRadius(4)
-                        }
-                    }
-                }
-                
-                Divider()
-                    .background(Color.white.opacity(0.05))
-                    .padding(.top, 4)
+                // User Avatar (Small)
+                Circle()
+                    .fill(Color.secondary.opacity(0.2))
+                    .frame(width: 24, height: 24)
+                    .overlay(
+                        Image(systemName: "person.fill")
+                            .font(.system(size: 10))
+                            .foregroundColor(.secondary)
+                    )
             }
-            .padding(.trailing, 16)
+            .padding(.horizontal, 16)
+            .padding(.vertical, 8)
+            
+        } else {
+            // AI Message (Left Aligned Bubble, Full Width Content allowed)
+            HStack(alignment: .top, spacing: 12) {
+                // AI Avatar
+                RoundedRectangle(cornerRadius: 6)
+                    .fill(aiGradient)
+                    .frame(width: 28, height: 28)
+                    .overlay(
+                        Image(systemName: "command")
+                            .font(.system(size: 12, weight: .semibold))
+                            .foregroundColor(.white)
+                    )
+                    .shadow(color: Color.accentColor.opacity(0.2), radius: 4, y: 2)
+                    .padding(.top, 4)
+                
+                VStack(alignment: .leading, spacing: 6) {
+                    // Name
+                    HStack {
+                        Text("MicroCode")
+                            .font(.system(size: 11, weight: .semibold))
+                            .foregroundColor(.primary)
+                        Text(message.timestamp.formatted(date: .omitted, time: .shortened))
+                            .font(.caption2)
+                            .foregroundColor(.secondary)
+                    }
+                    
+                    // Bubble Content
+                    VStack(alignment: .leading, spacing: 14) {
+                        // Blocks
+                        let blocks = MessageContentParser.parse(message.content)
+                        ForEach(blocks) { block in
+                            switch block {
+                            case .text(let text):
+                                if !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                                    MarkdownTextView(text: text)
+                                }
+                            case .code(let lang, let code):
+                                NativeCodeBlockView(language: lang, code: code)
+                            case .heading(let level, let content):
+                                HeadingView(level: level, content: content)
+                            case .list(let items, let isOrdered):
+                                ListView(items: items, isOrdered: isOrdered)
+                            case .blockquote(let content):
+                                BlockquoteView(content: content)
+                            case .latex(let expression, let isBlock):
+                                LaTeXBlockView(expression: expression, isBlock: isBlock)
+                            case .html(let content):
+                                HTMLBlockView(content: content)
+                            }
+                        }
+                        
+                        // Tool Outputs (if any)
+                        if !message.toolResults.isEmpty {
+                            VStack(alignment: .leading, spacing: 6) {
+                                ForEach(message.toolResults, id: \.toolCallId) { result in
+                                    VStack(alignment: .leading, spacing: 4) {
+                                        HStack {
+                                            Image(systemName: result.success ? "checkmark.circle.fill" : "exclamationmark.triangle.fill")
+                                                .foregroundColor(result.success ? .green : .red)
+                                            Text(result.toolName.uppercased())
+                                                .font(.system(size: 10, weight: .bold))
+                                                .foregroundColor(.secondary)
+                                            Spacer()
+                                        }
+                                        
+                                        if !result.output.isEmpty {
+                                            Text(result.output)
+                                                .font(.system(size: 11, design: .monospaced))
+                                                .foregroundColor(result.success ? .secondary : .red)
+                                                .lineLimit(8)
+                                                .fixedSize(horizontal: false, vertical: true)
+                                                .padding(8)
+                                                .background(Color.black.opacity(0.1))
+                                                .cornerRadius(4)
+                                        }
+                                    }
+                                    .padding(8)
+                                    .background(Color.primary.opacity(0.03))
+                                    .cornerRadius(8)
+                                    .overlay(RoundedRectangle(cornerRadius: 8).stroke(Color.primary.opacity(0.05), lineWidth: 1))
+                                }
+                            }
+                        }
+                        
+                        // Pending Changes (Diffs)
+                        if !message.pendingChanges.isEmpty {
+                            VStack(spacing: 8) {
+                                Text("Proposed Changes")
+                                    .font(.caption)
+                                    .fontWeight(.bold)
+                                    .foregroundColor(.secondary)
+                                    .frame(maxWidth: .infinity, alignment: .leading)
+                                
+                                ForEach(message.pendingChanges) { change in
+                                    VStack(alignment: .leading, spacing: 0) {
+                                        // Header
+                                        HStack {
+                                            Image(systemName: "pencil.circle.fill")
+                                                .foregroundColor(.blue)
+                                            Text(URL(fileURLWithPath: change.filePath).lastPathComponent)
+                                                .font(.system(size: 12, weight: .bold))
+                                            
+                                            Spacer()
+                                            
+                                            Text("+\(change.additions) -\(change.deletions)")
+                                                .font(.caption2)
+                                                .foregroundColor(.secondary)
+                                        }
+                                        .padding(8)
+                                        .background(Color.primary.opacity(0.05))
+                                        
+                                        Divider()
+                                        
+                                        // Diff Preview (Simplified)
+                                        Text(change.newContent) 
+                                            .font(.system(size: 11, design: .monospaced))
+                                            .lineLimit(10)
+                                            .padding(8)
+                                            .frame(maxWidth: .infinity, alignment: .leading)
+                                        
+                                        Divider()
+                                        
+                                        // Actions
+                                        HStack {
+                                            Button(action: { /* Apply */ }) {
+                                                Label("Apply", systemImage: "checkmark")
+                                            }
+                                            .buttonStyle(.borderedProminent)
+                                            .tint(.green)
+                                            .font(.caption)
+                                            
+                                            Button(action: { /* Reject */ }) {
+                                                Label("Reject", systemImage: "xmark")
+                                            }
+                                            .buttonStyle(.bordered)
+                                            .tint(.red)
+                                            .font(.caption)
+                                        }
+                                        .padding(8)
+                                    }
+                                    .background(Color.primary.opacity(0.02))
+                                    .cornerRadius(8)
+                                    .overlay(RoundedRectangle(cornerRadius: 8).stroke(Color.primary.opacity(0.1), lineWidth: 1))
+                                }
+                            }
+                            .padding(.top, 8)
+                        }
+                    }
+                    .padding(14)
+                    .background(Color(nsColor: .controlBackgroundColor).opacity(0.8))
+                    .cornerRadius(12, corners: [.topRight, .bottomRight, .bottomLeft])
+                    .overlay(
+                        RoundedRectangle(cornerRadius: 12, style: .continuous)
+                            .stroke(Color.white.opacity(0.1), lineWidth: 1)
+                            .mask(RoundedCornerShape(radius: 12, corners: [.topRight, .bottomRight, .bottomLeft]))
+                    )
+                }
+                
+                Spacer(minLength: 40)
+            }
+            .padding(.horizontal, 16)
+            .padding(.vertical, 8)
         }
-        .background(isUser ? Color.clear : Color.white.opacity(0.02))
+    }
+}
+
+// MARK: - Shape Extension
+struct RoundedCornerShape: Shape {
+    var radius: CGFloat = .infinity
+    var corners: RectCorner
+    
+    func path(in rect: CGRect) -> Path {
+        var path = Path()
+        
+        let w = rect.size.width
+        let h = rect.size.height
+        let r = min(min(self.radius, h/2), w/2)
+        
+        let tr = corners.contains(.topRight) ? r : 0
+        let tl = corners.contains(.topLeft) ? r : 0
+        let bl = corners.contains(.bottomLeft) ? r : 0
+        let br = corners.contains(.bottomRight) ? r : 0
+        
+        path.move(to: CGPoint(x: w / 2.0, y: 0))
+        path.addLine(to: CGPoint(x: w - tr, y: 0))
+        path.addArc(center: CGPoint(x: w - tr, y: tr), radius: tr,
+                    startAngle: Angle(degrees: -90), endAngle: Angle(degrees: 0), clockwise: false)
+        
+        path.addLine(to: CGPoint(x: w, y: h - br))
+        path.addArc(center: CGPoint(x: w - br, y: h - br), radius: br,
+                    startAngle: Angle(degrees: 0), endAngle: Angle(degrees: 90), clockwise: false)
+        
+        path.addLine(to: CGPoint(x: bl, y: h))
+        path.addArc(center: CGPoint(x: bl, y: h - bl), radius: bl,
+                    startAngle: Angle(degrees: 90), endAngle: Angle(degrees: 180), clockwise: false)
+        
+        path.addLine(to: CGPoint(x: 0, y: tl))
+        path.addArc(center: CGPoint(x: tl, y: tl), radius: tl,
+                    startAngle: Angle(degrees: 180), endAngle: Angle(degrees: 270), clockwise: false)
+        
+        path.closeSubpath()
+        return path
+    }
+}
+
+// Custom OptionSet for Corners (Cross-platform)
+struct RectCorner: OptionSet {
+    let rawValue: Int
+    static let topLeft = RectCorner(rawValue: 1 << 0)
+    static let topRight = RectCorner(rawValue: 1 << 1)
+    static let bottomLeft = RectCorner(rawValue: 1 << 2)
+    static let bottomRight = RectCorner(rawValue: 1 << 3)
+    static let allCorners: RectCorner = [.topLeft, .topRight, .bottomLeft, .bottomRight]
+}
+
+extension View {
+    func cornerRadius(_ radius: CGFloat, corners: RectCorner) -> some View {
+        clipShape( RoundedCornerShape(radius: radius, corners: corners) )
     }
 }
 
@@ -821,31 +1504,50 @@ struct MarkdownTextView: View {
     
     private var attributedText: AttributedString {
         var str = AttributedString(text)
+        let nsText = text as NSString
         
         // Apply bold (**text** or __text__)
-        if let boldRegex = try? Regex("\\*\\*(.+?)\\*\\*|__(.+?)__") {
-            for match in text.matches(of: boldRegex) {
-                if let range = str.range(of: String(match.0)) {
+        if let boldRegex = try? NSRegularExpression(pattern: "\\*\\*(.+?)\\*\\*|__(.+?)__", options: []) {
+            let matches = boldRegex.matches(in: text, options: [], range: NSRange(location: 0, length: nsText.length))
+            for match in matches {
+                let matchedString = nsText.substring(with: match.range)
+                if let range = str.range(of: matchedString) {
                     str[range].font = .system(size: 13, weight: .bold)
                 }
             }
         }
         
-        // Apply italic (*text* or _text_) - but not bold
-        if let italicRegex = try? Regex("(?<![*_])\\*([^*]+)\\*(?![*_])|(?<![*_])_([^_]+)_(?![*_])") {
-            for match in text.matches(of: italicRegex) {
-                if let range = str.range(of: String(match.0)) {
+        // Apply italic (*text* or _text_)
+        if let italicRegex = try? NSRegularExpression(pattern: "(?<![*_])\\*([^*]+)\\*(?![*_])|(?<![*_])_([^_]+)_(?![*_])", options: []) {
+            let matches = italicRegex.matches(in: text, options: [], range: NSRange(location: 0, length: nsText.length))
+            for match in matches {
+                let matchedString = nsText.substring(with: match.range)
+                if let range = str.range(of: matchedString) {
                     str[range].font = .system(size: 13).italic()
                 }
             }
         }
         
         // Apply inline code (`code`)
-        if let codeRegex = try? Regex("`([^`]+)`") {
-            for match in text.matches(of: codeRegex) {
-                if let range = str.range(of: String(match.0)) {
+        if let codeRegex = try? NSRegularExpression(pattern: "`([^`]+)`", options: []) {
+            let matches = codeRegex.matches(in: text, options: [], range: NSRange(location: 0, length: nsText.length))
+            for match in matches {
+                let matchedString = nsText.substring(with: match.range)
+                if let range = str.range(of: matchedString) {
                     str[range].font = .system(size: 12, design: .monospaced)
                     str[range].backgroundColor = Color(nsColor: .controlBackgroundColor)
+                }
+            }
+        }
+        
+        // Apply inline LaTeX ($formula$) - styled as italic blue
+        if let latexRegex = try? NSRegularExpression(pattern: "\\$([^$]+)\\$", options: []) {
+            let matches = latexRegex.matches(in: text, options: [], range: NSRange(location: 0, length: nsText.length))
+            for match in matches {
+                let matchedString = nsText.substring(with: match.range)
+                if let range = str.range(of: matchedString) {
+                    str[range].font = .system(size: 13, design: .serif).italic()
+                    str[range].foregroundColor = Color.accentColor
                 }
             }
         }
@@ -938,11 +1640,11 @@ struct LaTeXBlockView: View {
     var body: some View {
         VStack(alignment: isBlock ? .center : .leading, spacing: 0) {
             LaTeXWebView(expression: expression, isBlock: isBlock)
-                .frame(height: isBlock ? 80 : 40)
+                .frame(height: isBlock ? 120 : 50)
                 .frame(maxWidth: .infinity)
         }
-        .background(Color(nsColor: .textBackgroundColor).opacity(0.3))
-        .cornerRadius(6)
+        .background(Color(white: 0.12))
+        .cornerRadius(8)
     }
 }
 
@@ -960,45 +1662,73 @@ struct HTMLBlockView: View {
 
 // MARK: - LaTeX WebView (MathJax)
 
-import WebKit
-
 struct LaTeXWebView: NSViewRepresentable {
     let expression: String
     let isBlock: Bool
     
     func makeNSView(context: Context) -> WKWebView {
-        let webView = WKWebView()
-        webView.setValue(true, forKey: "drawsBackground")
-        webView.isHidden = false
+        let config = WKWebViewConfiguration()
+        config.preferences.setValue(true, forKey: "allowFileAccessFromFileURLs")
+        let webView = WKWebView(frame: .zero, configuration: config)
+        webView.setValue(false, forKey: "drawsBackground")
         return webView
     }
     
     func updateNSView(_ webView: WKWebView, context: Context) {
-        let delim = isBlock ? "\\[\\]" : "\\(\\)"
-        let left = isBlock ? "\\[" : "\\("
-        let right = isBlock ? "\\]" : "\\)"
+        // Escape backslashes for JavaScript
+        let escapedExpr = expression
+            .replacingOccurrences(of: "\\", with: "\\\\")
+            .replacingOccurrences(of: "\"", with: "\\\"")
+            .replacingOccurrences(of: "\n", with: " ")
         
         let html = """
         <!DOCTYPE html>
         <html>
         <head>
-            <script src="https://polyfill.io/v3/polyfill.min.js?features=es6"></script>
-            <script id="MathJax-script" async src="https://cdn.jsdelivr.net/npm/mathjax@3/es5/tex-mml-chtml.js"></script>
+            <meta charset="UTF-8">
+            <script>
+                MathJax = {
+                    tex: {
+                        inlineMath: [['$', '$'], ['\\\\(', '\\\\)']],
+                        displayMath: [['$$', '$$'], ['\\\\[', '\\\\]']],
+                        processEscapes: true
+                    },
+                    svg: {
+                        fontCache: 'global'
+                    },
+                    startup: {
+                        ready: function() {
+                            MathJax.startup.defaultReady();
+                            MathJax.startup.promise.then(function() {
+                                document.body.style.opacity = '1';
+                            });
+                        }
+                    }
+                };
+            </script>
+            <script id="MathJax-script" async src="https://cdn.jsdelivr.net/npm/mathjax@3/es5/tex-svg.js"></script>
             <style>
                 body {
                     margin: 0;
-                    padding: 8px;
-                    background: transparent;
+                    padding: \(isBlock ? "16px" : "8px");
+                    background: #1e1e1e;
                     display: flex;
                     align-items: center;
                     justify-content: \(isBlock ? "center" : "flex-start");
-                    font-size: 14px;
-                    color: #e0e0e0;
+                    min-height: 100%;
+                    opacity: 0;
+                    transition: opacity 0.2s ease;
+                }
+                mjx-container {
+                    color: #e0e0e0 !important;
+                }
+                mjx-container svg {
+                    fill: #e0e0e0 !important;
                 }
             </style>
         </head>
         <body>
-            \(left)\(expression)\(right)
+            \(isBlock ? "$$\(expression)$$" : "$\(expression)$")
         </body>
         </html>
         """

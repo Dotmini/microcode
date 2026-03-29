@@ -52,7 +52,25 @@ class BackendService {
         process.executableURL = backendURL
         process.arguments = []
         var env = ProcessInfo.processInfo.environment
-        env["RUST_LOG"] = "info" // Enable info logs for debugging folder freeze
+        env["RUST_LOG"] = "info"
+        
+        // Fix: Ensure HOME and PATH are set correctly for the backend to find runtimes (rustc, node, etc.)
+        // When running as an App Bundle, PATH might be stripped.
+        let home = FileManager.default.homeDirectoryForCurrentUser.path
+        env["HOME"] = home
+        
+        let currentPath = env["PATH"] ?? "/usr/bin:/bin:/usr/sbin:/sbin"
+        let extraPaths = [
+            "\(home)/.cargo/bin",
+            "/opt/homebrew/bin",
+            "/usr/local/bin",
+            "\(home)/.nvm/versions/node/v22.0.0/bin", // Common Node path
+            "\(home)/.nvm/versions/node/v20.0.0/bin",
+            "\(home)/.nvm/versions/node/v18.0.0/bin"
+        ]
+        let newPath = extraPaths.joined(separator: ":") + ":" + currentPath
+        env["PATH"] = newPath
+        
         process.environment = env
         
         let pipe = Pipe()
@@ -562,6 +580,40 @@ class BackendService {
         let decoder = JSONDecoder()
         return try decoder.decode(R.self, from: data)
     }
+    // MARK: - Vector Search
+    
+    func indexWorkspace(path: String) async throws -> StatusResponse {
+        let url = URL(string: "\(baseURL)/api/ai/vector/index")!
+        let request = VectorIndexRequest(workspace_path: path)
+        return try await post(url: url, body: request)
+    }
+    
+    func searchVectors(query: String, limit: Int = 5) async throws -> SearchResponse {
+        let url = URL(string: "\(baseURL)/api/ai/vector/search")!
+        let request = SearchRequest(query: query, limit: limit)
+        return try await post(url: url, body: request)
+    }
+}
+
+// MARK: - Vector Search Models
+
+struct VectorIndexRequest: Codable {
+    let workspace_path: String
+}
+
+struct SearchRequest: Codable {
+    let query: String
+    let limit: Int?
+}
+
+struct BackendSearchResult: Codable {
+    let file_path: String
+    let snippet: String
+    let score: Float
+}
+
+struct SearchResponse: Codable {
+    let results: [BackendSearchResult]
 }
 
 // MARK: - Remote X Models

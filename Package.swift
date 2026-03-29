@@ -39,6 +39,7 @@ let package = Package(
             sources: [
                 "CodeTunnerApp.swift",
                 "Managers/ReportLogManager.swift",
+                "Managers/PDFGenerator.swift",
                 "Models/AppState.swift",
                 "Models/AnyCodable.swift",
                 "Models/CellModels.swift",
@@ -145,6 +146,8 @@ let package = Package(
                 "Services/APIClientService.swift",
                 "Services/CICDService.swift",
                 "Services/AgentService.swift",        // Restored Agent Core
+                "Services/AgentToolExecutor.swift",   // Local Tool Executor
+                "Services/AgentMemoryService.swift",  // Vector Memory Store
                 "Services/AIClient.swift",            // Direct AI API Client
                 "Services/MicroCore/MicroCore.swift", // AI Core Bridge
                 "Services/MicroCodeService.swift",    // AI Core Service Wrapper
@@ -196,6 +199,9 @@ let package = Package(
             ],
             resources: [
                 // .process("Views/Metal/Shaders.metal")
+            ],
+            swiftSettings: [
+                .unsafeFlags(["-strict-concurrency=minimal"])
             ]
         ),
         .target(

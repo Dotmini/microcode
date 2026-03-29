@@ -86,6 +86,7 @@ enum AppTheme: String, CaseIterable {
     case transparent = "transparent"
     case extraClear = "extraClear"
     case xnuDark = "xnuDark"
+    case microCodeTheme = "microCodeTheme" // Apple Presentation Style
     
     // Modern
     case monokaiPro = "monokaiPro"
@@ -133,6 +134,7 @@ enum AppTheme: String, CaseIterable {
         case .transparent: return "Glass Transparent 💎"
         case .extraClear: return "Extra Clear (Transparent) ✨"
         case .xnuDark: return "XNU Dark (Kernel) 🍏"
+        case .microCodeTheme: return "MicroCode Theme (Presentation) "
         case .monokaiPro: return "Monokai Pro 🎨"
         case .oneDarkPro: return "One Dark Pro ⚛️"
         case .nord: return "Nord ❄️"
@@ -150,7 +152,7 @@ enum AppTheme: String, CaseIterable {
     
     var isDark: Bool {
         switch self {
-        case .light, .lightBlue, .xcodeLight, .christmasLight, .wwdcLight, .keynoteLight, .draculaLight, .githubLight, .happyNewYear2026Light, .solarizedLight, .crystalClear:
+        case .light, .lightBlue, .xcodeLight, .christmasLight, .wwdcLight, .keynoteLight, .draculaLight, .githubLight, .happyNewYear2026Light, .solarizedLight, .crystalClear, .microCodeTheme:
             return false
         case .system:
             return NSApp?.effectiveAppearance.name.rawValue.contains("Dark") ?? true
@@ -163,7 +165,7 @@ enum AppTheme: String, CaseIterable {
         switch self {
         case .system:
             return nil
-        case .light, .lightBlue, .xcodeLight, .christmasLight, .wwdcLight, .keynoteLight, .draculaLight, .githubLight, .happyNewYear2026Light, .solarizedLight, .crystalClear:
+        case .light, .lightBlue, .xcodeLight, .christmasLight, .wwdcLight, .keynoteLight, .draculaLight, .githubLight, .happyNewYear2026Light, .solarizedLight, .crystalClear, .microCodeTheme:
             return .light
         default:
             return .dark
@@ -198,6 +200,7 @@ enum AppTheme: String, CaseIterable {
         case .transparent: return NSColor(white: 0.0, alpha: 0.1) // Low Alpha Black for Glass effect
         case .extraClear: return NSColor(white: 0.0, alpha: 0.02) // Near fully transparent
         case .xnuDark: return NSColor(red: 0.071, green: 0.071, blue: 0.071, alpha: 1.0) // #121212
+        case .microCodeTheme: return NSColor(white: 1.0, alpha: 1.0) // Pure White
         case .monokaiPro: return NSColor(red: 0.173, green: 0.169, blue: 0.196, alpha: 1.0) // #2D2A32
         case .oneDarkPro: return NSColor(red: 0.157, green: 0.165, blue: 0.184, alpha: 1.0) // #282C34
         case .nord: return NSColor(red: 0.180, green: 0.204, blue: 0.251, alpha: 1.0) // #2E3440
@@ -240,6 +243,7 @@ enum AppTheme: String, CaseIterable {
         case .transparent: return .white
         case .extraClear: return .white
         case .xnuDark: return NSColor(red: 0.8, green: 0.8, blue: 0.8, alpha: 1.0) // #CCCCCC
+        case .microCodeTheme: return NSColor(white: 0.0, alpha: 1.0) // Pure Black
         case .monokaiPro: return NSColor(red: 0.988, green: 0.988, blue: 0.941, alpha: 1.0) // #FCFCF0
         case .oneDarkPro: return NSColor(red: 0.675, green: 0.745, blue: 0.804, alpha: 1.0) // #ABB2BF
         case .nord: return NSColor(red: 0.847, green: 0.871, blue: 0.914, alpha: 1.0) // #D8DEE9
@@ -281,6 +285,7 @@ enum AppTheme: String, CaseIterable {
         case .transparent: return NSColor(red: 0.73, green: 0.47, blue: 1.0, alpha: 1.0) // Glowing Purple
         case .extraClear: return NSColor(red: 0.5, green: 0.8, blue: 1.0, alpha: 1.0) // Sky Glow
         case .xnuDark: return NSColor(red: 1.0, green: 0.25, blue: 0.506, alpha: 1.0) // #FF4081 (Pink)
+        case .microCodeTheme: return NSColor(red: 0.608, green: 0.165, blue: 0.639, alpha: 1.0) // Apple Purple (Xcode)
         case .monokaiPro: return NSColor(red: 1.0, green: 0.380, blue: 0.412, alpha: 1.0) // #FF6188 (Red/Pink)
         case .oneDarkPro: return NSColor(red: 0.796, green: 0.467, blue: 0.898, alpha: 1.0) // #CB77E5 (Purple)
         case .nord: return NSColor(red: 0.506, green: 0.631, blue: 0.757, alpha: 1.0) // #81A1C1 (Blue)
@@ -321,6 +326,7 @@ enum AppTheme: String, CaseIterable {
         case .transparent: return NSColor(red: 0.0, green: 1.0, blue: 0.8, alpha: 1.0) // Neon Teal
         case .extraClear: return NSColor(red: 1.0, green: 0.5, blue: 1.0, alpha: 1.0) // Vivid Emrald
         case .xnuDark: return NSColor(red: 1.0, green: 0.54, blue: 0.4, alpha: 1.0) // #FF8A65 (Orange)
+        case .microCodeTheme: return NSColor(red: 0.761, green: 0.196, blue: 0.169, alpha: 1.0) // Apple Red
         case .monokaiPro: return NSColor(red: 1.0, green: 0.847, blue: 0.361, alpha: 1.0) // #FFD866 (Yellow)
         case .oneDarkPro: return NSColor(red: 0.596, green: 0.765, blue: 0.455, alpha: 1.0) // #98C379 (Green)
         case .nord: return NSColor(red: 0.643, green: 0.741, blue: 0.549, alpha: 1.0) // #A3BE8C (Green)
@@ -362,6 +368,7 @@ enum AppTheme: String, CaseIterable {
         case .transparent: return NSColor(white: 0.7, alpha: 1.0)
         case .extraClear: return NSColor(white: 0.8, alpha: 0.6)
         case .xnuDark: return NSColor(red: 0.3, green: 0.69, blue: 0.31, alpha: 1.0) // #4CAF50 (Green)
+        case .microCodeTheme: return NSColor(red: 0.33, green: 0.38, blue: 0.44, alpha: 1.0) // Apple Gray
         case .monokaiPro: return NSColor(red: 0.447, green: 0.439, blue: 0.412, alpha: 1.0) // #727069
         case .oneDarkPro: return NSColor(red: 0.365, green: 0.392, blue: 0.439, alpha: 1.0) // #5C6370
         case .nord: return NSColor(red: 0.369, green: 0.416, blue: 0.482, alpha: 1.0) // #4C566A
@@ -402,6 +409,7 @@ enum AppTheme: String, CaseIterable {
         case .transparent: return NSColor(red: 1.0, green: 0.8, blue: 0.0, alpha: 1.0) // Neon Yellow
         case .extraClear: return NSColor(red: 1.0, green: 0.5, blue: 1.0, alpha: 1.0) // Neon Pink
         case .xnuDark: return NSColor(red: 1.0, green: 0.84, blue: 0.31, alpha: 1.0) // #FFD54F (Yellow)
+        case .microCodeTheme: return NSColor(red: 0.071, green: 0.408, blue: 0.616, alpha: 1.0) // Apple Blue
         case .monokaiPro: return NSColor(red: 0.671, green: 0.553, blue: 1.0, alpha: 1.0) // #AB8DFF (Purple)
         case .oneDarkPro: return NSColor(red: 0.898, green: 0.725, blue: 0.369, alpha: 1.0) // #E5C07B (Gold)
         case .nord: return NSColor(red: 0.733, green: 0.580, blue: 0.835, alpha: 1.0) // #B48EAD (Purple)
@@ -443,6 +451,7 @@ enum AppTheme: String, CaseIterable {
         case .transparent: return NSColor(red: 1.0, green: 0.2, blue: 0.6, alpha: 1.0) // Hot Pink
         case .extraClear: return NSColor(red: 0.2, green: 0.9, blue: 0.4, alpha: 1.0) // Lime
         case .xnuDark: return NSColor(red: 0.31, green: 0.76, blue: 0.97, alpha: 1.0) // #4FC3F7 (Light Blue)
+        case .microCodeTheme: return NSColor(red: 0.22, green: 0.66, blue: 0.76, alpha: 1.0) // Apple Cyan/Teal
         case .monokaiPro: return NSColor(red: 0.412, green: 0.847, blue: 0.988, alpha: 1.0) // #69D9FC (Blue)
         case .oneDarkPro: return NSColor(red: 0.349, green: 0.718, blue: 0.773, alpha: 1.0) // #56B6C2 (Cyan)
         case .nord: return NSColor(red: 0.561, green: 0.737, blue: 0.733, alpha: 1.0) // #8FBCBB (Teal)
@@ -484,6 +493,7 @@ enum AppTheme: String, CaseIterable {
         case .transparent: return NSColor(red: 0.2, green: 0.8, blue: 1.0, alpha: 1.0) // Cyan
         case .extraClear: return NSColor(red: 1.0, green: 0.4, blue: 0.2, alpha: 1.0) // Sunset
         case .xnuDark: return NSColor(red: 0.31, green: 0.76, blue: 0.97, alpha: 1.0) // #4FC3F7
+        case .microCodeTheme: return NSColor(red: 0.0, green: 0.22, blue: 0.38, alpha: 1.0) // Deep Navy (Focus)
         case .monokaiPro: return NSColor(red: 0.639, green: 0.863, blue: 0.353, alpha: 1.0) // #A9DC5A (Green)
         case .oneDarkPro: return NSColor(red: 0.380, green: 0.655, blue: 0.871, alpha: 1.0) // #61AFEF (Blue)
         case .nord: return NSColor(red: 0.533, green: 0.655, blue: 0.812, alpha: 1.0) // #88C0D0 (Blue)
@@ -529,6 +539,7 @@ enum AppTheme: String, CaseIterable {
         case .transparent: return NSColor(white: 1.0, alpha: 0.2) // Glassy White
         case .extraClear: return NSColor(white: 1.0, alpha: 0.1) // Subtle Highlight
         case .xnuDark: return NSColor(red: 0.173, green: 0.243, blue: 0.314, alpha: 1.0) // #2C3E50
+        case .microCodeTheme: return NSColor(red: 0.70, green: 0.84, blue: 1.0, alpha: 1.0) // Apple Highlight Blue
         case .monokaiPro: return NSColor(red: 0.251, green: 0.243, blue: 0.282, alpha: 1.0) // #403E48
         case .oneDarkPro: return NSColor(red: 0.235, green: 0.251, blue: 0.306, alpha: 1.0) // #3D414D
         case .nord: return NSColor(red: 0.263, green: 0.298, blue: 0.369, alpha: 1.0) // #434C5E
@@ -570,6 +581,7 @@ enum AppTheme: String, CaseIterable {
         case .transparent: return NSColor(white: 1.0, alpha: 0.1)
         case .extraClear: return NSColor(white: 1.0, alpha: 0.05)
         case .xnuDark: return NSColor(red: 0.118, green: 0.118, blue: 0.118, alpha: 1.0) // #1E1E1E
+        case .microCodeTheme: return NSColor(red: 0.96, green: 0.97, blue: 0.99, alpha: 1.0) // Very Light Blue-Grey
         case .monokaiPro: return NSColor(red: 0.22, green: 0.22, blue: 0.24, alpha: 1.0)
         case .oneDarkPro: return NSColor(red: 0.18, green: 0.20, blue: 0.23, alpha: 1.0)
         case .nord: return NSColor(red: 0.23, green: 0.26, blue: 0.32, alpha: 1.0)
@@ -927,6 +939,16 @@ class AppState: ObservableObject {
         }
         aiProvider = defaults.string(forKey: "aiProvider") ?? "gemini"
         aiModel = defaults.string(forKey: "aiModel") ?? "gemini-pro"
+        
+        // MicroRent AI Proxy setup
+        let microToken = defaults.string(forKey: "microRentToken") ?? ""
+        if !microToken.isEmpty {
+            setenv("MICRORENT_TOKEN", microToken, 1)
+            setenv("USE_MICRORENT_PROXY", "1", 1)
+        } else {
+            unsetenv("MICRORENT_TOKEN")
+            setenv("USE_MICRORENT_PROXY", "0", 1)
+        }
         
         // Load API Keys
         let providers = ["gemini", "openai", "anthropic", "glm", "deepseek", "qwen", "grok"]
@@ -1351,6 +1373,11 @@ class AppState: ObservableObject {
                 self.saveSettings()
             }
         }
+    }
+    
+    /// Public method for views to persist GitHub/CI settings
+    func saveGitHubSettings() {
+        saveSettings()
     }
 
     func loadFile(url: URL) async {

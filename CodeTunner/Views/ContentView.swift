@@ -524,11 +524,31 @@ struct EmptyNavigatorView: View {
     var body: some View {
         VStack(spacing: 16) {
             Spacer()
-            Image(systemName: "folder")
-                .font(.system(size: 32))
-                .foregroundColor(.secondary)
+            ZStack {
+                RoundedRectangle(cornerRadius: 16, style: .continuous)
+                    .fill(LinearGradient(colors: [Color(nsColor: .windowBackgroundColor), Color(nsColor: .controlBackgroundColor)], startPoint: .topLeading, endPoint: .bottomTrailing))
+                    .frame(width: 64, height: 64)
+                    .shadow(color: .black.opacity(0.3), radius: 10, x: 0, y: 5)
+                
+                RoundedRectangle(cornerRadius: 16, style: .continuous)
+                    .strokeBorder(LinearGradient(colors: [Color.white.opacity(0.2), Color.clear], startPoint: .top, endPoint: .bottom), lineWidth: 1)
+                    .frame(width: 64, height: 64)
+                
+                // MicroCode 'M' interlocking logo using native SF symbols stacked
+                ZStack {
+                    Image(systemName: "chevron.left")
+                        .font(.system(size: 24, weight: .bold))
+                        .foregroundStyle(LinearGradient(colors: [Color(red: 0.02, green: 0.71, blue: 0.83), Color(red: 0.23, green: 0.51, blue: 0.96)], startPoint: .topLeading, endPoint: .bottomTrailing))
+                        .offset(x: -8)
+                    
+                    Image(systemName: "chevron.right")
+                        .font(.system(size: 24, weight: .bold))
+                        .foregroundStyle(LinearGradient(colors: [Color(red: 0.54, green: 0.36, blue: 0.96), Color(red: 0.92, green: 0.28, blue: 0.60)], startPoint: .topTrailing, endPoint: .bottomLeading))
+                        .offset(x: 8)
+                }
+            }
             Text("No Folder Open")
-                .font(.system(size: 13, weight: .medium))
+                .font(.system(size: 14, weight: .medium, design: .rounded))
                 .foregroundColor(.secondary)
             Button("Open Folder") {
                 appState.openFolder()
@@ -1601,29 +1621,32 @@ struct WelcomeScreen: View {
                 Spacer()
                 
                 // App Icon from icns
-                if let appIcon = NSImage(named: "AppIcon") {
-                    Image(nsImage: appIcon)
-                        .resizable()
-                        .aspectRatio(contentMode: .fit)
+                // MicroCode Studio Icon Render (Direct SwiftUI equivalent of the new SVG)
+                ZStack {
+                    RoundedRectangle(cornerRadius: 28, style: .continuous)
+                        .fill(LinearGradient(
+                            colors: [Color(red: 0.1, green: 0.11, blue: 0.15), Color(red: 0.05, green: 0.06, blue: 0.08)],
+                            startPoint: .topLeading,
+                            endPoint: .bottomTrailing
+                        ))
                         .frame(width: 120, height: 120)
-                        .shadow(color: .pink.opacity(0.3), radius: 20, x: 0, y: 10)
-                } else {
-                    // Fallback icon
-                    ZStack {
-                        RoundedRectangle(cornerRadius: 24)
-                            .fill(LinearGradient(
-                                colors: [Color.pink, Color.purple],
-                                startPoint: .topLeading,
-                                endPoint: .bottomTrailing
-                            ))
-                            .frame(width: 100, height: 100)
                         
-                        Image(systemName: "chevron.left.forwardslash.chevron.right")
-                            .font(.system(size: 40, weight: .bold))
-                            .foregroundColor(.white)
+                    RoundedRectangle(cornerRadius: 24, style: .continuous)
+                        .stroke(Color(red: 0.17, green: 0.18, blue: 0.25), lineWidth: 4)
+                        .frame(width: 112, height: 112)
+                    
+                    HStack(spacing: -6) {
+                        Image(systemName: "chevron.left")
+                            .font(.system(size: 36, weight: .bold))
+                            .foregroundColor(Color(red: 0.48, green: 0.64, blue: 0.97)) // Tokyo Night Blue
+                        
+                        Image(systemName: "chevron.right")
+                            .font(.system(size: 36, weight: .bold))
+                            .foregroundColor(Color(red: 0.97, green: 0.46, blue: 0.56)) // Tokyo Night Pink
                     }
-                    .shadow(color: .pink.opacity(0.3), radius: 20, x: 0, y: 10)
+                    .shadow(color: Color(red: 0.73, green: 0.6, blue: 0.97).opacity(0.8), radius: 12, x: 0, y: 0) // Purple glow
                 }
+                .shadow(color: .black.opacity(0.4), radius: 20, x: 0, y: 10)
                 
                 // App Title with colored text
                 VStack(spacing: 8) {
@@ -2859,6 +2882,11 @@ struct SettingsView: View {
     @State private var cellFontWeight: Int = 2
     @State private var selectedTab: Int = 0
     @State private var hasChanges: Bool = false
+    @State private var microRentToken: String = ""
+    @State private var authEmail = ""
+    @State private var authPassword = ""
+    @State private var isAuthenticating = false
+    @State private var authError = ""
     
     var body: some View {
         VStack(spacing: 0) {
@@ -2896,6 +2924,7 @@ struct SettingsView: View {
                 SettingsTabButton(title: "AI", icon: "brain", isSelected: selectedTab == 2) { selectedTab = 2 }
                 SettingsTabButton(title: "Tools", icon: "wrench.and.screwdriver", isSelected: selectedTab == 3) { selectedTab = 3 }
                 SettingsTabButton(title: "Extensions", icon: "puzzlepiece.extension", isSelected: selectedTab == 5) { selectedTab = 5 }
+                SettingsTabButton(title: "Subscription", icon: "crown", isSelected: selectedTab == 6) { selectedTab = 6 }
                 SettingsTabButton(title: "About", icon: "info.circle", isSelected: selectedTab == 4) { selectedTab = 4 }
                 Spacer()
             }
@@ -2918,6 +2947,8 @@ struct SettingsView: View {
                         toolsSettingsContent
                     } else if selectedTab == 5 {
                         ExtensionSettingsView()
+                    } else if selectedTab == 6 {
+                        subscriptionSettingsContent
                     } else {
                         aboutContent
                     }
@@ -2945,35 +2976,291 @@ struct SettingsView: View {
         }
     }
     
+    // MARK: - Subscription Content
+    
+    private var subscriptionSettingsContent: some View {
+        VStack(alignment: .leading, spacing: 20) {
+            SettingsSectionHeader(title: "MicroRent Plan")
+            
+            Text("Unlock advanced AI features, unlimited cloud agents, and more with MicroRent.")
+                .font(.system(size: 13))
+                .foregroundColor(.secondary)
+            
+            HStack(spacing: 20) {
+                // Free Plan (Current)
+                VStack(alignment: .leading, spacing: 12) {
+                    Text("Free Plan")
+                        .font(.system(size: 16, weight: .bold))
+                    Text("Up to 20K tokens / month")
+                        .font(.system(size: 12))
+                        .foregroundColor(.secondary)
+                    
+                    Text("Active")
+                        .font(.system(size: 11, weight: .bold))
+                        .padding(.horizontal, 8)
+                        .padding(.vertical, 4)
+                        .background(Color.green.opacity(0.1))
+                        .foregroundColor(.green)
+                        .cornerRadius(4)
+                }
+                .padding()
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .background(Color(nsColor: .controlBackgroundColor))
+                .cornerRadius(12)
+                .overlay(RoundedRectangle(cornerRadius: 12).stroke(Color.secondary.opacity(0.2), lineWidth: 1))
+                
+                // Pro Plan
+                VStack(alignment: .leading, spacing: 12) {
+                    Text("Pro Plan")
+                        .font(.system(size: 16, weight: .bold))
+                        .foregroundStyle(LinearGradient(colors: [.accentColor, .purple], startPoint: .leading, endPoint: .trailing))
+                    Text("Unlimited Local AI + 100K Tokens")
+                        .font(.system(size: 12))
+                        .foregroundColor(.secondary)
+                    
+                    Button("Upgrade for $29") {
+                        NSWorkspace.shared.open(URL(string: "https://microrentofficial.web.app/auth.html?mode=register&intent=upgrade")!)
+                    }
+                    .buttonStyle(.borderedProminent)
+                }
+                .padding()
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .background(Color(nsColor: .controlBackgroundColor))
+                .cornerRadius(12)
+                .overlay(RoundedRectangle(cornerRadius: 12).stroke(Color.accentColor.opacity(0.4), lineWidth: 1))
+                
+                // Enterprise Plan
+                VStack(alignment: .leading, spacing: 12) {
+                    Text("Enterprise")
+                        .font(.system(size: 16, weight: .bold))
+                    Text("Custom Tokens + Priority Support")
+                        .font(.system(size: 12))
+                        .foregroundColor(.secondary)
+                    
+                    Button("Contact Sales") {
+                        NSWorkspace.shared.open(URL(string: "https://microrentofficial.web.app/enterprise")!)
+                    }
+                    .buttonStyle(.bordered)
+                }
+                .padding()
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .background(Color(nsColor: .controlBackgroundColor))
+                .cornerRadius(12)
+                .overlay(RoundedRectangle(cornerRadius: 12).stroke(Color.secondary.opacity(0.2), lineWidth: 1))
+            }
+            .padding(.top, 8)
+            
+            Divider().padding(.vertical, 16)
+            
+            SettingsSectionHeader(title: "MicroCode Link")
+            
+            if !microRentToken.isEmpty {
+                HStack {
+                    Image(systemName: "checkmark.seal.fill")
+                        .foregroundColor(.green)
+                    VStack(alignment: .leading) {
+                        Text("MicroCode Linked Successfully")
+                            .font(.system(size: 13, weight: .bold))
+                        Text("UID: \(microRentToken)")
+                            .font(.system(size: 11, design: .monospaced))
+                            .foregroundColor(.secondary)
+                    }
+                    Spacer()
+                    Button("Unlink Account") {
+                        microRentToken = ""
+                        hasChanges = true
+                    }
+                    .buttonStyle(.bordered)
+                }
+                .padding()
+                .background(Color.green.opacity(0.05))
+                .cornerRadius(12)
+                .overlay(RoundedRectangle(cornerRadius: 12).stroke(Color.green.opacity(0.3), lineWidth: 1))
+            } else {
+                VStack(alignment: .leading, spacing: 12) {
+                    Text("Sign In to automatically link your subscription")
+                        .font(.system(size: 13, weight: .semibold))
+                    
+                    TextField("Email Address", text: $authEmail)
+                        .textFieldStyle(.roundedBorder)
+                        .frame(maxWidth: 300)
+                    
+                    SecureField("Password", text: $authPassword)
+                        .textFieldStyle(.roundedBorder)
+                        .frame(maxWidth: 300)
+                    
+                    if !authError.isEmpty {
+                        Text(authError)
+                            .foregroundColor(.red)
+                            .font(.system(size: 11))
+                    }
+                    
+                    HStack {
+                        Button(isAuthenticating ? "Signing In..." : "Sign In via MicroRent") {
+                            authenticateWithFirebase()
+                        }
+                        .disabled(isAuthenticating || authEmail.isEmpty || authPassword.isEmpty)
+                        .buttonStyle(.borderedProminent)
+                        
+                        if isAuthenticating {
+                            ProgressView()
+                                .controlSize(.small)
+                                .padding(.leading, 8)
+                        }
+                    }
+                }
+                .padding()
+                .background(Color(nsColor: .controlBackgroundColor))
+                .cornerRadius(12)
+                .overlay(RoundedRectangle(cornerRadius: 12).stroke(Color.secondary.opacity(0.2), lineWidth: 1))
+                
+                Text("Signed up with Google? Paste your token below instead:")
+                    .font(.system(size: 12))
+                    .foregroundColor(.secondary)
+                    .padding(.top, 8)
+                
+                HStack {
+                    SecureField("Manual Access Token", text: $microRentToken)
+                        .textFieldStyle(.plain)
+                        .padding(8)
+                        .background(Color(nsColor: .controlBackgroundColor))
+                        .cornerRadius(6)
+                        .overlay(RoundedRectangle(cornerRadius: 6).stroke(Color.secondary.opacity(0.2), lineWidth: 1))
+                        .frame(maxWidth: 400)
+                        .onChange(of: microRentToken) { _ in hasChanges = true }
+                    
+                    Button("Verify") {
+                        hasChanges = true
+                    }
+                    .buttonStyle(.bordered)
+                    .disabled(microRentToken.isEmpty)
+                }
+            }
+        }
+    }
+    
+    // MARK: - Firebase Authentication
+    private func authenticateWithFirebase() {
+        guard !authEmail.isEmpty, !authPassword.isEmpty else { return }
+        isAuthenticating = true
+        authError = ""
+        
+        let apiKey = "***REDACTED_FIREBASE_KEY***"
+        let urlString = "https://identitytoolkit.googleapis.com/v1/accounts:signInWithPassword?key=\(apiKey)"
+        guard let url = URL(string: urlString) else {
+            authError = "Invalid Configuration"
+            isAuthenticating = false
+            return
+        }
+        
+        var request = URLRequest(url: url)
+        request.httpMethod = "POST"
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        
+        let body: [String: Any] = [
+            "email": authEmail,
+            "password": authPassword,
+            "returnSecureToken": true
+        ]
+        
+        do {
+            request.httpBody = try JSONSerialization.data(withJSONObject: body)
+        } catch {
+            authError = "Payload Error"
+            isAuthenticating = false
+            return
+        }
+        
+        URLSession.shared.dataTask(with: request) { data, response, error in
+            DispatchQueue.main.async {
+                self.isAuthenticating = false
+                
+                if let error = error {
+                    self.authError = "Network error: \(error.localizedDescription)"
+                    return
+                }
+                
+                guard let data = data else {
+                    self.authError = "No data received"
+                    return
+                }
+                
+                if let httpResponse = response as? HTTPURLResponse, httpResponse.statusCode != 200 {
+                    if let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+                       let errorObj = json["error"] as? [String: Any],
+                       let message = errorObj["message"] as? String {
+                        self.authError = message
+                        if message == "INVALID_LOGIN_CREDENTIALS" {
+                            self.authError = "Invalid Email or Password"
+                        }
+                    } else {
+                        self.authError = "Server Error: \(httpResponse.statusCode)"
+                    }
+                    return
+                }
+                
+                do {
+                    if let json = try JSONSerialization.jsonObject(with: data) as? [String: Any],
+                       let localId = json["localId"] as? String {
+                        self.microRentToken = localId
+                        self.hasChanges = true
+                        self.authEmail = ""
+                        self.authPassword = ""
+                    } else {
+                        self.authError = "Could not parse UID from response"
+                    }
+                } catch {
+                    self.authError = "Invalid response format"
+                }
+            }
+        }.resume()
+    }
+    
     // MARK: - About Content
     
     private var aboutContent: some View {
         VStack(alignment: .center, spacing: 20) {
             Spacer()
             
-            // App Icon
-            Image(systemName: "chevron.left.forwardslash.chevron.right")
-                .font(.system(size: 60))
-                .foregroundStyle(
-                    LinearGradient(
-                        colors: [Color.pink, Color.purple],
-                        startPoint: .topLeading,
-                        endPoint: .bottomTrailing
-                    )
-                )
+            // App Icon Graphic
+            ZStack {
+                RoundedRectangle(cornerRadius: 32, style: .continuous)
+                    .fill(LinearGradient(colors: [Color(red: 0.05, green: 0.08, blue: 0.15), Color(red: 0.01, green: 0.02, blue: 0.05)], startPoint: .topLeading, endPoint: .bottomTrailing))
+                    .frame(width: 140, height: 140)
+                    .shadow(color: .black.opacity(0.4), radius: 20, x: 0, y: 10)
+                
+                RoundedRectangle(cornerRadius: 32, style: .continuous)
+                    .strokeBorder(LinearGradient(colors: [Color.white.opacity(0.15), Color.clear], startPoint: .top, endPoint: .bottom), lineWidth: 1.5)
+                    .frame(width: 140, height: 140)
+                
+                // MicroCode 'M' interlocking logo
+                ZStack {
+                    Image(systemName: "chevron.left")
+                        .font(.system(size: 56, weight: .bold))
+                        .foregroundStyle(LinearGradient(colors: [Color(red: 0.02, green: 0.71, blue: 0.83), Color(red: 0.23, green: 0.51, blue: 0.96)], startPoint: .topLeading, endPoint: .bottomTrailing))
+                        .offset(x: -16)
+                    
+                    Image(systemName: "chevron.right")
+                        .font(.system(size: 56, weight: .bold))
+                        .foregroundStyle(LinearGradient(colors: [Color(red: 0.54, green: 0.36, blue: 0.96), Color(red: 0.92, green: 0.28, blue: 0.60)], startPoint: .topTrailing, endPoint: .bottomLeading))
+                        .offset(x: 16)
+                }
+            }
+            .padding(.bottom, 8)
             
             // App Name with colored text
             HStack(spacing: 0) {
-                Text("MicroCode | ")
-                    .font(.system(size: 28, weight: .bold))
+                Text("MicroCode ")
+                    .font(.system(size: 32, weight: .heavy, design: .rounded))
                     .foregroundColor(.primary)
-                Text("Dotmini Software")
-                    .font(.system(size: 28, weight: .bold))
-                    .foregroundStyle(LinearGradient(colors: [.blue, .purple], startPoint: .leading, endPoint: .trailing))
-                Text(" 2.0")
-                    .font(.system(size: 28, weight: .bold))
-                    .foregroundColor(.primary)
+                Text("PRO")
+                    .font(.system(size: 32, weight: .heavy, design: .rounded))
+                    .foregroundStyle(LinearGradient(colors: [Color(red: 0.23, green: 0.51, blue: 0.96), Color(red: 0.92, green: 0.28, blue: 0.60)], startPoint: .leading, endPoint: .trailing))
             }
+            
+            Text("Version 2.0")
+                .font(.system(size: 16, weight: .medium, design: .rounded))
+                .foregroundColor(.secondary)
             
             Text("Version 2.0.0 (Build 2025.1)")
                 .font(.system(size: 14))
@@ -3363,6 +3650,7 @@ struct SettingsView: View {
         cellFontSize = appState.cellFontSize
         cellFontWeight = appState.cellFontWeight
         apiKey = appState.apiKeys[appState.aiProvider] ?? UserDefaults.standard.string(forKey: "\(appState.aiProvider)_api_key") ?? ""
+        microRentToken = UserDefaults.standard.string(forKey: "microRentToken") ?? ""
     }
     
     private func saveAllSettings() {
@@ -3408,6 +3696,15 @@ struct SettingsView: View {
         
         if !apiKey.isEmpty {
             defaults.set(apiKey, forKey: "\(selectedProvider)_api_key")
+        }
+        
+        defaults.set(microRentToken, forKey: "microRentToken")
+        if !microRentToken.isEmpty {
+            setenv("MICRORENT_TOKEN", microRentToken, 1)
+            setenv("USE_MICRORENT_PROXY", "1", 1)
+        } else {
+            unsetenv("MICRORENT_TOKEN")
+            setenv("USE_MICRORENT_PROXY", "0", 1)
         }
         
         defaults.synchronize()
