@@ -3668,31 +3668,34 @@ struct SettingsView: View {
     
     @ObservedObject private var localLLM = LocalLLMService.shared
     
+    @State private var showModelBrowser = false
+    
     private var localLLMSettingsPanel: some View {
         VStack(alignment: .leading, spacing: 14) {
+            // Header
             HStack(spacing: 8) {
                 Image(systemName: "desktopcomputer")
-                    .font(.system(size: 12))
+                    .font(.system(size: 14))
                     .foregroundColor(.mint)
                 Text("Local LLM")
                     .font(.system(size: 13, weight: .bold))
-                
                 Spacer()
                 
-                // Scan button
-                Button(action: {
-                    Task { await localLLM.scanForServers() }
-                }) {
+                Button(action: { showModelBrowser = true }) {
+                    Label("Model Browser", systemImage: "square.grid.2x2")
+                        .font(.system(size: 11, weight: .medium))
+                }
+                .buttonStyle(.bordered)
+                .tint(.purple)
+                
+                Button(action: { Task { await localLLM.scanForServers() } }) {
                     HStack(spacing: 4) {
                         if localLLM.isScanning {
-                            ProgressView()
-                                .scaleEffect(0.5)
-                                .frame(width: 12, height: 12)
+                            ProgressView().scaleEffect(0.5).frame(width: 12, height: 12)
                         } else {
-                            Image(systemName: "antenna.radiowaves.left.and.right")
-                                .font(.system(size: 11))
+                            Image(systemName: "antenna.radiowaves.left.and.right").font(.system(size: 11))
                         }
-                        Text(localLLM.isScanning ? "Scanning..." : "Scan Network")
+                        Text(localLLM.isScanning ? "Scanning..." : "Scan")
                             .font(.system(size: 11, weight: .medium))
                     }
                 }
@@ -3701,146 +3704,111 @@ struct SettingsView: View {
                 .disabled(localLLM.isScanning)
             }
             
-            Text("Auto-detect LM Studio, Ollama, Text Gen WebUI, and LocalAI servers on your machine. No API key needed.")
-                .font(.system(size: 11))
-                .foregroundColor(.secondary)
-            
             // Detected servers
             if localLLM.detectedServers.isEmpty {
                 HStack(spacing: 12) {
-                    Image(systemName: "magnifyingglass")
-                        .font(.system(size: 24))
-                        .foregroundColor(.secondary.opacity(0.4))
-                    
+                    Image(systemName: "magnifyingglass").font(.system(size: 24)).foregroundColor(.secondary.opacity(0.4))
                     VStack(alignment: .leading, spacing: 4) {
-                        Text("No servers detected")
-                            .font(.system(size: 12, weight: .medium))
-                        Text("Start LM Studio or Ollama, then click Scan.")
-                            .font(.system(size: 11))
-                            .foregroundColor(.secondary)
+                        Text("No servers detected").font(.system(size: 12, weight: .medium))
+                        Text("Start LM Studio or Ollama, then click Scan.").font(.system(size: 11)).foregroundColor(.secondary)
                     }
                 }
-                .padding(12)
-                .frame(maxWidth: .infinity, alignment: .leading)
-                .background(Color.primary.opacity(0.03))
-                .cornerRadius(8)
+                .padding(12).frame(maxWidth: .infinity, alignment: .leading)
+                .background(Color.primary.opacity(0.03)).cornerRadius(8)
             } else {
                 ForEach(Array(localLLM.detectedServers.enumerated()), id: \.element.id) { index, server in
-                    HStack(spacing: 10) {
-                        // Server icon
-                        ZStack {
-                            RoundedRectangle(cornerRadius: 6)
-                                .fill(server.isOnline ? Color.green.opacity(0.12) : Color.red.opacity(0.12))
-                                .frame(width: 28, height: 28)
-                            Image(systemName: server.type.icon)
-                                .font(.system(size: 13))
-                                .foregroundColor(server.isOnline ? .green : .red)
-                        }
-                        
-                        VStack(alignment: .leading, spacing: 2) {
-                            HStack(spacing: 6) {
-                                Text(server.type.rawValue)
-                                    .font(.system(size: 12, weight: .semibold))
-                                
-                                if server.isOnline {
-                                    Text("ONLINE")
-                                        .font(.system(size: 8, weight: .bold))
-                                        .foregroundColor(.white)
-                                        .padding(.horizontal, 5).padding(.vertical, 2)
-                                        .background(Color.green)
-                                        .cornerRadius(3)
-                                }
-                                
-                                if localLLM.selectedServerIndex == index {
-                                    Text("ACTIVE")
-                                        .font(.system(size: 8, weight: .bold))
-                                        .foregroundColor(.white)
-                                        .padding(.horizontal, 5).padding(.vertical, 2)
-                                        .background(Color.accentColor)
-                                        .cornerRadius(3)
-                                }
-                            }
-                            
-                            Text("\(server.host):\(server.port) — \(server.models.count) model(s) — \(String(format: "%.0fms", server.latency * 1000))")
-                                .font(.system(size: 10))
-                                .foregroundColor(.secondary)
-                        }
-                        
-                        Spacer()
-                        
-                        // Model picker for this server
-                        if !server.models.isEmpty && localLLM.selectedServerIndex == index {
-                            Picker("", selection: $localLLM.selectedModelId) {
-                                ForEach(server.models) { model in
-                                    Text(model.displayName).tag(model.id)
-                                }
-                            }
-                            .labelsHidden()
-                            .frame(width: 180)
-                        }
-                        
-                        // Select button
-                        if localLLM.selectedServerIndex != index {
-                            Button("Use") {
-                                localLLM.selectedServerIndex = index
-                                if let first = server.models.first {
-                                    localLLM.selectedModelId = first.id
-                                }
-                                // Auto-switch provider
-                                selectedProvider = "local"
-                                hasChanges = true
-                            }
-                            .font(.system(size: 10, weight: .semibold))
-                            .buttonStyle(.bordered)
-                        }
-                    }
-                    .padding(8)
-                    .background(localLLM.selectedServerIndex == index ? Color.mint.opacity(0.06) : Color.clear)
-                    .cornerRadius(8)
-                    .overlay(
-                        RoundedRectangle(cornerRadius: 8)
-                            .stroke(localLLM.selectedServerIndex == index ? Color.mint.opacity(0.3) : Color.clear, lineWidth: 1)
-                    )
+                    localServerRow(server: server, index: index)
                 }
             }
             
-            Divider()
+            // Installed models
+            if let server = localLLM.activeServer, !server.models.isEmpty {
+                Divider()
+                Text("Installed Models").font(.system(size: 11, weight: .bold)).foregroundColor(.secondary)
+                
+                ForEach(server.models) { model in
+                    installedModelRow(model: model)
+                }
+            }
             
             // Custom endpoint
+            Divider()
             HStack(spacing: 8) {
-                Text("Custom:")
-                    .font(.system(size: 11, weight: .medium))
-                    .foregroundColor(.secondary)
-                
-                TextField("Host", text: $localLLM.customHost)
-                    .textFieldStyle(.roundedBorder)
-                    .frame(width: 120)
-                    .font(.system(size: 11, design: .monospaced))
-                
-                Text(":")
-                    .foregroundColor(.secondary)
-                
-                TextField("Port", text: $localLLM.customPort)
-                    .textFieldStyle(.roundedBorder)
-                    .frame(width: 60)
-                    .font(.system(size: 11, design: .monospaced))
-                
+                Text("Custom:").font(.system(size: 11, weight: .medium)).foregroundColor(.secondary)
+                TextField("Host", text: $localLLM.customHost).textFieldStyle(.roundedBorder).frame(width: 120).font(.system(size: 11, design: .monospaced))
+                Text(":").foregroundColor(.secondary)
+                TextField("Port", text: $localLLM.customPort).textFieldStyle(.roundedBorder).frame(width: 60).font(.system(size: 11, design: .monospaced))
                 Spacer()
-                
-                if let scanTime = localLLM.lastScanTime {
-                    Text("Last scan: \(scanTime, style: .relative) ago")
-                        .font(.system(size: 10))
-                        .foregroundColor(.secondary)
-                }
+                if let t = localLLM.lastScanTime { Text("Last: \(t, style: .relative) ago").font(.system(size: 10)).foregroundColor(.secondary) }
             }
         }
         .padding(16)
         .background(Color(nsColor: .controlBackgroundColor))
         .cornerRadius(12)
-        .overlay(
-            RoundedRectangle(cornerRadius: 12)
-                .stroke(Color.mint.opacity(0.2), lineWidth: 1)
-        )
+        .overlay(RoundedRectangle(cornerRadius: 12).stroke(Color.mint.opacity(0.2), lineWidth: 1))
+        .sheet(isPresented: $showModelBrowser) {
+            ModelBrowserSheet(isPresented: $showModelBrowser)
+        }
+    }
+    
+    private func localServerRow(server: DetectedLLMServer, index: Int) -> some View {
+        let isActive = localLLM.selectedServerIndex == index
+        return HStack(spacing: 10) {
+            ZStack {
+                RoundedRectangle(cornerRadius: 6).fill(server.isOnline ? Color.green.opacity(0.12) : Color.red.opacity(0.12)).frame(width: 28, height: 28)
+                Image(systemName: server.type.icon).font(.system(size: 13)).foregroundColor(server.isOnline ? .green : .red)
+            }
+            VStack(alignment: .leading, spacing: 2) {
+                HStack(spacing: 6) {
+                    Text(server.type.rawValue).font(.system(size: 12, weight: .semibold))
+                    if server.isOnline { Text("ONLINE").font(.system(size: 8, weight: .bold)).foregroundColor(.white).padding(.horizontal, 5).padding(.vertical, 2).background(Color.green).cornerRadius(3) }
+                    if isActive { Text("ACTIVE").font(.system(size: 8, weight: .bold)).foregroundColor(.white).padding(.horizontal, 5).padding(.vertical, 2).background(Color.accentColor).cornerRadius(3) }
+                }
+                Text("\(server.host):\(server.port) — \(server.models.count) model(s)").font(.system(size: 10)).foregroundColor(.secondary)
+            }
+            Spacer()
+            if !server.models.isEmpty && isActive {
+                Picker("", selection: $localLLM.selectedModelId) {
+                    ForEach(server.models) { m in Text(m.displayName).tag(m.id) }
+                }.labelsHidden().frame(width: 180)
+            }
+            if !isActive {
+                Button("Use") { localLLM.selectedServerIndex = index; if let f = server.models.first { localLLM.selectedModelId = f.id }; selectedProvider = "local"; hasChanges = true }
+                    .font(.system(size: 10, weight: .semibold)).buttonStyle(.bordered)
+            }
+        }
+        .padding(8)
+        .background(isActive ? Color.mint.opacity(0.06) : Color.clear)
+        .cornerRadius(8)
+        .overlay(RoundedRectangle(cornerRadius: 8).stroke(isActive ? Color.mint.opacity(0.3) : Color.clear, lineWidth: 1))
+    }
+    
+    private func installedModelRow(model: LocalLLMModel) -> some View {
+        let isSelected = localLLM.selectedModelId == model.id
+        return HStack(spacing: 8) {
+            ZStack {
+                RoundedRectangle(cornerRadius: 6).fill(Color.purple.opacity(0.1)).frame(width: 28, height: 28)
+                Text(String(model.name.prefix(2)).uppercased()).font(.system(size: 9, weight: .bold, design: .rounded)).foregroundColor(.purple)
+            }
+            VStack(alignment: .leading, spacing: 1) {
+                Text(model.name).font(.system(size: 11, weight: .medium)).lineLimit(1)
+                HStack(spacing: 4) {
+                    if let s = model.size { Text(s).font(.system(size: 9)).foregroundColor(.secondary).padding(.horizontal, 4).padding(.vertical, 1).background(Color.secondary.opacity(0.1)).cornerRadius(3) }
+                    if let q = model.quantization { Text(q).font(.system(size: 9)).foregroundColor(.blue).padding(.horizontal, 4).padding(.vertical, 1).background(Color.blue.opacity(0.1)).cornerRadius(3) }
+                    if let p = model.parameterSize { Text(p).font(.system(size: 9)).foregroundColor(.orange).padding(.horizontal, 4).padding(.vertical, 1).background(Color.orange.opacity(0.1)).cornerRadius(3) }
+                }
+            }
+            Spacer()
+            if isSelected {
+                Image(systemName: "checkmark.circle.fill").foregroundColor(.green).font(.system(size: 14))
+            } else {
+                Button("Select") { localLLM.selectedModelId = model.id; hasChanges = true }
+                    .font(.system(size: 10)).buttonStyle(.bordered).controlSize(.small)
+            }
+        }
+        .padding(6)
+        .background(isSelected ? Color.purple.opacity(0.04) : Color.clear)
+        .cornerRadius(6)
     }
     
     private func aiProviderKeyCard(_ provider: AIProviderInfo) -> some View {

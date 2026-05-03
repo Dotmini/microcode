@@ -22,31 +22,23 @@ enum LocalLLMServerType: String, CaseIterable, Identifiable {
     
     var id: String { rawValue }
     
-    var defaultPort: Int {
+    var defaultPorts: [Int] {
         switch self {
-        case .lmStudio: return 1234
-        case .ollama: return 11434
-        case .textGenWebUI: return 5000
-        case .localAI: return 8080
-        case .custom: return 8080
+        case .lmStudio: return [1234, 8080, 1235]
+        case .ollama: return [11434, 11435]
+        case .textGenWebUI: return [5000, 5001, 7860]
+        case .localAI: return [8080, 8081]
+        case .custom: return [8080]
         }
     }
     
+    var defaultPort: Int { defaultPorts.first ?? 8080 }
     var defaultHost: String { "127.0.0.1" }
-    
-    var apiPath: String {
-        switch self {
-        case .lmStudio: return "/v1"
-        case .ollama: return "/v1"  // Ollama supports OpenAI-compatible endpoint
-        case .textGenWebUI: return "/v1"
-        case .localAI: return "/v1"
-        case .custom: return "/v1"
-        }
-    }
+    var apiPath: String { "/v1" }
     
     var modelsPath: String {
         switch self {
-        case .ollama: return "/api/tags"  // Ollama's native endpoint
+        case .ollama: return "/api/tags"
         default: return "/v1/models"
         }
     }
@@ -83,13 +75,8 @@ struct DetectedLLMServer: Identifiable {
     var isOnline: Bool = false
     var latency: TimeInterval = 0
     
-    var endpoint: String {
-        "http://\(host):\(port)\(type.apiPath)"
-    }
-    
-    var displayName: String {
-        "\(type.rawValue) (\(host):\(port))"
-    }
+    var endpoint: String { "http://\(host):\(port)\(type.apiPath)" }
+    var displayName: String { "\(type.rawValue) (\(host):\(port))" }
 }
 
 struct LocalLLMModel: Identifiable, Hashable {
@@ -97,12 +84,34 @@ struct LocalLLMModel: Identifiable, Hashable {
     let name: String
     let size: String?
     let quantization: String?
+    var parameterSize: String?
+    var family: String?
+    var isDownloading: Bool = false
+    var downloadProgress: Double = 0
     
     var displayName: String {
-        if let q = quantization {
-            return "\(name) [\(q)]"
-        }
+        if let q = quantization { return "\(name) [\(q)]" }
         return name
+    }
+    
+    func hash(into hasher: inout Hasher) { hasher.combine(id) }
+    static func == (lhs: LocalLLMModel, rhs: LocalLLMModel) -> Bool { lhs.id == rhs.id }
+}
+
+// MARK: - Downloadable Model Catalog
+
+struct DownloadableModel: Identifiable {
+    let id: String
+    let name: String
+    let provider: String
+    let description: String
+    let params: String
+    let sizeGB: Double
+    let capabilities: [String]
+    let ollamaTag: String
+    
+    var sizeLabel: String {
+        sizeGB >= 1 ? String(format: "%.1f GB", sizeGB) : String(format: "%.0f MB", sizeGB * 1024)
     }
 }
 
@@ -119,11 +128,24 @@ class LocalLLMService: ObservableObject {
     @Published var customHost: String = "127.0.0.1"
     @Published var customPort: String = "1234"
     @Published var lastScanTime: Date?
+    @Published var downloadingModels: [String: Double] = [:]
+    @Published var scanLog: [String] = []
     
-    // Thread-safe cached values for nonisolated access (from StreamableAIProvider enum)
-    // These are updated on MainActor and read from any context
     nonisolated(unsafe) static var cachedEndpoint: String = "http://127.0.0.1:1234/v1"
     nonisolated(unsafe) static var cachedModel: String = "local-model"
+    
+    let modelCatalog: [DownloadableModel] = [
+        DownloadableModel(id: "gemma3", name: "Gemma 3", provider: "Google", description: "Google's efficient open model. Great for coding and reasoning.", params: "4B", sizeGB: 3.3, capabilities: ["Code", "Reasoning"], ollamaTag: "gemma3"),
+        DownloadableModel(id: "gemma3-12b", name: "Gemma 3 12B", provider: "Google", description: "Larger Gemma with stronger performance.", params: "12B", sizeGB: 8.1, capabilities: ["Code", "Reasoning", "Vision"], ollamaTag: "gemma3:12b"),
+        DownloadableModel(id: "qwen3", name: "Qwen 3", provider: "Alibaba", description: "Hybrid thinking. Strong multilingual and code.", params: "8B", sizeGB: 5.2, capabilities: ["Code", "Reasoning", "Tool Use"], ollamaTag: "qwen3"),
+        DownloadableModel(id: "llama3.3", name: "Llama 3.3", provider: "Meta", description: "Meta's latest. Excellent for general and code tasks.", params: "70B", sizeGB: 43.0, capabilities: ["Code", "Reasoning"], ollamaTag: "llama3.3"),
+        DownloadableModel(id: "llama3.2", name: "Llama 3.2", provider: "Meta", description: "Efficient small model. Fast local inference.", params: "3B", sizeGB: 2.0, capabilities: ["Code", "Chat"], ollamaTag: "llama3.2"),
+        DownloadableModel(id: "deepseek-r1", name: "DeepSeek R1", provider: "DeepSeek", description: "Reasoning-focused. Great for complex problem solving.", params: "8B", sizeGB: 5.0, capabilities: ["Reasoning", "Code"], ollamaTag: "deepseek-r1:8b"),
+        DownloadableModel(id: "codellama", name: "Code Llama", provider: "Meta", description: "Specialized for code generation and debugging.", params: "7B", sizeGB: 3.8, capabilities: ["Code"], ollamaTag: "codellama"),
+        DownloadableModel(id: "mistral", name: "Mistral", provider: "Mistral AI", description: "Fast, efficient model with strong reasoning.", params: "7B", sizeGB: 4.1, capabilities: ["Code", "Chat"], ollamaTag: "mistral"),
+        DownloadableModel(id: "phi4", name: "Phi-4", provider: "Microsoft", description: "Compact but powerful reasoning model.", params: "14B", sizeGB: 9.1, capabilities: ["Code", "Reasoning"], ollamaTag: "phi4"),
+        DownloadableModel(id: "nemotron", name: "Nemotron Mini", provider: "NVIDIA", description: "Compact model optimized for reasoning.", params: "4B", sizeGB: 2.7, capabilities: ["Reasoning", "Chat"], ollamaTag: "nemotron-mini"),
+    ]
     
     var activeServer: DetectedLLMServer? {
         guard !detectedServers.isEmpty, selectedServerIndex < detectedServers.count else { return nil }
@@ -137,49 +159,53 @@ class LocalLLMService: ObservableObject {
     }
     
     var activeModel: String {
-        let value: String
-        if !selectedModelId.isEmpty {
-            value = selectedModelId
-        } else {
-            value = activeServer?.models.first?.id ?? "local-model"
-        }
+        let value = !selectedModelId.isEmpty ? selectedModelId : (activeServer?.models.first?.id ?? "local-model")
         LocalLLMService.cachedModel = value
         return value
     }
     
-    var availableModels: [LocalLLMModel] {
-        activeServer?.models ?? []
-    }
+    var availableModels: [LocalLLMModel] { activeServer?.models ?? [] }
     
     // MARK: - Scan for Local Servers
     
     func scanForServers() async {
         isScanning = true
         detectedServers.removeAll()
+        scanLog = ["🔍 Starting scan..."]
         
-        // Scan all known server types
         for serverType in LocalLLMServerType.allCases where serverType != .custom {
-            let host = serverType.defaultHost
-            let port = serverType.defaultPort
-            
-            if let server = await probeServer(type: serverType, host: host, port: port) {
-                detectedServers.append(server)
+            for port in serverType.defaultPorts {
+                scanLog.append("  Probing \(serverType.rawValue) on :\(port)...")
+                if let server = await probeServer(type: serverType, host: serverType.defaultHost, port: port) {
+                    detectedServers.append(server)
+                    scanLog.append("  ✓ Found \(serverType.rawValue) — \(server.models.count) model(s)")
+                    break
+                }
             }
         }
         
-        // Also try custom if configured
         if let port = Int(customPort), port > 0 {
-            let customServer = await probeServer(
-                type: .custom,
-                host: customHost,
-                port: port
-            )
-            if let server = customServer {
+            scanLog.append("  Probing Custom on \(customHost):\(port)...")
+            if let server = await probeServer(type: .custom, host: customHost, port: port) {
                 detectedServers.append(server)
+                scanLog.append("  ✓ Found custom server — \(server.models.count) model(s)")
             }
         }
         
-        // Auto-select first online server
+        // Try localhost aliases if nothing found
+        if detectedServers.isEmpty {
+            scanLog.append("  Trying localhost aliases...")
+            for serverType in [LocalLLMServerType.lmStudio, .ollama] {
+                for port in serverType.defaultPorts {
+                    if let server = await probeServer(type: serverType, host: "localhost", port: port) {
+                        detectedServers.append(server)
+                        scanLog.append("  ✓ Found \(serverType.rawValue) on localhost:\(port)")
+                        break
+                    }
+                }
+            }
+        }
+        
         if let firstOnline = detectedServers.firstIndex(where: { $0.isOnline }) {
             selectedServerIndex = firstOnline
             if let firstModel = detectedServers[firstOnline].models.first {
@@ -189,8 +215,9 @@ class LocalLLMService: ObservableObject {
         
         lastScanTime = Date()
         isScanning = false
-        
-        print("🔍 Local LLM scan complete: \(detectedServers.filter { $0.isOnline }.count) server(s) found")
+        let count = detectedServers.filter { $0.isOnline }.count
+        scanLog.append("✅ Scan complete: \(count) server(s) found")
+        print("🔍 Local LLM scan complete: \(count) server(s) found")
     }
     
     // MARK: - Probe Single Server
@@ -199,10 +226,8 @@ class LocalLLMService: ObservableObject {
         let startTime = Date()
         var server = DetectedLLMServer(type: type, host: host, port: port)
         
-        // Try to reach the models endpoint
         let modelsURL: URL
         if type == .ollama {
-            // Ollama has its own models endpoint
             guard let url = URL(string: "http://\(host):\(port)\(type.modelsPath)") else { return nil }
             modelsURL = url
         } else {
@@ -210,45 +235,103 @@ class LocalLLMService: ObservableObject {
             modelsURL = url
         }
         
+        let config = URLSessionConfiguration.default
+        config.timeoutIntervalForRequest = 5
+        config.timeoutIntervalForResource = 8
+        let session = URLSession(configuration: config)
+        
         var request = URLRequest(url: modelsURL)
-        request.timeoutInterval = 3 // Quick timeout for local scan
         request.httpMethod = "GET"
+        request.timeoutInterval = 5
         
         do {
-            let (data, response) = try await URLSession.shared.data(for: request)
+            let (data, response) = try await session.data(for: request)
             
             guard let httpResponse = response as? HTTPURLResponse,
-                  (200...299).contains(httpResponse.statusCode) else {
-                return nil
-            }
+                  (200...299).contains(httpResponse.statusCode) else { return nil }
             
             server.isOnline = true
             server.latency = Date().timeIntervalSince(startTime)
             
-            // Parse models
             if type == .ollama {
                 server.models = parseOllamaModels(data)
             } else {
                 server.models = parseOpenAIModels(data)
             }
             
-            // If no models from endpoint, try v1/models for Ollama too
             if server.models.isEmpty && type == .ollama {
                 if let openaiURL = URL(string: "http://\(host):\(port)/v1/models") {
                     var req2 = URLRequest(url: openaiURL)
-                    req2.timeoutInterval = 3
-                    if let (data2, _) = try? await URLSession.shared.data(for: req2) {
+                    req2.timeoutInterval = 5
+                    if let (data2, _) = try? await session.data(for: req2) {
                         server.models = parseOpenAIModels(data2)
                     }
                 }
             }
             
-            return server
+            if server.models.isEmpty && type == .lmStudio {
+                server.models = [LocalLLMModel(id: "lmstudio-default", name: "Default Model", size: nil, quantization: nil)]
+            }
             
+            return server
         } catch {
-            // Server not reachable
             return nil
         }
+    }
+    
+    // MARK: - Download Model via Ollama
+    
+    func downloadModel(_ model: DownloadableModel) async {
+        guard detectedServers.contains(where: { $0.type == .ollama && $0.isOnline }) else {
+            scanLog.append("❌ Ollama not running. Start Ollama first.")
+            return
+        }
+        
+        let ollamaServer = detectedServers.first(where: { $0.type == .ollama })!
+        guard let url = URL(string: "http://\(ollamaServer.host):\(ollamaServer.port)/api/pull") else { return }
+        
+        downloadingModels[model.id] = 0
+        scanLog.append("⬇ Downloading \(model.name)...")
+        
+        var request = URLRequest(url: url)
+        request.httpMethod = "POST"
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        request.httpBody = try? JSONSerialization.data(withJSONObject: ["name": model.ollamaTag])
+        
+        do {
+            let (bytes, _) = try await URLSession.shared.bytes(for: request)
+            for try await line in bytes.lines {
+                if let data = line.data(using: .utf8),
+                   let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] {
+                    if let total = json["total"] as? Double, let completed = json["completed"] as? Double, total > 0 {
+                        downloadingModels[model.id] = completed / total
+                    }
+                    if let status = json["status"] as? String, status == "success" {
+                        downloadingModels.removeValue(forKey: model.id)
+                        scanLog.append("✅ Downloaded \(model.name)")
+                        await scanForServers()
+                        return
+                    }
+                }
+            }
+        } catch {
+            downloadingModels.removeValue(forKey: model.id)
+            scanLog.append("❌ Download failed: \(error.localizedDescription)")
+        }
+    }
+    
+    func deleteModel(_ modelName: String) async {
+        guard let ollamaServer = detectedServers.first(where: { $0.type == .ollama && $0.isOnline }) else { return }
+        guard let url = URL(string: "http://\(ollamaServer.host):\(ollamaServer.port)/api/delete") else { return }
+        
+        var request = URLRequest(url: url)
+        request.httpMethod = "DELETE"
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        request.httpBody = try? JSONSerialization.data(withJSONObject: ["name": modelName])
+        
+        _ = try? await URLSession.shared.data(for: request)
+        scanLog.append("🗑 Deleted \(modelName)")
+        await scanForServers()
     }
     
     // MARK: - Parse Models
@@ -259,13 +342,8 @@ class LocalLLMService: ObservableObject {
         
         return modelsArray.compactMap { modelDict -> LocalLLMModel? in
             guard let id = modelDict["id"] as? String else { return nil }
-            
-            // Extract name and quantization from model ID
             let name = id.components(separatedBy: "/").last ?? id
-            let quantization = extractQuantization(from: name)
-            let size = extractSize(from: name)
-            
-            return LocalLLMModel(id: id, name: name, size: size, quantization: quantization)
+            return LocalLLMModel(id: id, name: name, size: extractSize(from: name), quantization: extractQuantization(from: name))
         }
     }
     
@@ -277,15 +355,16 @@ class LocalLLMService: ObservableObject {
             guard let name = modelDict["name"] as? String else { return nil }
             
             let size: String?
-            if let sizeBytes = modelDict["size"] as? Int64 {
-                size = formatBytes(sizeBytes)
-            } else {
-                size = extractSize(from: name)
+            if let sizeBytes = modelDict["size"] as? Int64 { size = formatBytes(sizeBytes) }
+            else if let sizeBytes = modelDict["size"] as? Int { size = formatBytes(Int64(sizeBytes)) }
+            else { size = extractSize(from: name) }
+            
+            var model = LocalLLMModel(id: name, name: name, size: size, quantization: extractQuantization(from: name))
+            if let details = modelDict["details"] as? [String: Any] {
+                model.parameterSize = details["parameter_size"] as? String
+                model.family = details["family"] as? String
             }
-            
-            let quantization = extractQuantization(from: name)
-            
-            return LocalLLMModel(id: name, name: name, size: size, quantization: quantization)
+            return model
         }
     }
     
@@ -294,17 +373,13 @@ class LocalLLMService: ObservableObject {
     private func extractQuantization(from name: String) -> String? {
         let patterns = ["Q2_K", "Q3_K", "Q4_K_M", "Q4_K_S", "Q4_0", "Q4_1",
                        "Q5_K_M", "Q5_K_S", "Q5_0", "Q5_1",
-                       "Q6_K", "Q8_0", "F16", "F32",
-                       "IQ2_M", "IQ3_M", "IQ4_NL"]
-        
+                       "Q6_K", "Q8_0", "F16", "F32", "IQ2_M", "IQ3_M", "IQ4_NL"]
         let upper = name.uppercased()
         return patterns.first { upper.contains($0) }
     }
     
     private func extractSize(from name: String) -> String? {
-        // Match patterns like "7b", "13b", "70b", "8x7b"
-        let pattern = "\\d+x?\\d*[bB]"
-        if let range = name.range(of: pattern, options: .regularExpression) {
+        if let range = name.range(of: "\\d+x?\\d*[bB]", options: .regularExpression) {
             return String(name[range]).uppercased()
         }
         return nil
@@ -312,28 +387,17 @@ class LocalLLMService: ObservableObject {
     
     private func formatBytes(_ bytes: Int64) -> String {
         let gb = Double(bytes) / (1024 * 1024 * 1024)
-        if gb >= 1 {
-            return String(format: "%.1f GB", gb)
-        }
-        let mb = Double(bytes) / (1024 * 1024)
-        return String(format: "%.0f MB", mb)
+        return gb >= 1 ? String(format: "%.1f GB", gb) : String(format: "%.0f MB", Double(bytes) / (1024 * 1024))
     }
     
-    // MARK: - Quick Check (for UI status indicators)
-    
     func quickCheck() async -> Bool {
-        guard let server = activeServer else { return false }
-        
-        guard let url = URL(string: "http://\(server.host):\(server.port)/v1/models") else { return false }
-        
+        guard let server = activeServer,
+              let url = URL(string: "http://\(server.host):\(server.port)/v1/models") else { return false }
         var request = URLRequest(url: url)
-        request.timeoutInterval = 2
-        
+        request.timeoutInterval = 3
         do {
             let (_, response) = try await URLSession.shared.data(for: request)
             return (response as? HTTPURLResponse)?.statusCode == 200
-        } catch {
-            return false
-        }
+        } catch { return false }
     }
 }

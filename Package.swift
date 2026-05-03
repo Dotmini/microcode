@@ -159,6 +159,7 @@ let package = Package(
                 "Views/DatabaseStudioView.swift",
                 "Views/APIClientView.swift",
                 "Views/CICDPipelineView.swift",
+                "Views/ModelBrowserSheet.swift",
                 "Views/TerminalTextView.swift",
                 "Views/TerminalWebView.swift",
                 "Views/Components/PlaygroundTerminalView.swift",
