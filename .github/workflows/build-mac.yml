@@ -109,6 +109,9 @@ jobs:
           sed -i '' "s/^VERSION=\".*\"/VERSION=\"${VERSION}\"/" build_distribution.sh
           echo "✅ Injected version ${VERSION} (build ${BUILD_NUM})"
 
+      - name: Install protobuf
+        run: brew install protobuf
+
       # -- Full Build (ARM64 + Intel + Universal) --
       - name: "🏗️ Full Distribution Build"
         if: github.event.inputs.build_type != 'dev'

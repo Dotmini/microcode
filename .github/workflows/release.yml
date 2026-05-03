@@ -71,6 +71,9 @@ jobs:
           restore-keys: |
             ${{ runner.os }}-spm-
 
+      - name: Install protobuf
+        run: brew install protobuf
+
       - name: Prepare build
         run: |
           chmod +x build_distribution.sh bundle_runtimes.sh generate_checksums.sh 2>/dev/null || true
