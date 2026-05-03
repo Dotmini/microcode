@@ -102,6 +102,7 @@ let package = Package(
                 "Models/SASProcedures.swift",
                 "Views/Tasks/GitHistoryView.swift", // New Phase 10
                 "Views/Notebook/SASProcedureView.swift", // New Phase 12
+                "Views/Notebook/NotebookAIPanel.swift", // Cell Mode AI Agent
                 "Models/DesignModels.swift", // Design Engine
                 "Services/DesignStore.swift",
                 "Services/Design/DesignCodeGenerator.swift",
