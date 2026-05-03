@@ -422,6 +422,25 @@ mkdir -p "${UNIVERSAL_BUILD_DIR}"
 lipo -create "${BUILD_ROOT}/arm64/CodeTunner" "${BUILD_ROOT}/x86_64/CodeTunner" -output "${UNIVERSAL_BUILD_DIR}/CodeTunner"
 lipo -create "${BUILD_ROOT}/arm64/codetunner-backend" "${BUILD_ROOT}/x86_64/codetunner-backend" -output "${UNIVERSAL_BUILD_DIR}/codetunner-backend"
 
+# Universal dylibs (CRITICAL: without these, the app crashes at launch)
+for DYLIB_NAME in libcodetunner_embedded.dylib libmicrocode_core.dylib; do
+    ARM64_DYLIB="${BUILD_ROOT}/arm64/${DYLIB_NAME}"
+    X86_DYLIB="${BUILD_ROOT}/x86_64/${DYLIB_NAME}"
+    
+    if [ -f "${ARM64_DYLIB}" ] && [ -f "${X86_DYLIB}" ]; then
+        lipo -create "${ARM64_DYLIB}" "${X86_DYLIB}" -output "${UNIVERSAL_BUILD_DIR}/${DYLIB_NAME}"
+        echo "   → Created universal ${DYLIB_NAME}"
+    elif [ -f "${ARM64_DYLIB}" ]; then
+        cp "${ARM64_DYLIB}" "${UNIVERSAL_BUILD_DIR}/${DYLIB_NAME}"
+        echo "   → Copied arm64-only ${DYLIB_NAME}"
+    elif [ -f "${X86_DYLIB}" ]; then
+        cp "${X86_DYLIB}" "${UNIVERSAL_BUILD_DIR}/${DYLIB_NAME}"
+        echo "   → Copied x86_64-only ${DYLIB_NAME}"
+    else
+        echo "   ⚠️  ${DYLIB_NAME} not found for either arch!"
+    fi
+done
+
 # ==============================================================================
 # 2. PACKAGING PHASE
 # ==============================================================================
