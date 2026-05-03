@@ -235,6 +235,56 @@ EOF
         chmod +x "${APP_BUNDLE}/Contents/MacOS/microcode-cli"
     fi
     
+    # 2.3a CRITICAL: Bundle Rust dylibs and fix install names
+    echo "   🔗 Bundling and fixing Rust dynamic libraries..."
+    FRAMEWORKS_DIR="${APP_BUNDLE}/Contents/Frameworks"
+    mkdir -p "${FRAMEWORKS_DIR}"
+    
+    # Find and copy dylibs from the build artifacts
+    for DYLIB_NAME in libcodetunner_embedded.dylib libmicrocode_core.dylib; do
+        DYLIB_PATH=$(find "${BUILD_ROOT}/${SOURCE_ARCH}" backend/target microcode_core/target \
+            -name "${DYLIB_NAME}" -type f 2>/dev/null | head -1)
+        
+        if [ -z "${DYLIB_PATH}" ]; then
+            # Try broader search
+            DYLIB_PATH=$(find . -path "*/release/${DYLIB_NAME}" -type f 2>/dev/null | head -1)
+        fi
+        
+        if [ -n "${DYLIB_PATH}" ]; then
+            echo "      → Found ${DYLIB_NAME}: ${DYLIB_PATH}"
+            cp "${DYLIB_PATH}" "${FRAMEWORKS_DIR}/"
+            chmod 755 "${FRAMEWORKS_DIR}/${DYLIB_NAME}"
+            
+            # Fix the dylib's own install name
+            install_name_tool -id "@executable_path/../Frameworks/${DYLIB_NAME}" \
+                "${FRAMEWORKS_DIR}/${DYLIB_NAME}"
+            
+            # Fix the main binary's reference to this dylib
+            # Get the current (broken) install name from the binary
+            OLD_NAME=$(otool -L "${APP_BUNDLE}/Contents/MacOS/CodeTunner" | \
+                grep "${DYLIB_NAME}" | awk '{print $1}' | head -1)
+            
+            if [ -n "${OLD_NAME}" ]; then
+                echo "      → Rewriting: ${OLD_NAME} → @executable_path/../Frameworks/${DYLIB_NAME}"
+                install_name_tool -change "${OLD_NAME}" \
+                    "@executable_path/../Frameworks/${DYLIB_NAME}" \
+                    "${APP_BUNDLE}/Contents/MacOS/CodeTunner"
+            fi
+        else
+            echo "      ⚠️  ${DYLIB_NAME} not found — may be statically linked"
+        fi
+    done
+    
+    # Verify no absolute paths remain
+    echo "   🔍 Verifying dylib references..."
+    BROKEN=$(otool -L "${APP_BUNDLE}/Contents/MacOS/CodeTunner" | grep -E "/Users/|/home/" | grep -v "rpath" || true)
+    if [ -n "${BROKEN}" ]; then
+        echo "   ⚠️  WARNING: Found absolute dylib paths:"
+        echo "${BROKEN}"
+    else
+        echo "   ✅ All dylib references are relative"
+    fi
+
     # CRITICAL: Strip binaries to reduce size (from 200MB+ to ~30-50MB)
     echo "   ✂️  Stripping debug symbols..."
     strip -u -r "${APP_BUNDLE}/Contents/MacOS/CodeTunner"
