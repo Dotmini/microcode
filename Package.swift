@@ -3,6 +3,7 @@ import PackageDescription
 
 let package = Package(
     name: "CodeTunner",
+    defaultLocalization: "en",
     platforms: [
         .macOS(.v13)
     ],
@@ -17,13 +18,7 @@ let package = Package(
             name: "CodeTunnerSupport",
             dependencies: [],
             path: "CodeTunnerSupport",
-            publicHeadersPath: "include",
-            cSettings: [
-                .unsafeFlags(["-fobjc-arc"])
-            ],
-            cxxSettings: [
-                .unsafeFlags(["-std=c++17", "-fobjc-arc"])
-            ]
+            publicHeadersPath: "include"
         ),
         .target(
             name: "CodeTunnerKernel",
@@ -97,24 +92,14 @@ let package = Package(
                 "Services/ExtensionManager.swift",
                 "Views/ExtensionSettingsView.swift",
                 "Models/AICodeReport.swift",
-                "Services/AgentCore/AgentStep.swift",
                 "Services/AgentCore/AgentToolBox.swift",
-                "Services/AgentCore/AgentMemory.swift",
-                "Services/AgentCore/AgentSession.swift",
-                "Services/AgentCore/AgentExecutor.swift",
                 "Services/AuthService.swift",
                 "Services/CollaborationService.swift",
                 "Views/EmbeddedToolsView.swift",
                 "Views/EmbeddedStudioView.swift",
                 "Views/EmbeddedProjectWizard.swift",
                 "Views/CollaborationView.swift",
-                "Models/TaskModels.swift",
-                "Models/SASProcedures.swift", // New Phase 12
-                "Services/TaskManager.swift",
-                "Views/ProjectManagerView.swift",
-                "Views/TaskCardView.swift",
-                "Views/Tasks/TaskDashboardView.swift",
-                "Views/Tasks/TaskCommandPalette.swift", // New Phase 10
+                "Models/SASProcedures.swift",
                 "Views/Tasks/GitHistoryView.swift", // New Phase 10
                 "Views/Notebook/SASProcedureView.swift", // New Phase 12
                 "Models/DesignModels.swift", // Design Engine
@@ -151,9 +136,8 @@ let package = Package(
                 "Services/DataFrameService.swift",
                 "Services/APIClientService.swift",
                 "Services/CICDService.swift",
-                "Services/AgentService.swift",        // Restored Agent Core
-                "Services/AgentToolExecutor.swift",   // Local Tool Executor
-                "Services/AgentMemoryService.swift",  // Vector Memory Store
+                "Services/AgentService.swift",
+                "Services/AgentMemoryService.swift",
                 "Services/AIClient.swift",            // Direct AI API Client
                 "Services/MicroCore/MicroCore.swift", // AI Core Bridge
                 "Services/MicroCodeService.swift",    // AI Core Service Wrapper
@@ -216,5 +200,6 @@ let package = Package(
             path: "MicrocodeCoreSupport",
             publicHeadersPath: "include"
         )
-    ]
+    ],
+    cxxLanguageStandard: .cxx17
 )
