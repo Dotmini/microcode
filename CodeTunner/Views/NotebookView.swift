@@ -2103,77 +2103,89 @@ struct NotebookView: View {
     // MARK: - Toolbar
     
     private var notebookToolbar: some View {
-        HStack(spacing: 12) {
+        HStack(spacing: 6) {
+            // Sidebar toggle
             Button(action: { viewModel.showingSidebar.toggle() }) {
                 Image(systemName: "sidebar.left")
+                    .font(.system(size: 12))
             }
             .buttonStyle(.borderless)
             
-            // Editable Notebook Name
+            Divider().frame(height: 14)
+            
+            // Notebook Name (compact, truncated)
             if let notebook = viewModel.activeNotebook {
-                HStack(spacing: 4) {
-                    Text("📓")
-                    
-                    if viewModel.isEditingName {
-                        TextField("Name", text: Binding(
-                            get: { notebook.name },
-                            set: { notebook.name = $0 }
-                        ))
-                        .textFieldStyle(.plain)
-                        .font(.headline)
-                        .frame(width: 200)
-                        .onSubmit { viewModel.isEditingName = false }
-                    } else {
-                        Text(notebook.name)
-                            .font(.headline)
-                            .onTapGesture(count: 2) {
-                                viewModel.isEditingName = true
-                            }
-                    }
-                    
-                    Button(action: { viewModel.isEditingName.toggle() }) {
-                        Image(systemName: "pencil")
-                            .font(.caption)
-                            .foregroundColor(.secondary)
-                    }
-                    .buttonStyle(.plain)
+                if viewModel.isEditingName {
+                    TextField("Name", text: Binding(
+                        get: { notebook.name },
+                        set: { notebook.name = $0 }
+                    ))
+                    .textFieldStyle(.plain)
+                    .font(.system(size: 12, weight: .semibold))
+                    .frame(maxWidth: 140)
+                    .onSubmit { viewModel.isEditingName = false }
+                } else {
+                    Text(notebook.name)
+                        .font(.system(size: 12, weight: .semibold))
+                        .lineLimit(1)
+                        .truncationMode(.tail)
+                        .frame(maxWidth: 120, alignment: .leading)
+                        .onTapGesture(count: 2) {
+                            viewModel.isEditingName = true
+                        }
                 }
+                
+                Button(action: { viewModel.isEditingName.toggle() }) {
+                    Image(systemName: "pencil")
+                        .font(.system(size: 9))
+                        .foregroundColor(.secondary)
+                }
+                .buttonStyle(.plain)
             }
             
             Spacer()
             
-            // Python Version Selector
+            // --- Right side: compact icon buttons ---
+            
+            // Python version (icon-only)
             pythonVersionMenu
             
+            // Add Cell
             Menu {
                 Text("Code Cells")
                     .font(.caption)
                     .foregroundColor(.secondary)
                 
-                Button {
-                    viewModel.addCell(type: .code, language: .python)
-                } label: {
-                    Label("Python Cell", systemImage: "p.circle.fill")
+                Button { viewModel.addCell(type: .code, language: .python) } label: {
+                    Label("Python", systemImage: "p.circle.fill")
                 }
-                
-                Button {
-                    viewModel.addCell(type: .code, language: .r)
-                } label: {
-                    Label("R Cell", systemImage: "r.circle.fill")
+                Button { viewModel.addCell(type: .code, language: .r) } label: {
+                    Label("R", systemImage: "r.circle.fill")
+                }
+                Button { viewModel.addCell(type: .code, language: .julia) } label: {
+                    Label("Julia", systemImage: "j.circle.fill")
+                }
+                Button { viewModel.addCell(type: .code, language: .sql) } label: {
+                    Label("SQL", systemImage: "cylinder.fill")
                 }
                 
                 Divider()
                 
-                Button {
-                    viewModel.addCell(type: .code, language: .julia)
-                } label: {
-                    Label("Julia Cell", systemImage: "j.circle.fill")
-                }
+                Text("Compiled")
+                    .font(.caption)
+                    .foregroundColor(.secondary)
                 
-                Button {
-                    viewModel.addCell(type: .code, language: .sql)
-                } label: {
-                    Label("SQL Cell", systemImage: "cylinder.fill")
+                Button { viewModel.addCell(type: .code, language: .rust) } label: {
+                    Label("Rust", systemImage: "gearshape.fill")
+                }
+                Button { viewModel.addCell(type: .code, language: .go) } label: {
+                    Label("Go", systemImage: "g.circle.fill")
+                }
+                Button { viewModel.addCell(type: .code, language: .cpp) } label: {
+                    Label("C++", systemImage: "c.circle.fill")
+                }
+                Button { viewModel.addCell(type: .code, language: .objc) } label: {
+                    Label("Objective-C", systemImage: "apple.logo")
                 }
                 
                 Divider()
@@ -2182,45 +2194,41 @@ struct NotebookView: View {
                     .font(.caption)
                     .foregroundColor(.secondary)
                 
-                Button {
-                    viewModel.addCell(type: .code, language: .rmarkdown)
-                } label: {
-                    Label("R Markdown (Rmd)", systemImage: "doc.richtext.fill")
+                Button { viewModel.addCell(type: .code, language: .rmarkdown) } label: {
+                    Label("R Markdown", systemImage: "doc.richtext.fill")
                 }
-                
-                Button {
-                    viewModel.addCell(type: .code, language: .latex)
-                } label: {
+                Button { viewModel.addCell(type: .code, language: .latex) } label: {
                     Label("LaTeX", systemImage: "function")
                 }
                 
                 Divider()
                 
-                Text("Other")
-                    .font(.caption)
-                    .foregroundColor(.secondary)
-                
-                Button("Markdown Cell") { viewModel.addCell(type: .markdown) }
-                Button("Raw Cell") { viewModel.addCell(type: .raw) }
+                Button("Markdown") { viewModel.addCell(type: .markdown) }
+                Button("Raw") { viewModel.addCell(type: .raw) }
                 
                 Divider()
                 
-                Button {
-                    viewModel.addCell(type: .procedure)
-                } label: {
+                Button { viewModel.addCell(type: .procedure) } label: {
                     Label("SAS Procedure", systemImage: "tablecells.fill")
                 }
             } label: {
-                Label("Add", systemImage: "plus")
+                Image(systemName: "plus")
+                    .font(.system(size: 12))
             }
+            .menuIndicator(.hidden)
+            .help("Add Cell")
             
-            Divider().frame(height: 16)
+            Divider().frame(height: 14)
             
+            // Run
             Button(action: { viewModel.runSelectedCell() }) {
-                Label("Run", systemImage: "play.fill")
+                Image(systemName: "play.fill")
+                    .font(.system(size: 11))
             }
             .disabled(viewModel.selectedCellId == nil)
+            .help("Run Selected Cell")
             
+            // Run All
             Menu {
                 Button(action: { viewModel.runAllCells() }) {
                     Label("Run All Cells", systemImage: "forward.fill")
@@ -2228,83 +2236,80 @@ struct NotebookView: View {
                 
                 Divider()
                 
-                Text("Run by Color")
-                    .font(.caption)
-                    .foregroundColor(.secondary)
-                
                 ForEach(viewModel.getUsedColors()) { theme in
                     Button {
                         viewModel.runCellsByColor(theme)
                     } label: {
                         HStack {
                             Circle().fill(theme.iconColor).frame(width: 8, height: 8)
-                            Text("Run \(theme.rawValue) Cells")
+                            Text("Run \(theme.rawValue)")
                         }
                     }
                 }
             } label: {
-                Label("Run All", systemImage: "forward.fill")
+                Image(systemName: "forward.fill")
+                    .font(.system(size: 11))
             } primaryAction: {
                 viewModel.runAllCells()
             }
+            .menuIndicator(.hidden)
+            .help("Run All")
             
-            Divider().frame(height: 16)
+            Divider().frame(height: 14)
             
-            // Open Notebook
+            // Open
             Button(action: { openNotebookFile() }) {
-                Label("Open", systemImage: "folder")
+                Image(systemName: "folder")
+                    .font(.system(size: 11))
             }
-            .help("Open .mcnb or .ipynb notebook")
+            .help("Open Notebook")
             
-            // Save Menu
+            // Save
             Menu {
                 Button(action: { viewModel.saveNotebook() }) {
                     Label("Save As...", systemImage: "square.and.arrow.down")
                 }
-                
                 Divider()
-                
                 Button(action: { viewModel.autoSave() }) {
-                    Label("Quick Save (Auto-Save)", systemImage: "externaldrive.fill.badge.checkmark")
+                    Label("Quick Save", systemImage: "externaldrive.fill.badge.checkmark")
                 }
             } label: {
-                Label("Save", systemImage: "square.and.arrow.down")
+                Image(systemName: "square.and.arrow.down")
+                    .font(.system(size: 11))
             } primaryAction: {
                 viewModel.autoSave()
             }
+            .menuIndicator(.hidden)
+            .help("Save")
             
-            Divider().frame(height: 16)
+            Divider().frame(height: 14)
             
-            Text("Executions: \(viewModel.totalExecutions)")
-                .font(.caption)
+            // Execution count (compact)
+            Text("\(viewModel.totalExecutions)")
+                .font(.system(size: 10, design: .monospaced))
                 .foregroundColor(.secondary)
+                .padding(.horizontal, 4)
+                .padding(.vertical, 2)
+                .background(Color.primary.opacity(0.05))
+                .cornerRadius(4)
+                .help("Total Executions: \(viewModel.totalExecutions)")
             
-            Divider().frame(height: 16)
-            
-            // AI Agent Toggle
+            // AI Toggle
             Button(action: { withAnimation(.easeInOut(duration: 0.2)) { showAIPanel.toggle() } }) {
-                HStack(spacing: 4) {
-                    Image(systemName: showAIPanel ? "brain.fill" : "brain")
-                        .font(.system(size: 12))
-                    Text("AI")
-                        .font(.system(size: 11, weight: .medium))
-                }
-                .foregroundColor(showAIPanel ? .accentColor : .secondary)
-                .padding(.horizontal, 8)
-                .padding(.vertical, 4)
-                .background(showAIPanel ? Color.accentColor.opacity(0.12) : Color.clear)
-                .cornerRadius(6)
+                Image(systemName: showAIPanel ? "brain.fill" : "brain")
+                    .font(.system(size: 12))
+                    .foregroundColor(showAIPanel ? .accentColor : .secondary)
+                    .frame(width: 24, height: 24)
+                    .background(showAIPanel ? Color.accentColor.opacity(0.12) : Color.clear)
+                    .cornerRadius(5)
             }
             .buttonStyle(.plain)
-            .help("Toggle AI Agent Panel")
+            .help("AI Agent")
         }
-        .padding(.horizontal)
-        .padding(.vertical, 8)
+        .padding(.horizontal, 10)
+        .padding(.vertical, 6)
+        .frame(height: 34)
         .background(Color(nsColor: .controlBackgroundColor))
-        .onAppear {
-            // TODO: Fix AppState access pattern
-            // appState.detectPythonVersions()
-        }
     }
     
     // MARK: - Python Version Menu
