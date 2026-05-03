@@ -1382,8 +1382,15 @@ class AppState: ObservableObject {
             if binaryExtensions.contains(ext) {
                 content = "[Binary File]"
             } else {
-                // Use native Swift file reading for reliability
-                content = try String(contentsOf: url, encoding: .utf8)
+                // Try UTF-8 first, then fallback to Latin1 (ISO 8859-1) for non-UTF8 files
+                if let utf8Content = try? String(contentsOf: url, encoding: .utf8) {
+                    content = utf8Content
+                } else if let latin1Content = try? String(contentsOf: url, encoding: .isoLatin1) {
+                    content = latin1Content
+                } else {
+                    // Last resort: read as data and show placeholder
+                    content = "[Unable to decode file — unsupported encoding]"
+                }
             }
             let language = detectLanguage(from: url)
 

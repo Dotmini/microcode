@@ -455,6 +455,12 @@ public final class SyntaxHighlightingEngine: @unchecked Sendable {
     /// Currently running highlight task
     private var currentHighlightTask: Task<Void, Never>?
     
+    /// Cancel any in-flight highlighting task
+    public func cancelHighlighting() {
+        currentHighlightTask?.cancel()
+        currentHighlightTask = nil
+    }
+    
     /// Asynchronously apply highlighting to an existing NSTextStorage.
     /// Performs lexing on a background thread and updates attributes on the main thread.
     @MainActor
@@ -1055,6 +1061,12 @@ public struct SyntaxHighlightedCodeView: NSViewRepresentable {
         
         init(_ parent: SyntaxHighlightedCodeView) {
             self.parent = parent
+        }
+        
+        deinit {
+            // Cancel any in-flight highlighting task on deallocation
+            highlightTimer?.invalidate()
+            engine?.cancelHighlighting()
         }
         
         // MARK: - NSTextStorageDelegate (Incremental Updates)

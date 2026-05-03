@@ -809,6 +809,7 @@ struct EditorArea: View {
                                 .frame(maxWidth: .infinity, maxHeight: .infinity)
                         } else {
                             CodeEditor(file: file)
+                                .id(file.id) // Force fresh NSTextView per file to prevent stale highlight crash
                         }
                     } else if appState.workspaceFolder != nil {
                         // Empty State (Folder open, no file selected)
