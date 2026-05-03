@@ -327,21 +327,28 @@ struct PlaygroundView: View {
             if isCellMode {
                 // Run By Color Menu
                 Menu {
-                    ForEach(getUsedColors()) { theme in
-                        Button(action: { runCellsByColor(theme) }) {
-                            Label("Run \(theme.rawValue)", systemImage: "play.fill")
-                                .foregroundColor(theme.iconColor)
+                    // Colors with cells — show count
+                    ForEach(CellColorTheme.allCases) { theme in
+                        let count = cellCountForColor(theme)
+                        if count > 0 {
+                            Button(action: { runCellsByColor(theme) }) {
+                                HStack {
+                                    Image(systemName: "circle.fill")
+                                    Text("\(theme.rawValue) (\(count) cells)")
+                                    Image(systemName: "play.fill")
+                                }
+                            }
                         }
                     }
                     
                     Divider()
                     
                     Button(action: { runAllCells() }) {
-                        Label("Run All Cells", systemImage: "play.circle.fill")
+                        Label("Run All Cells (\(cells.count))", systemImage: "play.circle.fill")
                     }
                 } label: {
                     HStack(spacing: 4) {
-                        Image(systemName: "play.fill")
+                        Image(systemName: "paintpalette.fill")
                         Text("Run By Color")
                     }
                     .font(.system(size: 12))
@@ -2064,8 +2071,12 @@ struct PlaygroundView: View {
     }
     
     func getUsedColors() -> [CellColorTheme] {
-        let colors = Set(cells.map { $0.colorTheme })
-        return Array(colors).sorted { $0.rawValue < $1.rawValue }
+        // Return ALL color themes for the catalog, mark which are in use
+        return CellColorTheme.allCases
+    }
+    
+    func cellCountForColor(_ theme: CellColorTheme) -> Int {
+        cells.filter { $0.colorTheme == theme }.count
     }
     
     func runCell(cell: PlaygroundCellModel) {
@@ -2107,10 +2118,11 @@ struct PlaygroundView: View {
     }
     
     func deleteCell(cell: PlaygroundCellModel) {
-        cells.removeAll { $0.id == cell.id }
-        if cells.isEmpty {
-            addCell()
+        // Fast indexed removal instead of filter
+        if let idx = cells.firstIndex(where: { $0.id == cell.id }) {
+            cells.remove(at: idx)
         }
+        // Allow empty state — don't auto-add
     }
     
     func handleCatalogueItem(code: String) {

@@ -1042,9 +1042,8 @@ struct AgentCellModeView: View {
     }
     
     private func deleteCell(_ id: UUID) {
-        cells.removeAll { $0.id == id }
-        if cells.isEmpty {
-            cells.append(AgentCell(type: .code))
+        if let idx = cells.firstIndex(where: { $0.id == id }) {
+            cells.remove(at: idx)
         }
     }
     

@@ -428,12 +428,13 @@ final class NotebookViewModel: ObservableObject {
     
     func deleteCell(_ cell: NotebookCellModel) {
         guard let notebook = activeNotebook else { return }
-        guard notebook.cells.count > 1 else { return }
-        notebook.cells.removeAll { $0.id == cell.id }
-        if selectedCellId == cell.id {
-            selectedCellId = notebook.cells.first?.id
+        if let idx = notebook.cells.firstIndex(where: { $0.id == cell.id }) {
+            notebook.cells.remove(at: idx)
+            if selectedCellId == cell.id {
+                selectedCellId = notebook.cells.first?.id
+            }
+            notebook.modifiedAt = Date()
         }
-        notebook.modifiedAt = Date()
     }
     
     func moveCell(_ cell: NotebookCellModel, direction: Int) {
