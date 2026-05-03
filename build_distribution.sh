@@ -146,6 +146,21 @@ compile_arch() {
     
     # Copy Rust Binary
     cp "backend/target/${RUST_TARGET}/${RUST_CONFIG}/codetunner-backend" "${ARCH_BUILD_DIR}/codetunner-backend"
+    
+    # Copy Rust dylibs (CRITICAL: must be same arch)
+    echo "   📦 Copying Rust dylibs for ${ARCH}..."
+    if [ -f "${RUST_LIB_PATH}/libcodetunner_embedded.dylib" ]; then
+        cp "${RUST_LIB_PATH}/libcodetunner_embedded.dylib" "${ARCH_BUILD_DIR}/"
+        echo "      → libcodetunner_embedded.dylib (${ARCH})"
+    else
+        echo "      ⚠️  libcodetunner_embedded.dylib not found at ${RUST_LIB_PATH}"
+    fi
+    if [ -f "${MICROCORE_LIB_PATH}/libmicrocode_core.dylib" ]; then
+        cp "${MICROCORE_LIB_PATH}/libmicrocode_core.dylib" "${ARCH_BUILD_DIR}/"
+        echo "      → libmicrocode_core.dylib (${ARCH})"
+    else
+        echo "      ⚠️  libmicrocode_core.dylib not found at ${MICROCORE_LIB_PATH}"
+    fi
 
     # 1.5 MicroCode CLI (Optional - may not exist)
     if [ -d "../MicroCodeCLI" ]; then
@@ -240,18 +255,17 @@ EOF
     FRAMEWORKS_DIR="${APP_BUNDLE}/Contents/Frameworks"
     mkdir -p "${FRAMEWORKS_DIR}"
     
-    # Find and copy dylibs from the build artifacts
+    # Copy dylibs from the CORRECT arch-specific build dir
     for DYLIB_NAME in libcodetunner_embedded.dylib libmicrocode_core.dylib; do
-        DYLIB_PATH=$(find "${BUILD_ROOT}/${SOURCE_ARCH}" backend/target microcode_core/target \
-            -name "${DYLIB_NAME}" -type f 2>/dev/null | head -1)
+        DYLIB_PATH="${BUILD_ROOT}/${SOURCE_ARCH}/${DYLIB_NAME}"
         
-        if [ -z "${DYLIB_PATH}" ]; then
-            # Try broader search
-            DYLIB_PATH=$(find . -path "*/release/${DYLIB_NAME}" -type f 2>/dev/null | head -1)
-        fi
-        
-        if [ -n "${DYLIB_PATH}" ]; then
-            echo "      → Found ${DYLIB_NAME}: ${DYLIB_PATH}"
+        if [ -f "${DYLIB_PATH}" ]; then
+            echo "      → Bundling ${DYLIB_NAME} from ${DYLIB_PATH}"
+            
+            # Verify architecture matches
+            DYLIB_ARCH=$(lipo -archs "${DYLIB_PATH}" 2>/dev/null || echo "unknown")
+            echo "        Architecture: ${DYLIB_ARCH}"
+            
             cp "${DYLIB_PATH}" "${FRAMEWORKS_DIR}/"
             chmod 755 "${FRAMEWORKS_DIR}/${DYLIB_NAME}"
             
@@ -260,26 +274,36 @@ EOF
                 "${FRAMEWORKS_DIR}/${DYLIB_NAME}"
             
             # Fix the main binary's reference to this dylib
-            # Get the current (broken) install name from the binary
             OLD_NAME=$(otool -L "${APP_BUNDLE}/Contents/MacOS/CodeTunner" | \
                 grep "${DYLIB_NAME}" | awk '{print $1}' | head -1)
             
             if [ -n "${OLD_NAME}" ]; then
-                echo "      → Rewriting: ${OLD_NAME} → @executable_path/../Frameworks/${DYLIB_NAME}"
+                echo "        Rewriting: ${OLD_NAME}"
+                echo "              → @executable_path/../Frameworks/${DYLIB_NAME}"
                 install_name_tool -change "${OLD_NAME}" \
                     "@executable_path/../Frameworks/${DYLIB_NAME}" \
                     "${APP_BUNDLE}/Contents/MacOS/CodeTunner"
             fi
         else
-            echo "      ⚠️  ${DYLIB_NAME} not found — may be statically linked"
+            echo "      ❌ FATAL: ${DYLIB_NAME} not found at ${DYLIB_PATH}"
+            echo "         Available files in ${BUILD_ROOT}/${SOURCE_ARCH}/:"
+            ls -la "${BUILD_ROOT}/${SOURCE_ARCH}/" 2>/dev/null || echo "         (directory not found)"
+            exit 1
         fi
     done
     
-    # Verify no absolute paths remain
+    # Verify architecture and paths
     echo "   🔍 Verifying dylib references..."
+    echo "   Binary arch: $(lipo -archs "${APP_BUNDLE}/Contents/MacOS/CodeTunner" 2>/dev/null)"
+    for DYLIB_NAME in libcodetunner_embedded.dylib libmicrocode_core.dylib; do
+        if [ -f "${FRAMEWORKS_DIR}/${DYLIB_NAME}" ]; then
+            echo "   ${DYLIB_NAME} arch: $(lipo -archs "${FRAMEWORKS_DIR}/${DYLIB_NAME}" 2>/dev/null)"
+        fi
+    done
+    
     BROKEN=$(otool -L "${APP_BUNDLE}/Contents/MacOS/CodeTunner" | grep -E "/Users/|/home/" | grep -v "rpath" || true)
     if [ -n "${BROKEN}" ]; then
-        echo "   ⚠️  WARNING: Found absolute dylib paths:"
+        echo "   ❌ WARNING: Found absolute dylib paths:"
         echo "${BROKEN}"
     else
         echo "   ✅ All dylib references are relative"
