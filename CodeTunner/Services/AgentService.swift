@@ -46,19 +46,31 @@ class AgentService: ObservableObject {
         You are MicroCode Agent, a senior full-stack software engineer embedded in the MicroCode IDE.
         You help the user understand, modify, debug, and build software projects.
         
-        ## Rules
-        1. ALWAYS read a file before modifying it — never guess file contents.
-        2. Use grep_search to find relevant code before making changes.
-        3. Make minimal, targeted edits using replace_in_file — don't rewrite entire files unless asked.
-        4. Explain your reasoning before taking action.
-        5. After making changes, verify by reading the modified file.
+        ## CRITICAL RULES
+        1. You MUST take action — read files, WRITE changes, and RUN commands. Never just describe what should be done.
+        2. ALWAYS read a file before modifying it — never guess file contents.
+        3. Use grep_search to find relevant code before making changes.
+        4. Make minimal, targeted edits using replace_in_file — don't rewrite entire files unless asked.
+        5. After making changes, verify by reading the modified file or running the project.
         6. If a shell command fails, analyze the error and try to fix it.
         7. When the user asks about their project, use list_directory_tree first to understand the structure.
+        
+        ## WORKFLOW: When asked to modify code
+        Step 1: file_read — read the target file
+        Step 2: replace_in_file or file_write — make the actual changes  
+        Step 3: shell — compile/run/test to verify
+        Step 4: Report what you did
+        
+        ## WORKFLOW: When asked to run something
+        Step 1: shell — execute the command
+        Step 2: If it fails, read relevant files and fix the issue
+        Step 3: shell — re-run to verify
         
         ## Style
         - Be concise and direct. No filler.
         - Show code changes clearly.
         - When uncertain, ask the user before proceeding.
+        - ALWAYS follow through with actual tool calls. Reading is only the first step.
         """
         
         // Inject editor context
@@ -223,7 +235,9 @@ class AgentService: ObservableObject {
             // If no tool calls, we're done
             if receivedToolCalls.isEmpty { break }
             
-            // Execute tool calls
+            // Execute ALL tool calls in this batch
+            var batchResults: [(name: String, output: String, success: Bool)] = []
+            
             for toolCall in receivedToolCalls {
                 currentToolExecution = "Running \(toolCall.name)..."
                 
@@ -237,6 +251,8 @@ class AgentService: ObservableObject {
                         output: output,
                         error: nil
                     ))
+                    
+                    batchResults.append((name: toolCall.name, output: output, success: true))
                     
                     // Track file changes
                     if toolCall.name == "file_write" || toolCall.name == "replace_in_file" {
@@ -252,10 +268,6 @@ class AgentService: ObservableObject {
                         }
                     }
                     
-                    // Add tool result to history for next iteration
-                    history.append((role: "assistant", content: streamedText))
-                    history.append((role: "user", content: "[Tool Result: \(toolCall.name)]\n\(output)"))
-                    
                 } catch {
                     allToolResults.append(ToolResultModel(
                         toolCallId: toolCall.id,
@@ -265,12 +277,29 @@ class AgentService: ObservableObject {
                         error: error.localizedDescription
                     ))
                     
-                    history.append((role: "assistant", content: streamedText))
-                    history.append((role: "user", content: "[Tool Error: \(toolCall.name)] \(error.localizedDescription)"))
+                    batchResults.append((name: toolCall.name, output: error.localizedDescription, success: false))
                 }
                 
                 currentToolExecution = nil
             }
+            
+            // Add assistant message ONCE per iteration (not per tool call)
+            history.append((role: "assistant", content: streamedText))
+            
+            // Aggregate all tool results into ONE follow-up message
+            let resultsText = batchResults.map { r in
+                r.success
+                    ? "✅ \(r.name) completed:\n\(r.output)"
+                    : "❌ \(r.name) failed: \(r.output)"
+            }.joined(separator: "\n\n---\n\n")
+            
+            history.append((role: "user", content: """
+            Tool execution results:
+            
+            \(resultsText)
+            
+            Now continue with the task. If you have read the files, proceed to make the requested changes using file_write or replace_in_file, then run any commands using shell. Do NOT just describe what to do — actually do it.
+            """))
         }
         
         // Finalize the assistant message
