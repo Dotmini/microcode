@@ -81,9 +81,11 @@ class AgentService: ObservableObject {
             prompt += "\n\nWorkspace root: \(root)"
         }
         
-        // Inject semantic context from AuthenticLanguageCore
-        if let smartContext = AuthenticLanguageCore.shared().aiContext() {
-            prompt += "\n\n## Semantic Context\n\(smartContext.llmContextDescription())"
+        // Inject semantic context from AuthenticLanguageCore (safely)
+        if let smartContext = try? AuthenticLanguageCore.shared()?.aiContext() {
+            if let desc = smartContext.llmContextDescription() {
+                prompt += "\n\n## Semantic Context\n\(desc)"
+            }
         }
         
         // Inject relevant memories
