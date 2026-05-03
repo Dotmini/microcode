@@ -17,7 +17,13 @@ let package = Package(
             name: "CodeTunnerSupport",
             dependencies: [],
             path: "CodeTunnerSupport",
-            publicHeadersPath: "include"
+            publicHeadersPath: "include",
+            cSettings: [
+                .unsafeFlags(["-fobjc-arc"])
+            ],
+            cxxSettings: [
+                .unsafeFlags(["-std=c++17", "-fobjc-arc"])
+            ]
         ),
         .target(
             name: "CodeTunnerKernel",
