@@ -236,17 +236,19 @@ struct AuthenticEditor: NSViewRepresentable {
             if let regex = try? NSRegularExpression(pattern: hexPattern, options: []) {
                 regex.enumerateMatches(in: string, options: [], range: safeRange) { match, _, _ in
                     guard let matchRange = match?.range else { return }
-                    let hexString = (string as NSString).substring(with: matchRange)
+                    let nsString = string as NSString
+                    let hexString = nsString.substring(with: matchRange)
                     
-                    if let color = NSColor(hexString: hexString) {
-                        textStorage.addAttribute(.backgroundColor, value: color, range: matchRange)
-                        
-                        if let componentColor = color.usingColorSpace(.genericRGB) {
-                             let brightness = ((componentColor.redComponent * 299) + (componentColor.greenComponent * 587) + (componentColor.blueComponent * 114)) / 1000
-                             let textColor = (brightness > 0.5) ? NSColor.black : NSColor.white
-                             textStorage.addAttribute(.foregroundColor, value: textColor, range: matchRange)
-                        }
-                    }
+                    guard let color = NSColor(hexString: hexString) else { return }
+                    textStorage.addAttribute(.backgroundColor, value: color, range: matchRange)
+                    
+                    guard let rgb = color.usingColorSpace(.genericRGB) else { return }
+                    let r: CGFloat = rgb.redComponent
+                    let g: CGFloat = rgb.greenComponent
+                    let b: CGFloat = rgb.blueComponent
+                    let brightness: CGFloat = ((r * 299) + (g * 587) + (b * 114)) / 1000
+                    let textColor: NSColor = (brightness > 0.5) ? NSColor.black : NSColor.white
+                    textStorage.addAttribute(.foregroundColor, value: textColor, range: matchRange)
                 }
             }
         }
