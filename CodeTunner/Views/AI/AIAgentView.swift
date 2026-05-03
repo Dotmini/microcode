@@ -22,7 +22,9 @@ struct AIAgentView: View {
     @State private var attachments: [AIAttachment] = []
     @State private var isHoveringInput = false
     @State private var isPaperMode = false  // A4 Paper reading mode
+    @State private var isCellMode = false   // Cell Mode (notebook-style)
     @State private var currentPaperPage = 0
+    @State private var showModelPicker = false
     @FocusState private var isInputFocused: Bool
     
     // Aesthetic Constants
@@ -53,6 +55,10 @@ struct AIAgentView: View {
                         messages: agent.messages,
                         currentPage: $currentPaperPage
                     )
+                } else if isCellMode {
+                    // Cell Mode (Notebook-style AI Agent)
+                    AgentCellModeView()
+                        .environmentObject(appState)
                 } else {
                     // Normal Chat Mode
                     ZStack(alignment: .bottom) {
@@ -200,12 +206,12 @@ struct AIAgentView: View {
                     .frame(height: 14)
                     .padding(.horizontal, 4)
                 
-                // Paper Mode Toggle (Slide Button Redesign)
+                // Paper Mode Toggle
                 Toggle(isOn: $isPaperMode.animation(.easeInOut(duration: 0.2))) {
                     HStack(spacing: 6) {
                         Image(systemName: isPaperMode ? "doc.text.fill" : "doc.text")
                             .font(.system(size: 11))
-                        Text(isPaperMode ? "Report Mode" : "Chat Mode")
+                        Text(isPaperMode ? "Report" : "Chat")
                             .font(.system(size: 11, weight: .medium))
                     }
                 }
@@ -213,7 +219,33 @@ struct AIAgentView: View {
                 .buttonStyle(.plain)
                 .padding(.vertical, 4)
                 .tint(Color.accentColor)
-                .help("Toggle between Chat and Report (Paper) Mode")
+                .help("Toggle Report (Paper) Mode")
+                
+                Divider()
+                    .frame(height: 14)
+                    .padding(.horizontal, 4)
+                
+                // Cell Mode Toggle
+                Toggle(isOn: $isCellMode.animation(.easeInOut(duration: 0.2))) {
+                    HStack(spacing: 6) {
+                        Image(systemName: isCellMode ? "rectangle.grid.1x2.fill" : "rectangle.grid.1x2")
+                            .font(.system(size: 11))
+                        Text("Cells")
+                            .font(.system(size: 11, weight: .medium))
+                    }
+                }
+                .toggleStyle(.button)
+                .buttonStyle(.plain)
+                .padding(.vertical, 4)
+                .tint(Color.purple)
+                .help("Cell Mode — Notebook-style AI Agent")
+                
+                Divider()
+                    .frame(height: 14)
+                    .padding(.horizontal, 4)
+                
+                // Model Selector
+                modelSelector
                 
                 Divider()
                     .frame(height: 14)
@@ -552,6 +584,536 @@ struct AIAgentView: View {
                 break
             }
         }
+    }
+    
+    // MARK: - Model Selector
+    
+    private var modelSelector: some View {
+        Menu {
+            modelMenuContent
+        } label: {
+            HStack(spacing: 4) {
+                Image(systemName: "cpu")
+                    .font(.system(size: 10))
+                Text(appState.aiModel.isEmpty ? "Auto" : shortModelName(appState.aiModel))
+                    .font(.system(size: 10, weight: .medium))
+                    .lineLimit(1)
+                Image(systemName: "chevron.down")
+                    .font(.system(size: 7))
+            }
+            .foregroundColor(.secondary)
+            .padding(.horizontal, 8)
+            .padding(.vertical, 4)
+            .background(Color.white.opacity(0.05))
+            .cornerRadius(4)
+        }
+        .menuStyle(.borderlessButton)
+        .fixedSize()
+        .help("Select AI Model")
+    }
+    
+    @ViewBuilder
+    private var modelMenuContent: some View {
+        // Cloud Providers
+        Text("☁️ Cloud Models").font(.caption2).foregroundColor(.secondary)
+        
+        Menu("Gemini") {
+            Button("gemini-2.5-flash") { setModel("gemini", "gemini-2.5-flash") }
+            Button("gemini-2.5-pro") { setModel("gemini", "gemini-2.5-pro") }
+            Button("gemini-2.0-flash") { setModel("gemini", "gemini-2.0-flash") }
+        }
+        Menu("OpenAI") {
+            Button("gpt-4o") { setModel("openai", "gpt-4o") }
+            Button("gpt-4o-mini") { setModel("openai", "gpt-4o-mini") }
+            Button("o3-mini") { setModel("openai", "o3-mini") }
+        }
+        Menu("Anthropic") {
+            Button("claude-sonnet-4-20250514") { setModel("anthropic", "claude-sonnet-4-20250514") }
+            Button("claude-3-5-haiku-latest") { setModel("anthropic", "claude-3-5-haiku-latest") }
+        }
+        Menu("DeepSeek") {
+            Button("deepseek-chat") { setModel("deepseek", "deepseek-chat") }
+            Button("deepseek-reasoner") { setModel("deepseek", "deepseek-reasoner") }
+        }
+        Menu("Other") {
+            Button("grok-3") { setModel("grok", "grok-3") }
+            Button("qwen-max") { setModel("qwen", "qwen-max") }
+            Button("glm-4-plus") { setModel("glm", "glm-4-plus") }
+        }
+        
+        Divider()
+        
+        // Local LLM
+        Text("🖥️ Local Models").font(.caption2).foregroundColor(.secondary)
+        
+        let localModels = LocalLLMService.shared.availableModels
+        if localModels.isEmpty {
+            Button("Scan for Local Models...") {
+                Task { await LocalLLMService.shared.scanForServers() }
+            }
+        } else {
+            ForEach(localModels) { model in
+                Button(model.displayName) {
+                    setModel("local", model.id)
+                }
+            }
+            Divider()
+            Button("🔄 Rescan") {
+                Task { await LocalLLMService.shared.scanForServers() }
+            }
+        }
+    }
+    
+    private func setModel(_ provider: String, _ model: String) {
+        appState.aiProvider = provider
+        appState.aiModel = model
+    }
+    
+    private func shortModelName(_ model: String) -> String {
+        // Shorten long model names for the header
+        let parts = model.split(separator: "-")
+        if parts.count > 2 {
+            return parts.prefix(2).joined(separator: "-")
+        }
+        return model
+    }
+}
+
+// MARK: - Agent Cell Mode View
+
+struct AgentCellModeView: View {
+    @EnvironmentObject var appState: AppState
+    @StateObject private var agent = AgentService.shared
+    @State private var cells: [AgentCell] = [AgentCell(type: .code)]
+    @State private var focusedCellId: UUID? = nil
+    
+    var body: some View {
+        VStack(spacing: 0) {
+            // Context Bar
+            cellContextBar
+            
+            Divider()
+            
+            // Cells
+            ScrollViewReader { proxy in
+                ScrollView {
+                    LazyVStack(spacing: 0) {
+                        ForEach($cells) { $cell in
+                            AgentCellRow(
+                                cell: $cell,
+                                isFocused: focusedCellId == cell.id,
+                                onFocus: { focusedCellId = cell.id },
+                                onRun: { runCell(cell) },
+                                onDelete: { deleteCell(cell.id) },
+                                onInsertBelow: { insertCell(below: cell.id) },
+                                appState: appState
+                            )
+                            .id(cell.id)
+                        }
+                        
+                        // Add Cell Button
+                        addCellButton
+                    }
+                    .padding(.bottom, 100)
+                }
+                .onChange(of: cells.count) { _ in
+                    if let lastId = cells.last?.id {
+                        withAnimation { proxy.scrollTo(lastId, anchor: .bottom) }
+                    }
+                }
+            }
+        }
+    }
+    
+    // MARK: - Context Bar
+    
+    private var cellContextBar: some View {
+        HStack(spacing: 8) {
+            Image(systemName: "rectangle.grid.1x2.fill")
+                .font(.system(size: 10))
+                .foregroundColor(.purple)
+            
+            Text("CELL MODE")
+                .font(.system(size: 9, weight: .bold))
+                .foregroundColor(.secondary)
+                .tracking(0.5)
+            
+            Divider().frame(height: 12)
+            
+            // Workspace context
+            if let workspace = appState.workspaceFolder {
+                HStack(spacing: 4) {
+                    Image(systemName: "folder.fill")
+                        .font(.system(size: 9))
+                    Text(workspace.lastPathComponent)
+                        .font(.system(size: 10))
+                }
+                .foregroundColor(.secondary)
+            }
+            
+            // Current file context
+            if let file = appState.currentFile {
+                HStack(spacing: 4) {
+                    Image(systemName: "doc.text.fill")
+                        .font(.system(size: 9))
+                    Text(file.name)
+                        .font(.system(size: 10))
+                }
+                .foregroundColor(.accentColor.opacity(0.8))
+            }
+            
+            Spacer()
+            
+            // Model indicator
+            HStack(spacing: 4) {
+                Circle()
+                    .fill(appState.aiProvider == "local" ? Color.green : Color.accentColor)
+                    .frame(width: 6, height: 6)
+                Text(appState.aiModel.isEmpty ? "Auto" : appState.aiModel)
+                    .font(.system(size: 9))
+                    .foregroundColor(.secondary)
+            }
+            
+            Text("\(cells.count) cells")
+                .font(.system(size: 9))
+                .foregroundColor(.secondary)
+                .padding(.horizontal, 6)
+                .padding(.vertical, 2)
+                .background(Color.white.opacity(0.05))
+                .cornerRadius(3)
+        }
+        .padding(.horizontal, 12)
+        .padding(.vertical, 6)
+        .background(Color(nsColor: .controlBackgroundColor).opacity(0.6))
+    }
+    
+    // MARK: - Add Cell
+    
+    private var addCellButton: some View {
+        HStack {
+            Button(action: { cells.append(AgentCell(type: .code)) }) {
+                HStack(spacing: 6) {
+                    Image(systemName: "plus.circle.fill")
+                    Text("Code")
+                }
+                .font(.system(size: 11))
+                .foregroundColor(.secondary)
+            }
+            .buttonStyle(.plain)
+            
+            Button(action: { cells.append(AgentCell(type: .markdown)) }) {
+                HStack(spacing: 6) {
+                    Image(systemName: "plus.circle")
+                    Text("Markdown")
+                }
+                .font(.system(size: 11))
+                .foregroundColor(.secondary)
+            }
+            .buttonStyle(.plain)
+            
+            Button(action: { cells.append(AgentCell(type: .ai)) }) {
+                HStack(spacing: 6) {
+                    Image(systemName: "plus.circle")
+                    Text("AI Prompt")
+                }
+                .font(.system(size: 11))
+                .foregroundColor(.purple.opacity(0.8))
+            }
+            .buttonStyle(.plain)
+        }
+        .padding(.vertical, 12)
+        .frame(maxWidth: .infinity)
+    }
+    
+    // MARK: - Cell Actions
+    
+    private func runCell(_ cell: AgentCell) {
+        guard let idx = cells.firstIndex(where: { $0.id == cell.id }) else { return }
+        
+        cells[idx].isRunning = true
+        cells[idx].output = ""
+        
+        let providerString = appState.aiProvider
+        let model = appState.aiModel.isEmpty ? (StreamableAIProvider(rawValue: providerString) ?? .gemini).defaultModel : appState.aiModel
+        let apiKey = appState.apiKeys[providerString] ?? ""
+        let provider: StreamableAIProvider = StreamableAIProvider(rawValue: providerString) ?? .gemini
+        
+        // Build context from workspace + current file + previous cells
+        var context = ""
+        if let file = appState.currentFile {
+            context += "Current file: \(file.name) (\(file.language))\n```\(file.language)\n\(file.content.prefix(3000))\n```\n\n"
+        }
+        
+        // Gather previous cell outputs as context
+        for prevCell in cells where prevCell.id != cell.id {
+            if !prevCell.input.isEmpty {
+                let label = prevCell.type == .ai ? "AI Prompt" : prevCell.type == .code ? "Code" : "Note"
+                context += "[\(label)]: \(prevCell.input.prefix(500))\n"
+                if !prevCell.output.isEmpty {
+                    context += "[Output]: \(prevCell.output.prefix(500))\n"
+                }
+            }
+        }
+        
+        let systemPrompt: String
+        let userPrompt: String
+        
+        switch cell.type {
+        case .ai:
+            systemPrompt = "You are MicroCode AI. You have context from the user's workspace. Respond concisely and accurately. Use code blocks for code."
+            userPrompt = context + "\nUser request: " + cell.input
+        case .code:
+            systemPrompt = "You are a code execution assistant. Analyze the code, explain what it does, and provide the expected output. If there are errors, explain them."
+            userPrompt = context + "\nAnalyze and run this code:\n```\n\(cell.input)\n```"
+        case .markdown:
+            // Markdown cells don't need AI - just render
+            cells[idx].isRunning = false
+            cells[idx].output = cell.input
+            return
+        }
+        
+        let cellId = cell.id
+        AIClient.shared.sendMessage(
+            prompt: userPrompt,
+            systemPrompt: systemPrompt,
+            conversationHistory: [],
+            provider: provider,
+            model: model,
+            apiKey: apiKey,
+            onToken: { token in
+                if let i = self.cells.firstIndex(where: { $0.id == cellId }) {
+                    self.cells[i].output += token
+                }
+            },
+            onComplete: { _ in
+                if let i = self.cells.firstIndex(where: { $0.id == cellId }) {
+                    self.cells[i].isRunning = false
+                }
+            },
+            onError: { error in
+                if let i = self.cells.firstIndex(where: { $0.id == cellId }) {
+                    self.cells[i].output = "❌ Error: \(error)"
+                    self.cells[i].isRunning = false
+                }
+            }
+        )
+    }
+    
+    private func deleteCell(_ id: UUID) {
+        cells.removeAll { $0.id == id }
+        if cells.isEmpty {
+            cells.append(AgentCell(type: .code))
+        }
+    }
+    
+    private func insertCell(below id: UUID) {
+        if let idx = cells.firstIndex(where: { $0.id == id }) {
+            cells.insert(AgentCell(type: .code), at: idx + 1)
+        }
+    }
+}
+
+// MARK: - Agent Cell Model
+
+struct AgentCell: Identifiable {
+    let id = UUID()
+    var type: CellType
+    var input: String = ""
+    var output: String = ""
+    var isRunning: Bool = false
+    var language: String = "swift"
+    
+    enum CellType: String {
+        case code = "code"
+        case markdown = "markdown"
+        case ai = "ai"
+        
+        var icon: String {
+            switch self {
+            case .code: return "chevron.left.forwardslash.chevron.right"
+            case .markdown: return "doc.richtext"
+            case .ai: return "sparkles"
+            }
+        }
+        
+        var color: Color {
+            switch self {
+            case .code: return .blue
+            case .markdown: return .orange
+            case .ai: return .purple
+            }
+        }
+        
+        var label: String {
+            switch self {
+            case .code: return "Code"
+            case .markdown: return "Markdown"
+            case .ai: return "AI"
+            }
+        }
+    }
+}
+
+// MARK: - Agent Cell Row
+
+struct AgentCellRow: View {
+    @Binding var cell: AgentCell
+    let isFocused: Bool
+    let onFocus: () -> Void
+    let onRun: () -> Void
+    let onDelete: () -> Void
+    let onInsertBelow: () -> Void
+    let appState: AppState
+    @State private var isHovering = false
+    
+    var body: some View {
+        VStack(spacing: 0) {
+            // Cell Header
+            cellHeader
+            
+            // Input Area
+            cellInput
+            
+            // Output Area
+            if !cell.output.isEmpty || cell.isRunning {
+                cellOutput
+            }
+            
+            // Bottom Divider
+            Rectangle()
+                .fill(Color.white.opacity(0.05))
+                .frame(height: 1)
+        }
+        .background(isFocused ? Color.accentColor.opacity(0.03) : Color.clear)
+        .contentShape(Rectangle())
+        .onTapGesture(perform: onFocus)
+        .onHover { isHovering = $0 }
+    }
+    
+    private var cellHeader: some View {
+        HStack(spacing: 6) {
+            // Cell Type Badge
+            HStack(spacing: 4) {
+                Image(systemName: cell.type.icon)
+                    .font(.system(size: 9))
+                Text(cell.type.label)
+                    .font(.system(size: 9, weight: .bold))
+            }
+            .foregroundColor(cell.type.color)
+            .padding(.horizontal, 6)
+            .padding(.vertical, 2)
+            .background(cell.type.color.opacity(0.1))
+            .cornerRadius(3)
+            
+            // Language selector for code cells
+            if cell.type == .code {
+                Menu {
+                    ForEach(["swift", "python", "javascript", "typescript", "rust", "go", "bash", "sql"], id: \.self) { lang in
+                        Button(lang) { cell.language = lang }
+                    }
+                } label: {
+                    Text(cell.language)
+                        .font(.system(size: 9))
+                        .foregroundColor(.secondary)
+                        .padding(.horizontal, 4)
+                        .padding(.vertical, 1)
+                        .background(Color.white.opacity(0.05))
+                        .cornerRadius(2)
+                }
+                .menuStyle(.borderlessButton)
+                .fixedSize()
+            }
+            
+            Spacer()
+            
+            // Actions (show on hover)
+            if isHovering || isFocused {
+                HStack(spacing: 2) {
+                    // Run Button
+                    Button(action: onRun) {
+                        Image(systemName: cell.isRunning ? "stop.fill" : "play.fill")
+                            .font(.system(size: 10))
+                            .foregroundColor(cell.isRunning ? .red : .green)
+                    }
+                    .buttonStyle(.plain)
+                    .help("Run Cell")
+                    
+                    // Insert Below
+                    Button(action: onInsertBelow) {
+                        Image(systemName: "plus")
+                            .font(.system(size: 10))
+                            .foregroundColor(.secondary)
+                    }
+                    .buttonStyle(.plain)
+                    .help("Insert Cell Below")
+                    
+                    // Delete
+                    Button(action: onDelete) {
+                        Image(systemName: "trash")
+                            .font(.system(size: 10))
+                            .foregroundColor(.secondary)
+                    }
+                    .buttonStyle(.plain)
+                    .help("Delete Cell")
+                }
+            }
+        }
+        .padding(.horizontal, 12)
+        .padding(.vertical, 4)
+        .background(Color(nsColor: .controlBackgroundColor).opacity(0.3))
+    }
+    
+    private var cellInput: some View {
+        TextEditor(text: $cell.input)
+            .font(.system(size: 12, design: cell.type == .code ? .monospaced : .default))
+            .scrollContentBackground(.hidden)
+            .background(Color.clear)
+            .frame(minHeight: 44, maxHeight: 300)
+            .fixedSize(horizontal: false, vertical: true)
+            .padding(.horizontal, 12)
+            .padding(.vertical, 6)
+    }
+    
+    @ViewBuilder
+    private var cellOutput: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            // Output Header
+            HStack(spacing: 4) {
+                Image(systemName: cell.isRunning ? "circle.dotted" : "checkmark.circle.fill")
+                    .font(.system(size: 9))
+                    .foregroundColor(cell.isRunning ? .orange : .green)
+                Text(cell.isRunning ? "Running..." : "Output")
+                    .font(.system(size: 9, weight: .medium))
+                    .foregroundColor(.secondary)
+                Spacer()
+            }
+            .padding(.horizontal, 12)
+            .padding(.vertical, 3)
+            .background(Color.green.opacity(0.03))
+            
+            // Output Content
+            if cell.isRunning && cell.output.isEmpty {
+                HStack(spacing: 8) {
+                    ProgressView()
+                        .controlSize(.small)
+                    Text("Processing...")
+                        .font(.system(size: 11))
+                        .foregroundColor(.secondary)
+                }
+                .padding(12)
+            } else {
+                ScrollView {
+                    Text(cell.output)
+                        .font(.system(size: 11, design: .monospaced))
+                        .foregroundColor(.primary.opacity(0.9))
+                        .textSelection(.enabled)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .padding(12)
+                }
+                .frame(maxHeight: 300)
+            }
+        }
+        .background(Color(nsColor: .textBackgroundColor).opacity(0.3))
     }
 }
 
