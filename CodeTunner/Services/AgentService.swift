@@ -364,7 +364,16 @@ class AgentService: ObservableObject {
             
             finalText = streamedText
             
-            // If no tool calls, we're done
+            // If no native tool calls, try to parse text-based tool calls (for local LLMs)
+            if receivedToolCalls.isEmpty {
+                let parsedCalls = parseTextBasedToolCalls(streamedText)
+                if !parsedCalls.isEmpty {
+                    receivedToolCalls = parsedCalls
+                    logActivity(.info, "Parsed \(parsedCalls.count) tool call(s) from text output")
+                }
+            }
+            
+            // If still no tool calls, we're done
             if receivedToolCalls.isEmpty { break }
             
             // Execute ALL tool calls in this batch
@@ -661,6 +670,122 @@ class AgentService: ObservableObject {
             return "\(key)=\(str.prefix(50))"
         }
         return parts.joined(separator: ", ")
+    }
+    
+    // MARK: - Text-Based Tool Call Parser (for Local LLMs)
+    // Local models (Gemma, Llama, etc.) don't support native function calling.
+    // They output tool calls as text like: list_directory_tree(path:".")
+    // This parser extracts those into executable AIToolCall objects.
+    
+    private func parseTextBasedToolCalls(_ text: String) -> [AIToolCall] {
+        var calls: [AIToolCall] = []
+        let knownTools = ["file_read", "file_write", "replace_in_file", "grep_search", "list_directory_tree", "shell"]
+        
+        // Pattern 1: tool_name(key:"value", key2:"value2")
+        // Also handles <|"> tokens from some models
+        for tool in knownTools {
+            let pattern = "\(tool)\\s*\\(([^)]+)\\)"
+            guard let regex = try? NSRegularExpression(pattern: pattern, options: []) else { continue }
+            let nsText = text as NSString
+            let matches = regex.matches(in: text, range: NSRange(location: 0, length: nsText.length))
+            
+            for match in matches {
+                guard match.numberOfRanges > 1 else { continue }
+                let argsString = nsText.substring(with: match.range(at: 1))
+                let args = parseToolArgs(argsString, toolName: tool)
+                if !args.isEmpty {
+                    calls.append(AIToolCall(id: UUID().uuidString, name: tool, arguments: args))
+                }
+            }
+        }
+        
+        // Pattern 2: ```json { "name": "tool_name", "arguments": {...} } ```
+        let jsonBlockPattern = "```(?:json)?\\s*\\{[\\s\\S]*?\"name\"\\s*:\\s*\"([^\"]+)\"[\\s\\S]*?\"arguments\"\\s*:\\s*(\\{[^}]+\\})[\\s\\S]*?```"
+        if let regex = try? NSRegularExpression(pattern: jsonBlockPattern, options: []) {
+            let nsText = text as NSString
+            let matches = regex.matches(in: text, range: NSRange(location: 0, length: nsText.length))
+            for match in matches {
+                guard match.numberOfRanges > 2 else { continue }
+                let name = nsText.substring(with: match.range(at: 1))
+                let argsStr = nsText.substring(with: match.range(at: 2))
+                if knownTools.contains(name),
+                   let data = argsStr.data(using: .utf8),
+                   let args = try? JSONSerialization.jsonObject(with: data) as? [String: Any] {
+                    calls.append(AIToolCall(id: UUID().uuidString, name: name, arguments: args))
+                }
+            }
+        }
+        
+        // Pattern 3: <tool_call> JSON </tool_call>
+        let xmlPattern = "<tool_call>\\s*(\\{[\\s\\S]*?\\})\\s*</tool_call>"
+        if let regex = try? NSRegularExpression(pattern: xmlPattern, options: []) {
+            let nsText = text as NSString
+            let matches = regex.matches(in: text, range: NSRange(location: 0, length: nsText.length))
+            for match in matches {
+                guard match.numberOfRanges > 1 else { continue }
+                let jsonStr = nsText.substring(with: match.range(at: 1))
+                if let data = jsonStr.data(using: .utf8),
+                   let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+                   let name = json["name"] as? String,
+                   let args = json["arguments"] as? [String: Any],
+                   knownTools.contains(name) {
+                    calls.append(AIToolCall(id: UUID().uuidString, name: name, arguments: args))
+                }
+            }
+        }
+        
+        return calls
+    }
+    
+    private func parseToolArgs(_ argsString: String, toolName: String) -> [String: Any] {
+        var args: [String: Any] = [:]
+        
+        // Clean up token artifacts like <|"> or <|'>
+        let cleaned = argsString
+            .replacingOccurrences(of: "<|\"", with: "")
+            .replacingOccurrences(of: "\"|>", with: "")
+            .replacingOccurrences(of: "<|'>", with: "")
+            .replacingOccurrences(of: "'|>", with: "")
+            .replacingOccurrences(of: "<|", with: "")
+            .replacingOccurrences(of: "|>", with: "")
+        
+        // Parse key:value or key="value" or key:'value' pairs
+        let kvPattern = "(\\w+)\\s*[:=]\\s*(?:\"([^\"]*)\"|'([^']*)'|([^,)]+))"
+        guard let regex = try? NSRegularExpression(pattern: kvPattern, options: []) else { return args }
+        let nsStr = cleaned as NSString
+        let matches = regex.matches(in: cleaned, range: NSRange(location: 0, length: nsStr.length))
+        
+        for match in matches {
+            guard match.numberOfRanges > 1 else { continue }
+            let key = nsStr.substring(with: match.range(at: 1)).trimmingCharacters(in: .whitespaces)
+            var value = ""
+            for i in 2...min(4, match.numberOfRanges - 1) {
+                let range = match.range(at: i)
+                if range.location != NSNotFound {
+                    value = nsStr.substring(with: range).trimmingCharacters(in: .whitespaces)
+                    break
+                }
+            }
+            if !key.isEmpty && !value.isEmpty {
+                args[key] = value
+            }
+        }
+        
+        // For simple single-arg tools, infer the key
+        if args.isEmpty {
+            let trimmed = cleaned.trimmingCharacters(in: .whitespacesAndNewlines)
+                .trimmingCharacters(in: CharacterSet(charactersIn: "\"'"))
+            if !trimmed.isEmpty {
+                switch toolName {
+                case "file_read", "list_directory_tree": args["path"] = trimmed
+                case "grep_search": args["pattern"] = trimmed
+                case "shell": args["command"] = trimmed
+                default: break
+                }
+            }
+        }
+        
+        return args
     }
 }
 
