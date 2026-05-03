@@ -1338,12 +1338,14 @@ class AppState: ObservableObject {
         
         let components = cleanUrl.split(separator: "/")
         if components.count >= 2 {
-            let repoName = String(components.last!)
+            guard let lastComponent = components.last else { return }
+            let repoName = String(lastComponent)
             var ownerName = String(components[components.count - 2])
             
             // Handle SSH colon separation (git@github.com:owner)
             if ownerName.contains(":") {
-                ownerName = String(ownerName.split(separator: ":").last!)
+                guard let lastPart = ownerName.split(separator: ":").last else { return }
+                ownerName = String(lastPart)
             }
             
             print("🔍 Detected Git Remote: \(ownerName)/\(repoName)")

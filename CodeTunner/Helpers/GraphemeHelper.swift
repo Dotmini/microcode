@@ -156,7 +156,7 @@ extension String {
         guard let firstChar = self.first else { return false }
         
         // Check unicode properties
-        let scalar = firstChar.unicodeScalars.first!
+        guard let scalar = firstChar.unicodeScalars.first else { return false }
         
         // Arabic: 0x0600-0x06FF, 0x0750-0x077F, 0x08A0-0x08FF
         // Hebrew: 0x0590-0x05FF
