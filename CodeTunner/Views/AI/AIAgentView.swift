@@ -82,8 +82,8 @@ struct AIAgentView: View {
                             }
                         }
                         
-                        // Activity Log (collapsible footer)
-                        if !agent.activityLog.isEmpty && agent.isLoading {
+                        // Activity Log (always visible when active)
+                        if !agent.activityLog.isEmpty {
                             activityLogStrip
                         }
                     }
@@ -2173,15 +2173,20 @@ private struct PendingChangeCard: View {
     let change: PendingChangeModel
     var onApply: ((PendingChangeModel) -> Void)?
     var onReject: ((PendingChangeModel) -> Void)?
+    @State private var showDiff = false
     
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
-            changeHeader
+            changeCardHeader
             Divider()
-            changeDiffPreview
+            if showDiff {
+                codeDiffSection
+            } else {
+                changeSummaryRow
+            }
             Divider()
             if change.status == .pending {
-                changeActions
+                changeCardActions
             }
         }
         .background(Color.primary.opacity(0.02))
@@ -2189,7 +2194,7 @@ private struct PendingChangeCard: View {
         .overlay(RoundedRectangle(cornerRadius: 8).stroke(Color.primary.opacity(0.1), lineWidth: 1))
     }
     
-    private var changeHeader: some View {
+    private var changeCardHeader: some View {
         HStack {
             Image(systemName: change.status == .accepted ? "checkmark.circle.fill" : change.status == .rejected ? "xmark.circle.fill" : "pencil.circle.fill")
                 .foregroundColor(change.status == .accepted ? .green : change.status == .rejected ? .red : .blue)
@@ -2198,38 +2203,121 @@ private struct PendingChangeCard: View {
             
             Spacer()
             
-            changeStatusLabel
+            // Diff stats
+            HStack(spacing: 4) {
+                Text("+\(change.additions)")
+                    .foregroundColor(.green)
+                Text("-\(change.deletions)")
+                    .foregroundColor(.red)
+            }
+            .font(.system(size: 10, weight: .bold, design: .monospaced))
+            
+            // Toggle diff
+            Button(action: { showDiff.toggle() }) {
+                HStack(spacing: 3) {
+                    Image(systemName: showDiff ? "chevron.up" : "chevron.down")
+                        .font(.system(size: 8))
+                    Text(showDiff ? "Hide" : "Diff")
+                        .font(.system(size: 9))
+                }
+                .foregroundColor(.accentColor)
+                .padding(.horizontal, 6)
+                .padding(.vertical, 2)
+                .background(Color.accentColor.opacity(0.1))
+                .cornerRadius(3)
+            }
+            .buttonStyle(.plain)
+            
+            changeCardStatusLabel
         }
         .padding(8)
         .background(Color.primary.opacity(0.05))
     }
     
     @ViewBuilder
-    private var changeStatusLabel: some View {
+    private var changeCardStatusLabel: some View {
         if change.status == .accepted {
-            Text("Applied ✓")
-                .font(.caption2)
-                .foregroundColor(.green)
+            Text("Applied ✓").font(.caption2).foregroundColor(.green)
         } else if change.status == .rejected {
-            Text("Rejected")
-                .font(.caption2)
-                .foregroundColor(.red)
-        } else {
-            Text("+\(change.additions) -\(change.deletions)")
-                .font(.caption2)
-                .foregroundColor(.secondary)
+            Text("Rejected").font(.caption2).foregroundColor(.red)
         }
     }
     
-    private var changeDiffPreview: some View {
-        Text(change.newContent)
-            .font(.system(size: 11, design: .monospaced))
-            .lineLimit(10)
-            .padding(8)
-            .frame(maxWidth: .infinity, alignment: .leading)
+    private var changeSummaryRow: some View {
+        HStack(spacing: 6) {
+            Image(systemName: "doc.text").font(.system(size: 10)).foregroundColor(.secondary)
+            Text(change.description).font(.system(size: 10)).foregroundColor(.secondary)
+            Spacer()
+        }
+        .padding(8)
     }
     
-    private var changeActions: some View {
+    // MARK: - Code Diff
+    
+    private var codeDiffSection: some View {
+        ScrollView {
+            VStack(alignment: .leading, spacing: 0) {
+                let lines = buildDiffLines()
+                ForEach(Array(lines.enumerated()), id: \.offset) { _, line in
+                    HStack(spacing: 0) {
+                        Text(line.num)
+                            .font(.system(size: 9, design: .monospaced))
+                            .foregroundColor(.secondary.opacity(0.4))
+                            .frame(width: 28, alignment: .trailing)
+                            .padding(.trailing, 4)
+                        Text(line.prefix)
+                            .font(.system(size: 10, weight: .bold, design: .monospaced))
+                            .foregroundColor(line.clr)
+                            .frame(width: 14, alignment: .center)
+                        Text(line.text)
+                            .font(.system(size: 10, design: .monospaced))
+                            .foregroundColor(line.clr.opacity(0.9))
+                            .lineLimit(1)
+                    }
+                    .padding(.horizontal, 4)
+                    .padding(.vertical, 1)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .background(line.bg)
+                }
+            }
+        }
+        .frame(maxHeight: 250)
+        .background(Color(nsColor: .textBackgroundColor).opacity(0.5))
+    }
+    
+    private struct DiffRow {
+        let num: String; let prefix: String; let text: String; let clr: Color; let bg: Color
+    }
+    
+    private func buildDiffLines() -> [DiffRow] {
+        let oldL = change.oldContent.components(separatedBy: "\n")
+        let newL = change.newContent.components(separatedBy: "\n")
+        var res: [DiffRow] = []
+        var oi = 0; var ni = 0
+        while oi < oldL.count || ni < newL.count {
+            if oi < oldL.count && ni < newL.count {
+                if oldL[oi] == newL[ni] {
+                    res.append(DiffRow(num: "\(ni+1)", prefix: " ", text: newL[ni], clr: .primary.opacity(0.6), bg: .clear))
+                    oi += 1; ni += 1
+                } else {
+                    res.append(DiffRow(num: "-", prefix: "-", text: oldL[oi], clr: .red, bg: Color.red.opacity(0.08)))
+                    oi += 1
+                    res.append(DiffRow(num: "\(ni+1)", prefix: "+", text: newL[ni], clr: .green, bg: Color.green.opacity(0.08)))
+                    ni += 1
+                }
+            } else if oi < oldL.count {
+                res.append(DiffRow(num: "-", prefix: "-", text: oldL[oi], clr: .red, bg: Color.red.opacity(0.08)))
+                oi += 1
+            } else {
+                res.append(DiffRow(num: "\(ni+1)", prefix: "+", text: newL[ni], clr: .green, bg: Color.green.opacity(0.08)))
+                ni += 1
+            }
+            if res.count > 100 { break }
+        }
+        return res
+    }
+    
+    private var changeCardActions: some View {
         HStack {
             Button(action: { onApply?(change) }) {
                 Label("Apply", systemImage: "checkmark")
