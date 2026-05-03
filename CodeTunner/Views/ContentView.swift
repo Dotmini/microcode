@@ -3507,6 +3507,11 @@ struct SettingsView: View {
                               ("GLM‑4 Plus", "glm-4-plus", ""),
                               ("GLM‑4 Flash", "glm-4-flash", "FAST"),
                           ]),
+            AIProviderInfo(id: "local", name: "Local LLM", icon: "desktopcomputer", color: .mint,
+                          endpoint: LocalLLMService.shared.activeEndpoint,
+                          models: LocalLLMService.shared.availableModels.map {
+                              (name: $0.displayName, id: $0.id, badge: $0.size ?? "")
+                          } + [("Auto-detect", "local-model", "SCAN")]),
         ]
     }
     
@@ -3579,7 +3584,29 @@ struct SettingsView: View {
                 }
                 
                 // Status pill
-                if let key = providerKeys[selectedProvider], !key.isEmpty {
+                if selectedProvider == "local" {
+                    if let server = LocalLLMService.shared.activeServer, server.isOnline {
+                        HStack(spacing: 6) {
+                            Circle().fill(Color.green).frame(width: 7, height: 7)
+                            Text("Connected to \(server.type.rawValue)")
+                                .font(.system(size: 11, weight: .medium))
+                                .foregroundColor(.green)
+                        }
+                        .padding(.horizontal, 10).padding(.vertical, 5)
+                        .background(Color.green.opacity(0.08))
+                        .cornerRadius(6)
+                    } else {
+                        HStack(spacing: 6) {
+                            Circle().fill(Color.orange).frame(width: 7, height: 7)
+                            Text("No local server detected — click Scan below")
+                                .font(.system(size: 11, weight: .medium))
+                                .foregroundColor(.orange)
+                        }
+                        .padding(.horizontal, 10).padding(.vertical, 5)
+                        .background(Color.orange.opacity(0.08))
+                        .cornerRadius(6)
+                    }
+                } else if let key = providerKeys[selectedProvider], !key.isEmpty {
                     HStack(spacing: 6) {
                         Circle().fill(Color.green).frame(width: 7, height: 7)
                         Text("API key configured")
@@ -3622,15 +3649,195 @@ struct SettingsView: View {
                         .foregroundColor(.secondary)
                 }
                 
-                // Provider cards grid
-                ForEach(aiProviders, id: \.id) { provider in
+                // Provider cards grid (exclude local — it has its own panel)
+                ForEach(aiProviders.filter { $0.id != "local" }, id: \.id) { provider in
                     aiProviderKeyCard(provider)
                 }
             }
             .padding(16)
             .background(Color(nsColor: .controlBackgroundColor))
             .cornerRadius(12)
+            
+            // ── Local LLM Section ──
+            localLLMSettingsPanel
         }
+    }
+    
+    @ObservedObject private var localLLM = LocalLLMService.shared
+    
+    private var localLLMSettingsPanel: some View {
+        VStack(alignment: .leading, spacing: 14) {
+            HStack(spacing: 8) {
+                Image(systemName: "desktopcomputer")
+                    .font(.system(size: 12))
+                    .foregroundColor(.mint)
+                Text("Local LLM")
+                    .font(.system(size: 13, weight: .bold))
+                
+                Spacer()
+                
+                // Scan button
+                Button(action: {
+                    Task { await localLLM.scanForServers() }
+                }) {
+                    HStack(spacing: 4) {
+                        if localLLM.isScanning {
+                            ProgressView()
+                                .scaleEffect(0.5)
+                                .frame(width: 12, height: 12)
+                        } else {
+                            Image(systemName: "antenna.radiowaves.left.and.right")
+                                .font(.system(size: 11))
+                        }
+                        Text(localLLM.isScanning ? "Scanning..." : "Scan Network")
+                            .font(.system(size: 11, weight: .medium))
+                    }
+                }
+                .buttonStyle(.borderedProminent)
+                .tint(.mint)
+                .disabled(localLLM.isScanning)
+            }
+            
+            Text("Auto-detect LM Studio, Ollama, Text Gen WebUI, and LocalAI servers on your machine. No API key needed.")
+                .font(.system(size: 11))
+                .foregroundColor(.secondary)
+            
+            // Detected servers
+            if localLLM.detectedServers.isEmpty {
+                HStack(spacing: 12) {
+                    Image(systemName: "magnifyingglass")
+                        .font(.system(size: 24))
+                        .foregroundColor(.secondary.opacity(0.4))
+                    
+                    VStack(alignment: .leading, spacing: 4) {
+                        Text("No servers detected")
+                            .font(.system(size: 12, weight: .medium))
+                        Text("Start LM Studio or Ollama, then click Scan.")
+                            .font(.system(size: 11))
+                            .foregroundColor(.secondary)
+                    }
+                }
+                .padding(12)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .background(Color.primary.opacity(0.03))
+                .cornerRadius(8)
+            } else {
+                ForEach(Array(localLLM.detectedServers.enumerated()), id: \.element.id) { index, server in
+                    HStack(spacing: 10) {
+                        // Server icon
+                        ZStack {
+                            RoundedRectangle(cornerRadius: 6)
+                                .fill(server.isOnline ? Color.green.opacity(0.12) : Color.red.opacity(0.12))
+                                .frame(width: 28, height: 28)
+                            Image(systemName: server.type.icon)
+                                .font(.system(size: 13))
+                                .foregroundColor(server.isOnline ? .green : .red)
+                        }
+                        
+                        VStack(alignment: .leading, spacing: 2) {
+                            HStack(spacing: 6) {
+                                Text(server.type.rawValue)
+                                    .font(.system(size: 12, weight: .semibold))
+                                
+                                if server.isOnline {
+                                    Text("ONLINE")
+                                        .font(.system(size: 8, weight: .bold))
+                                        .foregroundColor(.white)
+                                        .padding(.horizontal, 5).padding(.vertical, 2)
+                                        .background(Color.green)
+                                        .cornerRadius(3)
+                                }
+                                
+                                if localLLM.selectedServerIndex == index {
+                                    Text("ACTIVE")
+                                        .font(.system(size: 8, weight: .bold))
+                                        .foregroundColor(.white)
+                                        .padding(.horizontal, 5).padding(.vertical, 2)
+                                        .background(Color.accentColor)
+                                        .cornerRadius(3)
+                                }
+                            }
+                            
+                            Text("\(server.host):\(server.port) — \(server.models.count) model(s) — \(String(format: "%.0fms", server.latency * 1000))")
+                                .font(.system(size: 10))
+                                .foregroundColor(.secondary)
+                        }
+                        
+                        Spacer()
+                        
+                        // Model picker for this server
+                        if !server.models.isEmpty && localLLM.selectedServerIndex == index {
+                            Picker("", selection: $localLLM.selectedModelId) {
+                                ForEach(server.models) { model in
+                                    Text(model.displayName).tag(model.id)
+                                }
+                            }
+                            .labelsHidden()
+                            .frame(width: 180)
+                        }
+                        
+                        // Select button
+                        if localLLM.selectedServerIndex != index {
+                            Button("Use") {
+                                localLLM.selectedServerIndex = index
+                                if let first = server.models.first {
+                                    localLLM.selectedModelId = first.id
+                                }
+                                // Auto-switch provider
+                                selectedProvider = "local"
+                                hasChanges = true
+                            }
+                            .font(.system(size: 10, weight: .semibold))
+                            .buttonStyle(.bordered)
+                        }
+                    }
+                    .padding(8)
+                    .background(localLLM.selectedServerIndex == index ? Color.mint.opacity(0.06) : Color.clear)
+                    .cornerRadius(8)
+                    .overlay(
+                        RoundedRectangle(cornerRadius: 8)
+                            .stroke(localLLM.selectedServerIndex == index ? Color.mint.opacity(0.3) : Color.clear, lineWidth: 1)
+                    )
+                }
+            }
+            
+            Divider()
+            
+            // Custom endpoint
+            HStack(spacing: 8) {
+                Text("Custom:")
+                    .font(.system(size: 11, weight: .medium))
+                    .foregroundColor(.secondary)
+                
+                TextField("Host", text: $localLLM.customHost)
+                    .textFieldStyle(.roundedBorder)
+                    .frame(width: 120)
+                    .font(.system(size: 11, design: .monospaced))
+                
+                Text(":")
+                    .foregroundColor(.secondary)
+                
+                TextField("Port", text: $localLLM.customPort)
+                    .textFieldStyle(.roundedBorder)
+                    .frame(width: 60)
+                    .font(.system(size: 11, design: .monospaced))
+                
+                Spacer()
+                
+                if let scanTime = localLLM.lastScanTime {
+                    Text("Last scan: \(scanTime, style: .relative) ago")
+                        .font(.system(size: 10))
+                        .foregroundColor(.secondary)
+                }
+            }
+        }
+        .padding(16)
+        .background(Color(nsColor: .controlBackgroundColor))
+        .cornerRadius(12)
+        .overlay(
+            RoundedRectangle(cornerRadius: 12)
+                .stroke(Color.mint.opacity(0.2), lineWidth: 1)
+        )
     }
     
     private func aiProviderKeyCard(_ provider: AIProviderInfo) -> some View {

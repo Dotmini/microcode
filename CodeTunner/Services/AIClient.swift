@@ -19,6 +19,7 @@ enum StreamableAIProvider: String, CaseIterable {
     case grok = "grok"
     case qwen = "qwen"
     case glm = "glm"
+    case local = "local"
     
     var baseURL: String {
         switch self {
@@ -29,6 +30,7 @@ enum StreamableAIProvider: String, CaseIterable {
         case .grok: return "https://api.x.ai/v1"
         case .qwen: return "https://dashscope.aliyuncs.com/compatible-mode/v1"
         case .glm: return "https://open.bigmodel.cn/api/paas/v4"
+        case .local: return LocalLLMService.shared.activeEndpoint
         }
     }
     
@@ -41,14 +43,23 @@ enum StreamableAIProvider: String, CaseIterable {
         case .grok: return "grok-3"
         case .qwen: return "qwen-max"
         case .glm: return "glm-4-plus"
+        case .local: return LocalLLMService.shared.activeModel
         }
     }
     
     /// Whether this provider uses OpenAI-compatible chat/completions API format
     var usesOpenAIFormat: Bool {
         switch self {
-        case .openai, .deepseek, .grok, .qwen, .glm: return true
+        case .openai, .deepseek, .grok, .qwen, .glm, .local: return true
         case .gemini, .anthropic: return false
+        }
+    }
+    
+    /// Whether this provider requires an API key
+    var requiresAPIKey: Bool {
+        switch self {
+        case .local: return false
+        default: return true
         }
     }
     
@@ -127,7 +138,7 @@ class AIClient: ObservableObject {
         onComplete: @escaping (String) -> Void,
         onError: @escaping (String) -> Void
     ) {
-        guard !apiKey.isEmpty else {
+        guard !apiKey.isEmpty || !provider.requiresAPIKey else {
             onError("API Key is missing. Please set it in Settings.")
             return
         }
@@ -146,7 +157,7 @@ class AIClient: ObservableObject {
                     switch provider {
                     case .gemini:
                         try await streamGemini(prompt: prompt, attachments: attachments, systemPrompt: systemPrompt, conversationHistory: trimmedHistory, model: model, apiKey: apiKey, tools: tools, onToken: onToken, onToolCall: onToolCall)
-                    case .openai, .deepseek, .grok, .qwen, .glm:
+                    case .openai, .deepseek, .grok, .qwen, .glm, .local:
                         try await streamOpenAI(prompt: prompt, attachments: attachments, systemPrompt: systemPrompt, conversationHistory: trimmedHistory, model: model, apiKey: apiKey, baseURL: provider.baseURL, tools: tools, onToken: onToken, onToolCall: onToolCall)
                     case .anthropic:
                         try await streamAnthropic(prompt: prompt, attachments: attachments, systemPrompt: systemPrompt, conversationHistory: trimmedHistory, model: model, apiKey: apiKey, tools: tools, onToken: onToken, onToolCall: onToolCall)
@@ -195,7 +206,7 @@ class AIClient: ObservableObject {
         switch provider {
         case .gemini:
             return try await syncGemini(messages: messages, systemPrompt: systemPrompt, model: model, apiKey: apiKey, tools: tools)
-        case .openai, .deepseek, .grok, .qwen, .glm:
+        case .openai, .deepseek, .grok, .qwen, .glm, .local:
             return try await syncOpenAI(messages: messages, systemPrompt: systemPrompt, model: model, apiKey: apiKey, baseURL: provider.baseURL, tools: tools)
         case .anthropic:
             return try await syncAnthropic(messages: messages, systemPrompt: systemPrompt, model: model, apiKey: apiKey, tools: tools)

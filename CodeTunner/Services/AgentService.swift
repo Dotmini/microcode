@@ -154,7 +154,7 @@ class AgentService: ObservableObject {
         isLoading = true
         defer { isLoading = false }
         
-        let detectedProvider = StreamableAIProvider.detect(from: model)
+        let detectedProvider = StreamableAIProvider(rawValue: provider) ?? StreamableAIProvider.detect(from: model)
         let toolSchemas = toolBox.toolSchemas()
         
         // Build conversation history for API
