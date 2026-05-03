@@ -1,6 +1,6 @@
 # =============================================================================
-# MicroCode (CodeTunner) - .gitignore
-# เก็บเฉพาะ Source Code, ไม่เก็บ Build Artifacts และ Generated Files
+# MicroCode — .gitignore
+# Source code only. No build artifacts, logs, or generated files.
 # =============================================================================
 
 # ----- macOS -----
