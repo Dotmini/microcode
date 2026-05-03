@@ -1281,9 +1281,8 @@ struct RichMessageRow: View {
     var onApplyChange: ((PendingChangeModel) -> Void)? = nil
     var onRejectChange: ((PendingChangeModel) -> Void)? = nil
     
-    var isUser: Bool { message.role == .user }
+    private var isUser: Bool { message.role == .user }
     
-    // Premium gradient for AI avatar
     private var aiGradient: LinearGradient {
         LinearGradient(
             colors: [Color.accentColor, Color.accentColor.opacity(0.7)],
@@ -1294,203 +1293,255 @@ struct RichMessageRow: View {
     
     var body: some View {
         if isUser {
-            // User Message (Right Aligned Bubble)
-            HStack(alignment: .bottom, spacing: 8) {
-                Spacer(minLength: 40)
-                
-                VStack(alignment: .trailing, spacing: 4) {
-                    VStack(alignment: .leading, spacing: 8) {
-                        let blocks = MessageContentParser.parse(message.content)
-                        ForEach(blocks) { block in
-                            switch block {
-                            case .text(let text):
-                                Text(text)
-                                    .font(.system(size: 13))
-                                    .foregroundColor(.white)
-                            case .code(let lang, let code):
-                                NativeCodeBlockView(language: lang, code: code)
-                            case .latex(let expression, _):
-                                Text(LocalizedStringKey(expression)) // Markdown Parsing user input
-                                    .foregroundColor(.white.opacity(0.9))
-                            default:
-                                EmptyView()
-                            }
-                        }
-                    }
+            userBubble
+        } else {
+            aiBubble
+        }
+    }
+    
+    // MARK: - User Bubble
+    
+    private var userBubble: some View {
+        HStack(alignment: .bottom, spacing: 8) {
+            Spacer(minLength: 40)
+            
+            VStack(alignment: .trailing, spacing: 4) {
+                userBubbleContent
                     .padding(12)
                     .background(Color.accentColor)
                     .foregroundColor(.white)
                     .cornerRadius(12, corners: [.topLeft, .topRight, .bottomLeft])
-                    
-                    Text(message.timestamp.formatted(date: .omitted, time: .shortened))
-                        .font(.caption2)
-                        .foregroundColor(.secondary)
-                }
                 
-                // User Avatar (Small)
-                Circle()
-                    .fill(Color.secondary.opacity(0.2))
-                    .frame(width: 24, height: 24)
-                    .overlay(
-                        Image(systemName: "person.fill")
-                            .font(.system(size: 10))
-                            .foregroundColor(.secondary)
-                    )
+                Text(message.timestamp.formatted(date: .omitted, time: .shortened))
+                    .font(.caption2)
+                    .foregroundColor(.secondary)
             }
-            .padding(.horizontal, 16)
-            .padding(.vertical, 8)
             
-        } else {
-            // AI Message (Left Aligned Bubble, Full Width Content allowed)
-            HStack(alignment: .top, spacing: 12) {
-                // AI Avatar
-                RoundedRectangle(cornerRadius: 6)
-                    .fill(aiGradient)
-                    .frame(width: 28, height: 28)
-                    .overlay(
-                        Image(systemName: "command")
-                            .font(.system(size: 12, weight: .semibold))
-                            .foregroundColor(.white)
-                    )
-                    .shadow(color: Color.accentColor.opacity(0.2), radius: 4, y: 2)
-                    .padding(.top, 4)
-                
-                VStack(alignment: .leading, spacing: 6) {
-                    // Name
-                    HStack {
-                        Text("MicroCode")
-                            .font(.system(size: 11, weight: .semibold))
-                            .foregroundColor(.primary)
-                        Text(message.timestamp.formatted(date: .omitted, time: .shortened))
-                            .font(.caption2)
-                            .foregroundColor(.secondary)
-                    }
-                    
-                    // Bubble Content
-                    VStack(alignment: .leading, spacing: 14) {
-                        // Blocks
-                        let blocks = MessageContentParser.parse(message.content)
-                        ForEach(blocks) { block in
-                            switch block {
-                            case .text(let text):
-                                if !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-                                    MarkdownTextView(text: text)
-                                }
-                            case .code(let lang, let code):
-                                NativeCodeBlockView(language: lang, code: code)
-                            case .heading(let level, let content):
-                                HeadingView(level: level, content: content)
-                            case .list(let items, let isOrdered):
-                                ListView(items: items, isOrdered: isOrdered)
-                            case .blockquote(let content):
-                                BlockquoteView(content: content)
-                            case .latex(let expression, let isBlock):
-                                LaTeXBlockView(expression: expression, isBlock: isBlock)
-                            case .html(let content):
-                                HTMLBlockView(content: content)
-                            }
-                        }
-                        
-                        // Tool Execution Steps (Rich Interactive View)
-                        if !message.toolResults.isEmpty {
-                            ToolExecutionStepsView(results: message.toolResults)
-                        }
-                        
-                        // Pending Changes (Diffs)
-                        if !message.pendingChanges.isEmpty {
-                            VStack(spacing: 8) {
-                                Text("Proposed Changes")
-                                    .font(.caption)
-                                    .fontWeight(.bold)
-                                    .foregroundColor(.secondary)
-                                    .frame(maxWidth: .infinity, alignment: .leading)
-                                
-                                ForEach(message.pendingChanges) { change in
-                                    VStack(alignment: .leading, spacing: 0) {
-                                        // Header
-                                        HStack {
-                                            Image(systemName: change.status == .accepted ? "checkmark.circle.fill" : change.status == .rejected ? "xmark.circle.fill" : "pencil.circle.fill")
-                                                .foregroundColor(change.status == .accepted ? .green : change.status == .rejected ? .red : .blue)
-                                            Text(URL(fileURLWithPath: change.filePath).lastPathComponent)
-                                                .font(.system(size: 12, weight: .bold))
-                                            
-                                            Spacer()
-                                            
-                                            if change.status == .accepted {
-                                                Text("Applied ✓")
-                                                    .font(.caption2)
-                                                    .foregroundColor(.green)
-                                            } else if change.status == .rejected {
-                                                Text("Rejected")
-                                                    .font(.caption2)
-                                                    .foregroundColor(.red)
-                                            } else {
-                                                Text("+\(change.additions) -\(change.deletions)")
-                                                    .font(.caption2)
-                                                    .foregroundColor(.secondary)
-                                            }
-                                        }
-                                        .padding(8)
-                                        .background(Color.primary.opacity(0.05))
-                                        
-                                        Divider()
-                                        
-                                        // Diff Preview (Simplified)
-                                        Text(change.newContent) 
-                                            .font(.system(size: 11, design: .monospaced))
-                                            .lineLimit(10)
-                                            .padding(8)
-                                            .frame(maxWidth: .infinity, alignment: .leading)
-                                        
-                                        Divider()
-                                        
-                                        // Actions (only show if pending)
-                                        if change.status == .pending {
-                                            HStack {
-                                                Button(action: {
-                                                    onApplyChange?(change)
-                                                }) {
-                                                    Label("Apply", systemImage: "checkmark")
-                                                }
-                                                .buttonStyle(.borderedProminent)
-                                                .tint(.green)
-                                                .font(.caption)
-                                                
-                                                Button(action: {
-                                                    onRejectChange?(change)
-                                                }) {
-                                                    Label("Reject", systemImage: "xmark")
-                                                }
-                                                .buttonStyle(.bordered)
-                                                .tint(.red)
-                                                .font(.caption)
-                                            }
-                                            .padding(8)
-                                        }
-                                    }
-                                    .background(Color.primary.opacity(0.02))
-                                    .cornerRadius(8)
-                                    .overlay(RoundedRectangle(cornerRadius: 8).stroke(Color.primary.opacity(0.1), lineWidth: 1))
-                                }
-                            }
-                            .padding(.top, 8)
-                        }
-                    }
-                    .padding(14)
-                    .background(Color(nsColor: .controlBackgroundColor).opacity(0.8))
-                    .cornerRadius(12, corners: [.topRight, .bottomRight, .bottomLeft])
-                    .overlay(
-                        RoundedRectangle(cornerRadius: 12, style: .continuous)
-                            .stroke(Color.white.opacity(0.1), lineWidth: 1)
-                            .mask(RoundedCornerShape(radius: 12, corners: [.topRight, .bottomRight, .bottomLeft]))
-                    )
-                }
-                
-                Spacer(minLength: 40)
-            }
-            .padding(.horizontal, 16)
-            .padding(.vertical, 8)
+            Circle()
+                .fill(Color.secondary.opacity(0.2))
+                .frame(width: 24, height: 24)
+                .overlay(
+                    Image(systemName: "person.fill")
+                        .font(.system(size: 10))
+                        .foregroundColor(.secondary)
+                )
         }
+        .padding(.horizontal, 16)
+        .padding(.vertical, 8)
+    }
+    
+    @ViewBuilder
+    private var userBubbleContent: some View {
+        let blocks = MessageContentParser.parse(message.content)
+        VStack(alignment: .leading, spacing: 8) {
+            ForEach(blocks) { block in
+                userBlockView(block)
+            }
+        }
+    }
+    
+    @ViewBuilder
+    private func userBlockView(_ block: MessageContentBlock) -> some View {
+        switch block {
+        case .text(let text):
+            Text(text)
+                .font(.system(size: 13))
+                .foregroundColor(.white)
+        case .code(let lang, let code):
+            NativeCodeBlockView(language: lang, code: code)
+        case .latex(let expression, _):
+            Text(LocalizedStringKey(expression))
+                .foregroundColor(.white.opacity(0.9))
+        default:
+            EmptyView()
+        }
+    }
+    
+    // MARK: - AI Bubble
+    
+    private var aiBubble: some View {
+        HStack(alignment: .top, spacing: 12) {
+            aiAvatar
+            
+            VStack(alignment: .leading, spacing: 6) {
+                aiHeader
+                aiBubbleContent
+            }
+            
+            Spacer(minLength: 40)
+        }
+        .padding(.horizontal, 16)
+        .padding(.vertical, 8)
+    }
+    
+    private var aiAvatar: some View {
+        RoundedRectangle(cornerRadius: 6)
+            .fill(aiGradient)
+            .frame(width: 28, height: 28)
+            .overlay(
+                Image(systemName: "command")
+                    .font(.system(size: 12, weight: .semibold))
+                    .foregroundColor(.white)
+            )
+            .shadow(color: Color.accentColor.opacity(0.2), radius: 4, y: 2)
+            .padding(.top, 4)
+    }
+    
+    private var aiHeader: some View {
+        HStack {
+            Text("MicroCode")
+                .font(.system(size: 11, weight: .semibold))
+                .foregroundColor(.primary)
+            Text(message.timestamp.formatted(date: .omitted, time: .shortened))
+                .font(.caption2)
+                .foregroundColor(.secondary)
+        }
+    }
+    
+    private var aiBubbleContent: some View {
+        let blocks = MessageContentParser.parse(message.content)
+        return VStack(alignment: .leading, spacing: 14) {
+            ForEach(blocks) { block in
+                aiBlockView(block)
+            }
+            
+            if !message.toolResults.isEmpty {
+                ToolExecutionStepsView(results: message.toolResults)
+            }
+            
+            if !message.pendingChanges.isEmpty {
+                pendingChangesSection
+            }
+        }
+        .padding(14)
+        .background(Color(nsColor: .controlBackgroundColor).opacity(0.8))
+        .cornerRadius(12, corners: [.topRight, .bottomRight, .bottomLeft])
+        .overlay(
+            RoundedRectangle(cornerRadius: 12, style: .continuous)
+                .stroke(Color.white.opacity(0.1), lineWidth: 1)
+                .mask(RoundedCornerShape(radius: 12, corners: [.topRight, .bottomRight, .bottomLeft]))
+        )
+    }
+    
+    @ViewBuilder
+    private func aiBlockView(_ block: MessageContentBlock) -> some View {
+        switch block {
+        case .text(let text):
+            if !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                MarkdownTextView(text: text)
+            }
+        case .code(let lang, let code):
+            NativeCodeBlockView(language: lang, code: code)
+        case .heading(let level, let content):
+            HeadingView(level: level, content: content)
+        case .list(let items, let isOrdered):
+            ListView(items: items, isOrdered: isOrdered)
+        case .blockquote(let content):
+            BlockquoteView(content: content)
+        case .latex(let expression, let isBlock):
+            LaTeXBlockView(expression: expression, isBlock: isBlock)
+        case .html(let content):
+            HTMLBlockView(content: content)
+        }
+    }
+    
+    // MARK: - Pending Changes
+    
+    private var pendingChangesSection: some View {
+        VStack(spacing: 8) {
+            Text("Proposed Changes")
+                .font(.caption)
+                .fontWeight(.bold)
+                .foregroundColor(.secondary)
+                .frame(maxWidth: .infinity, alignment: .leading)
+            
+            ForEach(message.pendingChanges) { change in
+                PendingChangeCard(change: change, onApply: onApplyChange, onReject: onRejectChange)
+            }
+        }
+        .padding(.top, 8)
+    }
+}
+
+// MARK: - Pending Change Card (Extracted for type-checker)
+
+private struct PendingChangeCard: View {
+    let change: PendingChangeModel
+    var onApply: ((PendingChangeModel) -> Void)?
+    var onReject: ((PendingChangeModel) -> Void)?
+    
+    var body: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            changeHeader
+            Divider()
+            changeDiffPreview
+            Divider()
+            if change.status == .pending {
+                changeActions
+            }
+        }
+        .background(Color.primary.opacity(0.02))
+        .cornerRadius(8)
+        .overlay(RoundedRectangle(cornerRadius: 8).stroke(Color.primary.opacity(0.1), lineWidth: 1))
+    }
+    
+    private var changeHeader: some View {
+        HStack {
+            Image(systemName: change.status == .accepted ? "checkmark.circle.fill" : change.status == .rejected ? "xmark.circle.fill" : "pencil.circle.fill")
+                .foregroundColor(change.status == .accepted ? .green : change.status == .rejected ? .red : .blue)
+            Text(URL(fileURLWithPath: change.filePath).lastPathComponent)
+                .font(.system(size: 12, weight: .bold))
+            
+            Spacer()
+            
+            changeStatusLabel
+        }
+        .padding(8)
+        .background(Color.primary.opacity(0.05))
+    }
+    
+    @ViewBuilder
+    private var changeStatusLabel: some View {
+        if change.status == .accepted {
+            Text("Applied ✓")
+                .font(.caption2)
+                .foregroundColor(.green)
+        } else if change.status == .rejected {
+            Text("Rejected")
+                .font(.caption2)
+                .foregroundColor(.red)
+        } else {
+            Text("+\(change.additions) -\(change.deletions)")
+                .font(.caption2)
+                .foregroundColor(.secondary)
+        }
+    }
+    
+    private var changeDiffPreview: some View {
+        Text(change.newContent)
+            .font(.system(size: 11, design: .monospaced))
+            .lineLimit(10)
+            .padding(8)
+            .frame(maxWidth: .infinity, alignment: .leading)
+    }
+    
+    private var changeActions: some View {
+        HStack {
+            Button(action: { onApply?(change) }) {
+                Label("Apply", systemImage: "checkmark")
+            }
+            .buttonStyle(.borderedProminent)
+            .tint(.green)
+            .font(.caption)
+            
+            Button(action: { onReject?(change) }) {
+                Label("Reject", systemImage: "xmark")
+            }
+            .buttonStyle(.bordered)
+            .tint(.red)
+            .font(.caption)
+        }
+        .padding(8)
     }
 }
 
