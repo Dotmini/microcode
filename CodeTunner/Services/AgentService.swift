@@ -21,7 +21,17 @@ class AgentService: ObservableObject {
     @Published var isLoading = false
     @Published var pendingChanges: [PendingChangeModel] = []
     @Published var editorContext: EditorContextModel?
-    @Published var currentToolExecution: String? = nil // UI: shows which tool is running
+    @Published var currentToolExecution: String? = nil
+    
+    // Real-time Activity Tracking
+    @Published var activityLog: [AgentActivity] = []
+    @Published var agentPhase: AgentPhase = .idle
+    @Published var filesModified: [String] = []
+    @Published var suggestedAction: SuggestedAction? = nil
+    
+    // Workspace Agent Files
+    @Published var agentMdContent: String? = nil
+    @Published var taskMdContent: String? = nil
     
     // Multi-Chat State
     @Published var chatSessions: [ChatSession] = []
@@ -101,11 +111,21 @@ class AgentService: ObservableObject {
         }
         
         // Inject relevant memories
-        if let chatId = activeChatId {
+        if let _ = activeChatId {
             let memories = memoryService.recallMemories(query: messages.last?.content ?? "", limit: 3)
             if !memories.isEmpty {
                 prompt += "\n\n## Recalled Context\n\(memoryService.formatMemoriesForContext(memories))"
             }
+        }
+        
+        // Inject agent.md instructions if present
+        if let agentMd = agentMdContent, !agentMd.isEmpty {
+            prompt += "\n\n## Project Agent Instructions (agent.md)\n\(agentMd.prefix(3000))"
+        }
+        
+        // Inject task.md if present
+        if let taskMd = taskMdContent, !taskMd.isEmpty {
+            prompt += "\n\n## Current Task (task.md)\n\(taskMd.prefix(2000))"
         }
         
         return prompt
@@ -128,6 +148,64 @@ class AgentService: ObservableObject {
     
     func setWorkspace(_ path: String) {
         toolBox.workspaceRoot = path
+        loadAgentWorkspaceFiles(path)
+    }
+    
+    // MARK: - Load agent.md / task.md / AI.arx
+    
+    private func loadAgentWorkspaceFiles(_ workspacePath: String) {
+        let fm = FileManager.default
+        
+        // Load agent.md
+        let agentMdPath = (workspacePath as NSString).appendingPathComponent("agent.md")
+        if fm.fileExists(atPath: agentMdPath) {
+            agentMdContent = try? String(contentsOfFile: agentMdPath, encoding: .utf8)
+            logActivity(.info, "Loaded agent.md")
+        }
+        
+        // Load task.md
+        let taskMdPath = (workspacePath as NSString).appendingPathComponent("task.md")
+        if fm.fileExists(atPath: taskMdPath) {
+            taskMdContent = try? String(contentsOfFile: taskMdPath, encoding: .utf8)
+            logActivity(.info, "Loaded task.md")
+        }
+        
+        // Load or create AI.arx
+        loadOrCreateArx(workspacePath)
+    }
+    
+    // MARK: - AI.arx Storage
+    
+    private func loadOrCreateArx(_ workspacePath: String) {
+        let arxPath = (workspacePath as NSString).appendingPathComponent(".microcode/AI.arx")
+        let fm = FileManager.default
+        
+        if !fm.fileExists(atPath: arxPath) {
+            // Create .microcode directory and AI.arx
+            let dirPath = (workspacePath as NSString).appendingPathComponent(".microcode")
+            try? fm.createDirectory(atPath: dirPath, withIntermediateDirectories: true)
+            let arxData = AIArxData(models: [], memory: [], artifacts: [], lastUpdated: Date())
+            if let data = try? JSONEncoder().encode(arxData) {
+                fm.createFile(atPath: arxPath, contents: data)
+                logActivity(.info, "Created AI.arx")
+            }
+        } else {
+            logActivity(.info, "Loaded AI.arx")
+        }
+    }
+    
+    func saveArx() {
+        guard let root = toolBox.workspaceRoot else { return }
+        let arxPath = (root as NSString).appendingPathComponent(".microcode/AI.arx")
+        let arxData = AIArxData(
+            models: [AIArxData.ModelUsage(provider: "current", model: "active", lastUsed: Date())],
+            memory: activityLog.suffix(50).map { AIArxData.MemoryEntry(content: $0.message, timestamp: $0.timestamp, role: "agent") },
+            artifacts: filesModified.map { AIArxData.Artifact(path: $0, type: "modified", timestamp: Date()) },
+            lastUpdated: Date()
+        )
+        if let data = try? JSONEncoder().encode(arxData) {
+            try? data.write(to: URL(fileURLWithPath: arxPath))
+        }
     }
     
     // MARK: - Send Message (Production Agentic Loop)
@@ -152,7 +230,15 @@ class AgentService: ObservableObject {
         }
         
         isLoading = true
-        defer { isLoading = false }
+        agentPhase = .thinking
+        filesModified = []
+        suggestedAction = nil
+        logActivity(.thinking, "Processing request...")
+        defer {
+            isLoading = false
+            agentPhase = .idle
+            saveArx()
+        }
         
         let detectedProvider = StreamableAIProvider(rawValue: provider) ?? StreamableAIProvider.detect(from: model)
         let toolSchemas = toolBox.toolSchemas()
@@ -240,7 +326,8 @@ class AgentService: ObservableObject {
             
             for toolCall in receivedToolCalls {
                 currentToolExecution = "Running \(toolCall.name)..."
-                
+                agentPhase = .executing(toolCall.name)
+                logActivity(.tool, "\(toolCall.name)", detail: truncateArgs(toolCall.arguments))
                 do {
                     let output = try await toolBox.execute(toolCall.name, params: toolCall.arguments)
                     
@@ -253,10 +340,13 @@ class AgentService: ObservableObject {
                     ))
                     
                     batchResults.append((name: toolCall.name, output: output, success: true))
+                    logActivity(.success, "\(toolCall.name) ✓")
                     
                     // Track file changes
                     if toolCall.name == "file_write" || toolCall.name == "replace_in_file" {
                         if let path = toolCall.arguments["path"] as? String {
+                            filesModified.append(path)
+                            logActivity(.fileChange, "Modified: \(URL(fileURLWithPath: path).lastPathComponent)")
                             allChanges.append(PendingChangeModel(
                                 id: UUID().uuidString,
                                 filePath: path,
@@ -278,6 +368,7 @@ class AgentService: ObservableObject {
                     ))
                     
                     batchResults.append((name: toolCall.name, output: error.localizedDescription, success: false))
+                    logActivity(.error, "\(toolCall.name) failed: \(error.localizedDescription)")
                 }
                 
                 currentToolExecution = nil
@@ -316,6 +407,18 @@ class AgentService: ObservableObject {
         }
         
         pendingChanges.append(contentsOf: allChanges)
+        
+        // Generate post-completion suggestion
+        if !filesModified.isEmpty {
+            suggestedAction = SuggestedAction(
+                title: "Run Project?",
+                icon: "play.circle.fill",
+                description: "\(filesModified.count) file(s) modified. Run to verify changes?"
+            )
+        }
+        
+        logActivity(.done, "Completed (\(iteration) iterations, \(allToolResults.count) tools)")
+        agentPhase = .done
         
         // Store memory
         if let chatId = activeChatId {
@@ -473,6 +576,144 @@ class AgentService: ObservableObject {
             messages = chat.messages.map { $0.toModel() }
         }
     }
+    
+    // MARK: - Activity Logging
+    
+    func logActivity(_ type: AgentActivity.ActivityType, _ message: String, detail: String? = nil) {
+        let activity = AgentActivity(type: type, message: message, detail: detail, timestamp: Date())
+        activityLog.append(activity)
+        // Keep last 100 entries
+        if activityLog.count > 100 {
+            activityLog.removeFirst(activityLog.count - 100)
+        }
+    }
+    
+    private func truncateArgs(_ args: [String: Any]) -> String {
+        let keys = args.keys.sorted()
+        let parts = keys.prefix(3).map { key -> String in
+            let val = args[key]
+            let str = "\(val ?? "nil")"
+            return "\(key)=\(str.prefix(50))"
+        }
+        return parts.joined(separator: ", ")
+    }
+}
+
+// MARK: - Agent Activity Model
+
+struct AgentActivity: Identifiable {
+    let id = UUID()
+    let type: ActivityType
+    let message: String
+    let detail: String?
+    let timestamp: Date
+    
+    enum ActivityType {
+        case thinking, tool, success, error, fileChange, info, done
+        
+        var icon: String {
+            switch self {
+            case .thinking: return "brain"
+            case .tool: return "wrench.and.screwdriver"
+            case .success: return "checkmark.circle.fill"
+            case .error: return "xmark.circle.fill"
+            case .fileChange: return "doc.badge.arrow.up"
+            case .info: return "info.circle"
+            case .done: return "flag.checkered"
+            }
+        }
+        
+        var color: Color {
+            switch self {
+            case .thinking: return .purple
+            case .tool: return .blue
+            case .success: return .green
+            case .error: return .red
+            case .fileChange: return .orange
+            case .info: return .secondary
+            case .done: return .green
+            }
+        }
+    }
+}
+
+// MARK: - Agent Phase
+
+enum AgentPhase: Equatable {
+    case idle
+    case thinking
+    case executing(String) // tool name
+    case done
+    
+    static func == (lhs: AgentPhase, rhs: AgentPhase) -> Bool {
+        switch (lhs, rhs) {
+        case (.idle, .idle), (.thinking, .thinking), (.done, .done): return true
+        case (.executing(let a), .executing(let b)): return a == b
+        default: return false
+        }
+    }
+    
+    var displayText: String {
+        switch self {
+        case .idle: return "Ready"
+        case .thinking: return "Thinking..."
+        case .executing(let tool): return "Running \(tool)"
+        case .done: return "Done"
+        }
+    }
+    
+    var icon: String {
+        switch self {
+        case .idle: return "circle"
+        case .thinking: return "brain"
+        case .executing: return "gearshape.2.fill"
+        case .done: return "checkmark.circle.fill"
+        }
+    }
+    
+    var color: Color {
+        switch self {
+        case .idle: return .secondary
+        case .thinking: return .purple
+        case .executing: return .blue
+        case .done: return .green
+        }
+    }
+}
+
+// MARK: - Suggested Action
+
+struct SuggestedAction {
+    let title: String
+    let icon: String
+    let description: String
+}
+
+// MARK: - AI.arx Data Model
+
+struct AIArxData: Codable {
+    var models: [ModelUsage]
+    var memory: [MemoryEntry]
+    var artifacts: [Artifact]
+    var lastUpdated: Date
+    
+    struct ModelUsage: Codable {
+        let provider: String
+        let model: String
+        let lastUsed: Date
+    }
+    
+    struct MemoryEntry: Codable {
+        let content: String
+        let timestamp: Date
+        let role: String
+    }
+    
+    struct Artifact: Codable {
+        let path: String
+        let type: String
+        let timestamp: Date
+    }
 }
 
 // MARK: - Models
@@ -573,3 +814,4 @@ struct ToolDefinitionModel: Codable, Identifiable {
     let name: String
     let description: String
 }
+

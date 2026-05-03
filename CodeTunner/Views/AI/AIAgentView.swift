@@ -61,12 +61,31 @@ struct AIAgentView: View {
                         .environmentObject(appState)
                 } else {
                     // Normal Chat Mode
-                    ZStack(alignment: .bottom) {
-                        // Chat Scroll
-                        AgentChatStage(messages: agent.messages, isLoading: agent.isLoading, currentToolExecution: agent.currentToolExecution, onApplyChange: { change in applyChange(change) }, onRejectChange: { change in rejectChange(change) })
+                    VStack(spacing: 0) {
+                        // Agent Phase Indicator (animated status bar)
+                        if agent.agentPhase != .idle {
+                            agentPhaseBar
+                        }
                         
-                        // Input Container (Docked at bottom, not floating)
-                        inputArea
+                        ZStack(alignment: .bottom) {
+                            // Chat Scroll
+                            AgentChatStage(messages: agent.messages, isLoading: agent.isLoading, currentToolExecution: agent.currentToolExecution, onApplyChange: { change in applyChange(change) }, onRejectChange: { change in rejectChange(change) })
+                            
+                            VStack(spacing: 0) {
+                                // Suggested Action (after completion)
+                                if let suggestion = agent.suggestedAction {
+                                    suggestedActionBar(suggestion)
+                                }
+                                
+                                // Input Container
+                                inputArea
+                            }
+                        }
+                        
+                        // Activity Log (collapsible footer)
+                        if !agent.activityLog.isEmpty && agent.isLoading {
+                            activityLogStrip
+                        }
                     }
                 }
             }
@@ -387,6 +406,129 @@ struct AIAgentView: View {
             .padding(12)
             .background(paneColor)
         }
+    }
+    
+    // MARK: - Agent Phase Bar (Animated Status)
+    
+    private var agentPhaseBar: some View {
+        HStack(spacing: 8) {
+            // Animated indicator
+            Circle()
+                .fill(agent.agentPhase.color)
+                .frame(width: 8, height: 8)
+                .overlay(
+                    Circle()
+                        .stroke(agent.agentPhase.color.opacity(0.5), lineWidth: 2)
+                        .scaleEffect(agent.agentPhase == .idle ? 1.0 : 1.5)
+                        .opacity(agent.agentPhase == .idle ? 0 : 0.5)
+                        .animation(.easeInOut(duration: 0.8).repeatForever(autoreverses: true), value: agent.agentPhase)
+                )
+            
+            Image(systemName: agent.agentPhase.icon)
+                .font(.system(size: 10))
+                .foregroundColor(agent.agentPhase.color)
+            
+            Text(agent.agentPhase.displayText)
+                .font(.system(size: 10, weight: .medium))
+                .foregroundColor(agent.agentPhase.color)
+            
+            Spacer()
+            
+            // Files modified counter
+            if !agent.filesModified.isEmpty {
+                HStack(spacing: 3) {
+                    Image(systemName: "doc.badge.arrow.up")
+                        .font(.system(size: 9))
+                    Text("\(agent.filesModified.count) files")
+                        .font(.system(size: 9))
+                }
+                .foregroundColor(.orange)
+                .padding(.horizontal, 6)
+                .padding(.vertical, 2)
+                .background(Color.orange.opacity(0.1))
+                .cornerRadius(3)
+            }
+        }
+        .padding(.horizontal, 12)
+        .padding(.vertical, 5)
+        .background(agent.agentPhase.color.opacity(0.05))
+        .transition(.move(edge: .top).combined(with: .opacity))
+    }
+    
+    // MARK: - Suggested Action Bar
+    
+    private func suggestedActionBar(_ suggestion: SuggestedAction) -> some View {
+        HStack(spacing: 8) {
+            Image(systemName: suggestion.icon)
+                .font(.system(size: 14))
+                .foregroundColor(.green)
+            
+            VStack(alignment: .leading, spacing: 1) {
+                Text(suggestion.title)
+                    .font(.system(size: 11, weight: .bold))
+                    .foregroundColor(.primary)
+                Text(suggestion.description)
+                    .font(.system(size: 9))
+                    .foregroundColor(.secondary)
+            }
+            
+            Spacer()
+            
+            Button(action: {
+                // TODO: Run project command
+                inputText = "Run the project and show me the output"
+                sendMessage()
+                agent.suggestedAction = nil
+            }) {
+                Text("Run")
+                    .font(.system(size: 10, weight: .bold))
+                    .foregroundColor(.white)
+                    .padding(.horizontal, 12)
+                    .padding(.vertical, 4)
+                    .background(Color.green)
+                    .cornerRadius(4)
+            }
+            .buttonStyle(.plain)
+            
+            Button(action: { agent.suggestedAction = nil }) {
+                Image(systemName: "xmark")
+                    .font(.system(size: 9))
+                    .foregroundColor(.secondary)
+            }
+            .buttonStyle(.plain)
+        }
+        .padding(.horizontal, 12)
+        .padding(.vertical, 6)
+        .background(Color.green.opacity(0.08))
+        .transition(.move(edge: .bottom).combined(with: .opacity))
+    }
+    
+    // MARK: - Activity Log Strip
+    
+    private var activityLogStrip: some View {
+        ScrollView(.horizontal, showsIndicators: false) {
+            HStack(spacing: 6) {
+                ForEach(agent.activityLog.suffix(8)) { activity in
+                    HStack(spacing: 3) {
+                        Image(systemName: activity.type.icon)
+                            .font(.system(size: 8))
+                            .foregroundColor(activity.type.color)
+                        Text(activity.message)
+                            .font(.system(size: 8))
+                            .foregroundColor(.secondary)
+                            .lineLimit(1)
+                    }
+                    .padding(.horizontal, 5)
+                    .padding(.vertical, 2)
+                    .background(activity.type.color.opacity(0.06))
+                    .cornerRadius(3)
+                }
+            }
+            .padding(.horizontal, 12)
+        }
+        .frame(height: 22)
+        .background(Color(nsColor: .controlBackgroundColor).opacity(0.5))
+        .transition(.move(edge: .bottom).combined(with: .opacity))
     }
     
     // MARK: - File Attachment Logic
