@@ -109,3 +109,6 @@ installer_background*.png
 
 # ----- Presentation (not source) -----
 presentation/
+
+# ----- Enterprise Module (PROPRIETARY — not open source) -----
+Enterprise/
