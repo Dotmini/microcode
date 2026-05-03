@@ -358,17 +358,21 @@ final class NotebookViewModel: ObservableObject {
         
         do {
             try FileManager.default.createDirectory(at: workDir, withIntermediateDirectories: true)
-            print("📝 NotebookViewModel: Created workspace at \(workDir.path)")
         } catch {
             print("❌ NotebookViewModel: Failed to create directory: \(error)")
         }
         
-        // Create initial notebook
-        let notebook = NotebookModel(name: "Notebook 1")
-        notebooks = [notebook]
-        activeNotebookId = notebook.id
-        if let firstCell = notebook.cells.first {
-            selectedCellId = firstCell.id
+        // Try to restore from auto-save first
+        loadAutoSave()
+        
+        // If no saved notebooks, create initial
+        if notebooks.isEmpty {
+            let notebook = NotebookModel(name: "Notebook 1")
+            notebooks = [notebook]
+            activeNotebookId = notebook.id
+            if let firstCell = notebook.cells.first {
+                selectedCellId = firstCell.id
+            }
         }
         print("📝 NotebookViewModel: Init complete with \(notebooks.count) notebook(s)")
     }
@@ -1365,69 +1369,362 @@ final class NotebookViewModel: ObservableObject {
         guard let notebook = activeNotebook else { return }
         
         let panel = NSSavePanel()
-        panel.allowedContentTypes = [.json]
-        panel.nameFieldStringValue = "\(notebook.name).ipynb"
+        panel.allowedContentTypes = [
+            UTType(filenameExtension: "mcnb") ?? .json,
+            .json
+        ]
+        panel.nameFieldStringValue = "\(notebook.name).mcnb"
         panel.title = "Save Notebook"
+        panel.message = "Save as .mcnb (MicroCode native) or .ipynb (Jupyter compatible)"
         
         panel.begin { response in
             guard response == .OK, let url = panel.url else { return }
             
-            // Construct JSON
-            var jsonCells: [[String: Any]] = []
-            
-            for cell in notebook.cells {
-                var cellDict: [String: Any] = [
-                    "cell_type": cell.type.rawValue.lowercased(),
-                    "metadata": [:],
-                    "source": cell.content.split(separator: "\n", omittingEmptySubsequences: false).map { String($0) + "\n" }
-                ]
-                
-                if cell.type == .code {
-                    cellDict["execution_count"] = cell.executionCount
-                    cellDict["outputs"] = cell.output.isEmpty ? [] : [
-                        [
-                            "output_type": "stream",
-                            "name": "stdout",
-                            "text": cell.output.split(separator: "\n", omittingEmptySubsequences: false).map { String($0) + "\n" }
-                        ]
-                    ]
-                }
-                
-                jsonCells.append(cellDict)
-            }
-            
-            let notebookDict: [String: Any] = [
-                "cells": jsonCells,
-                "metadata": [
-                    "kernelspec": [
-                        "display_name": "Python 3",
-                        "language": "python",
-                        "name": "python3"
-                    ],
-                    "language_info": [
-                        "codemirror_mode": [
-                            "name": "ipython",
-                            "version": 3
-                        ],
-                        "file_extension": ".py",
-                        "mimetype": "text/x-python",
-                        "name": "python",
-                        "nbconvert_exporter": "python",
-                        "pygments_lexer": "ipython3",
-                        "version": "3.8.5"
-                    ]
-                ],
-                "nbformat": 4,
-                "nbformat_minor": 4
-            ]
-            
-            do {
-                let data = try JSONSerialization.data(withJSONObject: notebookDict, options: [.prettyPrinted, .sortedKeys])
-                try data.write(to: url)
-            } catch {
-                print("Failed to save notebook: \(error)")
+            if url.pathExtension == "ipynb" {
+                self.exportAsIPYNB(notebook: notebook, to: url)
+            } else {
+                self.saveAsMCNB(notebook: notebook, to: url)
             }
         }
+    }
+    
+    // MARK: - MicroCode Native Format (.mcnb)
+    
+    func saveAsMCNB(notebook: NotebookModel, to url: URL) {
+        var cellsArray: [[String: Any]] = []
+        
+        for cell in notebook.cells {
+            var cellDict: [String: Any] = [
+                "id": cell.id.uuidString,
+                "type": cell.type.rawValue,
+                "language": cell.language.rawValue,
+                "content": cell.content,
+                "output": cell.output,
+                "execution_count": cell.executionCount as Any,
+                "color_theme": cell.colorTheme.rawValue,
+                "is_collapsed": cell.isCollapsed,
+                "use_custom_color": cell.useCustomColor,
+            ]
+            
+            if let custom = cell.customColor {
+                cellDict["custom_color"] = [
+                    "red": custom.red,
+                    "green": custom.green,
+                    "blue": custom.blue,
+                    "opacity": custom.opacity
+                ]
+            }
+            
+            // Save output images paths
+            if !cell.outputImages.isEmpty {
+                cellDict["output_images"] = cell.outputImages.map { $0.path }
+            }
+            
+            cellsArray.append(cellDict)
+        }
+        
+        let notebookDict: [String: Any] = [
+            "format": "mcnb",
+            "version": 1,
+            "name": notebook.name,
+            "created_at": ISO8601DateFormatter().string(from: notebook.createdAt),
+            "modified_at": ISO8601DateFormatter().string(from: Date()),
+            "cells": cellsArray,
+            "metadata": [
+                "app": "MicroCode",
+                "app_version": "1.0.1",
+                "total_executions": totalExecutions
+            ]
+        ]
+        
+        do {
+            let data = try JSONSerialization.data(withJSONObject: notebookDict, options: [.prettyPrinted, .sortedKeys])
+            try data.write(to: url)
+            print("✅ Saved notebook to \(url.lastPathComponent)")
+        } catch {
+            print("❌ Failed to save notebook: \(error)")
+        }
+    }
+    
+    // MARK: - Load MicroCode Notebook (.mcnb)
+    
+    func loadNotebook(from url: URL) {
+        do {
+            let data = try Data(contentsOf: url)
+            guard let dict = try JSONSerialization.jsonObject(with: data) as? [String: Any] else {
+                print("❌ Invalid notebook format")
+                return
+            }
+            
+            let format = dict["format"] as? String ?? ""
+            
+            if format == "mcnb" {
+                loadMCNB(dict: dict)
+            } else if dict["nbformat"] != nil {
+                loadIPYNB(dict: dict, fileName: url.deletingPathExtension().lastPathComponent)
+            } else {
+                print("❌ Unknown notebook format")
+            }
+        } catch {
+            print("❌ Failed to load notebook: \(error)")
+        }
+    }
+    
+    private func loadMCNB(dict: [String: Any]) {
+        let name = dict["name"] as? String ?? "Imported Notebook"
+        let notebook = NotebookModel(name: name)
+        notebook.cells.removeAll()
+        
+        if let cellsArray = dict["cells"] as? [[String: Any]] {
+            for cellDict in cellsArray {
+                let typeStr = cellDict["type"] as? String ?? "Code"
+                let langStr = cellDict["language"] as? String ?? "Python"
+                let content = cellDict["content"] as? String ?? ""
+                let output = cellDict["output"] as? String ?? ""
+                let executionCount = cellDict["execution_count"] as? Int
+                let colorThemeStr = cellDict["color_theme"] as? String ?? "none"
+                let isCollapsed = cellDict["is_collapsed"] as? Bool ?? false
+                let useCustomColor = cellDict["use_custom_color"] as? Bool ?? false
+                
+                let cellType = NotebookCellModel.CellType(rawValue: typeStr) ?? .code
+                let language = CellLanguage(rawValue: langStr) ?? .python
+                
+                let cell = NotebookCellModel(type: cellType, language: language, content: content)
+                cell.output = output
+                cell.executionCount = executionCount
+                cell.colorTheme = CellColorTheme(rawValue: colorThemeStr) ?? .none
+                cell.isCollapsed = isCollapsed
+                cell.useCustomColor = useCustomColor
+                
+                if let customColorDict = cellDict["custom_color"] as? [String: Double] {
+                    cell.customColor = CustomCellColor(
+                        red: customColorDict["red"] ?? 0,
+                        green: customColorDict["green"] ?? 0,
+                        blue: customColorDict["blue"] ?? 0,
+                        opacity: customColorDict["opacity"] ?? 1
+                    )
+                }
+                
+                notebook.cells.append(cell)
+            }
+        }
+        
+        if let createdStr = dict["created_at"] as? String {
+            notebook.createdAt = ISO8601DateFormatter().date(from: createdStr) ?? Date()
+        }
+        
+        notebooks.append(notebook)
+        activeNotebookId = notebook.id
+        selectedCellId = notebook.cells.first?.id
+        
+        print("✅ Loaded notebook: \(name) (\(notebook.cells.count) cells)")
+    }
+    
+    // MARK: - Load Jupyter Notebook (.ipynb)
+    
+    private func loadIPYNB(dict: [String: Any], fileName: String) {
+        let notebook = NotebookModel(name: fileName)
+        notebook.cells.removeAll()
+        
+        if let cellsArray = dict["cells"] as? [[String: Any]] {
+            for cellDict in cellsArray {
+                let cellTypeStr = cellDict["cell_type"] as? String ?? "code"
+                let cellType: NotebookCellModel.CellType
+                switch cellTypeStr {
+                case "code": cellType = .code
+                case "markdown": cellType = .markdown
+                case "raw": cellType = .raw
+                default: cellType = .code
+                }
+                
+                // Source can be array of strings or a single string
+                let content: String
+                if let sourceArray = cellDict["source"] as? [String] {
+                    content = sourceArray.joined()
+                } else {
+                    content = cellDict["source"] as? String ?? ""
+                }
+                
+                // Detect language from metadata or kernel
+                var language: CellLanguage = .python
+                if let metadata = cellDict["metadata"] as? [String: Any],
+                   let langStr = metadata["language"] as? String {
+                    language = CellLanguage.allCases.first(where: { $0.rawValue.lowercased() == langStr.lowercased() }) ?? .python
+                }
+                
+                let cell = NotebookCellModel(type: cellType, language: language, content: content)
+                cell.executionCount = cellDict["execution_count"] as? Int
+                
+                // Parse outputs
+                if let outputs = cellDict["outputs"] as? [[String: Any]] {
+                    var outputText = ""
+                    for output in outputs {
+                        if let text = output["text"] as? [String] {
+                            outputText += text.joined()
+                        } else if let text = output["text"] as? String {
+                            outputText += text
+                        } else if let data = output["data"] as? [String: Any],
+                                  let plainText = data["text/plain"] as? [String] {
+                            outputText += plainText.joined()
+                        }
+                    }
+                    cell.output = outputText
+                }
+                
+                notebook.cells.append(cell)
+            }
+        }
+        
+        notebooks.append(notebook)
+        activeNotebookId = notebook.id
+        selectedCellId = notebook.cells.first?.id
+        
+        print("✅ Imported Jupyter notebook: \(fileName) (\(notebook.cells.count) cells)")
+    }
+    
+    // MARK: - Export as Jupyter (.ipynb)
+    
+    func exportAsIPYNB(notebook: NotebookModel, to url: URL) {
+        var jsonCells: [[String: Any]] = []
+        
+        for cell in notebook.cells {
+            var cellDict: [String: Any] = [
+                "cell_type": cell.type == .code ? "code" : (cell.type == .markdown ? "markdown" : "raw"),
+                "metadata": [
+                    "language": cell.language.rawValue
+                ],
+                "source": cell.content.split(separator: "\n", omittingEmptySubsequences: false).map { String($0) + "\n" }
+            ]
+            
+            if cell.type == .code {
+                cellDict["execution_count"] = cell.executionCount
+                cellDict["outputs"] = cell.output.isEmpty ? [] : [
+                    [
+                        "output_type": "stream",
+                        "name": "stdout",
+                        "text": cell.output.split(separator: "\n", omittingEmptySubsequences: false).map { String($0) + "\n" }
+                    ]
+                ]
+            }
+            
+            jsonCells.append(cellDict)
+        }
+        
+        let notebookDict: [String: Any] = [
+            "cells": jsonCells,
+            "metadata": [
+                "kernelspec": [
+                    "display_name": "Python 3",
+                    "language": "python",
+                    "name": "python3"
+                ],
+                "language_info": [
+                    "name": "python",
+                    "version": "3.8.5"
+                ],
+                "microcode": [
+                    "version": "1.0.1",
+                    "multi_language": true
+                ]
+            ],
+            "nbformat": 4,
+            "nbformat_minor": 4
+        ]
+        
+        do {
+            let data = try JSONSerialization.data(withJSONObject: notebookDict, options: [.prettyPrinted, .sortedKeys])
+            try data.write(to: url)
+            print("✅ Exported as .ipynb to \(url.lastPathComponent)")
+        } catch {
+            print("❌ Failed to export notebook: \(error)")
+        }
+    }
+    
+    // MARK: - Auto-Save to UserDefaults
+    
+    func autoSave() {
+        var allNotebooks: [[String: Any]] = []
+        
+        for notebook in notebooks {
+            var cellsArray: [[String: Any]] = []
+            for cell in notebook.cells {
+                var cellDict: [String: Any] = [
+                    "type": cell.type.rawValue,
+                    "language": cell.language.rawValue,
+                    "content": cell.content,
+                    "output": cell.output,
+                    "color_theme": cell.colorTheme.rawValue,
+                    "is_collapsed": cell.isCollapsed,
+                ]
+                if let ec = cell.executionCount { cellDict["execution_count"] = ec }
+                cellsArray.append(cellDict)
+            }
+            
+            allNotebooks.append([
+                "id": notebook.id.uuidString,
+                "name": notebook.name,
+                "cells": cellsArray,
+                "created_at": ISO8601DateFormatter().string(from: notebook.createdAt),
+                "modified_at": ISO8601DateFormatter().string(from: Date())
+            ])
+        }
+        
+        if let data = try? JSONSerialization.data(withJSONObject: [
+            "notebooks": allNotebooks,
+            "active_id": activeNotebookId?.uuidString ?? ""
+        ]) {
+            UserDefaults.standard.set(data, forKey: "microcode_notebooks_autosave")
+        }
+    }
+    
+    func loadAutoSave() {
+        guard let data = UserDefaults.standard.data(forKey: "microcode_notebooks_autosave"),
+              let dict = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let notebooksArray = dict["notebooks"] as? [[String: Any]],
+              !notebooksArray.isEmpty else { return }
+        
+        notebooks.removeAll()
+        
+        for nbDict in notebooksArray {
+            let name = nbDict["name"] as? String ?? "Notebook"
+            let notebook = NotebookModel(name: name)
+            notebook.cells.removeAll()
+            
+            if let createdStr = nbDict["created_at"] as? String {
+                notebook.createdAt = ISO8601DateFormatter().date(from: createdStr) ?? Date()
+            }
+            
+            if let cellsArray = nbDict["cells"] as? [[String: Any]] {
+                for cellDict in cellsArray {
+                    let typeStr = cellDict["type"] as? String ?? "Code"
+                    let langStr = cellDict["language"] as? String ?? "Python"
+                    let content = cellDict["content"] as? String ?? ""
+                    let output = cellDict["output"] as? String ?? ""
+                    let executionCount = cellDict["execution_count"] as? Int
+                    let colorStr = cellDict["color_theme"] as? String ?? "none"
+                    let isCollapsed = cellDict["is_collapsed"] as? Bool ?? false
+                    
+                    let cellType = NotebookCellModel.CellType(rawValue: typeStr) ?? .code
+                    let language = CellLanguage(rawValue: langStr) ?? .python
+                    
+                    let cell = NotebookCellModel(type: cellType, language: language, content: content)
+                    cell.output = output
+                    cell.executionCount = executionCount
+                    cell.colorTheme = CellColorTheme(rawValue: colorStr) ?? .none
+                    cell.isCollapsed = isCollapsed
+                    
+                    notebook.cells.append(cell)
+                }
+            }
+            
+            notebooks.append(notebook)
+        }
+        
+        let activeIdStr = dict["active_id"] as? String ?? ""
+        activeNotebookId = notebooks.first(where: { $0.id.uuidString == activeIdStr })?.id ?? notebooks.first?.id
+        selectedCellId = activeNotebook?.cells.first?.id
+        
+        print("✅ Restored \(notebooks.count) notebook(s) from auto-save")
     }
 }
 
@@ -1568,6 +1865,24 @@ struct NotebookView: View {
                     lastCell.content = code
                 }
             }
+        }
+    }
+    
+    // MARK: - Open Notebook File
+    
+    private func openNotebookFile() {
+        let panel = NSOpenPanel()
+        panel.allowedContentTypes = [
+            UTType(filenameExtension: "mcnb") ?? .json,
+            .json
+        ]
+        panel.allowsMultipleSelection = false
+        panel.canChooseDirectories = false
+        panel.title = "Open Notebook"
+        panel.message = "Open .mcnb (MicroCode) or .ipynb (Jupyter) notebook"
+        
+        if panel.runModal() == .OK, let url = panel.url {
+            viewModel.loadNotebook(from: url)
         }
     }
     
@@ -1935,8 +2250,27 @@ struct NotebookView: View {
             
             Divider().frame(height: 16)
             
-            Button(action: { viewModel.saveNotebook() }) {
+            // Open Notebook
+            Button(action: { openNotebookFile() }) {
+                Label("Open", systemImage: "folder")
+            }
+            .help("Open .mcnb or .ipynb notebook")
+            
+            // Save Menu
+            Menu {
+                Button(action: { viewModel.saveNotebook() }) {
+                    Label("Save As...", systemImage: "square.and.arrow.down")
+                }
+                
+                Divider()
+                
+                Button(action: { viewModel.autoSave() }) {
+                    Label("Quick Save (Auto-Save)", systemImage: "externaldrive.fill.badge.checkmark")
+                }
+            } label: {
                 Label("Save", systemImage: "square.and.arrow.down")
+            } primaryAction: {
+                viewModel.autoSave()
             }
             
             Divider().frame(height: 16)
