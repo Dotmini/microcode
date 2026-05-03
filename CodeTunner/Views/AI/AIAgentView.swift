@@ -57,7 +57,7 @@ struct AIAgentView: View {
                     // Normal Chat Mode
                     ZStack(alignment: .bottom) {
                         // Chat Scroll
-                        AgentChatStage(messages: agent.messages, isLoading: agent.isLoading)
+                        AgentChatStage(messages: agent.messages, isLoading: agent.isLoading, currentToolExecution: agent.currentToolExecution)
                         
                         // Input Container (Docked at bottom, not floating)
                         inputArea
@@ -777,6 +777,7 @@ struct MessageContentParser {
 struct AgentChatStage: View {
     let messages: [AgentMessageModel]
     let isLoading: Bool
+    var currentToolExecution: String? = nil
     
     var body: some View {
         ScrollViewReader { proxy in
@@ -800,23 +801,20 @@ struct AgentChatStage: View {
                     }
                     
                     if isLoading {
-                        HStack(spacing: 8) {
-                            ProgressView()
-                                .scaleEffect(0.5)
-                                .frame(width: 16, height: 16)
-                            Text("Generating...")
-                                .font(.system(size: 11))
-                                .foregroundColor(.secondary)
-                            Spacer()
-                        }
-                        .padding(16)
+                        AgentThinkingView(currentTool: currentToolExecution)
+                            .id("thinking-indicator")
                     }
                 }
-                .padding(.bottom, 120) // Extra space for input area
+                .padding(.bottom, 120)
             }
             .onChange(of: messages.count) { _ in
                 if let lastId = messages.last?.id {
                     proxy.scrollTo(lastId, anchor: .bottom)
+                }
+            }
+            .onChange(of: currentToolExecution) { _ in
+                withAnimation(.easeInOut(duration: 0.2)) {
+                    proxy.scrollTo("thinking-indicator", anchor: .bottom)
                 }
             }
         }
@@ -1331,37 +1329,9 @@ struct RichMessageRow: View {
                             }
                         }
                         
-                        // Tool Outputs (if any)
+                        // Tool Execution Steps (Rich Interactive View)
                         if !message.toolResults.isEmpty {
-                            VStack(alignment: .leading, spacing: 6) {
-                                ForEach(message.toolResults, id: \.toolCallId) { result in
-                                    VStack(alignment: .leading, spacing: 4) {
-                                        HStack {
-                                            Image(systemName: result.success ? "checkmark.circle.fill" : "exclamationmark.triangle.fill")
-                                                .foregroundColor(result.success ? .green : .red)
-                                            Text(result.toolName.uppercased())
-                                                .font(.system(size: 10, weight: .bold))
-                                                .foregroundColor(.secondary)
-                                            Spacer()
-                                        }
-                                        
-                                        if !result.output.isEmpty {
-                                            Text(result.output)
-                                                .font(.system(size: 11, design: .monospaced))
-                                                .foregroundColor(result.success ? .secondary : .red)
-                                                .lineLimit(8)
-                                                .fixedSize(horizontal: false, vertical: true)
-                                                .padding(8)
-                                                .background(Color.black.opacity(0.1))
-                                                .cornerRadius(4)
-                                        }
-                                    }
-                                    .padding(8)
-                                    .background(Color.primary.opacity(0.03))
-                                    .cornerRadius(8)
-                                    .overlay(RoundedRectangle(cornerRadius: 8).stroke(Color.primary.opacity(0.05), lineWidth: 1))
-                                }
-                            }
+                            ToolExecutionStepsView(results: message.toolResults)
                         }
                         
                         // Pending Changes (Diffs)
@@ -2382,3 +2352,271 @@ struct ChatListRow: View {
         }
     }
 }
+
+// MARK: - Agent Thinking View (Live Tool Execution)
+
+struct AgentThinkingView: View {
+    let currentTool: String?
+    
+    @State private var pulsePhase = false
+    @State private var dotCount = 0
+    
+    private let timer = Timer.publish(every: 0.5, on: .main, in: .common).autoconnect()
+    
+    private var toolIcon: String {
+        guard let tool = currentTool?.lowercased() else { return "brain" }
+        if tool.contains("file_read") || tool.contains("reading") { return "doc.text.magnifyingglass" }
+        if tool.contains("file_write") || tool.contains("writing") { return "doc.text.fill" }
+        if tool.contains("replace") || tool.contains("editing") { return "pencil.line" }
+        if tool.contains("shell") || tool.contains("running") { return "terminal.fill" }
+        if tool.contains("grep") || tool.contains("search") { return "magnifyingglass" }
+        if tool.contains("list_dir") || tool.contains("tree") { return "folder.fill" }
+        if tool.contains("git") { return "arrow.triangle.branch" }
+        if tool.contains("web") || tool.contains("fetch") { return "globe" }
+        return "gearshape.fill"
+    }
+    
+    private var toolColor: Color {
+        guard let tool = currentTool?.lowercased() else { return .accentColor }
+        if tool.contains("file_read") || tool.contains("reading") { return .cyan }
+        if tool.contains("file_write") || tool.contains("writing") { return .green }
+        if tool.contains("replace") || tool.contains("editing") { return .orange }
+        if tool.contains("shell") || tool.contains("running") { return .purple }
+        if tool.contains("grep") || tool.contains("search") { return .yellow }
+        if tool.contains("git") { return .pink }
+        return .accentColor
+    }
+    
+    private var statusText: String {
+        guard let tool = currentTool else {
+            let dots = String(repeating: ".", count: (dotCount % 3) + 1)
+            return "Thinking\(dots)"
+        }
+        return tool
+    }
+    
+    var body: some View {
+        HStack(alignment: .top, spacing: 12) {
+            // AI Avatar
+            RoundedRectangle(cornerRadius: 6)
+                .fill(LinearGradient(
+                    colors: [toolColor, toolColor.opacity(0.6)],
+                    startPoint: .topLeading,
+                    endPoint: .bottomTrailing
+                ))
+                .frame(width: 28, height: 28)
+                .overlay(
+                    Image(systemName: toolIcon)
+                        .font(.system(size: 12, weight: .semibold))
+                        .foregroundColor(.white)
+                        .scaleEffect(pulsePhase ? 1.15 : 0.85)
+                        .animation(.easeInOut(duration: 0.6).repeatForever(autoreverses: true), value: pulsePhase)
+                )
+                .shadow(color: toolColor.opacity(0.3), radius: 6, y: 2)
+                .padding(.top, 4)
+            
+            VStack(alignment: .leading, spacing: 6) {
+                HStack(spacing: 8) {
+                    ProgressView()
+                        .scaleEffect(0.45)
+                        .frame(width: 14, height: 14)
+                    
+                    Text(statusText)
+                        .font(.system(size: 11, weight: .medium, design: .monospaced))
+                        .foregroundColor(toolColor)
+                    
+                    Spacer()
+                }
+                
+                // Animated progress bar
+                GeometryReader { geo in
+                    RoundedRectangle(cornerRadius: 1.5)
+                        .fill(toolColor.opacity(0.12))
+                        .frame(height: 3)
+                        .overlay(alignment: .leading) {
+                            RoundedRectangle(cornerRadius: 1.5)
+                                .fill(toolColor.opacity(0.6))
+                                .frame(width: geo.size.width * 0.3, height: 3)
+                                .offset(x: pulsePhase ? geo.size.width * 0.7 : 0)
+                                .animation(.easeInOut(duration: 1.2).repeatForever(autoreverses: true), value: pulsePhase)
+                        }
+                }
+                .frame(height: 3)
+            }
+            .padding(.vertical, 4)
+        }
+        .padding(.horizontal, 16)
+        .padding(.vertical, 12)
+        .onAppear { pulsePhase = true }
+        .onReceive(timer) { _ in dotCount += 1 }
+    }
+}
+
+// MARK: - Tool Execution Steps View (Completed Results)
+
+struct ToolExecutionStepsView: View {
+    let results: [ToolResultModel]
+    
+    var body: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            ForEach(Array(results.enumerated()), id: \.element.toolCallId) { index, result in
+                ToolStepRow(result: result, stepNumber: index + 1, isLast: index == results.count - 1)
+            }
+        }
+        .padding(1)
+        .background(Color.primary.opacity(0.02))
+        .cornerRadius(10)
+        .overlay(
+            RoundedRectangle(cornerRadius: 10)
+                .stroke(Color.primary.opacity(0.06), lineWidth: 1)
+        )
+    }
+}
+
+struct ToolStepRow: View {
+    let result: ToolResultModel
+    let stepNumber: Int
+    let isLast: Bool
+    
+    @State private var isExpanded = false
+    
+    private var icon: String {
+        let name = result.toolName.lowercased()
+        if name.contains("file_read") { return "doc.text.magnifyingglass" }
+        if name.contains("file_write") { return "doc.text.fill" }
+        if name.contains("replace_in_file") { return "pencil.line" }
+        if name.contains("shell") { return "terminal.fill" }
+        if name.contains("grep") || name.contains("search") { return "magnifyingglass" }
+        if name.contains("file_search") { return "doc.text.magnifyingglass" }
+        if name.contains("list_dir") || name.contains("tree") { return "folder.fill" }
+        if name.contains("git") { return "arrow.triangle.branch" }
+        if name.contains("web") || name.contains("fetch") { return "globe" }
+        return "gearshape"
+    }
+    
+    private var iconColor: Color {
+        guard result.success else { return .red }
+        let name = result.toolName.lowercased()
+        if name.contains("file_read") || name.contains("file_search") { return .cyan }
+        if name.contains("file_write") { return .green }
+        if name.contains("replace") { return .orange }
+        if name.contains("shell") { return .purple }
+        if name.contains("grep") || name.contains("search") { return .yellow }
+        if name.contains("git") { return .pink }
+        return .accentColor
+    }
+    
+    private var label: String {
+        switch result.toolName {
+        case "file_read": return "FILE_READ"
+        case "file_write": return "FILE_WRITE"
+        case "replace_in_file": return "EDIT_FILE"
+        case "shell": return "RUN_COMMAND"
+        case "grep_search": return "GREP_SEARCH"
+        case "file_search": return "FILE_SEARCH"
+        case "list_directory_tree": return "LIST_DIR"
+        case "git_status": return "GIT_STATUS"
+        case "web_fetch": return "WEB_FETCH"
+        default: return result.toolName.uppercased()
+        }
+    }
+    
+    // Extract filepath from output for display
+    private var filePath: String? {
+        let output = result.output
+        // Look for common patterns
+        if let range = output.range(of: #"/[^\s\n]+"#, options: .regularExpression) {
+            let path = String(output[range])
+            if path.contains("/") {
+                let url = URL(fileURLWithPath: path)
+                return url.lastPathComponent
+            }
+        }
+        return nil
+    }
+    
+    private var outputPreview: String {
+        let output = result.success ? result.output : (result.error ?? "Unknown error")
+        if output.count > 500 {
+            return String(output.prefix(500)) + "\n..."
+        }
+        return output
+    }
+    
+    var body: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            // Step Header (always visible, clickable)
+            Button(action: { withAnimation(.easeInOut(duration: 0.15)) { isExpanded.toggle() } }) {
+                HStack(spacing: 8) {
+                    // Timeline dot + line
+                    VStack(spacing: 0) {
+                        Circle()
+                            .fill(iconColor)
+                            .frame(width: 8, height: 8)
+                        if !isLast {
+                            Rectangle()
+                                .fill(Color.primary.opacity(0.08))
+                                .frame(width: 1)
+                        }
+                    }
+                    .frame(width: 8)
+                    
+                    // Status icon
+                    Image(systemName: result.success ? "checkmark.circle.fill" : "exclamationmark.triangle.fill")
+                        .font(.system(size: 10))
+                        .foregroundColor(result.success ? .green : .red)
+                    
+                    // Tool icon
+                    Image(systemName: icon)
+                        .font(.system(size: 10))
+                        .foregroundColor(iconColor)
+                        .frame(width: 14)
+                    
+                    // Label
+                    Text(label)
+                        .font(.system(size: 10, weight: .bold, design: .monospaced))
+                        .foregroundColor(.secondary)
+                    
+                    // File name (if detected)
+                    if let file = filePath {
+                        Text(file)
+                            .font(.system(size: 10, design: .monospaced))
+                            .foregroundColor(iconColor.opacity(0.8))
+                            .lineLimit(1)
+                    }
+                    
+                    Spacer()
+                    
+                    // Expand chevron
+                    Image(systemName: isExpanded ? "chevron.down" : "chevron.right")
+                        .font(.system(size: 8, weight: .bold))
+                        .foregroundColor(.secondary.opacity(0.5))
+                }
+                .padding(.horizontal, 10)
+                .padding(.vertical, 6)
+                .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            
+            // Expanded Output
+            if isExpanded && !outputPreview.isEmpty {
+                Text(outputPreview)
+                    .font(.system(size: 10, design: .monospaced))
+                    .foregroundColor(result.success ? .secondary : .red.opacity(0.8))
+                    .lineLimit(20)
+                    .fixedSize(horizontal: false, vertical: true)
+                    .textSelection(.enabled)
+                    .padding(.horizontal, 10)
+                    .padding(.leading, 16) // Align with content after timeline dot
+                    .padding(.vertical, 6)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .background(Color.black.opacity(0.08))
+            }
+            
+            if !isLast {
+                Divider().opacity(0.3)
+            }
+        }
+    }
+}
+
