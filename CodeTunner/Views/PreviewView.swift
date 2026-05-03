@@ -449,10 +449,11 @@ struct PreviewView: View {
                 // Universal Run
                 // Hardcoded devices for V1 (matches UniversalPreviewView)
                 let devices: [DeviceFrame] = [
-                    DeviceFrame.allDevices.first { $0.name == "iPhone SE" }!,
-                    DeviceFrame.allDevices.first { $0.name == "iPhone 15 Pro" }!,
-                    DeviceFrame.allDevices.first { $0.name == "iPad Pro 11" }!
-                ]
+                    DeviceFrame.allDevices.first { $0.name == "iPhone SE" },
+                    DeviceFrame.allDevices.first { $0.name == "iPhone 15 Pro" },
+                    DeviceFrame.allDevices.first { $0.name == "iPad Pro 11" }
+                ].compactMap { $0 }
+                guard !devices.isEmpty else { isRunning = false; return }
                 await previewService.runUniversalPreview(filePath: filePath, devices: devices, isDark: isDarkMode)
             } else {
                 // Standard Run

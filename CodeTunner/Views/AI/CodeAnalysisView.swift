@@ -779,8 +779,8 @@ class CodeAnalysisViewModel: ObservableObject {
         for pattern in patterns {
             if let regex = try? NSRegularExpression(pattern: pattern, options: .caseInsensitive),
                let match = regex.firstMatch(in: response, range: NSRange(response.startIndex..., in: response)) {
-                if match.numberOfRanges > 1 {
-                    let range = Range(match.range(at: 1), in: response)!
+                if match.numberOfRanges > 1,
+                   let range = Range(match.range(at: 1), in: response) {
                     return String(response[range])
                 }
             }
@@ -798,8 +798,8 @@ class CodeAnalysisViewModel: ObservableObject {
         for pattern in patterns {
             if let regex = try? NSRegularExpression(pattern: pattern, options: .caseInsensitive),
                let match = regex.firstMatch(in: response, range: NSRange(response.startIndex..., in: response)) {
-                if match.numberOfRanges > 1 {
-                    let range = Range(match.range(at: 1), in: response)!
+                if match.numberOfRanges > 1,
+                   let range = Range(match.range(at: 1), in: response) {
                     if let score = Int(response[range]) {
                         return min(10, max(1, score))
                     }

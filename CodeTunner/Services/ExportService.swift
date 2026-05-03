@@ -80,9 +80,12 @@ class ExportService {
         
         // Header Bar
         let headerRect = CGRect(x: 0, y: pageHeight - 150, width: pageWidth, height: 150)
-        let gradientColors = [NSColor(hex: "#1a2a6c")!.cgColor, NSColor(hex: "#b21f1f")!.cgColor] as CFArray
+        let gradientColors = [(NSColor(hex: "#1a2a6c") ?? .blue).cgColor, (NSColor(hex: "#b21f1f") ?? .red).cgColor] as CFArray
         let colorSpace = CGColorSpaceCreateDeviceRGB()
-        let gradient = CGGradient(colorsSpace: colorSpace, colors: gradientColors, locations: [0, 1])!
+        guard let gradient = CGGradient(colorsSpace: colorSpace, colors: gradientColors, locations: [0, 1]) else {
+            context.endPDFPage()
+            return
+        }
         
         context.saveGState()
         context.addRect(headerRect)
@@ -261,12 +264,12 @@ class ExportService {
     
     private func drawPageHeader(context: CGContext, title: String) {
         let bgRect = CGRect(x: 0, y: pageHeight - 60, width: pageWidth, height: 60)
-        context.setFillColor(NSColor(hex: "#f4f4f4")!.cgColor)
+        context.setFillColor((NSColor(hex: "#f4f4f4") ?? .lightGray).cgColor)
         context.fill(bgRect)
         
         let attr = NSAttributedString(string: title, attributes: [
             .font: NSFont.systemFont(ofSize: 18, weight: .bold),
-            .foregroundColor: NSColor(hex: "#333333")!
+            .foregroundColor: NSColor(hex: "#333333") ?? .darkGray
         ])
         drawText(string: attr, x: margin, y: pageHeight - 40)
         
@@ -286,7 +289,7 @@ class ExportService {
         ])
         drawText(string: attr, x: margin, y: y)
         
-        context.setStrokeColor(NSColor(hex: "#eeeeee")!.cgColor)
+        context.setStrokeColor((NSColor(hex: "#eeeeee") ?? .lightGray).cgColor)
         context.setLineWidth(1)
         context.move(to: CGPoint(x: margin, y: y - 5))
         context.addLine(to: CGPoint(x: pageWidth - margin, y: y - 5))
@@ -380,7 +383,7 @@ class ExportService {
             let regex = try? NSRegularExpression(pattern: "\\b\(keyword)\\b")
             regex?.enumerateMatches(in: code, range: fullRange) { match, _, _ in
                 if let range = match?.range {
-                    attributed.addAttribute(.foregroundColor, value: NSColor(hex: "#800080")!, range: range) // Purple
+                    attributed.addAttribute(.foregroundColor, value: NSColor(hex: "#800080") ?? .purple, range: range) // Purple
                 }
             }
         }
@@ -388,14 +391,14 @@ class ExportService {
         let stringRegex = try? NSRegularExpression(pattern: "\"[^\"]*\"")
         stringRegex?.enumerateMatches(in: code, range: fullRange) { match, _, _ in
             if let range = match?.range {
-                attributed.addAttribute(.foregroundColor, value: NSColor(hex: "#c41a16")!, range: range) // Red
+                attributed.addAttribute(.foregroundColor, value: NSColor(hex: "#c41a16") ?? .red, range: range) // Red
             }
         }
         
         let commentRegex = try? NSRegularExpression(pattern: "//.*$", options: .anchorsMatchLines)
         commentRegex?.enumerateMatches(in: code, range: fullRange) { match, _, _ in
             if let range = match?.range {
-                attributed.addAttribute(.foregroundColor, value: NSColor(hex: "#007400")!, range: range) // Green
+                attributed.addAttribute(.foregroundColor, value: NSColor(hex: "#007400") ?? .green, range: range) // Green
             }
         }
         

@@ -115,7 +115,7 @@ struct FestiveOverlayView: View {
             x: CGFloat.random(in: 0...size.width),
             y: size.height + 50,
             size: CGFloat.random(in: 20...40),
-            color: colors.randomElement()!,
+            color: colors.randomElement() ?? .red,
             speed: CGFloat.random(in: 1...3),
             wobble: CGFloat.random(in: 5...15),
             phase: Double.random(in: 0...Double.pi * 2)
@@ -124,7 +124,7 @@ struct FestiveOverlayView: View {
     
     private func spawnFirework(at point: CGPoint) {
         let colors: [Color] = [.yellow, .orange, .red, .white, .cyan, .pink]
-        let baseColor = colors.randomElement()!
+        let baseColor = colors.randomElement() ?? .yellow
         let count = 40
         
         for _ in 0..<count {
