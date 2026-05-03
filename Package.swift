@@ -137,6 +137,7 @@ let package = Package(
                 "Services/DataFrameService.swift",
                 "Services/APIClientService.swift",
                 "Services/CICDService.swift",
+                "Services/LocalPipelineRunner.swift",
                 "Services/AgentService.swift",
                 "Services/AgentMemoryService.swift",
                 "Services/AIClient.swift",            // Direct AI API Client

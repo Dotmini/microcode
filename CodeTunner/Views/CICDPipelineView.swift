@@ -12,12 +12,24 @@ struct CICDPipelineView: View {
         VStack(spacing: 0) {
             HStack {
                 Picker("", selection: $selectedTab) {
-                    Text("Pipelines").tag(0)
+                    Text("Local Pipelines").tag(0)
                     Text("GitHub Actions").tag(1)
                 }
                 .pickerStyle(.segmented)
-                .frame(width: 260)
+                .frame(width: 280)
                 Spacer()
+                
+                // Pipeline status indicator
+                if LocalPipelineRunner.shared.isRunning {
+                    HStack(spacing: 4) {
+                        ProgressView()
+                            .scaleEffect(0.5)
+                            .frame(width: 12, height: 12)
+                        Text("Running...")
+                            .font(.caption2)
+                            .foregroundColor(.blue)
+                    }
+                }
             }
             .padding(.horizontal, 12)
             .padding(.vertical, 8)
@@ -40,28 +52,32 @@ struct CICDPipelineView: View {
 
 struct LocalPipelinesView: View {
     @EnvironmentObject var appState: AppState
-    @State private var workflows: [PipelineWorkflowInfo] = []
-    @State private var selectedWorkflow: PipelineWorkflowInfo?
-    @State private var runs: [PipelineRun] = []
-    @State private var selectedRun: PipelineRun?
-    @State private var logLines: [String] = []
+    @StateObject private var runner = LocalPipelineRunner.shared
     @State private var showingEditor = false
     @State private var editorFilename = ""
     @State private var editorContent = ""
     @State private var editorIsNew = false
-    @State private var wsTask: URLSessionWebSocketTask?
-    
-    private let cicdService = CICDService.shared
-    private var projectPath: String { appState.workspaceFolder?.path ?? "" }
+    @State private var selectedPipeline: LocalPipeline?
+    @State private var selectedHistory: PipelineRunRecord?
+    @State private var showSecretsSheet = false
     
     var body: some View {
         HSplitView {
-            // Left: Workflow List
+            // Left: Pipeline List + History
             VStack(spacing: 0) {
+                // Header
                 HStack {
-                    Text("Workflows")
+                    Text("Pipelines")
                         .font(.headline)
                     Spacer()
+                    
+                    // Auto-detect magic button
+                    Button(action: autoGeneratePipeline) {
+                        Image(systemName: "wand.and.stars")
+                    }
+                    .buttonStyle(BorderlessButtonStyle())
+                    .help("Auto-detect project & generate pipeline")
+                    
                     Button(action: {
                         editorIsNew = true
                         editorFilename = "new-pipeline"
@@ -72,7 +88,7 @@ struct LocalPipelinesView: View {
                     }
                     .buttonStyle(BorderlessButtonStyle())
                     
-                    Button(action: loadWorkflows) {
+                    Button(action: { runner.scanPipelines() }) {
                         Image(systemName: "arrow.clockwise")
                     }
                     .buttonStyle(BorderlessButtonStyle())
@@ -81,7 +97,7 @@ struct LocalPipelinesView: View {
                 
                 Divider()
                 
-                if workflows.isEmpty {
+                if runner.pipelines.isEmpty {
                     VStack(spacing: 12) {
                         Spacer()
                         Image(systemName: "doc.badge.gearshape")
@@ -90,14 +106,12 @@ struct LocalPipelinesView: View {
                         Text("No Pipelines")
                             .font(.subheadline)
                             .foregroundColor(.secondary)
-                        Text("Create a workflow to get started")
+                        Text("Auto-detect or create a pipeline")
                             .font(.caption)
                             .foregroundColor(.secondary)
-                        Button("New Pipeline") {
-                            editorIsNew = true
-                            editorFilename = "deploy"
-                            editorContent = ""
-                            showingEditor = true
+                        
+                        Button(action: autoGeneratePipeline) {
+                            Label("Auto-Generate", systemImage: "wand.and.stars")
                         }
                         .buttonStyle(.borderedProminent)
                         .controlSize(.small)
@@ -105,122 +119,142 @@ struct LocalPipelinesView: View {
                     }
                     .frame(maxWidth: .infinity)
                 } else {
-                    List(workflows, selection: Binding(
-                        get: { selectedWorkflow?.filename },
-                        set: { id in
-                            selectedWorkflow = workflows.first { $0.filename == id }
-                            if selectedWorkflow != nil { loadRuns() }
-                        }
-                    )) { wf in
-                        HStack {
-                            Image(systemName: "doc.text")
-                                .foregroundColor(.blue)
-                            VStack(alignment: .leading, spacing: 2) {
-                                Text(wf.name)
-                                    .font(.subheadline)
-                                    .fontWeight(.medium)
-                                Text("\(wf.filename) · \(wf.job_count) jobs · \(wf.trigger)")
-                                    .font(.caption2)
-                                    .foregroundColor(.secondary)
+                    // Pipeline list
+                    List {
+                        Section("Workflows") {
+                            ForEach(runner.pipelines) { pipeline in
+                                Button(action: { selectedPipeline = pipeline }) {
+                                    HStack {
+                                        Image(systemName: "gear")
+                                            .foregroundColor(.blue)
+                                        VStack(alignment: .leading, spacing: 2) {
+                                            Text(pipeline.name)
+                                                .font(.subheadline)
+                                                .fontWeight(.medium)
+                                            Text("\(pipeline.jobs.count) jobs · \(pipeline.trigger)")
+                                                .font(.caption2)
+                                                .foregroundColor(.secondary)
+                                        }
+                                        Spacer()
+                                    }
+                                }
+                                .buttonStyle(.plain)
+                                .padding(.vertical, 2)
+                                .background(selectedPipeline?.filename == pipeline.filename ? Color.accentColor.opacity(0.1) : Color.clear)
+                                .cornerRadius(4)
+                                .contextMenu {
+                                    Button("Edit") {
+                                        editorIsNew = false
+                                        editorFilename = pipeline.filename
+                                        editorContent = runner.getPipelineContent(filename: pipeline.filename)
+                                        showingEditor = true
+                                    }
+                                    Button("Run") { Task { await runner.runPipeline(pipeline) } }
+                                    Divider()
+                                    Button("Delete", role: .destructive) { runner.deletePipeline(filename: pipeline.filename) }
+                                }
                             }
-                            Spacer()
                         }
-                        .padding(.vertical, 4)
-                        .tag(wf.filename)
-                        .contextMenu {
-                            Button("Edit") { editWorkflow(wf) }
-                            Button("Run") { triggerWorkflow(wf) }
-                            Divider()
-                            Button("Delete", role: .destructive) { deleteWorkflow(wf) }
+                        
+                        // Run History
+                        if !runner.runHistory.isEmpty {
+                            Section("Recent Runs") {
+                                ForEach(runner.runHistory.prefix(10)) { record in
+                                    Button(action: { selectedHistory = record }) {
+                                        HStack(spacing: 6) {
+                                            Image(systemName: record.status.icon)
+                                                .foregroundColor(record.status.color)
+                                                .font(.caption)
+                                            VStack(alignment: .leading, spacing: 1) {
+                                                Text(record.pipelineName)
+                                                    .font(.caption)
+                                                    .fontWeight(.medium)
+                                                    .lineLimit(1)
+                                                Text(formatRelativeDate(record.startedAt))
+                                                    .font(.caption2)
+                                                    .foregroundColor(.secondary)
+                                            }
+                                            Spacer()
+                                            Text(String(format: "%.1fs", record.totalDuration))
+                                                .font(.caption2)
+                                                .foregroundColor(.secondary)
+                                        }
+                                    }
+                                    .buttonStyle(.plain)
+                                    .padding(.vertical, 1)
+                                }
+                            }
                         }
                     }
                     .listStyle(.sidebar)
                 }
             }
-            .frame(minWidth: 200, idealWidth: 240, maxWidth: 300)
+            .frame(minWidth: 200, idealWidth: 250, maxWidth: 300)
             
-            // Center: Run History + Details
+            // Center: Pipeline Detail / Run Result
             VStack(spacing: 0) {
-                if let wf = selectedWorkflow {
-                    // Workflow header
+                if let pipeline = selectedPipeline {
+                    // Pipeline header
                     HStack {
                         VStack(alignment: .leading, spacing: 2) {
-                            Text(wf.name).font(.headline)
-                            Text(wf.filename).font(.caption).foregroundColor(.secondary)
+                            Text(pipeline.name).font(.headline)
+                            Text("\(pipeline.jobs.count) jobs · \(pipeline.trigger)")
+                                .font(.caption).foregroundColor(.secondary)
                         }
                         Spacer()
-                        Button(action: { editWorkflow(wf) }) {
+                        
+                        Button(action: {
+                            editorIsNew = false
+                            editorFilename = pipeline.filename
+                            editorContent = runner.getPipelineContent(filename: pipeline.filename)
+                            showingEditor = true
+                        }) {
                             Label("Edit", systemImage: "pencil")
                         }
                         .controlSize(.small)
                         
-                        Button(action: { triggerWorkflow(wf) }) {
-                            Label("Run", systemImage: "play.fill")
+                        Button(action: { showSecretsSheet = true }) {
+                            Label("Secrets", systemImage: "key.fill")
                         }
                         .controlSize(.small)
-                        .buttonStyle(.borderedProminent)
+                        
+                        if runner.isRunning {
+                            Button(action: { runner.cancelPipeline() }) {
+                                Label("Cancel", systemImage: "stop.fill")
+                            }
+                            .controlSize(.small)
+                            .tint(.red)
+                        } else {
+                            Button(action: { Task { await runner.runPipeline(pipeline) } }) {
+                                Label("Run", systemImage: "play.fill")
+                            }
+                            .controlSize(.small)
+                            .buttonStyle(.borderedProminent)
+                        }
                     }
                     .padding(10)
                     
                     Divider()
                     
-                    if runs.isEmpty {
-                        VStack(spacing: 8) {
-                            Spacer()
-                            Image(systemName: "clock.arrow.circlepath")
-                                .font(.system(size: 28))
-                                .foregroundColor(.secondary)
-                            Text("No runs yet")
-                                .font(.subheadline)
-                                .foregroundColor(.secondary)
-                            Spacer()
-                        }
-                        .frame(maxWidth: .infinity, maxHeight: .infinity)
-                    } else {
-                        // Run list
-                        List(runs, selection: Binding(
-                            get: { selectedRun?.id },
-                            set: { id in selectedRun = runs.first { $0.id == id } }
-                        )) { run in
-                            HStack(spacing: 8) {
-                                PipelineStatusIcon(status: run.status)
-                                VStack(alignment: .leading, spacing: 2) {
-                                    Text("Run #\(run.id.prefix(8))")
-                                        .font(.subheadline)
-                                        .fontWeight(.medium)
-                                    Text(run.started_at)
-                                        .font(.caption2)
-                                        .foregroundColor(.secondary)
-                                }
-                                Spacer()
-                                Text(run.status)
-                                    .font(.caption)
-                                    .padding(.horizontal, 6)
-                                    .padding(.vertical, 2)
-                                    .background(statusColor(run.status).opacity(0.15))
-                                    .foregroundColor(statusColor(run.status))
-                                    .cornerRadius(4)
-                            }
-                            .padding(.vertical, 2)
-                            .tag(run.id)
-                        }
-                        .listStyle(.plain)
-                        .frame(maxHeight: 200)
-                        
-                        Divider()
-                        
-                        // Run detail
-                        if let run = selectedRun {
-                            RunDetailView(run: run)
-                        }
+                    // Visual Pipeline Graph
+                    pipelineGraph(pipeline)
+                    
+                    Divider()
+                    
+                    // Active run job results
+                    if let run = runner.activeRun {
+                        runResultsView(run)
+                    } else if let hist = selectedHistory {
+                        runResultsView(hist)
                     }
+                    
                 } else {
                     VStack(spacing: 12) {
                         Spacer()
                         Image(systemName: "sidebar.left")
                             .font(.system(size: 32))
                             .foregroundColor(.secondary)
-                        Text("Select a workflow")
+                        Text("Select a pipeline")
                             .foregroundColor(.secondary)
                         Spacer()
                     }
@@ -228,7 +262,7 @@ struct LocalPipelinesView: View {
                 }
             }
             
-            // Right: Live Log Console
+            // Right: Live Console
             VStack(spacing: 0) {
                 HStack {
                     Image(systemName: "terminal")
@@ -236,8 +270,15 @@ struct LocalPipelinesView: View {
                     Text("Console")
                         .font(.subheadline)
                         .fontWeight(.medium)
+                    
+                    if runner.isRunning {
+                        ProgressView()
+                            .scaleEffect(0.5)
+                            .frame(width: 14, height: 14)
+                    }
+                    
                     Spacer()
-                    Button(action: { logLines = [] }) {
+                    Button(action: { runner.liveLog = [] }) {
                         Image(systemName: "trash")
                             .font(.caption)
                     }
@@ -249,32 +290,34 @@ struct LocalPipelinesView: View {
                 
                 ScrollViewReader { proxy in
                     ScrollView {
-                        LazyVStack(alignment: .leading, spacing: 1) {
-                            ForEach(Array(logLines.enumerated()), id: \.offset) { idx, line in
-                                Text(line)
+                        LazyVStack(alignment: .leading, spacing: 0) {
+                            ForEach(runner.liveLog) { entry in
+                                Text(entry.message)
                                     .font(.system(size: 11, design: .monospaced))
-                                    .foregroundColor(line.contains("ERROR") ? .red : line.contains("✓") ? .green : .primary)
+                                    .foregroundColor(entry.type.color)
                                     .frame(maxWidth: .infinity, alignment: .leading)
-                                    .id(idx)
+                                    .padding(.horizontal, 8)
+                                    .padding(.vertical, 0.5)
+                                    .id(entry.id)
                             }
                         }
-                        .padding(8)
+                        .padding(.vertical, 4)
                     }
                     .background(Color(nsColor: .textBackgroundColor))
-                    .onChange(of: logLines.count) { _ in
-                        if let last = logLines.indices.last {
-                            proxy.scrollTo(last, anchor: .bottom)
+                    .onChange(of: runner.liveLog.count) { _ in
+                        if let last = runner.liveLog.last {
+                            proxy.scrollTo(last.id, anchor: .bottom)
                         }
                     }
                 }
             }
-            .frame(minWidth: 250, idealWidth: 300)
+            .frame(minWidth: 250, idealWidth: 350)
         }
         .onAppear {
-            loadWorkflows()
-            connectLogs()
+            if let workspace = appState.workspaceFolder {
+                runner.setWorkspace(workspace.path)
+            }
         }
-        .onDisappear { wsTask?.cancel() }
         .sheet(isPresented: $showingEditor) {
             WorkflowEditorSheet(
                 isPresented: $showingEditor,
@@ -282,77 +325,211 @@ struct LocalPipelinesView: View {
                 content: $editorContent,
                 isNew: editorIsNew,
                 onSave: { name, content in
-                    cicdService.pipelineSaveWorkflow(projectPath: projectPath, filename: name, content: content) { _ in
-                        DispatchQueue.main.async { loadWorkflows() }
-                    }
+                    runner.savePipeline(filename: name, content: content)
                 }
             )
         }
-    }
-    
-    func loadWorkflows() {
-        cicdService.pipelineListWorkflows(projectPath: projectPath) { result in
-            DispatchQueue.main.async {
-                if case .success(let wfs) = result { workflows = wfs }
-            }
+        .sheet(isPresented: $showSecretsSheet) {
+            secretsSheet
         }
     }
     
-    func loadRuns() {
-        cicdService.pipelineListRuns(projectPath: projectPath) { result in
-            DispatchQueue.main.async {
-                if case .success(let r) = result { runs = r }
-            }
-        }
-    }
+    // MARK: - Visual Pipeline Graph
     
-    func editWorkflow(_ wf: PipelineWorkflowInfo) {
-        cicdService.pipelineGetContent(projectPath: projectPath, filename: wf.filename) { result in
-            DispatchQueue.main.async {
-                if case .success(let content) = result {
-                    editorIsNew = false
-                    editorFilename = wf.filename
-                    editorContent = content
-                    showingEditor = true
+    private func pipelineGraph(_ pipeline: LocalPipeline) -> some View {
+        ScrollView(.horizontal, showsIndicators: false) {
+            HStack(spacing: 0) {
+                ForEach(Array(pipeline.jobs.enumerated()), id: \.element.id) { idx, job in
+                    pipelineJobNode(job: job)
+                    
+                    if idx < pipeline.jobs.count - 1 {
+                        Image(systemName: "arrow.right")
+                            .font(.system(size: 10))
+                            .foregroundColor(.secondary)
+                            .padding(.horizontal, 6)
+                    }
                 }
             }
+            .padding(10)
         }
+        .frame(height: 70)
+        .background(Color.primary.opacity(0.02))
     }
     
-    func triggerWorkflow(_ wf: PipelineWorkflowInfo) {
-        logLines.append("▶ Starting \(wf.name)...")
-        cicdService.pipelineTrigger(projectPath: projectPath, workflowFile: wf.filename) { result in
-            DispatchQueue.main.async {
-                if case .success(let runId) = result {
-                    logLines.append("✓ Pipeline started (run: \(runId.prefix(8)))")
-                    loadRuns()
-                } else {
-                    logLines.append("✗ Failed to start pipeline")
+    private func pipelineJobNode(job: PipelineJob) -> some View {
+        let icon = jobStatusIcon(job.key)
+        let clr = jobStatusColor(job.key)
+        return VStack(spacing: 4) {
+            Image(systemName: icon)
+                .font(.system(size: 16))
+                .foregroundColor(clr)
+            Text(job.name)
+                .font(.system(size: 10, weight: .bold))
+            Text("\(job.steps.count) steps")
+                .font(.system(size: 8))
+                .foregroundColor(.secondary)
+        }
+        .padding(8)
+        .frame(minWidth: 80)
+        .background(clr.opacity(0.08))
+        .cornerRadius(8)
+        .overlay(RoundedRectangle(cornerRadius: 8).stroke(clr.opacity(0.3), lineWidth: 1))
+    }
+    
+    private func jobStatusIcon(_ jobKey: String) -> String {
+        if let run = runner.activeRun,
+           let result = run.jobResults.first(where: { $0.jobKey == jobKey }) {
+            return result.status.icon
+        }
+        return "cube.box"
+    }
+    
+    private func jobStatusColor(_ jobKey: String) -> Color {
+        if let run = runner.activeRun,
+           let result = run.jobResults.first(where: { $0.jobKey == jobKey }) {
+            return result.status.color
+        }
+        return .secondary
+    }
+    
+    // MARK: - Run Results View
+    
+    private func runResultsView(_ run: PipelineRunRecord) -> some View {
+        ScrollView {
+            VStack(alignment: .leading, spacing: 8) {
+                // Run summary
+                HStack {
+                    Image(systemName: run.status.icon)
+                        .foregroundColor(run.status.color)
+                    Text(run.status.rawValue.uppercased())
+                        .font(.system(size: 11, weight: .bold))
+                        .foregroundColor(run.status.color)
+                    Spacer()
+                    Text(String(format: "%.1fs", run.totalDuration))
+                        .font(.system(size: 11, design: .monospaced))
+                        .foregroundColor(.secondary)
+                }
+                .padding(8)
+                .background(run.status.color.opacity(0.05))
+                .cornerRadius(6)
+                
+                // Job results
+                ForEach(run.jobResults) { jobResult in
+                    GroupBox {
+                        VStack(alignment: .leading, spacing: 4) {
+                            HStack {
+                                Image(systemName: jobResult.status.icon)
+                                    .foregroundColor(jobResult.status.color)
+                                Text(jobResult.jobName)
+                                    .font(.subheadline)
+                                    .fontWeight(.medium)
+                                Spacer()
+                                Text(String(format: "%.1fs", jobResult.duration))
+                                    .font(.caption2)
+                                    .foregroundColor(.secondary)
+                            }
+                            
+                            ForEach(jobResult.stepResults) { step in
+                                HStack(spacing: 6) {
+                                    Image(systemName: step.status.icon)
+                                        .foregroundColor(step.status.color)
+                                        .font(.caption)
+                                    Text(step.name)
+                                        .font(.caption)
+                                    Spacer()
+                                    if step.exitCode != 0 {
+                                        Text("exit \(step.exitCode)")
+                                            .font(.caption2)
+                                            .foregroundColor(.red)
+                                    }
+                                    Text(String(format: "%.1fs", step.duration))
+                                        .font(.caption2)
+                                        .foregroundColor(.secondary)
+                                }
+                                .padding(.leading, 20)
+                            }
+                        }
+                        .padding(4)
+                    }
                 }
             }
+            .padding(10)
         }
     }
     
-    func deleteWorkflow(_ wf: PipelineWorkflowInfo) {
-        cicdService.pipelineDeleteWorkflow(projectPath: projectPath, filename: wf.filename) { _ in
-            DispatchQueue.main.async { loadWorkflows() }
+    // MARK: - Secrets Sheet
+    
+    private var secretsSheet: some View {
+        VStack(spacing: 0) {
+            HStack {
+                Image(systemName: "key.fill").foregroundColor(.orange)
+                Text("Pipeline Secrets").font(.headline)
+                Spacer()
+            }
+            .padding()
+            .background(Color(nsColor: .controlBackgroundColor))
+            
+            Divider()
+            
+            ScrollView {
+                VStack(spacing: 8) {
+                    ForEach(Array(runner.secrets.keys.sorted()), id: \.self) { key in
+                        HStack {
+                            let keyStr: String = key
+                            TextField("KEY", text: .constant(keyStr))
+                                .textFieldStyle(.roundedBorder)
+                                .frame(width: 140)
+                                .font(.system(.caption, design: .monospaced))
+                            Text("=")
+                            SecureField("value", text: Binding(
+                                get: { runner.secrets[key] ?? "" },
+                                set: { runner.secrets[key] = $0 }
+                            ))
+                            .textFieldStyle(.roundedBorder)
+                            Button(action: { runner.secrets.removeValue(forKey: key) }) {
+                                Image(systemName: "minus.circle").foregroundColor(.red)
+                            }.buttonStyle(BorderlessButtonStyle())
+                        }
+                    }
+                    
+                    Button(action: { runner.secrets["NEW_SECRET"] = "" }) {
+                        Label("Add Secret", systemImage: "plus.circle")
+                    }
+                    .padding(.top, 4)
+                }
+                .padding()
+            }
+            
+            Divider()
+            
+            HStack {
+                Button("Cancel") { showSecretsSheet = false }
+                Spacer()
+                Button("Save") {
+                    runner.saveSecrets()
+                    showSecretsSheet = false
+                }
+                .buttonStyle(.borderedProminent)
+            }
+            .padding()
         }
+        .frame(width: 450, height: 350)
     }
     
-    func connectLogs() {
-        wsTask = cicdService.connectPipelineLogs { event in
-            logLines.append("[\(event.step_name)] \(event.line)")
-        }
+    // MARK: - Helpers
+    
+    private func autoGeneratePipeline() {
+        let content = runner.autoDetectPipeline()
+        editorIsNew = true
+        editorFilename = "build"
+        editorContent = content
+        showingEditor = true
     }
     
-    func statusColor(_ s: String) -> Color {
-        switch s {
-        case "success": return .green
-        case "failed": return .red
-        case "running": return .blue
-        case "cancelled": return .orange
-        default: return .secondary
-        }
+    private func formatRelativeDate(_ date: Date) -> String {
+        let rel = RelativeDateTimeFormatter()
+        rel.unitsStyle = .abbreviated
+        return rel.localizedString(for: date, relativeTo: Date())
     }
 }
 
