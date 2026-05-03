@@ -14,10 +14,10 @@ struct UniversalPreviewView: View {
     
     // Default set of devices to preview
     let targetDevices: [DeviceFrame] = [
-        DeviceFrame.allDevices.first { $0.name == "iPhone SE" }!,
-        DeviceFrame.allDevices.first { $0.name == "iPhone 15 Pro" }!,
-        DeviceFrame.allDevices.first { $0.name == "iPad Pro 11" }!
-    ]
+        DeviceFrame.allDevices.first { $0.name == "iPhone SE" },
+        DeviceFrame.allDevices.first { $0.name == "iPhone 15 Pro" },
+        DeviceFrame.allDevices.first { $0.name == "iPad Pro 11" }
+    ].compactMap { $0 }
     
     var body: some View {
         VStack(spacing: 0) {
