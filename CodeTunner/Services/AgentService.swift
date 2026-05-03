@@ -156,18 +156,64 @@ class AgentService: ObservableObject {
     private func loadAgentWorkspaceFiles(_ workspacePath: String) {
         let fm = FileManager.default
         
-        // Load agent.md
-        let agentMdPath = (workspacePath as NSString).appendingPathComponent("agent.md")
+        // Create .microcode directory
+        let microcodeDir = (workspacePath as NSString).appendingPathComponent(".microcode")
+        if !fm.fileExists(atPath: microcodeDir) {
+            try? fm.createDirectory(atPath: microcodeDir, withIntermediateDirectories: true)
+        }
+        
+        // Load or create agent.md
+        let agentMdPath = (microcodeDir as NSString).appendingPathComponent("agent.md")
         if fm.fileExists(atPath: agentMdPath) {
             agentMdContent = try? String(contentsOfFile: agentMdPath, encoding: .utf8)
             logActivity(.info, "Loaded agent.md")
+        } else {
+            let defaultAgentMd = """
+            # Agent Instructions
+            
+            ## Project Context
+            This file provides project-level instructions to the MicroCode AI Agent.
+            Edit this file to customize how the agent behaves in this workspace.
+            
+            ## Rules
+            - Follow existing code style and conventions
+            - Write tests for new features
+            - Use descriptive commit messages
+            
+            ## Tech Stack
+            <!-- Add your project's tech stack here -->
+            
+            ## Important Files
+            <!-- List key files the agent should know about -->
+            """
+            try? defaultAgentMd.write(toFile: agentMdPath, atomically: true, encoding: .utf8)
+            agentMdContent = defaultAgentMd
+            logActivity(.info, "Created agent.md")
         }
         
-        // Load task.md
-        let taskMdPath = (workspacePath as NSString).appendingPathComponent("task.md")
+        // Load or create task.md
+        let taskMdPath = (microcodeDir as NSString).appendingPathComponent("task.md")
         if fm.fileExists(atPath: taskMdPath) {
             taskMdContent = try? String(contentsOfFile: taskMdPath, encoding: .utf8)
             logActivity(.info, "Loaded task.md")
+        } else {
+            let defaultTaskMd = """
+            # Current Task
+            
+            ## Objective
+            <!-- Describe the current task here -->
+            
+            ## Steps
+            - [ ] Step 1
+            - [ ] Step 2
+            - [ ] Step 3
+            
+            ## Notes
+            <!-- Any additional context for the AI agent -->
+            """
+            try? defaultTaskMd.write(toFile: taskMdPath, atomically: true, encoding: .utf8)
+            taskMdContent = defaultTaskMd
+            logActivity(.info, "Created task.md")
         }
         
         // Load or create AI.arx
@@ -328,6 +374,14 @@ class AgentService: ObservableObject {
                 currentToolExecution = "Running \(toolCall.name)..."
                 agentPhase = .executing(toolCall.name)
                 logActivity(.tool, "\(toolCall.name)", detail: truncateArgs(toolCall.arguments))
+                
+                // Capture old content for diff BEFORE execution
+                var oldContent: String? = nil
+                if (toolCall.name == "file_write" || toolCall.name == "replace_in_file"),
+                   let path = toolCall.arguments["path"] as? String {
+                    oldContent = try? String(contentsOfFile: path, encoding: .utf8)
+                }
+                
                 do {
                     let output = try await toolBox.execute(toolCall.name, params: toolCall.arguments)
                     
@@ -342,17 +396,28 @@ class AgentService: ObservableObject {
                     batchResults.append((name: toolCall.name, output: output, success: true))
                     logActivity(.success, "\(toolCall.name) ✓")
                     
-                    // Track file changes
+                    // Track file changes with diff
                     if toolCall.name == "file_write" || toolCall.name == "replace_in_file" {
                         if let path = toolCall.arguments["path"] as? String {
                             filesModified.append(path)
-                            logActivity(.fileChange, "Modified: \(URL(fileURLWithPath: path).lastPathComponent)")
+                            
+                            // Read new content for diff
+                            let newContent = (try? String(contentsOfFile: path, encoding: .utf8)) ?? ""
+                            let old = oldContent ?? ""
+                            
+                            // Compute additions/deletions
+                            let oldLines = old.components(separatedBy: "\n")
+                            let newLines = newContent.components(separatedBy: "\n")
+                            let additions = max(0, newLines.count - oldLines.count)
+                            let deletions = max(0, oldLines.count - newLines.count)
+                            
+                            logActivity(.fileChange, "Modified: \(URL(fileURLWithPath: path).lastPathComponent) (+\(additions) -\(deletions))")
                             allChanges.append(PendingChangeModel(
                                 id: UUID().uuidString,
                                 filePath: path,
                                 description: "Modified by \(toolCall.name)",
-                                additions: 0, deletions: 0,
-                                oldContent: "", newContent: "",
+                                additions: additions, deletions: deletions,
+                                oldContent: String(old.suffix(5000)), newContent: String(newContent.suffix(5000)),
                                 status: .accepted
                             ))
                         }

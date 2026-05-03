@@ -799,7 +799,9 @@ struct EditorArea: View {
                         EditorTabBar()
                     }
                     
-                    if let file = appState.currentFile {
+                    if let file = appState.currentFile,
+                       appState.currentFileIndex >= 0,
+                       appState.currentFileIndex < appState.openFiles.count {
                         let fileURL = URL(fileURLWithPath: file.path)
                         let ext = fileURL.pathExtension.lowercased()
                         let previewExtensions = ["png", "jpg", "jpeg", "pdf", "gif", "bmp", "tiff", "webp"]

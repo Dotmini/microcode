@@ -865,11 +865,14 @@ class AppState: ObservableObject {
     private func setupSubscriptions() {
         // Monitor current file changes
         $currentFileIndex
+            .receive(on: RunLoop.main)
             .sink { [weak self] index in
                 guard let self = self else { return }
-                if index >= 0 && index < self.openFiles.count {
-                    self.currentFile = self.openFiles[index]
+                guard index >= 0, index < self.openFiles.count else {
+                    self.currentFile = nil
+                    return
                 }
+                self.currentFile = self.openFiles[index]
             }
             .store(in: &cancellables)
             
@@ -1411,7 +1414,7 @@ class AppState: ObservableObject {
 
             openFiles.append(file)
             currentFileIndex = openFiles.count - 1
-            currentFile = file
+            // currentFile is set by the $currentFileIndex sink — do NOT set here to avoid race
             
             // Auto-Switch to Editor
             Task { @MainActor in
