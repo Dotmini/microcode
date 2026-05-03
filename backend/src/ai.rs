@@ -41,7 +41,8 @@ impl GeminiProvider {
 impl AIProvider for GeminiProvider {
     async fn generate(&self, prompt: &str, config: &AIConfig) -> Result<String> {
         let (url, auth_header) = if config.use_microrent_proxy || env::var("USE_MICRORENT_PROXY").unwrap_or_else(|_| "0".to_string()) == "1" {
-            let proxy_url = env::var("MICRORENT_PROXY_URL").unwrap_or_else(|_| "https://***REDACTED_PROXY_URL***".to_string());
+            let proxy_url = env::var("MICRORENT_PROXY_URL")
+                .map_err(|_| AppError::AIProviderError("MICRORENT_PROXY_URL not configured".to_string()))?;
             let token = config.microrent_token.clone()
                 .or_else(|| env::var("MICRORENT_TOKEN").ok())
                 .ok_or_else(|| AppError::AIProviderError("MICRORENT_TOKEN not found for Gateway".to_string()))?;
@@ -154,7 +155,8 @@ impl AIProvider for GeminiProvider {
 
     async fn generate_stream(&self, prompt: &str, config: &AIConfig) -> Result<futures::stream::BoxStream<'static, Result<String>>> {
         let (url, auth_header) = if config.use_microrent_proxy || env::var("USE_MICRORENT_PROXY").unwrap_or_else(|_| "0".to_string()) == "1" {
-            let proxy_url = env::var("MICRORENT_PROXY_URL").unwrap_or_else(|_| "https://***REDACTED_PROXY_URL***".to_string());
+            let proxy_url = env::var("MICRORENT_PROXY_URL")
+                .map_err(|_| AppError::AIProviderError("MICRORENT_PROXY_URL not configured".to_string()))?;
             let token = config.microrent_token.clone()
                 .or_else(|| env::var("MICRORENT_TOKEN").ok())
                 .ok_or_else(|| AppError::AIProviderError("MICRORENT_TOKEN not found for Gateway".to_string()))?;
@@ -324,7 +326,8 @@ impl OpenAIProvider {
 impl AIProvider for OpenAIProvider {
     async fn generate(&self, prompt: &str, config: &AIConfig) -> Result<String> {
         let (url, auth_header) = if config.use_microrent_proxy || env::var("USE_MICRORENT_PROXY").unwrap_or_else(|_| "0".to_string()) == "1" {
-            let proxy_url = env::var("MICRORENT_PROXY_URL").unwrap_or_else(|_| "https://***REDACTED_PROXY_URL***".to_string());
+            let proxy_url = env::var("MICRORENT_PROXY_URL")
+                .map_err(|_| AppError::AIProviderError("MICRORENT_PROXY_URL not configured".to_string()))?;
             let token = config.microrent_token.clone()
                 .or_else(|| env::var("MICRORENT_TOKEN").ok())
                 .ok_or_else(|| AppError::AIProviderError("MICRORENT_TOKEN not found for Gateway".to_string()))?;
@@ -420,7 +423,8 @@ impl AIProvider for OpenAIProvider {
 
     async fn generate_stream(&self, prompt: &str, config: &AIConfig) -> Result<futures::stream::BoxStream<'static, Result<String>>> {
         let (url, auth_header) = if config.use_microrent_proxy || env::var("USE_MICRORENT_PROXY").unwrap_or_else(|_| "0".to_string()) == "1" {
-            let proxy_url = env::var("MICRORENT_PROXY_URL").unwrap_or_else(|_| "https://***REDACTED_PROXY_URL***".to_string());
+            let proxy_url = env::var("MICRORENT_PROXY_URL")
+                .map_err(|_| AppError::AIProviderError("MICRORENT_PROXY_URL not configured".to_string()))?;
             let token = config.microrent_token.clone()
                 .or_else(|| env::var("MICRORENT_TOKEN").ok())
                 .ok_or_else(|| AppError::AIProviderError("MICRORENT_TOKEN not found for Gateway".to_string()))?;
@@ -571,7 +575,8 @@ impl ClaudeProvider {
 impl AIProvider for ClaudeProvider {
     async fn generate(&self, prompt: &str, config: &AIConfig) -> Result<String> {
         let (url, auth_header) = if config.use_microrent_proxy || env::var("USE_MICRORENT_PROXY").unwrap_or_else(|_| "0".to_string()) == "1" {
-            let proxy_url = env::var("MICRORENT_PROXY_URL").unwrap_or_else(|_| "https://***REDACTED_PROXY_URL***".to_string());
+            let proxy_url = env::var("MICRORENT_PROXY_URL")
+                .map_err(|_| AppError::AIProviderError("MICRORENT_PROXY_URL not configured".to_string()))?;
             let token = config.microrent_token.clone()
                 .or_else(|| env::var("MICRORENT_TOKEN").ok())
                 .ok_or_else(|| AppError::AIProviderError("MICRORENT_TOKEN not found for Gateway".to_string()))?;
@@ -666,7 +671,8 @@ impl AIProvider for ClaudeProvider {
 
     async fn generate_stream(&self, prompt: &str, config: &AIConfig) -> Result<futures::stream::BoxStream<'static, Result<String>>> {
         let (url, auth_header) = if config.use_microrent_proxy || env::var("USE_MICRORENT_PROXY").unwrap_or_else(|_| "0".to_string()) == "1" {
-            let proxy_url = env::var("MICRORENT_PROXY_URL").unwrap_or_else(|_| "https://***REDACTED_PROXY_URL***".to_string());
+            let proxy_url = env::var("MICRORENT_PROXY_URL")
+                .map_err(|_| AppError::AIProviderError("MICRORENT_PROXY_URL not configured".to_string()))?;
             let token = config.microrent_token.clone()
                 .or_else(|| env::var("MICRORENT_TOKEN").ok())
                 .ok_or_else(|| AppError::AIProviderError("MICRORENT_TOKEN not found for Gateway".to_string()))?;
@@ -816,7 +822,8 @@ impl DeepSeekProvider {
 impl AIProvider for DeepSeekProvider {
     async fn generate(&self, prompt: &str, config: &AIConfig) -> Result<String> {
         let (url, auth_header) = if config.use_microrent_proxy || env::var("USE_MICRORENT_PROXY").unwrap_or_else(|_| "0".to_string()) == "1" {
-            let proxy_url = env::var("MICRORENT_PROXY_URL").unwrap_or_else(|_| "https://***REDACTED_PROXY_URL***".to_string());
+            let proxy_url = env::var("MICRORENT_PROXY_URL")
+                .map_err(|_| AppError::AIProviderError("MICRORENT_PROXY_URL not configured".to_string()))?;
             let token = config.microrent_token.clone()
                 .or_else(|| env::var("MICRORENT_TOKEN").ok())
                 .ok_or_else(|| AppError::AIProviderError("MICRORENT_TOKEN not found for Gateway".to_string()))?;
@@ -912,7 +919,8 @@ impl AIProvider for DeepSeekProvider {
 
     async fn generate_stream(&self, prompt: &str, config: &AIConfig) -> Result<futures::stream::BoxStream<'static, Result<String>>> {
         let (url, auth_header) = if config.use_microrent_proxy || env::var("USE_MICRORENT_PROXY").unwrap_or_else(|_| "0".to_string()) == "1" {
-            let proxy_url = env::var("MICRORENT_PROXY_URL").unwrap_or_else(|_| "https://***REDACTED_PROXY_URL***".to_string());
+            let proxy_url = env::var("MICRORENT_PROXY_URL")
+                .map_err(|_| AppError::AIProviderError("MICRORENT_PROXY_URL not configured".to_string()))?;
             let token = config.microrent_token.clone()
                 .or_else(|| env::var("MICRORENT_TOKEN").ok())
                 .ok_or_else(|| AppError::AIProviderError("MICRORENT_TOKEN not found for Gateway".to_string()))?;

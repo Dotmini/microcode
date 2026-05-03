@@ -298,7 +298,7 @@ impl AutoUpdater {
     pub fn new(current_version: &str, current_build: u32) -> Self {
         Self {
             http_client: reqwest::Client::new(),
-            update_url: "https://***REDACTED_UPDATE_URL***".to_string(),
+            update_url: std::env::var("AUTOUPDATE_URL").unwrap_or_else(|_| "https://api.github.com/repos/Dotmini/microcode/releases/latest".to_string()),
             current_version: current_version.to_string(),
             current_build,
         }

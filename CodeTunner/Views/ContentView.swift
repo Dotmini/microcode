@@ -3078,7 +3078,13 @@ struct SettingsView: View {
         isAuthenticating = true
         authError = ""
         
-        let apiKey = "***REDACTED_FIREBASE_KEY***"
+        // API key must be configured via Settings → MicroRent, never hardcoded
+        let apiKey = UserDefaults.standard.string(forKey: "firebaseApiKey") ?? ProcessInfo.processInfo.environment["FIREBASE_API_KEY"] ?? ""
+        guard !apiKey.isEmpty else {
+            authError = "Firebase API Key not configured. Set it in Settings → MicroRent."
+            isAuthenticating = false
+            return
+        }
         let urlString = "https://identitytoolkit.googleapis.com/v1/accounts:signInWithPassword?key=\(apiKey)"
         guard let url = URL(string: urlString) else {
             authError = "Invalid Configuration"
@@ -3152,7 +3158,9 @@ struct SettingsView: View {
     private func checkSubscriptionStatus() {
         guard !microRentToken.isEmpty else { return }
         
-        let urlString = "https://***REDACTED_RTDB_URL***/users/\(microRentToken)/subscriptionPlan.json"
+        let baseURL = UserDefaults.standard.string(forKey: "firebaseRTDBUrl") ?? ProcessInfo.processInfo.environment["FIREBASE_RTDB_URL"] ?? ""
+        guard !baseURL.isEmpty else { return }
+        let urlString = "\(baseURL)/users/\(microRentToken)/subscriptionPlan.json"
         guard let url = URL(string: urlString) else { return }
         
         URLSession.shared.dataTask(with: url) { data, response, error in
