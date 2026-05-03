@@ -30,7 +30,7 @@ enum StreamableAIProvider: String, CaseIterable {
         case .grok: return "https://api.x.ai/v1"
         case .qwen: return "https://dashscope.aliyuncs.com/compatible-mode/v1"
         case .glm: return "https://open.bigmodel.cn/api/paas/v4"
-        case .local: return LocalLLMService.shared.activeEndpoint
+        case .local: return LocalLLMService.cachedEndpoint
         }
     }
     
@@ -43,7 +43,7 @@ enum StreamableAIProvider: String, CaseIterable {
         case .grok: return "grok-3"
         case .qwen: return "qwen-max"
         case .glm: return "glm-4-plus"
-        case .local: return LocalLLMService.shared.activeModel
+        case .local: return LocalLLMService.cachedModel
         }
     }
     
