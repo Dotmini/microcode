@@ -171,6 +171,9 @@ namespace MicroParser {
 }
 
 - (AuthenticAIContext *)aiContext {
+    if (!_sourceCode || _sourceCode.length == 0) {
+        return [[AuthenticAIContext alloc] init];
+    }
     return [self contextForLine:0 column:0];
 }
 
@@ -208,10 +211,16 @@ namespace MicroParser {
     
     // Convert Line/Col to Char Index (Need a helper for this)
     NSRange lineRange = [self rangeForLine:line];
+    if (lineRange.location == NSNotFound) {
+        return ctx;
+    }
     NSUInteger charIndex = lineRange.location + column;
     
     // 1. Find Scope
     // Iterate parsed scopes to find the deepest one wrapping charIndex
+    if (_parser->scopes.empty()) {
+        return ctx;
+    }
     MicroParser::Scope *foundScope = &_parser->scopes[0]; // Global
     
     // Heuristic: Find last declared scope started BEFORE this charIndex and NOT ended
@@ -262,6 +271,9 @@ namespace MicroParser {
 
 // Helper: Naive O(N) line finder. In production, cache this.
 - (NSRange)rangeForLine:(NSInteger)line {
+    if (!_sourceCode || _sourceCode.length == 0) {
+        return NSMakeRange(NSNotFound, 0);
+    }
     NSUInteger numberOfLines, index, stringLength = [_sourceCode length];
     for (index = 0, numberOfLines = 0; index < stringLength; numberOfLines++) {
         NSRange range = [_sourceCode lineRangeForRange:NSMakeRange(index, 0)];
