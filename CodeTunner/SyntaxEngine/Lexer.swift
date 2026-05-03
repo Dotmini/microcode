@@ -188,7 +188,7 @@ public class StateMachineLexer: LexerProtocol, @unchecked Sendable {
     private func tokenizeNormal(_ text: Substring, line: Int, column: Int, offset: Int) -> (SyntaxToken?, SyntaxLexerState, Int) {
         guard !text.isEmpty else { return (nil, .normal, 0) }
         
-        let first = text.first!
+        guard let first = text.first else { return (nil, .normal, 0) }
         
         // Whitespace
         if first.isWhitespace {
@@ -406,7 +406,7 @@ public class StateMachineLexer: LexerProtocol, @unchecked Sendable {
     /// SyntaxTokenize an identifier or keyword
     private func tokenizeIdentifier(_ text: Substring, line: Int, column: Int, offset: Int) -> (SyntaxToken?, SyntaxLexerState, Int) {
         var index = text.startIndex
-        let first = text.first!
+        guard let first = text.first else { return (nil, .normal, 0) }
         
         // Handle @ and # prefixed identifiers (decorators, preprocessor)
         var isDecorator = false
@@ -457,7 +457,7 @@ public class StateMachineLexer: LexerProtocol, @unchecked Sendable {
     
     /// SyntaxTokenize an operator or punctuation
     private func tokenizeOperator(_ text: Substring, line: Int, column: Int, offset: Int) -> (SyntaxToken?, SyntaxLexerState, Int) {
-        let first = text.first!
+        guard let first = text.first else { return (nil, .normal, 0) }
         
         // Multi-character operators (check longest first)
         let multiOps = ["===", "!==", "...", "..<", "->", "=>", "<=", ">=", "==", "!=", "&&", "||", "<<", ">>", "+=", "-=", "*=", "/=", "??", "++", "--"]
