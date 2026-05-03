@@ -1439,6 +1439,7 @@ struct NotebookView: View {
     @ObservedObject private var pythonEnvManager = PythonEnvManager.shared
     @ObservedObject private var shmService = SharedMemoryService.shared
     @State private var isReady = false
+    @State private var showAIPanel = false
     
     private var panelBackground: Color {
         appState.appTheme == .transparent ? Color.white.opacity(0.05) : Color(nsColor: .windowBackgroundColor)
@@ -1478,7 +1479,6 @@ struct NotebookView: View {
                                     onMoveDown: { viewModel.moveCell(cell, direction: 1) },
                                     onGenerateCode: { code in
                                         viewModel.addCell(type: .code, language: .python)
-                                        // Set content of the newly added cell (it's the active one now)
                                         if let lastCell = viewModel.activeNotebook?.cells.last {
                                             lastCell.content = code
                                             viewModel.runCell(lastCell)
@@ -1494,7 +1494,6 @@ struct NotebookView: View {
                     }
                     .background(appState.appTheme == .transparent ? Color.clear : Color(nsColor: .textBackgroundColor).opacity(0.3))
                 } else {
-                    // Loading or empty state
                     VStack(spacing: 16) {
                         ProgressView()
                             .scaleEffect(1.2)
@@ -1504,6 +1503,17 @@ struct NotebookView: View {
                     }
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
                 }
+            }
+            
+            // AI Agent Panel (Right Side)
+            if showAIPanel {
+                Divider()
+                NotebookAIPanel(
+                    viewModel: viewModel,
+                    isShowing: $showAIPanel
+                )
+                .frame(width: 380)
+                .transition(.move(edge: .trailing))
             }
         }
         .fileImporter(
@@ -1535,6 +1545,28 @@ struct NotebookView: View {
                 }
                 appState.aiExportedCode = nil // Clear after consuming
                 print("🚀 NotebookView: Loaded code from AI Agent into new cell")
+            }
+        }
+        .onReceive(NotificationCenter.default.publisher(for: Notification.Name("ApplyCodeToCell"))) { notification in
+            guard let code = notification.userInfo?["code"] as? String else { return }
+            
+            // Apply to selected cell, or create a new one
+            if let selectedId = viewModel.selectedCellId,
+               let notebook = viewModel.activeNotebook,
+               let cell = notebook.cells.first(where: { $0.id == selectedId }),
+               cell.type == .code {
+                cell.content = code
+            } else {
+                // Detect language from notification
+                let langStr = notification.userInfo?["language"] as? String ?? ""
+                let language: CellLanguage = CellLanguage.allCases.first(where: {
+                    $0.fileExtension == langStr || $0.rawValue.lowercased() == langStr.lowercased()
+                }) ?? .python
+                
+                viewModel.addCell(type: .code, language: language)
+                if let lastCell = viewModel.activeNotebook?.cells.last {
+                    lastCell.content = code
+                }
             }
         }
     }
@@ -1912,6 +1944,25 @@ struct NotebookView: View {
             Text("Executions: \(viewModel.totalExecutions)")
                 .font(.caption)
                 .foregroundColor(.secondary)
+            
+            Divider().frame(height: 16)
+            
+            // AI Agent Toggle
+            Button(action: { withAnimation(.easeInOut(duration: 0.2)) { showAIPanel.toggle() } }) {
+                HStack(spacing: 4) {
+                    Image(systemName: showAIPanel ? "brain.fill" : "brain")
+                        .font(.system(size: 12))
+                    Text("AI")
+                        .font(.system(size: 11, weight: .medium))
+                }
+                .foregroundColor(showAIPanel ? .accentColor : .secondary)
+                .padding(.horizontal, 8)
+                .padding(.vertical, 4)
+                .background(showAIPanel ? Color.accentColor.opacity(0.12) : Color.clear)
+                .cornerRadius(6)
+            }
+            .buttonStyle(.plain)
+            .help("Toggle AI Agent Panel")
         }
         .padding(.horizontal)
         .padding(.vertical, 8)
