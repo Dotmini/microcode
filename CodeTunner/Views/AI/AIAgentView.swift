@@ -57,7 +57,7 @@ struct AIAgentView: View {
                     // Normal Chat Mode
                     ZStack(alignment: .bottom) {
                         // Chat Scroll
-                        AgentChatStage(messages: agent.messages, isLoading: agent.isLoading, currentToolExecution: agent.currentToolExecution)
+                        AgentChatStage(messages: agent.messages, isLoading: agent.isLoading, currentToolExecution: agent.currentToolExecution, onApplyChange: { change in applyChange(change) }, onRejectChange: { change in rejectChange(change) })
                         
                         // Input Container (Docked at bottom, not floating)
                         inputArea
@@ -836,6 +836,8 @@ struct AgentChatStage: View {
     let messages: [AgentMessageModel]
     let isLoading: Bool
     var currentToolExecution: String? = nil
+    var onApplyChange: ((PendingChangeModel) -> Void)? = nil
+    var onRejectChange: ((PendingChangeModel) -> Void)? = nil
     
     var body: some View {
         ScrollViewReader { proxy in
@@ -853,7 +855,7 @@ struct AgentChatStage: View {
                         }
                     } else {
                         ForEach(messages) { message in
-                            RichMessageRow(message: message)
+                            RichMessageRow(message: message, onApplyChange: onApplyChange, onRejectChange: onRejectChange)
                                 .id(message.id)
                         }
                     }
@@ -1276,6 +1278,8 @@ struct LatexBlockWebView: NSViewRepresentable {
 
 struct RichMessageRow: View {
     let message: AgentMessageModel
+    var onApplyChange: ((PendingChangeModel) -> Void)? = nil
+    var onRejectChange: ((PendingChangeModel) -> Void)? = nil
     
     var isUser: Bool { message.role == .user }
     
@@ -1444,7 +1448,7 @@ struct RichMessageRow: View {
                                         if change.status == .pending {
                                             HStack {
                                                 Button(action: {
-                                                    applyChange(change)
+                                                    onApplyChange?(change)
                                                 }) {
                                                     Label("Apply", systemImage: "checkmark")
                                                 }
@@ -1453,7 +1457,7 @@ struct RichMessageRow: View {
                                                 .font(.caption)
                                                 
                                                 Button(action: {
-                                                    rejectChange(change)
+                                                    onRejectChange?(change)
                                                 }) {
                                                     Label("Reject", systemImage: "xmark")
                                                 }

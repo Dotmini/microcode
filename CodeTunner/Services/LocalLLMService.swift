@@ -120,18 +120,31 @@ class LocalLLMService: ObservableObject {
     @Published var customPort: String = "1234"
     @Published var lastScanTime: Date?
     
+    // Thread-safe cached values for nonisolated access (from StreamableAIProvider enum)
+    // These are updated on MainActor and read from any context
+    nonisolated(unsafe) static var cachedEndpoint: String = "http://127.0.0.1:1234/v1"
+    nonisolated(unsafe) static var cachedModel: String = "local-model"
+    
     var activeServer: DetectedLLMServer? {
         guard !detectedServers.isEmpty, selectedServerIndex < detectedServers.count else { return nil }
         return detectedServers[selectedServerIndex]
     }
     
     var activeEndpoint: String {
-        activeServer?.endpoint ?? "http://127.0.0.1:1234/v1"
+        let value = activeServer?.endpoint ?? "http://127.0.0.1:1234/v1"
+        LocalLLMService.cachedEndpoint = value
+        return value
     }
     
     var activeModel: String {
-        if !selectedModelId.isEmpty { return selectedModelId }
-        return activeServer?.models.first?.id ?? "local-model"
+        let value: String
+        if !selectedModelId.isEmpty {
+            value = selectedModelId
+        } else {
+            value = activeServer?.models.first?.id ?? "local-model"
+        }
+        LocalLLMService.cachedModel = value
+        return value
     }
     
     var availableModels: [LocalLLMModel] {
