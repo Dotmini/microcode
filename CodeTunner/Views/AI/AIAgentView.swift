@@ -1341,7 +1341,7 @@ struct RichMessageRow: View {
     }
     
     @ViewBuilder
-    private func userBlockView(_ block: MessageContentBlock) -> some View {
+    private func userBlockView(_ block: MessageBlock) -> some View {
         switch block {
         case .text(let text):
             Text(text)
@@ -1424,7 +1424,7 @@ struct RichMessageRow: View {
     }
     
     @ViewBuilder
-    private func aiBlockView(_ block: MessageContentBlock) -> some View {
+    private func aiBlockView(_ block: MessageBlock) -> some View {
         switch block {
         case .text(let text):
             if !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
