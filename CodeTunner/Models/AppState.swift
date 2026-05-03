@@ -894,7 +894,10 @@ class AppState: ObservableObject {
                 let language = notification.userInfo?["language"] as? String ?? "python"
                 self.aiExportedCode = code
                 self.selectedLanguage = language.isEmpty ? "python" : language.lowercased()
-                self.toggleEditorMode(.playground)
+                // Defer mode switch to next run loop to avoid re-entrant SwiftUI updates
+                DispatchQueue.main.async {
+                    self.editorMode = .playground
+                }
             }
             .store(in: &cancellables)
         
@@ -906,8 +909,10 @@ class AppState: ObservableObject {
                 let language = notification.userInfo?["language"] as? String ?? "python"
                 self.aiExportedCode = code
                 self.selectedLanguage = language.isEmpty ? "python" : language.lowercased()
-                // Navigate to Notebook mode (Cell Mode)
-                self.toggleEditorMode(.notebook)
+                // Defer mode switch to next run loop to avoid re-entrant SwiftUI updates
+                DispatchQueue.main.async {
+                    self.editorMode = .notebook
+                }
             }
             .store(in: &cancellables)
         

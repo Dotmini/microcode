@@ -495,6 +495,64 @@ struct AIAgentView: View {
             )
         }
     }
+    
+    // MARK: - Apply / Reject Pending Changes
+    
+    private func applyChange(_ change: PendingChangeModel) {
+        // Write the new content to the file
+        do {
+            let url = URL(fileURLWithPath: change.filePath)
+            
+            // Ensure parent directory exists
+            try FileManager.default.createDirectory(
+                at: url.deletingLastPathComponent(),
+                withIntermediateDirectories: true
+            )
+            
+            try change.newContent.write(to: url, atomically: true, encoding: .utf8)
+            
+            // Update status in agent messages
+            updateChangeStatus(change, newStatus: .accepted)
+            
+            // Reload file in editor if it's currently open
+            if let currentFile = appState.currentFile, currentFile.path == change.filePath {
+                Task { @MainActor in
+                    await appState.loadFile(url: url)
+                }
+            }
+            
+            print("✅ Applied change to \(change.filePath)")
+        } catch {
+            print("❌ Failed to apply change: \(error)")
+        }
+    }
+    
+    private func rejectChange(_ change: PendingChangeModel) {
+        updateChangeStatus(change, newStatus: .rejected)
+        print("❌ Rejected change to \(change.filePath)")
+    }
+    
+    private func updateChangeStatus(_ change: PendingChangeModel, newStatus: PendingChangeModel.PendingChangeStatus) {
+        // Find and update the change in agent messages
+        for (msgIdx, msg) in agent.messages.enumerated() {
+            if let changeIdx = msg.pendingChanges.firstIndex(where: { $0.id == change.id }) {
+                var updatedChanges = msg.pendingChanges
+                updatedChanges[changeIdx].status = newStatus
+                
+                // Rebuild message with updated changes
+                let updatedMsg = AgentMessageModel(
+                    id: msg.id,
+                    role: msg.role,
+                    content: msg.content,
+                    toolResults: msg.toolResults,
+                    pendingChanges: updatedChanges,
+                    timestamp: msg.timestamp
+                )
+                agent.messages[msgIdx] = updatedMsg
+                break
+            }
+        }
+    }
 }
 
 // MARK: - Header Button (Reusable)
@@ -1347,16 +1405,26 @@ struct RichMessageRow: View {
                                     VStack(alignment: .leading, spacing: 0) {
                                         // Header
                                         HStack {
-                                            Image(systemName: "pencil.circle.fill")
-                                                .foregroundColor(.blue)
+                                            Image(systemName: change.status == .accepted ? "checkmark.circle.fill" : change.status == .rejected ? "xmark.circle.fill" : "pencil.circle.fill")
+                                                .foregroundColor(change.status == .accepted ? .green : change.status == .rejected ? .red : .blue)
                                             Text(URL(fileURLWithPath: change.filePath).lastPathComponent)
                                                 .font(.system(size: 12, weight: .bold))
                                             
                                             Spacer()
                                             
-                                            Text("+\(change.additions) -\(change.deletions)")
-                                                .font(.caption2)
-                                                .foregroundColor(.secondary)
+                                            if change.status == .accepted {
+                                                Text("Applied ✓")
+                                                    .font(.caption2)
+                                                    .foregroundColor(.green)
+                                            } else if change.status == .rejected {
+                                                Text("Rejected")
+                                                    .font(.caption2)
+                                                    .foregroundColor(.red)
+                                            } else {
+                                                Text("+\(change.additions) -\(change.deletions)")
+                                                    .font(.caption2)
+                                                    .foregroundColor(.secondary)
+                                            }
                                         }
                                         .padding(8)
                                         .background(Color.primary.opacity(0.05))
@@ -1372,23 +1440,29 @@ struct RichMessageRow: View {
                                         
                                         Divider()
                                         
-                                        // Actions
-                                        HStack {
-                                            Button(action: { /* Apply */ }) {
-                                                Label("Apply", systemImage: "checkmark")
+                                        // Actions (only show if pending)
+                                        if change.status == .pending {
+                                            HStack {
+                                                Button(action: {
+                                                    applyChange(change)
+                                                }) {
+                                                    Label("Apply", systemImage: "checkmark")
+                                                }
+                                                .buttonStyle(.borderedProminent)
+                                                .tint(.green)
+                                                .font(.caption)
+                                                
+                                                Button(action: {
+                                                    rejectChange(change)
+                                                }) {
+                                                    Label("Reject", systemImage: "xmark")
+                                                }
+                                                .buttonStyle(.bordered)
+                                                .tint(.red)
+                                                .font(.caption)
                                             }
-                                            .buttonStyle(.borderedProminent)
-                                            .tint(.green)
-                                            .font(.caption)
-                                            
-                                            Button(action: { /* Reject */ }) {
-                                                Label("Reject", systemImage: "xmark")
-                                            }
-                                            .buttonStyle(.bordered)
-                                            .tint(.red)
-                                            .font(.caption)
+                                            .padding(8)
                                         }
-                                        .padding(8)
                                     }
                                     .background(Color.primary.opacity(0.02))
                                     .cornerRadius(8)
