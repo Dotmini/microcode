@@ -53,6 +53,8 @@ mod ftp;
 pub mod ai_engine; /// Hybrid AI Engine (Fast + Smart Tier)
 pub mod device_manager;
 pub mod crash_decoder;
+pub mod llm;    /// Unified LLM Provider (Anthropic, Gemini, OpenAI)
+pub mod mcp;    /// MCP Host (Model Context Protocol)
 
 use crate::error::Result;
 use crate::state::AppState;
