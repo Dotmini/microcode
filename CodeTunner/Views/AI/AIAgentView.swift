@@ -783,12 +783,20 @@ struct AIAgentView: View {
         Menu {
             modelMenuContent
         } label: {
-            HStack(spacing: 4) {
-                Image(systemName: "cpu")
-                    .font(.system(size: 10))
+            HStack(spacing: 5) {
+                // Provider icon with color
+                providerIcon(for: appState.aiProvider)
+                    .font(.system(size: 10, weight: .semibold))
+                
                 Text(appState.aiModel.isEmpty ? "Auto" : shortModelName(appState.aiModel))
                     .font(.system(size: 10, weight: .medium))
                     .lineLimit(1)
+                
+                // Connection status dot
+                Circle()
+                    .fill(hasActiveKey(appState.aiProvider) ? Color.green : Color.orange)
+                    .frame(width: 5, height: 5)
+                
                 Image(systemName: "chevron.down")
                     .font(.system(size: 7))
             }
@@ -804,55 +812,211 @@ struct AIAgentView: View {
     }
     
     @ViewBuilder
+    private func providerIcon(for provider: String) -> some View {
+        switch provider {
+        case "gemini":    Image(systemName: "sparkles").foregroundColor(.purple)
+        case "openai":    Image(systemName: "brain.head.profile").foregroundColor(.green)
+        case "anthropic": Image(systemName: "bubble.left.and.text.bubble.right").foregroundColor(.orange)
+        case "deepseek":  Image(systemName: "water.waves").foregroundColor(.blue)
+        case "grok":      Image(systemName: "bolt.fill").foregroundColor(.red)
+        case "codex":     Image(systemName: "chevron.left.forwardslash.chevron.right").foregroundColor(.cyan)
+        case "local":     Image(systemName: "desktopcomputer").foregroundColor(.mint)
+        default:          Image(systemName: "cpu").foregroundColor(.accentColor)
+        }
+    }
+    
+    private func hasActiveKey(_ provider: String) -> Bool {
+        if provider == "local" {
+            return LocalLLMService.shared.activeServer?.isOnline == true
+        }
+        return !(appState.apiKeys[provider]?.isEmpty ?? true)
+    }
+    
+    @ViewBuilder
     private var modelMenuContent: some View {
-        // Cloud Providers
-        Text("☁️ Cloud Models").font(.caption2).foregroundColor(.secondary)
+        // ── Cloud Providers ──
+        Label("Cloud Providers", systemImage: "cloud.fill")
+            .font(.caption2).foregroundColor(.secondary)
         
-        Menu("Gemini") {
-            Button("gemini-2.5-flash") { setModel("gemini", "gemini-2.5-flash") }
-            Button("gemini-2.5-pro") { setModel("gemini", "gemini-2.5-pro") }
-            Button("gemini-2.0-flash") { setModel("gemini", "gemini-2.0-flash") }
+        // Gemini
+        Menu {
+            ForEach(["gemini-2.5-flash", "gemini-2.5-pro", "gemini-2.0-flash"], id: \.self) { model in
+                Button(action: { setModel("gemini", model) }) {
+                    HStack {
+                        Text(model)
+                        if appState.aiModel == model { Image(systemName: "checkmark") }
+                    }
+                }
+            }
+        } label: {
+            Label {
+                HStack {
+                    Text("Google Gemini")
+                    Spacer()
+                    if hasActiveKey("gemini") {
+                        Image(systemName: "checkmark.circle.fill").foregroundColor(.green).font(.system(size: 9))
+                    }
+                }
+            } icon: {
+                Image(systemName: "sparkles").foregroundColor(.purple)
+            }
         }
-        Menu("OpenAI") {
-            Button("gpt-4o") { setModel("openai", "gpt-4o") }
-            Button("gpt-4o-mini") { setModel("openai", "gpt-4o-mini") }
-            Button("o3-mini") { setModel("openai", "o3-mini") }
+        
+        // Claude (Anthropic)
+        Menu {
+            ForEach(["claude-sonnet-4-20250514", "claude-3-5-sonnet-20241022", "claude-3-5-haiku-20241022", "claude-3-opus-20240229"], id: \.self) { model in
+                Button(action: { setModel("anthropic", model) }) {
+                    HStack {
+                        Text(model)
+                        if appState.aiModel == model { Image(systemName: "checkmark") }
+                    }
+                }
+            }
+        } label: {
+            Label {
+                HStack {
+                    Text("Claude (Anthropic)")
+                    Spacer()
+                    if hasActiveKey("anthropic") {
+                        Image(systemName: "checkmark.circle.fill").foregroundColor(.green).font(.system(size: 9))
+                    }
+                }
+            } icon: {
+                Image(systemName: "bubble.left.and.text.bubble.right").foregroundColor(.orange)
+            }
         }
-        Menu("Anthropic") {
-            Button("claude-sonnet-4-20250514") { setModel("anthropic", "claude-sonnet-4-20250514") }
-            Button("claude-3-5-haiku-latest") { setModel("anthropic", "claude-3-5-haiku-latest") }
+        
+        // OpenAI (ChatGPT)
+        Menu {
+            ForEach(["gpt-4o", "gpt-4o-mini", "gpt-4.1", "gpt-4.1-mini", "o4-mini", "o3-mini"], id: \.self) { model in
+                Button(action: { setModel("openai", model) }) {
+                    HStack {
+                        Text(model)
+                        if appState.aiModel == model { Image(systemName: "checkmark") }
+                    }
+                }
+            }
+        } label: {
+            Label {
+                HStack {
+                    Text("OpenAI / ChatGPT")
+                    Spacer()
+                    if hasActiveKey("openai") {
+                        Image(systemName: "checkmark.circle.fill").foregroundColor(.green).font(.system(size: 9))
+                    }
+                }
+            } icon: {
+                Image(systemName: "brain.head.profile").foregroundColor(.green)
+            }
         }
-        Menu("DeepSeek") {
-            Button("deepseek-chat") { setModel("deepseek", "deepseek-chat") }
-            Button("deepseek-reasoner") { setModel("deepseek", "deepseek-reasoner") }
+        
+        // DeepSeek
+        Menu {
+            ForEach(["deepseek-chat", "deepseek-reasoner"], id: \.self) { model in
+                Button(action: { setModel("deepseek", model) }) {
+                    HStack {
+                        Text(model)
+                        if appState.aiModel == model { Image(systemName: "checkmark") }
+                    }
+                }
+            }
+        } label: {
+            Label {
+                HStack {
+                    Text("DeepSeek")
+                    Spacer()
+                    if hasActiveKey("deepseek") {
+                        Image(systemName: "checkmark.circle.fill").foregroundColor(.green).font(.system(size: 9))
+                    }
+                }
+            } icon: {
+                Image(systemName: "water.waves").foregroundColor(.blue)
+            }
         }
-        Menu("Other") {
-            Button("grok-3") { setModel("grok", "grok-3") }
+        
+        // Grok
+        Menu {
+            ForEach(["grok-3", "grok-3-mini", "grok-2"], id: \.self) { model in
+                Button(action: { setModel("grok", model) }) {
+                    HStack {
+                        Text(model)
+                        if appState.aiModel == model { Image(systemName: "checkmark") }
+                    }
+                }
+            }
+        } label: {
+            Label {
+                HStack {
+                    Text("Grok (xAI)")
+                    Spacer()
+                    if hasActiveKey("grok") {
+                        Image(systemName: "checkmark.circle.fill").foregroundColor(.green).font(.system(size: 9))
+                    }
+                }
+            } icon: {
+                Image(systemName: "bolt.fill").foregroundColor(.red)
+            }
+        }
+        
+        // Codex
+        Menu {
+            ForEach(["codex-mini-latest", "o4-mini"], id: \.self) { model in
+                Button(action: { setModel("openai", model) }) {
+                    HStack {
+                        Text(model)
+                        if appState.aiModel == model { Image(systemName: "checkmark") }
+                    }
+                }
+            }
+        } label: {
+            Label("Codex (OpenAI)", systemImage: "chevron.left.forwardslash.chevron.right")
+                .foregroundColor(.cyan)
+        }
+        
+        // Other (Qwen, GLM)
+        Menu {
             Button("qwen-max") { setModel("qwen", "qwen-max") }
             Button("glm-4-plus") { setModel("glm", "glm-4-plus") }
+        } label: {
+            Label("Other Providers", systemImage: "ellipsis.circle")
         }
         
         Divider()
         
-        // Local LLM
-        Text("🖥️ Local Models").font(.caption2).foregroundColor(.secondary)
+        // ── Local LLM ──
+        Label("Local Models", systemImage: "desktopcomputer")
+            .font(.caption2).foregroundColor(.secondary)
         
         let localModels = LocalLLMService.shared.availableModels
         if localModels.isEmpty {
-            Button("Scan for Local Models...") {
-                Task { await LocalLLMService.shared.scanForServers() }
+            Button(action: { Task { await LocalLLMService.shared.scanForServers() } }) {
+                Label("Scan for Local Models...", systemImage: "antenna.radiowaves.left.and.right")
             }
         } else {
             ForEach(localModels) { model in
-                Button(model.displayName) {
-                    setModel("local", model.id)
+                Button(action: { setModel("local", model.id) }) {
+                    HStack {
+                        Text(model.displayName)
+                        if appState.aiModel == model.id { Image(systemName: "checkmark") }
+                    }
                 }
             }
             Divider()
-            Button("🔄 Rescan") {
-                Task { await LocalLLMService.shared.scanForServers() }
+            Button(action: { Task { await LocalLLMService.shared.scanForServers() } }) {
+                Label("Rescan", systemImage: "arrow.clockwise")
             }
         }
+        
+        Divider()
+        
+        // ── MCP Status ──
+        let mcp = MCPServer.shared
+        Label(
+            mcp.isRunning ? "MCP Server: Running (\(mcp.requestCount) reqs)" : "MCP Server: Stopped",
+            systemImage: mcp.isRunning ? "server.rack" : "xmark.circle"
+        )
+        .font(.caption2)
+        .foregroundColor(mcp.isRunning ? .green : .secondary)
     }
     
     private func setModel(_ provider: String, _ model: String) {
