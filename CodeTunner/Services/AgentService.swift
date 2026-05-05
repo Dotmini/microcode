@@ -42,93 +42,123 @@ class AgentService: ObservableObject {
     private let aiClient = AIClient.shared
     private let toolBox = AgentToolBox.shared
     private let memoryService = AgentMemoryService.shared
+    private let tokenOptimizer = TokenOptimizer.shared
     
     private let chatStorageKey = "microcode_agent_chats"
     
     // Agent configuration
-    private let maxToolIterations = 10
-    private let maxContextChars = 60000
+    private let maxToolIterations = 25
+    private let maxContextChars = 80000
     
-    // MARK: - System Prompt
+    // Token stats (published for UI)
+    @Published var tokenStats: TokenUsageStats { get { tokenOptimizer.stats } set {} }
     
-    private var systemPrompt: String {
-        var prompt = """
-        You are MicroCode Agent, a senior full-stack software engineer embedded in the MicroCode IDE.
-        You help the user understand, modify, debug, and build software projects.
+    // MARK: - System Prompt (Dual Mode: Chat + Agent)
+    
+    private func buildSystemPrompt(for message: String) -> String {
+        let complexity = tokenOptimizer.detectComplexity(message)
+        let budget = TokenBudget.forTask(complexity)
+        let isChatMode = complexity == .chat
         
-        ## CRITICAL RULES
-        1. You MUST take action — read files, WRITE changes, and RUN commands. Never just describe what should be done.
-        2. ALWAYS read a file before modifying it — never guess file contents.
-        3. Use grep_search to find relevant code before making changes.
-        4. Make minimal, targeted edits using replace_in_file — don't rewrite entire files unless asked.
-        5. After making changes, verify by reading the modified file or running the project.
-        6. If a shell command fails, analyze the error and try to fix it.
-        7. When the user asks about their project, use list_directory_tree first to understand the structure.
+        var prompt: String
         
-        ## WORKFLOW: When asked to modify code
-        Step 1: file_read — read the target file
-        Step 2: replace_in_file or file_write — make the actual changes  
-        Step 3: shell — compile/run/test to verify
-        Step 4: Report what you did
+        if isChatMode {
+            // CHAT MODE: Friendly, knowledgeable conversationalist
+            prompt = """
+            You are MicroCode Agent — an intelligent AI assistant built into the MicroCode IDE.
+            Right now the user wants to have a conversation. Be natural, friendly, and knowledgeable.
+            You can discuss any topic: technology, science, philosophy, daily life, learning, etc.
+            Use Thai or English based on the user's language.
+            If the user shifts to coding, switch to agent mode automatically.
+            Keep responses conversational and engaging.
+            """
+        } else {
+            // AGENT MODE: Full coding assistant with tools
+            prompt = """
+            You are MicroCode Agent, a senior full-stack software engineer embedded in the MicroCode IDE.
+            You help the user understand, modify, debug, and build software projects.
+            
+            ## RULES
+            1. Take action — read files, WRITE changes, RUN commands. Don't just describe.
+            2. Read a file before modifying it.
+            3. Use grep_search to find relevant code before changes.
+            4. Make minimal edits using replace_in_file or patch_file.
+            5. After changes, verify by reading or running the project.
+            6. If a command fails, analyze the error and fix it.
+            7. Use list_directory_tree to understand project structure.
+            8. Use multi_file_read to read multiple files efficiently.
+            9. Use find_symbol to locate function/class definitions.
+            10. For multi-file changes, use patch_file for efficiency.
+            
+            ## WORKFLOW: Modify Code
+            1. file_read → 2. replace_in_file/patch_file → 3. shell (verify) → 4. Report
+            
+            ## WORKFLOW: Create Project
+            1. list_directory_tree → 2. create_directory → 3. file_write (multiple) → 4. shell (install/build)
+            
+            ## Style
+            - Concise and direct. No filler.
+            - Show code changes clearly.
+            - When uncertain, ask first.
+            - ALWAYS follow through with tool calls.
+            """
+        }
         
-        ## WORKFLOW: When asked to run something
-        Step 1: shell — execute the command
-        Step 2: If it fails, read relevant files and fix the issue
-        Step 3: shell — re-run to verify
-        
-        ## Style
-        - Be concise and direct. No filler.
-        - Show code changes clearly.
-        - When uncertain, ask the user before proceeding.
-        - ALWAYS follow through with actual tool calls. Reading is only the first step.
-        """
-        
-        // Inject editor context
-        if let ctx = editorContext {
-            prompt += "\n\n## Current Editor State"
-            if let file = ctx.activeFile { prompt += "\nActive file: \(file)" }
-            if let lang = ctx.language { prompt += "\nLanguage: \(lang)" }
-            if let line = ctx.cursorLine { prompt += "\nCursor line: \(line)" }
+        // Inject editor context (compressed)
+        if !isChatMode, let ctx = editorContext {
+            var editorInfo = "\n\n## Editor"
+            if let file = ctx.activeFile { editorInfo += "\nFile: \(file)" }
+            if let lang = ctx.language { editorInfo += " (\(lang))" }
+            if let line = ctx.cursorLine { editorInfo += " L\(line)" }
             if let sel = ctx.selectedText, !sel.isEmpty {
-                let truncated = sel.count > 2000 ? String(sel.prefix(2000)) + "..." : sel
-                prompt += "\nSelected text:\n```\n\(truncated)\n```"
+                let compressed = tokenOptimizer.compressFileContent(sel, query: message, budget: 500)
+                editorInfo += "\nSelected:\n```\n\(compressed)\n```"
             }
             if !ctx.openFiles.isEmpty {
-                prompt += "\nOpen files: \(ctx.openFiles.joined(separator: ", "))"
+                editorInfo += "\nOpen: \(ctx.openFiles.suffix(5).map { URL(fileURLWithPath: $0).lastPathComponent }.joined(separator: ", "))"
             }
+            prompt += editorInfo
         }
         
-        // Inject workspace info
+        // Workspace root
         if let root = toolBox.workspaceRoot {
-            prompt += "\n\nWorkspace root: \(root)"
+            prompt += "\n\nWorkspace: \(root)"
         }
         
-        // Inject semantic context from AuthenticLanguageCore (safely)
-        if let smartContext = try? AuthenticLanguageCore.shared()?.aiContext() {
-            if let desc = smartContext.llmContextDescription() {
-                prompt += "\n\n## Semantic Context\n\(desc)"
+        // Inject semantic context (if available)
+        if !isChatMode {
+            if let smartContext = try? AuthenticLanguageCore.shared()?.aiContext() {
+                if let desc = smartContext.llmContextDescription() {
+                    let compressed = tokenOptimizer.compressText(desc, targetTokens: 500)
+                    prompt += "\n\n## Semantic Context\n\(compressed)"
+                }
             }
         }
         
-        // Inject relevant memories
-        if let _ = activeChatId {
-            let memories = memoryService.recallMemories(query: messages.last?.content ?? "", limit: 3)
-            if !memories.isEmpty {
-                prompt += "\n\n## Recalled Context\n\(memoryService.formatMemoriesForContext(memories))"
+        // Inject relevant memories (with cross-chat recall)
+        if let chatId = activeChatId {
+            let currentChatMemories = memoryService.recallMemories(query: message, limit: 2, includeCurrentChat: true)
+            let crossChatMemories = memoryService.recallCrossChatMemories(query: message, currentChatId: chatId, limit: 2)
+            let allMemories = currentChatMemories + crossChatMemories
+            if !allMemories.isEmpty {
+                prompt += "\n\n## Memory\n\(memoryService.formatMemoriesForContext(allMemories, maxTokens: budget.maxContextTokens / 4))"
             }
         }
         
-        // Inject agent.md instructions if present
-        if let agentMd = agentMdContent, !agentMd.isEmpty {
-            prompt += "\n\n## Project Agent Instructions (agent.md)\n\(agentMd.prefix(3000))"
+        // Inject agent.md (compressed)
+        if !isChatMode, let agentMd = agentMdContent, !agentMd.isEmpty {
+            let compressed = tokenOptimizer.compressText(agentMd, targetTokens: 800)
+            prompt += "\n\n## agent.md\n\(compressed)"
         }
         
-        // Inject task.md if present
-        if let taskMd = taskMdContent, !taskMd.isEmpty {
-            prompt += "\n\n## Current Task (task.md)\n\(taskMd.prefix(2000))"
+        // Inject task.md (compressed)
+        if !isChatMode, let taskMd = taskMdContent, !taskMd.isEmpty {
+            let compressed = tokenOptimizer.compressText(taskMd, targetTokens: 500)
+            prompt += "\n\n## task.md\n\(compressed)"
         }
         
-        return prompt
+        // Apply final compression to system prompt
+        return tokenOptimizer.compressSystemPrompt(prompt, budget: budget.maxSystemTokens)
     }
     
     // MARK: - Init
@@ -284,13 +314,26 @@ class AgentService: ObservableObject {
             isLoading = false
             agentPhase = .idle
             saveArx()
+            // Update token stats
+            objectWillChange.send()
         }
         
-        let detectedProvider = StreamableAIProvider(rawValue: provider) ?? StreamableAIProvider.detect(from: model)
-        let toolSchemas = toolBox.toolSchemas()
+        // Detect task complexity and choose budget
+        let complexity = tokenOptimizer.detectComplexity(content)
+        let budget = TokenBudget.forTask(complexity)
+        let isChatMode = complexity == .chat
         
-        // Build conversation history for API
-        var history = buildConversationHistory()
+        let detectedProvider = StreamableAIProvider(rawValue: provider) ?? StreamableAIProvider.detect(from: model)
+        let toolSchemas = isChatMode ? [] : toolBox.toolSchemas()  // No tools in chat mode
+        
+        // Build optimized system prompt
+        let optimizedSystemPrompt = buildSystemPrompt(for: content)
+        
+        // Build and compress conversation history
+        var rawHistory = buildConversationHistory()
+        var history = tokenOptimizer.compressHistory(rawHistory, budget: budget.maxHistoryTokens)
+        
+        logActivity(.info, "Mode: \(isChatMode ? "Chat" : "Agent") | Budget: \(budget.totalBudget) tokens")
         
         // === Agentic Tool Loop ===
         var iteration = 0
@@ -315,7 +358,7 @@ class AgentService: ObservableObject {
                     aiClient.sendMessage(
                         prompt: content,
                         attachments: attachments,
-                        systemPrompt: systemPrompt,
+                        systemPrompt: optimizedSystemPrompt,
                         conversationHistory: history,
                         provider: detectedProvider,
                         model: model,
@@ -346,7 +389,7 @@ class AgentService: ObservableObject {
                     let syncMessages = buildSyncMessages(history: history, lastText: finalText, toolResults: allToolResults)
                     let result = try await aiClient.sendSync(
                         messages: syncMessages,
-                        systemPrompt: systemPrompt,
+                        systemPrompt: optimizedSystemPrompt,
                         provider: detectedProvider,
                         model: model,
                         apiKey: apiKey,
@@ -392,7 +435,10 @@ class AgentService: ObservableObject {
                 }
                 
                 do {
-                    let output = try await toolBox.execute(toolCall.name, params: toolCall.arguments)
+                    var output = try await toolBox.execute(toolCall.name, params: toolCall.arguments)
+                    
+                    // Compress tool output to save tokens
+                    output = tokenOptimizer.compressToolOutput(output, toolName: toolCall.name, budget: 2000)
                     
                     allToolResults.append(ToolResultModel(
                         toolCallId: toolCall.id,
@@ -491,7 +537,16 @@ class AgentService: ObservableObject {
             )
         }
         
-        logActivity(.done, "Completed (\(iteration) iterations, \(allToolResults.count) tools)")
+        // Update token stats
+        let inputTokens = tokenOptimizer.estimateTokens(optimizedSystemPrompt) + history.reduce(0) { $0 + tokenOptimizer.estimateTokens($1.content) }
+        let outputTokens = tokenOptimizer.estimateTokens(finalText)
+        tokenOptimizer.stats.inputTokens += inputTokens
+        tokenOptimizer.stats.outputTokens += outputTokens
+        tokenOptimizer.stats.totalRequests += 1
+        tokenOptimizer.stats.totalCost += tokenOptimizer.estimateCost(inputTokens: inputTokens, outputTokens: outputTokens, model: model)
+        tokenOptimizer.stats.compressionRatio = Double(tokenOptimizer.stats.savedTokens) / max(1, Double(tokenOptimizer.stats.inputTokens + tokenOptimizer.stats.savedTokens))
+        
+        logActivity(.done, "Completed (\(iteration) iterations, \(allToolResults.count) tools, ~\(inputTokens + outputTokens) tokens)")
         agentPhase = .done
         
         // Store memory
@@ -590,6 +645,15 @@ class AgentService: ObservableObject {
     
     func switchChat(to chatId: String) {
         guard let chat = chatSessions.first(where: { $0.id == chatId }) else { return }
+        
+        // Summarize current chat before switching (if it has enough messages)
+        if let currentId = activeChatId, messages.count > 6 {
+            let chatMessages = messages
+                .filter { $0.role == .user || $0.role == .assistant }
+                .map { (role: $0.role.rawValue, content: $0.content) }
+            memoryService.summarizeChat(chatId: currentId, messages: chatMessages)
+        }
+        
         saveCurrentChatMessages()
         activeChatId = chatId
         messages = chat.messages.map { $0.toModel() }
