@@ -160,6 +160,7 @@ let package = Package(
                 "Views/DatabaseStudioView.swift",
                 "Views/APIClientView.swift",
                 "Views/CICDPipelineView.swift",
+                "Views/IDEBrowserView.swift",
                 "Views/ModelBrowserSheet.swift",
                 "Views/TerminalTextView.swift",
                 "Views/TerminalWebView.swift",

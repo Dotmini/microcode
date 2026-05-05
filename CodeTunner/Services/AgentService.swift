@@ -50,8 +50,8 @@ class AgentService: ObservableObject {
     private let maxToolIterations = 25
     private let maxContextChars = 80000
     
-    // Token stats (published for UI)
-    @Published var tokenStats: TokenUsageStats { get { tokenOptimizer.stats } set {} }
+    // Token stats (read from optimizer)
+    var tokenStats: TokenUsageStats { tokenOptimizer.stats }
     
     // MARK: - System Prompt (Dual Mode: Chat + Agent)
     

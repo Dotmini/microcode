@@ -683,7 +683,7 @@ struct AIAgentView: View {
             AIClient.shared.sendMessage(
                 prompt: userText,
                 attachments: currentAttachments,
-                systemPrompt: "You are MicroCode, an intelligent AI assistant built into the MicroCode IDE. You can have natural conversations about any topic \u2014 technology, science, life, philosophy, or anything the user wants to discuss. When they ask about code, be a senior software engineer providing professional, concise solutions with code blocks. Use Thai or English based on the user's language. Be friendly, smart, and engaging.",
+                systemPrompt: "You are MicroCode, an intelligent AI assistant built into the MicroCode IDE. You can have natural conversations about any topic \u{2014} technology, science, life, philosophy, or anything the user wants to discuss. When they ask about code, be a senior software engineer providing professional, concise solutions with code blocks. Use Thai or English based on the user's language. Be friendly, smart, and engaging.",
                 conversationHistory: history,
                 provider: provider,
                 model: model,
