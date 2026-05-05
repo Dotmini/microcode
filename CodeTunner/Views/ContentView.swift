@@ -42,19 +42,63 @@ struct ContentView: View {
                         .frame(minWidth: 260, maxWidth: 350)
                 }
                 
-                // AI Agent Panel (Cursor-style inline agent)
+                // AI Agent Panel (Cursor-style inline agent — Premium)
                 if appState.aiChatVisible {
                     VStack(spacing: 0) {
-                        // Drag handle / collapse bar
-                        HStack(spacing: 6) {
-                            Image(systemName: "brain.head.profile.fill")
-                                .font(.system(size: 10))
-                                .foregroundStyle(LinearGradient(colors: [.purple, .blue], startPoint: .topLeading, endPoint: .bottomTrailing))
-                            Text("AGENT")
-                                .font(.system(size: 9, weight: .heavy, design: .rounded))
-                                .foregroundColor(.secondary)
+                        // Premium gradient header
+                        HStack(spacing: 8) {
+                            // AI Icon with glow
+                            ZStack {
+                                Circle()
+                                    .fill(LinearGradient(colors: [.purple.opacity(0.3), .blue.opacity(0.2)], startPoint: .topLeading, endPoint: .bottomTrailing))
+                                    .frame(width: 24, height: 24)
+                                Image(systemName: "sparkles")
+                                    .font(.system(size: 11, weight: .bold))
+                                    .foregroundStyle(LinearGradient(colors: [.purple, .cyan], startPoint: .topLeading, endPoint: .bottomTrailing))
+                            }
+                            
+                            VStack(alignment: .leading, spacing: 1) {
+                                Text("MicroCode AI")
+                                    .font(.system(size: 11, weight: .bold, design: .rounded))
+                                    .foregroundColor(.primary)
+                                
+                                // Model name
+                                Text(AgentService.shared.selectedModel.isEmpty ? "Ready" : AgentService.shared.selectedModel)
+                                    .font(.system(size: 9))
+                                    .foregroundColor(.secondary)
+                                    .lineLimit(1)
+                            }
                             
                             Spacer()
+                            
+                            // Quick model picker
+                            Menu {
+                                ForEach(["deepseek-coder", "gpt-4o", "claude-sonnet", "gemini-pro", "local"], id: \.self) { m in
+                                    Button(m) { AgentService.shared.selectedModel = m }
+                                }
+                            } label: {
+                                Image(systemName: "cpu")
+                                    .font(.system(size: 9))
+                                    .foregroundColor(.secondary)
+                                    .frame(width: 20, height: 20)
+                                    .background(Color.white.opacity(0.06))
+                                    .cornerRadius(4)
+                            }
+                            .menuStyle(.borderlessButton)
+                            .frame(width: 20)
+                            .help("Switch Model")
+                            
+                            // New chat
+                            Button {
+                                _ = AgentService.shared.createNewChat()
+                            } label: {
+                                Image(systemName: "plus.message")
+                                    .font(.system(size: 10))
+                                    .foregroundColor(.secondary)
+                                    .frame(width: 20, height: 20)
+                            }
+                            .buttonStyle(.plain)
+                            .help("New Chat")
                             
                             // Expand to full screen
                             Button {
@@ -64,9 +108,10 @@ struct ContentView: View {
                                 Image(systemName: "arrow.up.left.and.arrow.down.right")
                                     .font(.system(size: 9))
                                     .foregroundColor(.secondary)
+                                    .frame(width: 20, height: 20)
                             }
                             .buttonStyle(.plain)
-                            .help("Expand to Full Screen")
+                            .help("Full Screen Mode")
                             
                             Button {
                                 withAnimation(.easeInOut(duration: 0.2)) {
@@ -76,20 +121,33 @@ struct ContentView: View {
                                 Image(systemName: "xmark")
                                     .font(.system(size: 9, weight: .bold))
                                     .foregroundColor(.secondary)
+                                    .frame(width: 20, height: 20)
                             }
                             .buttonStyle(.plain)
-                            .help("Close Agent Panel (⌘L)")
+                            .help("Close (⌘L)")
                         }
-                        .padding(.horizontal, 10)
-                        .padding(.vertical, 6)
-                        .background(Color(nsColor: .windowBackgroundColor).opacity(0.6))
+                        .padding(.horizontal, 12)
+                        .padding(.vertical, 8)
+                        .background(
+                            LinearGradient(
+                                colors: [
+                                    Color(nsColor: .windowBackgroundColor),
+                                    Color.purple.opacity(0.03)
+                                ],
+                                startPoint: .leading,
+                                endPoint: .trailing
+                            )
+                        )
                         
-                        Divider()
+                        // Subtle accent line
+                        Rectangle()
+                            .fill(LinearGradient(colors: [.purple.opacity(0.4), .cyan.opacity(0.3), .purple.opacity(0.1)], startPoint: .leading, endPoint: .trailing))
+                            .frame(height: 1)
                         
                         AIAgentView()
                             .environmentObject(appState)
                     }
-                    .frame(minWidth: 360, idealWidth: 420, maxWidth: 560)
+                    .frame(minWidth: 340, idealWidth: 400, maxWidth: 520)
                     .transition(.move(edge: .trailing).combined(with: .opacity))
                 }
             }

@@ -141,255 +141,208 @@ struct AIAgentView: View {
     // MARK: - Header Bar
     
     private var headerBar: some View {
-        HStack(spacing: 0) {
-            // Sidebar Toggle
-            Button(action: { agent.showChatSidebar.toggle() }) {
-                Image(systemName: "sidebar.left")
-                    .font(.system(size: 12))
-                    .foregroundColor(agent.showChatSidebar ? .accentColor : .secondary)
-            }
-            .buttonStyle(.plain)
-            .padding(.horizontal, 12)
-            .help("Toggle Chat History")
-            
-            // New Chat Button
-            Button(action: { _ = agent.createNewChat() }) {
-                Image(systemName: "plus.message")
-                    .font(.system(size: 12))
-                    .foregroundColor(.secondary)
-            }
-            .buttonStyle(.plain)
-            .help("New Chat")
-            
-            Divider()
-                .frame(height: 14)
-                .padding(.horizontal, 8)
-            
-            // Title Tab
-            HStack(spacing: 8) {
-                Image(systemName: "terminal.fill")
-                    .font(.system(size: 12))
-                    .foregroundColor(.secondary)
+        VStack(spacing: 0) {
+            HStack(spacing: 6) {
+                // Sidebar Toggle
+                Button(action: { agent.showChatSidebar.toggle() }) {
+                    Image(systemName: "sidebar.left")
+                        .font(.system(size: 11))
+                        .foregroundColor(agent.showChatSidebar ? .accentColor : .secondary)
+                        .frame(width: 24, height: 24)
+                }
+                .buttonStyle(.plain)
+                .help("Chat History")
                 
-                Text("MICROCODE AGENT")
-                    .font(.system(size: 11, weight: .bold))
-                    .foregroundColor(.secondary)
-                    .tracking(0.5)
-            }
-            
-            Spacer()
-            
-            // Actions Toolbar
-            HStack(spacing: 0) {
-                // Smart Finder
-                Menu {
-                    Text("Jump to Tag Type").font(.caption).foregroundColor(.secondary)
-                    Divider()
-                    ForEach(["Function", "Class", "Fix", "Feature", "API", "Model", "View", "Service"], id: \.self) { tag in
-                        Button(action: { 
-                            // Filter by tag type
-                        }) {
-                            Label("#\(tag)", systemImage: "tag")
+                // New Chat
+                Button(action: { _ = agent.createNewChat() }) {
+                    Image(systemName: "plus.message")
+                        .font(.system(size: 11))
+                        .foregroundColor(.secondary)
+                        .frame(width: 24, height: 24)
+                }
+                .buttonStyle(.plain)
+                .help("New Chat")
+                
+                Spacer()
+                
+                // Mode pills (compact)
+                HStack(spacing: 2) {
+                    modePill("Chat", icon: "bubble.left.fill", isActive: !isPaperMode && !isCellMode) {
+                        isPaperMode = false; isCellMode = false
+                    }
+                    modePill("Report", icon: "doc.text.fill", isActive: isPaperMode) {
+                        isPaperMode = true; isCellMode = false
+                    }
+                    modePill("Cells", icon: "rectangle.grid.1x2.fill", isActive: isCellMode) {
+                        isCellMode = true; isPaperMode = false
+                    }
+                }
+                .padding(2)
+                .background(Color.white.opacity(0.04))
+                .cornerRadius(6)
+                
+                Spacer()
+                
+                // Compact actions
+                HStack(spacing: 4) {
+                    modelSelector
+                    
+                    Menu {
+                        Button { Task { await appState.microCodeService?.indexProject() } } label: {
+                            Label("Index Project", systemImage: "database")
                         }
-                    }
-                } label: {
-                    HStack(spacing: 4) {
-                        Image(systemName: "magnifyingglass")
+                        Divider()
+                        Button {
+                            if agent.messages.count >= 2 {
+                                agent.messages.removeLast(2)
+                                agent.saveChats()
+                            }
+                        } label: { Label("Undo Last", systemImage: "arrow.uturn.backward") }
+                        Button(role: .destructive) {
+                            agent.clearCurrentChat()
+                            attachments.removeAll()
+                        } label: { Label("Clear Chat", systemImage: "trash") }
+                    } label: {
+                        Image(systemName: "ellipsis")
                             .font(.system(size: 10))
-                        Text("Finder")
-                            .font(.system(size: 10, weight: .medium))
+                            .foregroundColor(.secondary)
+                            .frame(width: 24, height: 24)
+                            .background(Color.white.opacity(0.04))
+                            .cornerRadius(4)
                     }
-                    .foregroundColor(.secondary)
-                    .padding(.horizontal, 8)
-                    .padding(.vertical, 4)
-                    .background(Color.white.opacity(0.05))
-                    .cornerRadius(4)
+                    .menuStyle(.borderlessButton)
+                    .frame(width: 24)
                 }
-                .menuStyle(.borderlessButton)
-                .help("Smart Finder - Filter by tag type")
-                
-                Divider()
-                    .frame(height: 14)
-                    .padding(.horizontal, 4)
-                
-                // Index
-                HeaderIconButton(
-                    icon: "database",
-                    label: appState.microCodeService?.isIndexing ?? false ? "Indexing..." : "Index",
-                    isActive: appState.microCodeService?.isIndexing ?? false
-                ) {
-                    Task { await appState.microCodeService?.indexProject() }
-                }
-                
-                Divider()
-                    .frame(height: 14)
-                    .padding(.horizontal, 4)
-                
-                // Paper Mode Toggle
-                Toggle(isOn: $isPaperMode.animation(.easeInOut(duration: 0.2))) {
-                    HStack(spacing: 6) {
-                        Image(systemName: isPaperMode ? "doc.text.fill" : "doc.text")
-                            .font(.system(size: 11))
-                        Text(isPaperMode ? "Report" : "Chat")
-                            .font(.system(size: 11, weight: .medium))
-                    }
-                }
-                .toggleStyle(.button)
-                .buttonStyle(.plain)
-                .padding(.vertical, 4)
-                .tint(Color.accentColor)
-                .help("Toggle Report (Paper) Mode")
-                
-                Divider()
-                    .frame(height: 14)
-                    .padding(.horizontal, 4)
-                
-                // Cell Mode Toggle
-                Toggle(isOn: $isCellMode.animation(.easeInOut(duration: 0.2))) {
-                    HStack(spacing: 6) {
-                        Image(systemName: isCellMode ? "rectangle.grid.1x2.fill" : "rectangle.grid.1x2")
-                            .font(.system(size: 11))
-                        Text("Cells")
-                            .font(.system(size: 11, weight: .medium))
-                    }
-                }
-                .toggleStyle(.button)
-                .buttonStyle(.plain)
-                .padding(.vertical, 4)
-                .tint(Color.purple)
-                .help("Cell Mode — Notebook-style AI Agent")
-                
-                Divider()
-                    .frame(height: 14)
-                    .padding(.horizontal, 4)
-                
-                // Model Selector
-                modelSelector
-                
-                Divider()
-                    .frame(height: 14)
-                    .padding(.horizontal, 4)
-                
-                // Token Stats Badge
-                tokenStatsBadge
-                
-                Divider()
-                    .frame(height: 14)
-                    .padding(.horizontal, 4)
-                
-                HeaderIconButton(icon: "arrow.uturn.backward", label: nil) {
-                    // Remove last assistant + user message pair
-                    if agent.messages.count >= 2 {
-                        agent.messages.removeLast(2)
-                        agent.saveChats()
-                    }
-                }.help("Undo Last Action")
-                
-                HeaderIconButton(icon: "trash", label: nil) {
-                    agent.clearCurrentChat()
-                    attachments.removeAll()
-                }.help("Clear This Chat")
             }
-            .padding(.trailing, 8)
+            .padding(.horizontal, 10)
+            .padding(.vertical, 6)
+            .background(paneColor)
+            
+            Rectangle()
+                .fill(LinearGradient(colors: [.purple.opacity(0.4), .blue.opacity(0.3), .cyan.opacity(0.2)], startPoint: .leading, endPoint: .trailing))
+                .frame(height: 1)
         }
-        .frame(height: 36)
-        .background(paneColor)
+    }
+    
+    private func modePill(_ label: String, icon: String, isActive: Bool, action: @escaping () -> Void) -> some View {
+        Button(action: { withAnimation(.easeInOut(duration: 0.2)) { action() } }) {
+            HStack(spacing: 3) {
+                Image(systemName: icon)
+                    .font(.system(size: 8))
+                Text(label)
+                    .font(.system(size: 9, weight: .medium))
+            }
+            .foregroundColor(isActive ? .white : .secondary)
+            .padding(.horizontal, 8)
+            .padding(.vertical, 4)
+            .background(isActive ? Color.accentColor.opacity(0.8) : Color.clear)
+            .cornerRadius(4)
+        }
+        .buttonStyle(.plain)
     }
     
     // MARK: - Input Area
     
     private var inputArea: some View {
         VStack(spacing: 0) {
-            Divider().background(borderColor)
+            // Subtle top separator
+            Rectangle()
+                .fill(LinearGradient(colors: [.purple.opacity(0.15), .blue.opacity(0.1), .clear], startPoint: .leading, endPoint: .trailing))
+                .frame(height: 1)
             
             // Attachment Pills
             if !attachments.isEmpty {
                 ScrollView(.horizontal, showsIndicators: false) {
-                    HStack(spacing: 8) {
+                    HStack(spacing: 6) {
                         ForEach(attachments.indices, id: \.self) { index in
                             if index < attachments.count {
                                 let file = attachments[index]
                                 HStack(spacing: 4) {
                                     Image(systemName: fileIcon(for: file.type))
-                                        .font(.system(size: 10))
+                                        .font(.system(size: 9))
+                                        .foregroundColor(.purple)
                                     Text(file.name)
                                         .font(.system(size: 10))
                                         .lineLimit(1)
-                                    
                                     Button(action: { attachments.remove(at: index) }) {
-                                        Image(systemName: "xmark")
-                                            .font(.system(size: 8))
+                                        Image(systemName: "xmark.circle.fill")
+                                            .font(.system(size: 9))
                                             .foregroundColor(.secondary)
                                     }
                                     .buttonStyle(.plain)
                                 }
                                 .padding(.horizontal, 8)
                                 .padding(.vertical, 4)
-                                .background(Color.white.opacity(0.1))
-                                .cornerRadius(4)
+                                .background(Color.purple.opacity(0.08))
+                                .cornerRadius(6)
                             }
                         }
                     }
-                    .padding(.horizontal, 12)
+                    .padding(.horizontal, 14)
                     .padding(.top, 8)
                 }
             }
             
-            HStack(alignment: .bottom, spacing: 12) {
-                // Attach Button
+            // Input row
+            HStack(alignment: .bottom, spacing: 8) {
+                // Attach
                 Button(action: pickFile) {
                     Image(systemName: "paperclip")
-                        .font(.system(size: 14))
+                        .font(.system(size: 13))
                         .foregroundColor(.secondary)
-                        .frame(width: 24, height: 24)
+                        .frame(width: 28, height: 28)
                 }
                 .buttonStyle(.plain)
-                .padding(.bottom, 2)
                 
-                // Context Indicator
+                // Context file pill
                 if let file = appState.currentFile {
-                    Button(action: {}) {
-                        HStack(spacing: 4) {
-                            Image(systemName: "doc.text")
-                            Text(file.name)
-                        }
-                        .font(.system(size: 10))
-                        .foregroundColor(.secondary)
-                        .padding(4)
-                        .background(Color.white.opacity(0.05))
-                        .cornerRadius(4)
+                    HStack(spacing: 3) {
+                        Image(systemName: "doc.text")
+                            .font(.system(size: 8))
+                        Text(file.name)
+                            .font(.system(size: 9))
                     }
-                    .buttonStyle(.plain)
-                    .padding(.bottom, 6)
+                    .foregroundColor(.secondary)
+                    .padding(.horizontal, 6)
+                    .padding(.vertical, 3)
+                    .background(Color.white.opacity(0.04))
+                    .cornerRadius(4)
                 }
                 
-                // Text Field
+                // Text Field — Premium rounded
                 if #available(macOS 13.0, *) {
                     TextField("Ask anything or give instructions...", text: $inputText, axis: .vertical)
                         .textFieldStyle(.plain)
-                        .font(.system(size: 13, design: .monospaced))
-                        .lineLimit(1...5)
+                        .font(.system(size: 13))
+                        .lineLimit(1...6)
                         .focused($isInputFocused)
-                        .padding(8)
+                        .padding(.horizontal, 12)
+                        .padding(.vertical, 8)
                         .background(Color(nsColor: .textBackgroundColor))
-                        .cornerRadius(4)
+                        .cornerRadius(10)
                         .overlay(
-                            RoundedRectangle(cornerRadius: 4)
-                                .stroke(isInputFocused ? accentColor : borderColor, lineWidth: 1)
+                            RoundedRectangle(cornerRadius: 10)
+                                .stroke(
+                                    isInputFocused
+                                        ? LinearGradient(colors: [.purple.opacity(0.5), .blue.opacity(0.4)], startPoint: .topLeading, endPoint: .bottomTrailing)
+                                        : LinearGradient(colors: [borderColor, borderColor], startPoint: .leading, endPoint: .trailing),
+                                    lineWidth: 1
+                                )
                         )
                         .onSubmit {
                             if !inputText.isEmpty { sendMessage() }
                         }
                 } else {
-                    TextField("Ask anything or give instructions...", text: $inputText)
+                    TextField("Ask anything...", text: $inputText)
                         .textFieldStyle(.plain)
-                        .font(.system(size: 13, design: .monospaced))
+                        .font(.system(size: 13))
                         .focused($isInputFocused)
-                        .padding(8)
+                        .padding(.horizontal, 12)
+                        .padding(.vertical, 8)
                         .background(Color(nsColor: .textBackgroundColor))
-                        .cornerRadius(4)
+                        .cornerRadius(10)
                         .overlay(
-                            RoundedRectangle(cornerRadius: 4)
+                            RoundedRectangle(cornerRadius: 10)
                                 .stroke(isInputFocused ? accentColor : borderColor, lineWidth: 1)
                         )
                         .onSubmit {
@@ -397,20 +350,24 @@ struct AIAgentView: View {
                         }
                 }
                 
-                // Send Button
+                // Send Button — Gradient
                 Button(action: sendMessage) {
                     Image(systemName: "paperplane.fill")
                         .font(.system(size: 12))
                         .foregroundColor(.white)
-                        .frame(width: 28, height: 28)
-                        .background(accentColor)
-                        .cornerRadius(4)
+                        .frame(width: 32, height: 32)
+                        .background(
+                            LinearGradient(colors: [.purple, .blue], startPoint: .topLeading, endPoint: .bottomTrailing)
+                        )
+                        .cornerRadius(8)
+                        .shadow(color: .purple.opacity(0.3), radius: 4, y: 2)
                 }
                 .buttonStyle(.plain)
                 .disabled(inputText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty && attachments.isEmpty)
-                .padding(.bottom, 1)
+                .opacity((inputText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty && attachments.isEmpty) ? 0.4 : 1.0)
             }
-            .padding(12)
+            .padding(.horizontal, 12)
+            .padding(.vertical, 10)
             .background(paneColor)
         }
     }
@@ -1662,14 +1619,72 @@ struct AgentChatStage: View {
             ScrollView {
                 LazyVStack(spacing: 0) {
                     if messages.isEmpty && !isLoading {
-                        VStack(spacing: 16) {
-                            Spacer().frame(height: 60)
-                            Image(systemName: "terminal")
-                                .font(.system(size: 48))
-                                .foregroundColor(.white.opacity(0.05))
-                            Text("Ready to code.")
-                                .font(.system(size: 14))
-                                .foregroundColor(.secondary.opacity(0.5))
+                        VStack(spacing: 20) {
+                            Spacer().frame(height: 40)
+                            
+                            // Animated sparkle icon
+                            ZStack {
+                                Circle()
+                                    .fill(
+                                        RadialGradient(
+                                            colors: [.purple.opacity(0.15), .blue.opacity(0.05), .clear],
+                                            center: .center,
+                                            startRadius: 10,
+                                            endRadius: 60
+                                        )
+                                    )
+                                    .frame(width: 100, height: 100)
+                                
+                                Image(systemName: "sparkles")
+                                    .font(.system(size: 36, weight: .light))
+                                    .foregroundStyle(
+                                        LinearGradient(colors: [.purple, .cyan], startPoint: .topLeading, endPoint: .bottomTrailing)
+                                    )
+                            }
+                            
+                            VStack(spacing: 6) {
+                                Text("MicroCode AI")
+                                    .font(.system(size: 18, weight: .semibold, design: .rounded))
+                                    .foregroundColor(.primary.opacity(0.8))
+                                
+                                Text("Ask anything, write code, debug, or explore ideas")
+                                    .font(.system(size: 12))
+                                    .foregroundColor(.secondary)
+                                    .multilineTextAlignment(.center)
+                            }
+                            
+                            // Quick suggestions
+                            VStack(spacing: 8) {
+                                ForEach(["Explain this code", "Find bugs in my project", "Refactor for performance", "Write unit tests"], id: \.self) { suggestion in
+                                    Button(action: {}) {
+                                        HStack(spacing: 8) {
+                                            Image(systemName: "sparkle")
+                                                .font(.system(size: 9))
+                                                .foregroundColor(.purple)
+                                            Text(suggestion)
+                                                .font(.system(size: 11))
+                                                .foregroundColor(.primary.opacity(0.7))
+                                            Spacer()
+                                            Image(systemName: "arrow.right")
+                                                .font(.system(size: 8))
+                                                .foregroundColor(.secondary.opacity(0.4))
+                                        }
+                                        .padding(.horizontal, 14)
+                                        .padding(.vertical, 10)
+                                        .background(Color.white.opacity(0.03))
+                                        .cornerRadius(8)
+                                        .overlay(
+                                            RoundedRectangle(cornerRadius: 8)
+                                                .stroke(Color.white.opacity(0.06), lineWidth: 1)
+                                        )
+                                    }
+                                    .buttonStyle(.plain)
+                                }
+                            }
+                            .padding(.horizontal, 24)
+                            .padding(.top, 8)
+                            
+                            Spacer()
                         }
                     } else {
                         ForEach(messages) { message in
