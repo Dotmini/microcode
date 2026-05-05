@@ -14,7 +14,7 @@
   <img src="https://img.shields.io/badge/Swift-5.9-F05138?style=flat-square&logo=swift&logoColor=white" />
   <img src="https://img.shields.io/badge/Rust-1.75+-DEA584?style=flat-square&logo=rust&logoColor=white" />
   <img src="https://img.shields.io/badge/Metal-GPU_Accelerated-8E8E93?style=flat-square&logo=apple&logoColor=white" />
-  <img src="https://img.shields.io/github/license/Dotmini/microcode?style=flat-square&color=blue" />
+  <img src="https://img.shields.io/badge/License-MPL_v1.0-blue?style=flat-square" />
   <img src="https://img.shields.io/github/v/release/Dotmini/microcode?style=flat-square&color=green" />
 </p>
 
@@ -240,12 +240,55 @@ We welcome contributions! Please:
 
 ## License
 
-**Commercial License** — Dotmini Software
+**MicroCode Public License (MPL) v1.0** — See [`LICENSE`](LICENSE) for full terms.
 
-This software is proprietary. Use is governed by commercial licensing terms. Contact [Dotmini Software](https://github.com/Dotmini) for licensing inquiries.
+This is a **source-available** license designed to protect the creator's rights while fostering open-source collaboration:
+
+| Use Case | Allowed? | Cost |
+|----------|----------|------|
+| 🏠 **Personal / Hobby** | ✅ Free | $0 |
+| 🎓 **Education / Research** | ✅ Free | $0 |
+| 🤝 **Open Source Contributions** | ✅ Free | $0 |
+| 🔍 **Evaluation** (≤ 90 days) | ✅ Free | $0 |
+| 🏢 **Commercial** (Small Biz ≤ ฿10M) | ⚠️ Requires CLA | **10% Revenue Share** |
+| 🏬 **Commercial** (Medium ≤ ฿100M) | ⚠️ Requires CLA | **15% Revenue Share** |
+| 🏛️ **Commercial** (Enterprise > ฿100M) | ⚠️ Requires CLA | **20% Revenue Share** |
+
+### Commercial License Agreement (CLA)
+
+If you intend to use MicroCode or any derivative work for **commercial purposes** (SaaS, product integration, consulting, etc.), you **must** sign a Commercial License Agreement with the Licensor before deployment:
+
+1. **Contact** → [Dotmini Software](https://github.com/Dotmini) via GitHub
+2. **Negotiate** → Revenue tier + specific terms
+3. **Sign CLA** → Bilateral agreement with quarterly reporting
+4. **Deploy** → Use commercially with full legal protection
+
+> **⚠️ Using MicroCode commercially without a CLA is a violation of copyright law** under the Copyright Act B.E. 2537 (Thailand) and applicable international treaties.
+
+### Jurisdiction
+
+This license is governed by **Thai law** (กฎหมายไทย), including:
+- Copyright Act B.E. 2537 (พ.ร.บ. ลิขสิทธิ์)
+- Civil and Commercial Code (ประมวลกฎหมายแพ่งและพาณิชย์)
+- Trade Secrets Act B.E. 2545 (พ.ร.บ. ความลับทางการค้า)
+
+Disputes are resolved in the courts of **Bangkok, Thailand**.
+
+---
+
+## Credits
+
+<table>
+  <tr>
+    <td align="center"><strong>Tirawat Nantamas (ธีรวัฒน์ นันทมาศ)</strong><br/><em>Founder & Lead Architect</em><br/>Dotmini Software</td>
+  </tr>
+</table>
+
+**Academic Partnership**: SPU AI Club — Sripatum University (มหาวิทยาลัยศรีปทุม)
 
 ---
 
 <p align="center">
-  <sub>Built with ❤️ in Thailand 🇹🇭</sub>
+  <sub>Built with ❤️ in Thailand 🇹🇭</sub><br/>
+  <sub>Copyright © 2024-2026 Tirawat Nantamas — Dotmini Software</sub>
 </p>
