@@ -707,6 +707,13 @@ class AppState: ObservableObject {
 
     @Published var gitStatus: GitStatus?
     @Published var gitCommits: [GitCommit] = []
+    @Published var gitBranches: [String] = []
+    @Published var gitStashList: [String] = []
+    @Published var gitRemoteURL: String = ""
+    @Published var gitDiff: String = ""
+    @Published var gitDiffFile: String = ""
+    @Published var cicdRuns: [WorkflowRun] = []
+    @Published var cicdLoading: Bool = false
 
     @Published var hasUnsavedChanges: Bool = false
 
@@ -2542,11 +2549,18 @@ class AppState: ObservableObject {
                 let commits = try await backend.getGitLog(repoPath: folder.path, limit: 50)
                 self.gitCommits = commits
                 
+                // Also load extended git info
+                gitLoadBranches()
+                gitLoadStashList()
+                gitLoadRemoteURL()
+                
                 print("📂 [FreezeDebug] gitRefresh finished in \(Date().timeIntervalSince(start))s")
             } catch {
                 // Repository might not be a git repo
                 self.gitStatus = nil
                 self.gitCommits = []
+                self.gitBranches = []
+                self.gitStashList = []
                 print("📂 [FreezeDebug] gitRefresh failed/skipped in \(Date().timeIntervalSince(start))s")
             }
         }
@@ -2608,6 +2622,265 @@ class AppState: ObservableObject {
                 }
             } catch {
                 alertMessage = "Failed to pull: \(error.localizedDescription)"
+            }
+        }
+    }
+
+    // MARK: - Git Extended Operations
+    
+    /// Run a git command and return stdout
+    private func runGit(_ args: [String]) async -> String {
+        guard let folder = workspaceFolder else { return "" }
+        return await withCheckedContinuation { continuation in
+            let process = Process()
+            let pipe = Pipe()
+            process.executableURL = URL(fileURLWithPath: "/usr/bin/git")
+            process.arguments = args
+            process.currentDirectoryURL = folder
+            process.standardOutput = pipe
+            process.standardError = Pipe()
+            do {
+                try process.run()
+                process.waitUntilExit()
+                let data = pipe.fileHandleForReading.readDataToEndOfFile()
+                continuation.resume(returning: String(data: data, encoding: .utf8)?.trimmingCharacters(in: .whitespacesAndNewlines) ?? "")
+            } catch {
+                continuation.resume(returning: "")
+            }
+        }
+    }
+    
+    /// Run git command, return exit code
+    private func runGitExec(_ args: [String]) async -> (output: String, exitCode: Int32) {
+        guard let folder = workspaceFolder else { return ("", -1) }
+        return await withCheckedContinuation { continuation in
+            let process = Process()
+            let outPipe = Pipe()
+            let errPipe = Pipe()
+            process.executableURL = URL(fileURLWithPath: "/usr/bin/git")
+            process.arguments = args
+            process.currentDirectoryURL = folder
+            process.standardOutput = outPipe
+            process.standardError = errPipe
+            do {
+                try process.run()
+                process.waitUntilExit()
+                let out = String(data: outPipe.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? ""
+                let err = String(data: errPipe.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? ""
+                continuation.resume(returning: (out + err, process.terminationStatus))
+            } catch {
+                continuation.resume(returning: (error.localizedDescription, -1))
+            }
+        }
+    }
+    
+    // MARK: - Branch Management
+    
+    func gitLoadBranches() {
+        Task {
+            let raw = await runGit(["branch", "-a", "--no-color"])
+            let branches = raw.components(separatedBy: "\n")
+                .map { $0.trimmingCharacters(in: .whitespaces).replacingOccurrences(of: "* ", with: "") }
+                .filter { !$0.isEmpty && !$0.contains("HEAD") }
+            await MainActor.run { self.gitBranches = branches }
+        }
+    }
+    
+    func gitSwitchBranch(_ branch: String) {
+        Task {
+            let cleanBranch = branch
+                .replacingOccurrences(of: "remotes/origin/", with: "")
+                .trimmingCharacters(in: .whitespaces)
+            let result = await runGitExec(["checkout", cleanBranch])
+            if result.exitCode != 0 {
+                // Try creating tracking branch for remote
+                let _ = await runGitExec(["checkout", "-b", cleanBranch, "origin/\(cleanBranch)"])
+            }
+            await MainActor.run {
+                gitRefresh()
+                gitLoadBranches()
+            }
+        }
+    }
+    
+    func gitCreateBranch(_ name: String, switchTo: Bool = true) {
+        Task {
+            if switchTo {
+                let _ = await runGitExec(["checkout", "-b", name])
+            } else {
+                let _ = await runGitExec(["branch", name])
+            }
+            await MainActor.run {
+                gitRefresh()
+                gitLoadBranches()
+            }
+        }
+    }
+    
+    func gitDeleteBranch(_ name: String, force: Bool = false) {
+        Task {
+            let flag = force ? "-D" : "-d"
+            let _ = await runGitExec(["branch", flag, name])
+            await MainActor.run { gitLoadBranches() }
+        }
+    }
+    
+    func gitMergeBranch(_ name: String) {
+        Task {
+            let result = await runGitExec(["merge", name])
+            await MainActor.run {
+                if result.exitCode != 0 {
+                    alertMessage = "Merge conflict:\n\(result.output)"
+                }
+                gitRefresh()
+            }
+        }
+    }
+    
+    // MARK: - Stage / Unstage Individual Files
+    
+    func gitStageFile(_ path: String) {
+        Task {
+            let _ = await runGitExec(["add", path])
+            await MainActor.run { gitRefresh() }
+        }
+    }
+    
+    func gitUnstageFile(_ path: String) {
+        Task {
+            let _ = await runGitExec(["reset", "HEAD", path])
+            await MainActor.run { gitRefresh() }
+        }
+    }
+    
+    func gitStageAll() {
+        Task {
+            let _ = await runGitExec(["add", "-A"])
+            await MainActor.run { gitRefresh() }
+        }
+    }
+    
+    func gitDiscardFile(_ path: String) {
+        Task {
+            let _ = await runGitExec(["checkout", "--", path])
+            await MainActor.run { gitRefresh() }
+        }
+    }
+    
+    // MARK: - Diff
+    
+    func gitShowDiff(for path: String) {
+        Task {
+            let diff = await runGit(["diff", "--", path])
+            let cachedDiff = await runGit(["diff", "--cached", "--", path])
+            await MainActor.run {
+                gitDiffFile = path
+                gitDiff = diff.isEmpty ? cachedDiff : diff
+            }
+        }
+    }
+    
+    func gitShowFileDiff(_ path: String) -> String {
+        // Synchronous wrapper for inline diff preview
+        let process = Process()
+        let pipe = Pipe()
+        process.executableURL = URL(fileURLWithPath: "/usr/bin/git")
+        process.arguments = ["diff", "--", path]
+        process.currentDirectoryURL = workspaceFolder
+        process.standardOutput = pipe
+        process.standardError = Pipe()
+        try? process.run()
+        process.waitUntilExit()
+        let data = pipe.fileHandleForReading.readDataToEndOfFile()
+        return String(data: data, encoding: .utf8) ?? ""
+    }
+    
+    // MARK: - Stash Management
+    
+    func gitLoadStashList() {
+        Task {
+            let raw = await runGit(["stash", "list"])
+            let list = raw.components(separatedBy: "\n").filter { !$0.isEmpty }
+            await MainActor.run { gitStashList = list }
+        }
+    }
+    
+    func gitStash(message: String? = nil) {
+        Task {
+            var args = ["stash", "push"]
+            if let msg = message, !msg.isEmpty { args += ["-m", msg] }
+            let _ = await runGitExec(args)
+            await MainActor.run {
+                gitRefresh()
+                gitLoadStashList()
+            }
+        }
+    }
+    
+    func gitStashPop(index: Int = 0) {
+        Task {
+            let _ = await runGitExec(["stash", "pop", "stash@{\(index)}"])
+            await MainActor.run {
+                gitRefresh()
+                gitLoadStashList()
+            }
+        }
+    }
+    
+    func gitStashDrop(index: Int) {
+        Task {
+            let _ = await runGitExec(["stash", "drop", "stash@{\(index)}"])
+            await MainActor.run { gitLoadStashList() }
+        }
+    }
+    
+    // MARK: - Remote Info
+    
+    func gitLoadRemoteURL() {
+        Task {
+            let url = await runGit(["remote", "get-url", "origin"])
+            await MainActor.run { gitRemoteURL = url }
+        }
+    }
+    
+    func gitFetch() {
+        Task {
+            let _ = await runGitExec(["fetch", "--all", "--prune"])
+            await MainActor.run {
+                gitRefresh()
+                gitLoadBranches()
+            }
+        }
+    }
+    
+    // MARK: - GitHub CI/CD Status
+    
+    func gitLoadCICDStatus() {
+        guard !gitRemoteURL.isEmpty else { return }
+        // Extract owner/repo from remote URL
+        let url = gitRemoteURL
+        var owner = ""
+        var repo = ""
+        if url.contains("github.com") {
+            let parts = url
+                .replacingOccurrences(of: "https://github.com/", with: "")
+                .replacingOccurrences(of: "git@github.com:", with: "")
+                .replacingOccurrences(of: ".git", with: "")
+                .components(separatedBy: "/")
+            if parts.count >= 2 {
+                owner = parts[0]
+                repo = parts[1]
+            }
+        }
+        guard !owner.isEmpty, !repo.isEmpty else { return }
+        
+        cicdLoading = true
+        CICDService.shared.fetchWorkflowRuns(owner: owner, repo: repo, token: "") { [weak self] result in
+            DispatchQueue.main.async {
+                self?.cicdLoading = false
+                if case .success(let runs) = result {
+                    self?.cicdRuns = runs
+                }
             }
         }
     }
