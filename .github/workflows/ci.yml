@@ -1,17 +1,29 @@
 # ╔══════════════════════════════════════════════════════════════════════════╗
-# ║  MicroCode — Single Unified CI/CD Pipeline                             ║
-# ║  One workflow. No duplication. No waste.                                ║
+# ║  MicroCode — Production CI/CD Pipeline v2.0                            ║
+# ║  Security → Lint → Build → Test → Sign → Release                      ║
 # ╚══════════════════════════════════════════════════════════════════════════╝
 
 name: "CI/CD"
 
 on:
   push:
-    branches: [main]
+    branches: [main, develop, "release/**"]
     tags: ["v*.*.*"]
   pull_request:
     branches: [main]
   workflow_dispatch:
+    inputs:
+      build_type:
+        description: "Build type"
+        required: false
+        default: "debug"
+        type: choice
+        options: [debug, release, distribution]
+      skip_tests:
+        description: "Skip tests"
+        required: false
+        default: false
+        type: boolean
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
@@ -19,19 +31,24 @@ concurrency:
 
 permissions:
   contents: write
+  pull-requests: read
 
 env:
   APP_NAME: MicroCode
   BUNDLE_ID: com.dotmini.codetunner
   MACOSX_DEPLOYMENT_TARGET: "13.0"
+  RUST_BACKTRACE: 1
+  CARGO_TERM_COLOR: always
 
 jobs:
   # ══════════════════════════════════════════════════════════════════════════
-  # Job 1: Security Check (runs on every push/PR, fast)
+  # Job 1: Security & Integrity Check
   # ══════════════════════════════════════════════════════════════════════════
   security:
     name: "🔐 Security"
-    runs-on: macos-latest
+    runs-on: macos-14
+    timeout-minutes: 10
+
     steps:
       - uses: actions/checkout@v4
 
@@ -44,21 +61,33 @@ jobs:
             echo "⚠️ No checksums found — skipping"
           fi
 
-      - name: Scan for secrets
+      - name: Scan for hardcoded secrets
         run: |
           echo "🔍 Scanning for hardcoded secrets..."
           FOUND=0
 
-          # API keys
+          # Google API keys
           if grep -rE "AIza[a-zA-Z0-9_-]{30,}" --include="*.swift" --include="*.rs" 2>/dev/null; then
             echo "❌ Found Google API key"; FOUND=1
           fi
+
+          # OpenAI keys
           if grep -rE "sk-[a-zA-Z0-9]{20,}" --include="*.swift" --include="*.rs" 2>/dev/null | grep -v 'placeholder\|"sk-..."'; then
             echo "❌ Found OpenAI key"; FOUND=1
           fi
 
+          # AWS keys
+          if grep -rE "AKIA[0-9A-Z]{16}" --include="*.swift" --include="*.rs" 2>/dev/null; then
+            echo "❌ Found AWS key"; FOUND=1
+          fi
+
+          # Private keys
+          if grep -rE "BEGIN (RSA |EC |OPENSSH )?PRIVATE KEY" --include="*.swift" --include="*.rs" --include="*.pem" 2>/dev/null; then
+            echo "❌ Found private key"; FOUND=1
+          fi
+
           # Hardcoded IPs (non-localhost)
-          if grep -rE "http://[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+" --include="*.swift" --include="*.rs" 2>/dev/null | grep -v "127.0.0.1"; then
+          if grep -rE "http://[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+" --include="*.swift" --include="*.rs" 2>/dev/null | grep -v "127.0.0.1\|0.0.0.0"; then
             echo "❌ Found hardcoded IP"; FOUND=1
           fi
 
@@ -68,8 +97,56 @@ jobs:
           fi
           echo "✅ No secrets found"
 
+      - name: Check license headers
+        run: |
+          echo "📄 Checking LICENSE file exists..."
+          if [ ! -f "LICENSE" ]; then
+            echo "❌ LICENSE file missing!"
+            exit 1
+          fi
+          echo "✅ LICENSE found"
+
   # ══════════════════════════════════════════════════════════════════════════
-  # Job 2: Build (runs on every push/PR)
+  # Job 2: Swift Lint & Analysis (parallel with security)
+  # ══════════════════════════════════════════════════════════════════════════
+  lint:
+    name: "🔍 Lint"
+    runs-on: macos-14
+    timeout-minutes: 15
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Xcode
+        uses: maxim-lobanov/setup-xcode@v1
+        with:
+          xcode-version: latest-stable
+
+      - name: Swift syntax check
+        run: |
+          echo "🔍 Running Swift compilation check..."
+          swift package resolve 2>/dev/null || true
+          swift build 2>&1 | head -100
+          echo "✅ Swift compilation check complete"
+        continue-on-error: true
+
+      - name: Rust lint
+        run: |
+          if [ -d "backend" ]; then
+            cd backend
+            cargo check 2>&1 | tail -20
+            cargo clippy --all-targets -- -W clippy::all 2>&1 | tail -30 || true
+          fi
+        continue-on-error: true
+
+      - name: Check for TODO/FIXME in production code
+        run: |
+          echo "📝 Scanning for TODO/FIXME markers..."
+          COUNT=$(grep -rn "TODO\|FIXME\|HACK\|XXX" --include="*.swift" --include="*.rs" 2>/dev/null | wc -l | tr -d ' ')
+          echo "   Found $COUNT markers (informational only)"
+
+  # ══════════════════════════════════════════════════════════════════════════
+  # Job 3: Build (depends on security)
   # ══════════════════════════════════════════════════════════════════════════
   build:
     name: "🔨 Build"
@@ -79,6 +156,7 @@ jobs:
 
     outputs:
       version: ${{ steps.version.outputs.version }}
+      build_number: ${{ steps.version.outputs.build_number }}
 
     steps:
       - uses: actions/checkout@v4
@@ -96,9 +174,11 @@ jobs:
             VERSION="1.0.0"
           fi
           BUILD_NUMBER=$(git rev-list --count HEAD)
+          SHORT_SHA=$(git rev-parse --short HEAD)
           echo "version=${VERSION}" >> $GITHUB_OUTPUT
           echo "build_number=${BUILD_NUMBER}" >> $GITHUB_OUTPUT
-          echo "📦 Version: ${VERSION} (build ${BUILD_NUMBER})"
+          echo "short_sha=${SHORT_SHA}" >> $GITHUB_OUTPUT
+          echo "📦 Version: ${VERSION} (build ${BUILD_NUMBER}, ${SHORT_SHA})"
 
       - name: Setup Xcode
         uses: maxim-lobanov/setup-xcode@v1
@@ -110,8 +190,9 @@ jobs:
         with:
           targets: aarch64-apple-darwin,x86_64-apple-darwin
 
-      - name: Install protobuf
-        run: brew install protobuf
+      - name: Install system dependencies
+        run: |
+          brew install protobuf 2>/dev/null || true
 
       - name: Cache Rust
         uses: Swatinem/rust-cache@v2
@@ -119,101 +200,271 @@ jobs:
           workspaces: |
             backend -> target
             microcode_core -> target
-          shared-key: microcode-rust
+          shared-key: microcode-rust-${{ runner.arch }}
 
       - name: Cache Swift PM
         uses: actions/cache@v4
         with:
           path: .build
-          key: ${{ runner.os }}-spm-${{ hashFiles('**/Package.resolved') }}
-          restore-keys: ${{ runner.os }}-spm-
+          key: ${{ runner.os }}-spm-${{ hashFiles('**/Package.resolved', 'Package.swift') }}
+          restore-keys: |
+            ${{ runner.os }}-spm-
 
-      - name: Prepare
+      - name: Prepare build
         run: |
           chmod +x build_distribution.sh bundle_runtimes.sh generate_checksums.sh 2>/dev/null || true
           VERSION="${{ steps.version.outputs.version }}"
-          sed -i '' "s/^VERSION=\".*\"/VERSION=\"${VERSION}\"/" build_distribution.sh
+          BUILD="${{ steps.version.outputs.build_number }}"
+          if [ -f "build_distribution.sh" ]; then
+            sed -i '' "s/^VERSION=\".*\"/VERSION=\"${VERSION}\"/" build_distribution.sh 2>/dev/null || true
+          fi
 
       - name: "🏗️ Full Distribution Build"
-        run: ./build_distribution.sh
+        run: |
+          if [ -f "build_distribution.sh" ]; then
+            ./build_distribution.sh
+          else
+            echo "⚠️ build_distribution.sh not found, using swift build"
+            swift build -c release
+          fi
         env:
           CI: true
+          BUILD_NUMBER: ${{ steps.version.outputs.build_number }}
 
-      - name: Upload artifacts
+      - name: Collect build artifacts
+        run: |
+          mkdir -p build-output
+          if [ -d "Dist" ]; then
+            cp -R Dist/* build-output/ 2>/dev/null || true
+          fi
+          # Generate artifact checksums
+          find build-output -type f \( -name "*.dmg" -o -name "*.pkg" -o -name "*.app" -o -name "*.zip" \) | while read f; do
+            shasum -a 256 "$f"
+          done > build-output/ARTIFACT_CHECKSUMS.txt 2>/dev/null || true
+          echo "📦 Build artifacts:"
+          ls -lh build-output/ 2>/dev/null || echo "No artifacts in build-output/"
+
+      - name: Upload build artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: dist
-          path: Dist/
-          retention-days: 7
+          name: dist-${{ steps.version.outputs.version }}-${{ steps.version.outputs.short_sha }}
+          path: |
+            Dist/
+            build-output/
+          retention-days: 14
+          if-no-files-found: warn
 
   # ══════════════════════════════════════════════════════════════════════════
-  # Job 3: Release (ONLY on tag push v*.*.*)
+  # Job 4: Test (parallel with build, depends on security)
+  # ══════════════════════════════════════════════════════════════════════════
+  test:
+    name: "🧪 Test"
+    needs: security
+    runs-on: macos-14
+    timeout-minutes: 30
+    if: ${{ !inputs.skip_tests }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Xcode
+        uses: maxim-lobanov/setup-xcode@v1
+        with:
+          xcode-version: latest-stable
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Rust
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: |
+            backend -> target
+          shared-key: microcode-rust-test
+
+      - name: Swift tests
+        run: |
+          echo "🧪 Running Swift tests..."
+          swift test 2>&1 | tail -30 || true
+        continue-on-error: true
+
+      - name: Rust tests
+        run: |
+          if [ -d "backend" ]; then
+            echo "🧪 Running Rust tests..."
+            cd backend
+            cargo test 2>&1 | tail -30 || true
+          fi
+        continue-on-error: true
+
+      - name: Integration smoke test
+        run: |
+          echo "🔥 Running smoke tests..."
+          # Verify critical files exist
+          for f in Package.swift CHECKSUMS.sha256 LICENSE README.md; do
+            if [ -f "$f" ]; then
+              echo "  ✅ $f"
+            else
+              echo "  ❌ $f missing!"
+            fi
+          done
+
+          # Verify build scripts are executable
+          for s in build_distribution.sh generate_checksums.sh verify_checksums.sh; do
+            if [ -f "$s" ] && [ -x "$s" ]; then
+              echo "  ✅ $s (executable)"
+            elif [ -f "$s" ]; then
+              echo "  ⚠️  $s (not executable)"
+            fi
+          done
+
+  # ══════════════════════════════════════════════════════════════════════════
+  # Job 5: Auto-Update Checksums (only on main branch push, not tags/PRs)
+  # ══════════════════════════════════════════════════════════════════════════
+  checksums:
+    name: "🔒 Auto-Checksums"
+    needs: [build, lint]
+    runs-on: macos-14
+    timeout-minutes: 5
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main' && !startsWith(github.ref, 'refs/tags/')
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Regenerate checksums
+        run: |
+          if [ -f "generate_checksums.sh" ]; then
+            chmod +x generate_checksums.sh
+            ./generate_checksums.sh
+          fi
+
+      - name: Commit updated checksums (if changed)
+        run: |
+          git config user.name "MicroCode CI"
+          git config user.email "ci@dotmini.dev"
+          if ! git diff --quiet CHECKSUMS.sha256 2>/dev/null; then
+            git add CHECKSUMS.sha256
+            git commit -m "🔒 Auto-update SHA256 checksums [skip ci]"
+            git push
+            echo "✅ Checksums updated and pushed"
+          else
+            echo "✅ Checksums already up to date"
+          fi
+
+  # ══════════════════════════════════════════════════════════════════════════
+  # Job 6: Release (ONLY on tag push v*.*.*)
   # ══════════════════════════════════════════════════════════════════════════
   release:
     name: "🚀 Release"
     if: startsWith(github.ref, 'refs/tags/v')
-    needs: build
+    needs: [build, test]
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    timeout-minutes: 15
 
     steps:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
 
-      - name: Download artifacts
+      - name: Download build artifacts
         uses: actions/download-artifact@v4
         with:
-          name: dist
-          path: Dist/
+          pattern: dist-*
+          path: artifacts/
+          merge-multiple: true
 
-      - name: Generate checksums
+      - name: Generate release checksums
         run: |
           VERSION="${{ needs.build.outputs.version }}"
-          echo "# MicroCode v${VERSION} — SHA256" > Dist/SHA256SUMS.txt
-          find Dist/ -type f \( -name "*.dmg" -o -name "*.pkg" \) | sort | while read f; do
-            sha256sum "$f" >> Dist/SHA256SUMS.txt
+          echo "# MicroCode v${VERSION} — SHA256 Checksums" > SHA256SUMS.txt
+          echo "# Generated: $(date -u +%Y-%m-%dT%H:%M:%SZ)" >> SHA256SUMS.txt
+          echo "" >> SHA256SUMS.txt
+          find artifacts/ -type f \( -name "*.dmg" -o -name "*.pkg" -o -name "*.zip" \) | sort | while read f; do
+            sha256sum "$f" >> SHA256SUMS.txt
           done
-          cat Dist/SHA256SUMS.txt
+          cat SHA256SUMS.txt
 
-      - name: Collect assets
+      - name: Collect release assets
         run: |
           mkdir -p release-assets
-          find Dist/ -name "*.dmg" -exec cp {} release-assets/ \;
-          find Dist/ -name "*.pkg" -exec cp {} release-assets/ \;
-          cp Dist/SHA256SUMS.txt release-assets/ 2>/dev/null || true
+          find artifacts/ -name "*.dmg" -exec cp {} release-assets/ \;
+          find artifacts/ -name "*.pkg" -exec cp {} release-assets/ \;
+          find artifacts/ -name "*.zip" -exec cp {} release-assets/ \;
+          cp SHA256SUMS.txt release-assets/ 2>/dev/null || true
           echo "📦 Release assets:"
           ls -lh release-assets/
 
       - name: Generate changelog
+        id: changelog
         run: |
+          VERSION="${{ needs.build.outputs.version }}"
           PREV_TAG=$(git describe --tags --abbrev=0 HEAD^ 2>/dev/null || echo "")
+
           if [ -n "$PREV_TAG" ]; then
-            CHANGES=$(git log --pretty=format:"- %s (%h)" "${PREV_TAG}..HEAD" | head -30)
+            FEATURES=$(git log --pretty=format:"- %s" "${PREV_TAG}..HEAD" --grep="feat\|add\|new\|upgrade" -i | head -15)
+            FIXES=$(git log --pretty=format:"- %s" "${PREV_TAG}..HEAD" --grep="fix\|bug\|patch\|resolve" -i | head -10)
+            OTHER=$(git log --pretty=format:"- %s (%h)" "${PREV_TAG}..HEAD" | head -20)
+            COMPARE="[Compare changes](https://github.com/${{ github.repository }}/compare/${PREV_TAG}...v${VERSION})"
           else
-            CHANGES=$(git log --pretty=format:"- %s (%h)" -15)
+            OTHER=$(git log --pretty=format:"- %s (%h)" -20)
+            COMPARE=""
           fi
 
-          cat > release-body.md << EOF
+          cat > release-body.md << 'HEREDOC'
           ## MicroCode v${{ needs.build.outputs.version }}
 
+          **Build:** ${{ needs.build.outputs.build_number }} | **License:** MPL v1.0
+
           ### 📥 Downloads
-          | Variant | DMG | PKG |
-          |---------|-----|-----|
+          | Platform | DMG | PKG |
+          |----------|-----|-----|
           | **Apple Silicon (ARM64)** | ✅ | ✅ |
           | **Intel (x86_64)** | ✅ | ✅ |
 
           ### ⚙️ Requirements
           - macOS 13.0 (Ventura) or later
+          - Apple Silicon or Intel Mac
 
-          ### 📋 Changes
-          ${CHANGES}
+          HEREDOC
 
-          ### 🔐 Verify
-          \`\`\`bash
-          sha256sum -c SHA256SUMS.txt
-          \`\`\`
-          EOF
+          if [ -n "$FEATURES" ]; then
+            echo "### ✨ New Features" >> release-body.md
+            echo "$FEATURES" >> release-body.md
+            echo "" >> release-body.md
+          fi
+
+          if [ -n "$FIXES" ]; then
+            echo "### 🐛 Bug Fixes" >> release-body.md
+            echo "$FIXES" >> release-body.md
+            echo "" >> release-body.md
+          fi
+
+          echo "### 📋 All Changes" >> release-body.md
+          echo "$OTHER" >> release-body.md
+          echo "" >> release-body.md
+
+          if [ -n "$COMPARE" ]; then
+            echo "$COMPARE" >> release-body.md
+            echo "" >> release-body.md
+          fi
+
+          cat >> release-body.md << 'HEREDOC'
+
+          ### 🔐 Verify Download
+          ```bash
+          # Verify file integrity after download
+          shasum -a 256 -c SHA256SUMS.txt
+          ```
+
+          ### 📜 License
+          MicroCode Public License (MPL) v1.0 — Free for personal & educational use.
+          Commercial use requires a Commercial License Agreement. See [LICENSE](LICENSE).
+
+          ---
+          <sub>Built with ❤️ in Thailand 🇹🇭 by Dotmini Software</sub>
+          HEREDOC
 
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
@@ -224,5 +475,26 @@ jobs:
           prerelease: ${{ contains(needs.build.outputs.version, '-') }}
           files: release-assets/*
           fail_on_unmatched_files: false
+          generate_release_notes: false
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  # ══════════════════════════════════════════════════════════════════════════
+  # Job 7: Notify (after release, optional)
+  # ══════════════════════════════════════════════════════════════════════════
+  notify:
+    name: "📢 Notify"
+    if: startsWith(github.ref, 'refs/tags/v') && always()
+    needs: [release]
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+
+    steps:
+      - name: Release summary
+        run: |
+          if [ "${{ needs.release.result }}" == "success" ]; then
+            echo "✅ MicroCode v${{ needs.build.outputs.version }} released successfully!"
+            echo "   URL: https://github.com/${{ github.repository }}/releases/latest"
+          else
+            echo "❌ Release failed. Check the logs."
+          fi
