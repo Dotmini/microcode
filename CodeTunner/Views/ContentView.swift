@@ -3796,7 +3796,139 @@ struct SettingsView: View {
             
             // ── Local LLM Section ──
             localLLMSettingsPanel
+            
+            // ── MCP Server ──
+            mcpSettingsPanel
         }
+    }
+    
+    @ObservedObject private var mcpServer = MCPServer.shared
+    
+    private var mcpSettingsPanel: some View {
+        VStack(alignment: .leading, spacing: 14) {
+            HStack(spacing: 8) {
+                Image(systemName: "server.rack")
+                    .font(.system(size: 14))
+                    .foregroundStyle(LinearGradient(colors: [.purple, .cyan], startPoint: .topLeading, endPoint: .bottomTrailing))
+                Text("MCP Protocol Server")
+                    .font(.system(size: 13, weight: .bold))
+                Spacer()
+                
+                HStack(spacing: 4) {
+                    Circle().fill(mcpServer.isRunning ? .green : .secondary.opacity(0.3)).frame(width: 7, height: 7)
+                    Text(mcpServer.isRunning ? "Running" : "Stopped")
+                        .font(.system(size: 10, weight: .medium))
+                        .foregroundColor(mcpServer.isRunning ? .green : .secondary)
+                }
+                .padding(.horizontal, 8).padding(.vertical, 4)
+                .background(Color.white.opacity(0.04)).cornerRadius(6)
+                
+                Button(mcpServer.isRunning ? "Stop" : "Start") {
+                    if mcpServer.isRunning {
+                        mcpServer.stop()
+                    } else if let ws = appState.workspaceFolder?.path {
+                        mcpServer.start(workspace: ws)
+                    }
+                }
+                .buttonStyle(.bordered)
+                .controlSize(.small)
+            }
+            
+            Text("Model Context Protocol server exposes workspace tools (read, write, search, terminal, git) to external AI clients like Claude Desktop, Cursor, and ChatGPT plugins.")
+                .font(.system(size: 11))
+                .foregroundColor(.secondary)
+            
+            // Stats
+            if mcpServer.isRunning {
+                HStack(spacing: 20) {
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text("Requests").font(.system(size: 9, weight: .semibold)).foregroundColor(.secondary)
+                        Text("\(mcpServer.requestCount)").font(.system(size: 16, weight: .bold, design: .monospaced))
+                    }
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text("Clients").font(.system(size: 9, weight: .semibold)).foregroundColor(.secondary)
+                        Text("\(mcpServer.connectedClients)").font(.system(size: 16, weight: .bold, design: .monospaced))
+                    }
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text("Tools").font(.system(size: 9, weight: .semibold)).foregroundColor(.secondary)
+                        Text("8").font(.system(size: 16, weight: .bold, design: .monospaced))
+                    }
+                    Spacer()
+                    
+                    if let last = mcpServer.lastActivity {
+                        Text("Last: \(last, style: .relative) ago")
+                            .font(.system(size: 9))
+                            .foregroundColor(.secondary)
+                    }
+                }
+                .padding(12)
+                .background(Color.white.opacity(0.03))
+                .cornerRadius(8)
+            }
+            
+            // Available Tools
+            VStack(alignment: .leading, spacing: 6) {
+                Text("Available Tools")
+                    .font(.system(size: 10, weight: .semibold))
+                    .foregroundColor(.secondary)
+                
+                LazyVGrid(columns: [GridItem(.adaptive(minimum: 140))], spacing: 4) {
+                    mcpToolBadge("read_file", icon: "doc.text", color: .blue)
+                    mcpToolBadge("write_file", icon: "pencil.and.outline", color: .green)
+                    mcpToolBadge("edit_file", icon: "doc.text.fill", color: .orange)
+                    mcpToolBadge("search_files", icon: "magnifyingglass", color: .purple)
+                    mcpToolBadge("list_files", icon: "folder", color: .cyan)
+                    mcpToolBadge("run_terminal", icon: "terminal.fill", color: .mint)
+                    mcpToolBadge("git_status", icon: "point.3.filled.connected.trianglepath.dotted", color: .red)
+                    mcpToolBadge("get_diagnostics", icon: "exclamationmark.triangle", color: .yellow)
+                }
+            }
+            
+            // Recent Logs
+            if !mcpServer.logs.isEmpty {
+                VStack(alignment: .leading, spacing: 4) {
+                    Text("Recent Activity")
+                        .font(.system(size: 10, weight: .semibold))
+                        .foregroundColor(.secondary)
+                    
+                    ForEach(mcpServer.logs.suffix(5)) { log in
+                        HStack(spacing: 6) {
+                            Circle()
+                                .fill(log.status == .success ? .green : log.status == .error ? .red : .blue)
+                                .frame(width: 5, height: 5)
+                            Text(log.method)
+                                .font(.system(size: 9, weight: .medium, design: .monospaced))
+                            Text(log.detail)
+                                .font(.system(size: 9))
+                                .foregroundColor(.secondary)
+                                .lineLimit(1)
+                            Spacer()
+                            Text(log.timestamp, style: .time)
+                                .font(.system(size: 8))
+                                .foregroundColor(.secondary.opacity(0.6))
+                        }
+                    }
+                }
+                .padding(10)
+                .background(Color.black.opacity(0.15))
+                .cornerRadius(6)
+            }
+        }
+        .padding(16)
+        .background(Color(nsColor: .controlBackgroundColor))
+        .cornerRadius(12)
+        .overlay(RoundedRectangle(cornerRadius: 12).stroke(Color.purple.opacity(0.15), lineWidth: 1))
+    }
+    
+    @ViewBuilder
+    private func mcpToolBadge(_ name: String, icon: String, color: Color) -> some View {
+        HStack(spacing: 5) {
+            Image(systemName: icon).font(.system(size: 9)).foregroundColor(color)
+            Text(name).font(.system(size: 9, design: .monospaced)).foregroundColor(.primary.opacity(0.7))
+        }
+        .padding(.horizontal, 8).padding(.vertical, 4)
+        .background(color.opacity(0.06))
+        .cornerRadius(4)
     }
     
     @ObservedObject private var localLLM = LocalLLMService.shared

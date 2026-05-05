@@ -142,6 +142,8 @@ let package = Package(
                 "Services/AgentService.swift",
                 "Services/AgentMemoryService.swift",
                 "Services/AIClient.swift",            // Direct AI API Client
+                "Services/AIProviderAuthService.swift",// Multi-provider Auth + Keychain
+                "Services/MCPServer.swift",            // MCP Protocol Server
                 "Services/LocalLLMService.swift",     // Local LLM Detection (LM Studio, Ollama)
                 "Services/MicroCore/MicroCore.swift", // AI Core Bridge
                 "Services/MicroCodeService.swift",    // AI Core Service Wrapper

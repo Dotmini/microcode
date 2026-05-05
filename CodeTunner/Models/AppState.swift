@@ -1239,6 +1239,16 @@ class AppState: ObservableObject {
         // Initialize MicroCode AI Core
         self.microCodeService = MicroCodeService(workspacePath: url.path)
         
+        // Auto-start MCP Server
+        Task { @MainActor in
+            MCPServer.shared.start(workspace: url.path)
+        }
+        
+        // Sync AI Provider Auth keys to AppState
+        Task { @MainActor in
+            AIProviderAuthService.shared.syncToAppState(self)
+        }
+        
         // Step 2: Load file tree (main operation, already optimized)
         await self.refreshFileTree()
         
