@@ -23,6 +23,13 @@ class AgentService: ObservableObject {
     @Published var editorContext: EditorContextModel?
     @Published var currentToolExecution: String? = nil
     
+    // Stop / Cancel
+    @Published var isCancelled = false
+    
+    // Message Queue — send follow-ups while AI is working
+    @Published var messageQueue: [QueuedMessage] = []
+    @Published var isProcessingQueue = false
+    
     // Real-time Activity Tracking
     @Published var activityLog: [AgentActivity] = []
     @Published var agentPhase: AgentPhase = .idle
@@ -38,6 +45,9 @@ class AgentService: ObservableObject {
     @Published var activeChatId: String?
     @Published var showChatSidebar: Bool = false
     
+    // Model selection
+    @Published var selectedModel: String = ""
+    
     // Services
     private let aiClient = AIClient.shared
     private let toolBox = AgentToolBox.shared
@@ -52,6 +62,49 @@ class AgentService: ObservableObject {
     
     // Token stats (read from optimizer)
     var tokenStats: TokenUsageStats { tokenOptimizer.stats }
+    
+    // MARK: - Stop Generation
+    
+    func stopGeneration() {
+        isCancelled = true
+        isLoading = false
+        agentPhase = .idle
+        currentToolExecution = nil
+        logActivity(.completed, "Generation stopped by user")
+        
+        // Append stop marker to last AI message
+        if let lastIdx = messages.lastIndex(where: { $0.role == .assistant }) {
+            let current = messages[lastIdx].content
+            messages[lastIdx] = AgentMessageModel(
+                id: messages[lastIdx].id, role: .assistant,
+                content: current + "\n\n⏹ *Generation stopped*",
+                toolResults: messages[lastIdx].toolResults,
+                pendingChanges: messages[lastIdx].pendingChanges,
+                timestamp: messages[lastIdx].timestamp
+            )
+        }
+        
+        // Process next in queue if any
+        processQueue()
+    }
+    
+    // MARK: - Message Queue
+    
+    func enqueueMessage(_ text: String, attachments: [AIAttachment] = []) {
+        messageQueue.append(QueuedMessage(text: text, attachments: attachments))
+        if !isLoading {
+            processQueue()
+        }
+    }
+    
+    func processQueue() {
+        guard !messageQueue.isEmpty, !isLoading else { return }
+        let next = messageQueue.removeFirst()
+        isProcessingQueue = !messageQueue.isEmpty
+        
+        // This will be called from AIAgentView.sendMessage with proper context
+        NotificationCenter.default.post(name: .agentProcessQueueItem, object: next)
+    }
     
     // MARK: - System Prompt (Dual Mode: Chat + Agent)
     
@@ -306,6 +359,7 @@ class AgentService: ObservableObject {
         }
         
         isLoading = true
+        isCancelled = false
         agentPhase = .thinking
         filesModified = []
         suggestedAction = nil
@@ -314,8 +368,12 @@ class AgentService: ObservableObject {
             isLoading = false
             agentPhase = .idle
             saveArx()
-            // Update token stats
             objectWillChange.send()
+            // Auto-process queue
+            Task { @MainActor in
+                try? await Task.sleep(nanoseconds: 200_000_000)
+                self.processQueue()
+            }
         }
         
         // Detect task complexity and choose budget
@@ -1069,3 +1127,15 @@ struct ToolDefinitionModel: Codable, Identifiable {
     let description: String
 }
 
+// MARK: - Queue Model
+
+struct QueuedMessage {
+    let id = UUID()
+    let text: String
+    let attachments: [AIAttachment]
+    let timestamp = Date()
+}
+
+extension Notification.Name {
+    static let agentProcessQueueItem = Notification.Name("agentProcessQueueItem")
+}

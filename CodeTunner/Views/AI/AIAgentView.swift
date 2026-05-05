@@ -96,6 +96,11 @@ struct AIAgentView: View {
                 agent.setWorkspace(workspace.path)
             }
         }
+        .onReceive(NotificationCenter.default.publisher(for: .agentProcessQueueItem)) { notification in
+            if let queued = notification.object as? QueuedMessage {
+                executeMessage(queued.text, attachments: queued.attachments)
+            }
+        }
     }
     
     // MARK: - Chat Sidebar
@@ -350,24 +355,59 @@ struct AIAgentView: View {
                         }
                 }
                 
-                // Send Button — Gradient
-                Button(action: sendMessage) {
-                    Image(systemName: "paperplane.fill")
-                        .font(.system(size: 12))
-                        .foregroundColor(.white)
-                        .frame(width: 32, height: 32)
-                        .background(
-                            LinearGradient(colors: [.purple, .blue], startPoint: .topLeading, endPoint: .bottomTrailing)
-                        )
-                        .cornerRadius(8)
-                        .shadow(color: .purple.opacity(0.3), radius: 4, y: 2)
+                // Send or Stop Button
+                if agent.isLoading {
+                    // STOP button
+                    Button(action: { agent.stopGeneration() }) {
+                        Image(systemName: "stop.fill")
+                            .font(.system(size: 12))
+                            .foregroundColor(.white)
+                            .frame(width: 32, height: 32)
+                            .background(
+                                LinearGradient(colors: [.red, .orange], startPoint: .topLeading, endPoint: .bottomTrailing)
+                            )
+                            .cornerRadius(8)
+                            .shadow(color: .red.opacity(0.3), radius: 4, y: 2)
+                    }
+                    .buttonStyle(.plain)
+                    .help("Stop Generation")
+                } else {
+                    // SEND button
+                    Button(action: sendMessage) {
+                        Image(systemName: "paperplane.fill")
+                            .font(.system(size: 12))
+                            .foregroundColor(.white)
+                            .frame(width: 32, height: 32)
+                            .background(
+                                LinearGradient(colors: [.purple, .blue], startPoint: .topLeading, endPoint: .bottomTrailing)
+                            )
+                            .cornerRadius(8)
+                            .shadow(color: .purple.opacity(0.3), radius: 4, y: 2)
+                    }
+                    .buttonStyle(.plain)
+                    .disabled(inputText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty && attachments.isEmpty)
+                    .opacity((inputText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty && attachments.isEmpty) ? 0.4 : 1.0)
                 }
-                .buttonStyle(.plain)
-                .disabled(inputText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty && attachments.isEmpty)
-                .opacity((inputText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty && attachments.isEmpty) ? 0.4 : 1.0)
             }
             .padding(.horizontal, 12)
             .padding(.vertical, 10)
+            
+            // Queue indicator
+            if !agent.messageQueue.isEmpty {
+                HStack(spacing: 6) {
+                    ProgressView().scaleEffect(0.5).frame(width: 12, height: 12)
+                    Text("\(agent.messageQueue.count) message\(agent.messageQueue.count > 1 ? "s" : "") queued")
+                        .font(.system(size: 10))
+                        .foregroundColor(.orange)
+                    Spacer()
+                    Button("Clear Queue") { agent.messageQueue.removeAll() }
+                        .font(.system(size: 9))
+                        .buttonStyle(.bordered)
+                        .controlSize(.mini)
+                }
+                .padding(.horizontal, 14)
+                .padding(.bottom, 6)
+            }
             .background(paneColor)
         }
     }
@@ -582,6 +622,17 @@ struct AIAgentView: View {
         
         inputText = ""
         attachments = []
+        
+        // If AI is busy, queue the message
+        if agent.isLoading {
+            agent.enqueueMessage(userText, attachments: currentAttachments)
+            return
+        }
+        
+        executeMessage(userText, attachments: currentAttachments)
+    }
+    
+    private func executeMessage(_ userText: String, attachments currentAttachments: [AIAttachment] = []) {
         
         // Update editor context
         if let file = appState.currentFile {
@@ -2302,65 +2353,96 @@ private struct PendingChangeCard: View {
     let change: PendingChangeModel
     var onApply: ((PendingChangeModel) -> Void)?
     var onReject: ((PendingChangeModel) -> Void)?
-    @State private var showDiff = false
+    @State private var showDiff = true  // Auto-expand diff
     
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
             changeCardHeader
-            Divider()
+            
+            // Always show diff stats bar
+            HStack(spacing: 12) {
+                HStack(spacing: 3) {
+                    Circle().fill(.green).frame(width: 6, height: 6)
+                    Text("+\(change.additions) additions")
+                        .font(.system(size: 9, design: .monospaced))
+                        .foregroundColor(.green)
+                }
+                HStack(spacing: 3) {
+                    Circle().fill(.red).frame(width: 6, height: 6)
+                    Text("-\(change.deletions) deletions")
+                        .font(.system(size: 9, design: .monospaced))
+                        .foregroundColor(.red)
+                }
+                Spacer()
+            }
+            .padding(.horizontal, 10)
+            .padding(.vertical, 4)
+            .background(Color.primary.opacity(0.02))
+            
             if showDiff {
                 codeDiffSection
             } else {
                 changeSummaryRow
             }
-            Divider()
+            
             if change.status == .pending {
                 changeCardActions
             }
         }
-        .background(Color.primary.opacity(0.02))
-        .cornerRadius(8)
-        .overlay(RoundedRectangle(cornerRadius: 8).stroke(Color.primary.opacity(0.1), lineWidth: 1))
+        .background(Color(nsColor: .controlBackgroundColor).opacity(0.5))
+        .cornerRadius(10)
+        .overlay(
+            RoundedRectangle(cornerRadius: 10)
+                .stroke(
+                    change.status == .accepted ? Color.green.opacity(0.3) :
+                    change.status == .rejected ? Color.red.opacity(0.3) :
+                    Color.blue.opacity(0.2),
+                    lineWidth: 1
+                )
+        )
     }
     
     private var changeCardHeader: some View {
-        HStack {
-            Image(systemName: change.status == .accepted ? "checkmark.circle.fill" : change.status == .rejected ? "xmark.circle.fill" : "pencil.circle.fill")
+        HStack(spacing: 8) {
+            Image(systemName: change.status == .accepted ? "checkmark.circle.fill" : change.status == .rejected ? "xmark.circle.fill" : "doc.badge.gearshape.fill")
                 .foregroundColor(change.status == .accepted ? .green : change.status == .rejected ? .red : .blue)
-            Text(URL(fileURLWithPath: change.filePath).lastPathComponent)
-                .font(.system(size: 12, weight: .bold))
+                .font(.system(size: 13))
+            
+            VStack(alignment: .leading, spacing: 1) {
+                Text(URL(fileURLWithPath: change.filePath).lastPathComponent)
+                    .font(.system(size: 11, weight: .semibold, design: .monospaced))
+                Text(change.description)
+                    .font(.system(size: 9))
+                    .foregroundColor(.secondary)
+                    .lineLimit(1)
+            }
             
             Spacer()
             
-            // Diff stats
-            HStack(spacing: 4) {
-                Text("+\(change.additions)")
-                    .foregroundColor(.green)
-                Text("-\(change.deletions)")
-                    .foregroundColor(.red)
-            }
-            .font(.system(size: 10, weight: .bold, design: .monospaced))
-            
             // Toggle diff
-            Button(action: { showDiff.toggle() }) {
-                HStack(spacing: 3) {
-                    Image(systemName: showDiff ? "chevron.up" : "chevron.down")
-                        .font(.system(size: 8))
-                    Text(showDiff ? "Hide" : "Diff")
-                        .font(.system(size: 9))
-                }
-                .foregroundColor(.accentColor)
-                .padding(.horizontal, 6)
-                .padding(.vertical, 2)
-                .background(Color.accentColor.opacity(0.1))
-                .cornerRadius(3)
+            Button(action: { withAnimation(.easeInOut(duration: 0.2)) { showDiff.toggle() } }) {
+                Image(systemName: showDiff ? "chevron.up" : "chevron.down")
+                    .font(.system(size: 9))
+                    .foregroundColor(.secondary)
+                    .frame(width: 20, height: 20)
             }
             .buttonStyle(.plain)
             
             changeCardStatusLabel
         }
-        .padding(8)
-        .background(Color.primary.opacity(0.05))
+        .padding(.horizontal, 10)
+        .padding(.vertical, 8)
+        .background(
+            LinearGradient(
+                colors: [
+                    change.status == .accepted ? Color.green.opacity(0.05) :
+                    change.status == .rejected ? Color.red.opacity(0.05) :
+                    Color.blue.opacity(0.03),
+                    Color.clear
+                ],
+                startPoint: .leading, endPoint: .trailing
+            )
+        )
     }
     
     @ViewBuilder
@@ -2447,22 +2529,40 @@ private struct PendingChangeCard: View {
     }
     
     private var changeCardActions: some View {
-        HStack {
+        HStack(spacing: 8) {
             Button(action: { onApply?(change) }) {
-                Label("Apply", systemImage: "checkmark")
+                HStack(spacing: 4) {
+                    Image(systemName: "checkmark.circle.fill")
+                    Text("Apply Change")
+                }
+                .font(.system(size: 11, weight: .medium))
+                .foregroundColor(.white)
+                .padding(.horizontal, 12)
+                .padding(.vertical, 6)
+                .background(LinearGradient(colors: [.green, .green.opacity(0.8)], startPoint: .leading, endPoint: .trailing))
+                .cornerRadius(6)
             }
-            .buttonStyle(.borderedProminent)
-            .tint(.green)
-            .font(.caption)
+            .buttonStyle(.plain)
             
             Button(action: { onReject?(change) }) {
-                Label("Reject", systemImage: "xmark")
+                HStack(spacing: 4) {
+                    Image(systemName: "xmark")
+                    Text("Reject")
+                }
+                .font(.system(size: 11, weight: .medium))
+                .foregroundColor(.red)
+                .padding(.horizontal, 12)
+                .padding(.vertical, 6)
+                .background(Color.red.opacity(0.08))
+                .cornerRadius(6)
+                .overlay(RoundedRectangle(cornerRadius: 6).stroke(Color.red.opacity(0.2)))
             }
-            .buttonStyle(.bordered)
-            .tint(.red)
-            .font(.caption)
+            .buttonStyle(.plain)
+            
+            Spacer()
         }
-        .padding(8)
+        .padding(.horizontal, 10)
+        .padding(.vertical, 8)
     }
 }
 
