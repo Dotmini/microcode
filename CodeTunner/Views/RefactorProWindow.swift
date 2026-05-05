@@ -73,72 +73,90 @@ struct RefactorProWindow: View {
     // MARK: - Header Toolbar
     
     private var headerToolbar: some View {
-        HStack(spacing: 16) {
-            // Logo & Title
-            HStack(spacing: 8) {
-                Image(systemName: "wand.and.stars")
-                    .font(.system(size: 18))
-                    .foregroundColor(.purple)
+        VStack(spacing: 0) {
+            HStack(spacing: 12) {
+                // Logo
+                ZStack {
+                    Circle()
+                        .fill(LinearGradient(colors: [.purple.opacity(0.3), .blue.opacity(0.2)], startPoint: .topLeading, endPoint: .bottomTrailing))
+                        .frame(width: 30, height: 30)
+                    Image(systemName: "wand.and.stars")
+                        .font(.system(size: 14, weight: .bold))
+                        .foregroundStyle(LinearGradient(colors: [.purple, .cyan], startPoint: .topLeading, endPoint: .bottomTrailing))
+                }
                 
-                Text("AI Refactor Pro")
-                    .font(.system(size: 16, weight: .semibold))
-            }
-            
-            Divider()
-                .frame(height: 20)
-            
-            // Mode Picker
-            Picker("Mode", selection: $selectedMode) {
-                ForEach(RefactorMode.allCases, id: \.self) { mode in
-                    Text(mode.title).tag(mode)
-                }
-            }
-            .pickerStyle(.segmented)
-            .frame(width: 300)
-            
-            Spacer()
-            
-            // Language Migration (only for migration mode)
-            if selectedMode == .migration {
-                HStack(spacing: 8) {
-                    Picker("From", selection: $sourceLanguage) {
-                        ForEach(languages, id: \.self) { lang in
-                            Text(lang.capitalized).tag(lang)
-                        }
+                VStack(alignment: .leading, spacing: 1) {
+                    Text("AI Refactor Pro")
+                        .font(.system(size: 14, weight: .bold, design: .rounded))
+                    if let file = appState.currentFile {
+                        Text(file.name)
+                            .font(.system(size: 9))
+                            .foregroundColor(.secondary)
                     }
-                    .frame(width: 90)
-                    
-                    Image(systemName: "arrow.right")
-                        .foregroundColor(.secondary)
-                    
-                    Picker("To", selection: $targetLanguage) {
-                        ForEach(languages, id: \.self) { lang in
-                            Text(lang.capitalized).tag(lang)
-                        }
-                    }
-                    .frame(width: 90)
                 }
+                
+                Divider().frame(height: 24)
+                
+                // Mode pills
+                HStack(spacing: 2) {
+                    ForEach(RefactorMode.allCases, id: \.self) { mode in
+                        Button {
+                            withAnimation(.easeInOut(duration: 0.2)) { selectedMode = mode }
+                        } label: {
+                            HStack(spacing: 4) {
+                                Image(systemName: mode == .refactor ? "wrench.and.screwdriver.fill" : "arrow.left.arrow.right")
+                                    .font(.system(size: 9))
+                                Text(mode == .refactor ? "Refactor" : "Migration")
+                                    .font(.system(size: 10, weight: .medium))
+                            }
+                            .foregroundColor(selectedMode == mode ? .white : .secondary)
+                            .padding(.horizontal, 10)
+                            .padding(.vertical, 5)
+                            .background(selectedMode == mode ? Color.accentColor.opacity(0.85) : Color.clear)
+                            .cornerRadius(6)
+                        }
+                        .buttonStyle(.plain)
+                    }
+                }
+                .padding(3)
+                .background(Color.white.opacity(0.04))
+                .cornerRadius(8)
+                
+                if selectedMode == .migration {
+                    HStack(spacing: 6) {
+                        Picker("", selection: $sourceLanguage) {
+                            ForEach(languages, id: \.self) { Text($0.capitalized).tag($0) }
+                        }.frame(width: 85).labelsHidden()
+                        Image(systemName: "arrow.right").font(.system(size: 10)).foregroundColor(.purple)
+                        Picker("", selection: $targetLanguage) {
+                            ForEach(languages, id: \.self) { Text($0.capitalized).tag($0) }
+                        }.frame(width: 85).labelsHidden()
+                    }
+                }
+                
+                Spacer()
+                
+                HStack(spacing: 6) {
+                    Circle().fill(isUltraMode ? .green : .secondary.opacity(0.3)).frame(width: 6, height: 6)
+                    Text("Ultra").font(.system(size: 10, weight: .medium)).foregroundColor(isUltraMode ? .primary : .secondary)
+                    Toggle("", isOn: $isUltraMode).toggleStyle(.switch).controlSize(.mini).labelsHidden()
+                }
+                .padding(.horizontal, 8).padding(.vertical, 4)
+                .background(Color.white.opacity(0.04)).cornerRadius(6)
+                
+                Button(action: { dismiss() }) {
+                    Image(systemName: "xmark.circle.fill").font(.system(size: 18)).foregroundColor(.secondary)
+                }
+                .buttonStyle(.plain)
+                .keyboardShortcut(.escape, modifiers: [])
             }
+            .padding(.horizontal, 16).padding(.vertical, 10)
+            .background(Color(nsColor: .controlBackgroundColor))
             
-            Toggle("Ultra Mode", isOn: $isUltraMode)
-                .toggleStyle(.switch)
-                .controlSize(.small)
-                .help("Enable large context, streaming, and advanced migrations")
-            
-            Spacer()
-            
-            // Close Button
-            Button(action: { dismiss() }) {
-                Image(systemName: "xmark.circle.fill")
-                    .font(.title2)
-                    .foregroundColor(.secondary)
-            }
-            .buttonStyle(.plain)
-            .keyboardShortcut(.escape, modifiers: [])
+            Rectangle()
+                .fill(LinearGradient(colors: [.purple.opacity(0.4), .blue.opacity(0.3), .cyan.opacity(0.2)], startPoint: .leading, endPoint: .trailing))
+                .frame(height: 1)
         }
-        .padding(.horizontal, 16)
-        .padding(.vertical, 12)
-        .background(Color(nsColor: .controlBackgroundColor))
     }
     
     // MARK: - Source Panel
@@ -146,11 +164,12 @@ struct RefactorProWindow: View {
     private var sourcePanel: some View {
         VStack(spacing: 0) {
             // Panel Header
-            HStack {
-                Image(systemName: "doc.text")
-                    .foregroundColor(.blue)
+            HStack(spacing: 8) {
+                Image(systemName: "doc.text.fill")
+                    .foregroundStyle(LinearGradient(colors: [.blue, .cyan], startPoint: .topLeading, endPoint: .bottomTrailing))
+                    .font(.system(size: 12))
                 Text("Source Code")
-                    .font(.system(size: 13, weight: .medium))
+                    .font(.system(size: 12, weight: .semibold))
                 
                 Spacer()
                 
@@ -240,18 +259,21 @@ struct RefactorProWindow: View {
     private var resultPanel: some View {
         VStack(spacing: 0) {
             // Panel Header
-            HStack {
+            HStack(spacing: 8) {
                 Image(systemName: "sparkles")
-                    .foregroundColor(.green)
+                    .foregroundStyle(LinearGradient(colors: [.green, .mint], startPoint: .topLeading, endPoint: .bottomTrailing))
+                    .font(.system(size: 12))
                 Text(selectedMode == .migration ? "Migrated Code" : "Refactored Code")
-                    .font(.system(size: 13, weight: .medium))
+                    .font(.system(size: 12, weight: .semibold))
                 
                 Spacer()
                 
                 if selectedMode == .migration {
                     Text(".\(targetLanguage)")
-                        .font(.caption.monospaced())
-                        .foregroundColor(.secondary)
+                        .font(.system(size: 10, design: .monospaced))
+                        .foregroundColor(.green)
+                        .padding(.horizontal, 6).padding(.vertical, 2)
+                        .background(Color.green.opacity(0.1)).cornerRadius(4)
                 }
             }
             .padding(12)
@@ -326,18 +348,45 @@ struct RefactorProWindow: View {
     }
     
     private var emptyResultView: some View {
-        VStack(spacing: 16) {
-            Image(systemName: selectedMode == .migration ? "arrow.left.arrow.right" : "wand.and.stars")
-                .font(.system(size: 48))
-                .foregroundColor(.secondary.opacity(0.5))
+        VStack(spacing: 20) {
+            Spacer()
             
-            Text(selectedMode == .migration ? "Ready to Migrate" : "Ready to Refactor")
-                .font(.title3)
-                .foregroundColor(.secondary)
+            ZStack {
+                Circle()
+                    .fill(RadialGradient(colors: [.purple.opacity(0.12), .blue.opacity(0.05), .clear], center: .center, startRadius: 10, endRadius: 60))
+                    .frame(width: 100, height: 100)
+                Image(systemName: selectedMode == .migration ? "arrow.left.arrow.right" : "wand.and.stars")
+                    .font(.system(size: 36, weight: .light))
+                    .foregroundStyle(LinearGradient(colors: [.purple, .cyan], startPoint: .topLeading, endPoint: .bottomTrailing))
+            }
             
-            Text("Click 'Generate' to start the AI-powered transformation")
-                .font(.caption)
-                .foregroundColor(.secondary.opacity(0.7))
+            VStack(spacing: 6) {
+                Text(selectedMode == .migration ? "Ready to Migrate" : "Ready to Refactor")
+                    .font(.system(size: 18, weight: .semibold, design: .rounded))
+                    .foregroundColor(.primary.opacity(0.8))
+                Text("Paste code or load a file, then click Generate")
+                    .font(.system(size: 12))
+                    .foregroundColor(.secondary)
+            }
+            
+            VStack(spacing: 8) {
+                ForEach(selectedMode == .migration
+                    ? ["Direct Translation", "Idiomatic Style", "Type-Safe Migration"]
+                    : ["Clean Code", "Add Error Handling", "Optimize Performance"], id: \.self) { tip in
+                    HStack(spacing: 8) {
+                        Image(systemName: "sparkle").font(.system(size: 9)).foregroundColor(.purple)
+                        Text(tip).font(.system(size: 11)).foregroundColor(.primary.opacity(0.6))
+                        Spacer()
+                    }
+                    .padding(.horizontal, 14).padding(.vertical, 8)
+                    .background(Color.white.opacity(0.03))
+                    .cornerRadius(8)
+                    .overlay(RoundedRectangle(cornerRadius: 8).stroke(Color.white.opacity(0.06)))
+                }
+            }
+            .padding(.horizontal, 40)
+            
+            Spacer()
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
     }
@@ -420,83 +469,117 @@ struct RefactorProWindow: View {
     // MARK: - Footer Bar
     
     private var footerBar: some View {
-        HStack {
-            // Error Message
-            if !errorMessage.isEmpty {
-                HStack {
-                    Image(systemName: "exclamationmark.triangle.fill")
-                        .foregroundColor(.orange)
-                    Text(errorMessage)
-                        .font(.caption)
-                        .foregroundColor(.secondary)
+        VStack(spacing: 0) {
+            Rectangle()
+                .fill(LinearGradient(colors: [.purple.opacity(0.15), .blue.opacity(0.1), .clear], startPoint: .leading, endPoint: .trailing))
+                .frame(height: 1)
+            
+            HStack(spacing: 10) {
+                // Error / Status
+                if !errorMessage.isEmpty {
+                    HStack(spacing: 4) {
+                        Image(systemName: "exclamationmark.triangle.fill").foregroundColor(.orange).font(.system(size: 10))
+                        Text(errorMessage).font(.system(size: 10)).foregroundColor(.secondary).lineLimit(1)
+                    }
                 }
-            }
-            
-            Spacer()
-            
-            // Processing Indicator
-            if isProcessing {
+                
+                if isProcessing {
+                    HStack(spacing: 6) {
+                        ProgressView().scaleEffect(0.6).frame(width: 14, height: 14)
+                        Text("AI processing...").font(.system(size: 10)).foregroundColor(.purple)
+                    }
+                }
+                
+                Spacer()
+                
+                // Action Buttons
                 HStack(spacing: 8) {
-                    ProgressView()
-                        .scaleEffect(0.7)
-                    Text("AI is working...")
-                        .font(.caption)
+                    Menu {
+                        Button("Export as PDF") { exportReport(format: .pdf) }
+                        Button("Export as Text") { exportReport(format: .text) }
+                    } label: {
+                        HStack(spacing: 3) {
+                            Image(systemName: "doc.badge.arrow.up").font(.system(size: 9))
+                            Text("Export").font(.system(size: 10, weight: .medium))
+                        }
                         .foregroundColor(.secondary)
+                        .padding(.horizontal, 10).padding(.vertical, 5)
+                        .background(Color.white.opacity(0.04)).cornerRadius(6)
+                    }
+                    .menuStyle(.borderlessButton)
+                    .frame(width: 80)
+                    .disabled(report == nil)
+                    
+                    Button { copyToClipboard() } label: {
+                        HStack(spacing: 3) {
+                            Image(systemName: "doc.on.doc").font(.system(size: 9))
+                            Text("Copy").font(.system(size: 10, weight: .medium))
+                        }
+                        .foregroundColor(.secondary)
+                        .padding(.horizontal, 10).padding(.vertical, 5)
+                        .background(Color.white.opacity(0.04)).cornerRadius(6)
+                    }
+                    .buttonStyle(.plain).disabled(refactoredCode.isEmpty)
+                    
+                    Button { saveToFile() } label: {
+                        HStack(spacing: 3) {
+                            Image(systemName: "square.and.arrow.down").font(.system(size: 9))
+                            Text("Save As").font(.system(size: 10, weight: .medium))
+                        }
+                        .foregroundColor(.primary)
+                        .padding(.horizontal, 10).padding(.vertical, 5)
+                        .background(Color.white.opacity(0.06)).cornerRadius(6)
+                        .overlay(RoundedRectangle(cornerRadius: 6).stroke(Color.white.opacity(0.1)))
+                    }
+                    .buttonStyle(.plain).disabled(refactoredCode.isEmpty)
+                    
+                    if isProcessing {
+                        // Stop Button
+                        Button { isProcessing = false } label: {
+                            HStack(spacing: 4) {
+                                Image(systemName: "stop.fill").font(.system(size: 9))
+                                Text("Stop").font(.system(size: 11, weight: .semibold))
+                            }
+                            .foregroundColor(.white)
+                            .padding(.horizontal, 14).padding(.vertical, 6)
+                            .background(LinearGradient(colors: [.red, .orange], startPoint: .leading, endPoint: .trailing))
+                            .cornerRadius(8)
+                        }
+                        .buttonStyle(.plain)
+                    } else {
+                        // Generate
+                        Button { generateRefactor() } label: {
+                            HStack(spacing: 4) {
+                                Image(systemName: "sparkles").font(.system(size: 10))
+                                Text("Generate").font(.system(size: 11, weight: .semibold))
+                            }
+                            .foregroundColor(.white)
+                            .padding(.horizontal, 14).padding(.vertical, 6)
+                            .background(LinearGradient(colors: [.purple, .blue], startPoint: .leading, endPoint: .trailing))
+                            .cornerRadius(8)
+                            .shadow(color: .purple.opacity(0.3), radius: 4, y: 2)
+                        }
+                        .buttonStyle(.plain).disabled(originalCode.isEmpty)
+                    }
+                    
+                    // Apply
+                    Button { applyRefactor() } label: {
+                        HStack(spacing: 4) {
+                            Image(systemName: "checkmark.circle.fill").font(.system(size: 10))
+                            Text("Apply").font(.system(size: 11, weight: .semibold))
+                        }
+                        .foregroundColor(.white)
+                        .padding(.horizontal, 14).padding(.vertical, 6)
+                        .background(LinearGradient(colors: [.green, .green.opacity(0.8)], startPoint: .leading, endPoint: .trailing))
+                        .cornerRadius(8)
+                    }
+                    .buttonStyle(.plain).disabled(refactoredCode.isEmpty || isProcessing)
+                    .opacity(refactoredCode.isEmpty ? 0.4 : 1)
                 }
             }
-            
-            // Action Buttons
-            HStack(spacing: 12) {
-                // Export Report
-                Menu {
-                    Button("Export as PDF") { exportReport(format: .pdf) }
-                    Button("Export as DOCX") { exportReport(format: .docx) }
-                    Button("Export as Text") { exportReport(format: .text) }
-                } label: {
-                    Label("Export Report", systemImage: "doc.badge.arrow.up")
-                }
-                .disabled(report == nil)
-                
-                // Copy to Clipboard
-                Button {
-                    copyToClipboard()
-                } label: {
-                    Label("Copy", systemImage: "doc.on.doc")
-                }
-                .disabled(refactoredCode.isEmpty)
-                
-                // Save to File
-                Button {
-                    saveToFile()
-                } label: {
-                    Label("Save As", systemImage: "square.and.arrow.down")
-                }
-                .buttonStyle(.bordered)
-                .disabled(refactoredCode.isEmpty)
-                
-                // Generate
-                Button {
-                    generateRefactor()
-                } label: {
-                    Label("Generate", systemImage: "sparkles")
-                }
-                .buttonStyle(.borderedProminent)
-                .disabled(originalCode.isEmpty || isProcessing)
-                
-                // Apply
-                Button {
-                    applyRefactor()
-                } label: {
-                    Label("Apply", systemImage: "checkmark.circle")
-                }
-                .buttonStyle(.borderedProminent)
-                .tint(.green)
-                .disabled(refactoredCode.isEmpty || isProcessing)
-            }
+            .padding(.horizontal, 16).padding(.vertical, 10)
+            .background(Color(nsColor: .controlBackgroundColor))
         }
-        .padding(.horizontal, 16)
-        .padding(.vertical, 12)
-        .background(Color(nsColor: .controlBackgroundColor))
     }
     
     // MARK: - Templates
