@@ -1,0 +1,331 @@
+================================================================================
+                  MICROCODE PUBLIC LICENSE (MPL) v1.0
+         ใบอนุญาตสาธารณะไมโครโค้ด (MPL) ฉบับที่ 1.0
+
+                    Copyright (c) 2024-2026
+                Tirawat Nantamas (ถิรวัฒน์ นันตมาศ)
+                       Dotmini Software
+                     All rights reserved.
+================================================================================
+
+PREAMBLE (คำนำ)
+
+This license governs the use, modification, and distribution of the MicroCode
+software (the "Software"). The Software is made available as open-source for
+the purpose of transparency, education, and community development. However,
+commercial exploitation of the Software requires a separate commercial
+agreement as detailed in Section 3.
+
+ใบอนุญาตนี้กำกับดูแลการใช้งาน การดัดแปลง และการเผยแพร่ซอฟต์แวร์ MicroCode
+("ซอฟต์แวร์") ซอฟต์แวร์นี้เผยแพร่เป็นโอเพนซอร์สเพื่อวัตถุประสงค์ด้าน
+ความโปร่งใส การศึกษา และการพัฒนาชุมชน อย่างไรก็ตาม การนำซอฟต์แวร์ไปใช้
+ในเชิงพาณิชย์จำเป็นต้องมีสัญญาเชิงพาณิชย์แยกต่างหากตามที่ระบุในหมวดที่ 3
+
+================================================================================
+
+SECTION 1 — DEFINITIONS (หมวดที่ 1 — นิยาม)
+
+1.1 "Licensor" (ผู้อนุญาต) means Tirawat Nantamas and/or Dotmini Software,
+    the original author and copyright holder of the Software.
+
+1.2 "Licensee" (ผู้ได้รับอนุญาต) means any individual, organization, or
+    entity that obtains a copy of the Software.
+
+1.3 "Software" (ซอฟต์แวร์) means the MicroCode source code, binaries,
+    assets, documentation, and all associated materials contained in this
+    repository, including any modifications or derivative works.
+
+1.4 "Derivative Work" (งานสืบเนื่อง) means any software, product, or
+    service that is based on, incorporates, modifies, extends, or is
+    substantially derived from the Software, in whole or in part.
+
+1.5 "Commercial Use" (การใช้งานเชิงพาณิชย์) means any use of the Software
+    or Derivative Work that is intended for or results in financial gain,
+    monetary compensation, or commercial advantage. This includes but is
+    not limited to:
+    (a) Selling the Software or Derivative Work as a product or service;
+    (b) Using the Software as part of a paid SaaS offering;
+    (c) Integrating the Software into commercial products;
+    (d) Using the Software to provide paid consulting or development services;
+    (e) Generating advertising revenue from the Software or its derivatives;
+    (f) Offering the Software as a managed or hosted service for profit.
+
+1.6 "Personal Use" (การใช้งานส่วนบุคคล) means non-commercial use by an
+    individual for personal learning, hobbyist development, research, or
+    internal-only evaluation with no intent to generate revenue.
+
+1.7 "Educational Use" (การใช้งานเพื่อการศึกษา) means use by accredited
+    educational institutions, students, or educators for teaching, research,
+    academic projects, or non-profit educational programs.
+
+1.8 "Open Source Contribution" (การมีส่วนร่วมโอเพนซอร์ส) means modifications
+    contributed back to the original Software repository and made available
+    under this same license.
+
+1.9 "Revenue" (รายได้) means gross revenue, income, or proceeds generated
+    directly or indirectly from the Commercial Use of the Software or
+    Derivative Work, before deductions for expenses, taxes, or other costs.
+
+================================================================================
+
+SECTION 2 — PERMITTED USES (หมวดที่ 2 — การใช้งานที่อนุญาต)
+
+Subject to the terms of this license, the Licensor grants the Licensee a
+non-exclusive, non-transferable, revocable license to:
+
+2.1 PERSONAL USE — Use, copy, and modify the Software for Personal Use
+    without restriction, provided this license file is retained in all copies.
+
+2.2 EDUCATIONAL USE — Use, copy, modify, and distribute the Software for
+    Educational Use within accredited institutions, provided:
+    (a) This license and copyright notice are retained;
+    (b) The use is genuinely non-commercial;
+    (c) Proper attribution is given to the Licensor.
+
+2.3 OPEN SOURCE CONTRIBUTION — Create and submit modifications, bug fixes,
+    and improvements to the original repository, which shall be governed
+    by this same license upon acceptance.
+
+2.4 EVALUATION — Evaluate the Software for a period not exceeding 90 (ninety)
+    days for the purpose of determining suitability for Commercial Use,
+    after which a Commercial License Agreement must be executed.
+
+2.5 ATTRIBUTION — In all Permitted Uses, the Licensee must:
+    (a) Retain all copyright notices and license files;
+    (b) Display the following attribution in any user-facing documentation:
+        "Built with MicroCode — Copyright Tirawat Nantamas / Dotmini Software"
+    (c) Not misrepresent the origin of the Software.
+
+================================================================================
+
+SECTION 3 — COMMERCIAL USE (หมวดที่ 3 — การใช้งานเชิงพาณิชย์)
+
+3.1 COMMERCIAL LICENSE REQUIRED
+    Any Commercial Use of the Software or any Derivative Work requires a
+    separate written Commercial License Agreement ("CLA") executed between
+    the Licensee and the Licensor. Use of the Software for Commercial
+    purposes without an executed CLA is a violation of this license and
+    applicable copyright law.
+
+3.2 REVENUE SHARING
+    The standard Commercial License Agreement shall include a revenue-sharing
+    arrangement as follows:
+
+    (a) SMALL BUSINESS (Annual Revenue ≤ 10,000,000 THB / ~$280,000 USD):
+        10% (ten percent) of Revenue generated from or attributable to the
+        Software or Derivative Work, payable quarterly.
+
+    (b) MEDIUM BUSINESS (Annual Revenue > 10,000,000 THB and ≤ 100,000,000 THB):
+        15% (fifteen percent) of Revenue generated from or attributable to
+        the Software or Derivative Work, payable quarterly.
+
+    (c) ENTERPRISE (Annual Revenue > 100,000,000 THB / ~$2,800,000 USD):
+        20% (twenty percent) of Revenue generated from or attributable to
+        the Software or Derivative Work, payable quarterly.
+
+    (d) The specific rate and terms may be negotiated on a case-by-case basis
+        but shall not be less than 10% without written approval from the
+        Licensor.
+
+3.3 REPORTING OBLIGATIONS
+    Licensees with a Commercial License Agreement shall:
+    (a) Provide quarterly revenue reports within 30 days of each quarter end;
+    (b) Maintain accurate financial records related to the Software's usage;
+    (c) Allow the Licensor to audit such records with 30 days' written notice;
+    (d) Revenue reports must be certified by a qualified accountant for
+        Licensees generating Revenue exceeding 1,000,000 THB per quarter.
+
+3.4 PAYMENT TERMS
+    (a) Payments are due within 30 days of the end of each calendar quarter;
+    (b) Late payments shall accrue interest at the rate of 7.5% per annum
+        or the maximum rate permitted by Thai law, whichever is lower;
+    (c) Payments shall be made in Thai Baht (THB) to the Licensor's
+        designated bank account, or in USD equivalent at the exchange rate
+        on the date of payment;
+    (d) All applicable taxes (including VAT and withholding tax under Thai
+        Revenue Code) are the responsibility of the Licensee.
+
+3.5 HOW TO OBTAIN A COMMERCIAL LICENSE
+    Contact the Licensor at:
+    - GitHub: https://github.com/Dotmini
+    - Organization: Dotmini Software
+    - Website: https://spuaiclub.com
+    - Email: Contact via GitHub
+
+================================================================================
+
+SECTION 4 — RESTRICTIONS (หมวดที่ 4 — ข้อจำกัด)
+
+The Licensee shall NOT:
+
+4.1 Use the Software for Commercial Use without an executed Commercial
+    License Agreement;
+
+4.2 Remove, alter, or obscure any copyright notices, license files, or
+    attribution requirements from the Software;
+
+4.3 Sublicense, rent, lease, or lend the Software to third parties for
+    Commercial Use without the Licensor's prior written consent;
+
+4.4 Use the Licensor's name, trademarks, or branding to endorse or promote
+    products derived from the Software without prior written permission;
+
+4.5 Distribute compiled/binary versions of the Software or Derivative Work
+    for Commercial Use without an executed Commercial License Agreement;
+
+4.6 Circumvent, remove, or disable any license verification, checksum
+    validation, or integrity-checking mechanisms in the Software;
+
+4.7 Use the Software to create a competing product or service that directly
+    replicates the core functionality of MicroCode IDE for commercial sale
+    without a Commercial License Agreement.
+
+================================================================================
+
+SECTION 5 — INTELLECTUAL PROPERTY (หมวดที่ 5 — ทรัพย์สินทางปัญญา)
+
+5.1 The Licensor retains all intellectual property rights, including but not
+    limited to copyrights, patents, trademarks, and trade secrets, in the
+    Software and all Derivative Works thereof.
+
+5.2 The "MicroCode" name, logo, and associated branding are trademarks of
+    Dotmini Software and may not be used without prior written permission.
+
+5.3 Contributions submitted to the original repository are licensed under
+    this same license. Contributors retain copyright of their contributions
+    but grant the Licensor an irrevocable, worldwide, royalty-free license
+    to use, modify, and distribute such contributions as part of the Software.
+
+5.4 This license is protected under the Copyright Act B.E. 2537 (1994) of
+    Thailand (พระราชบัญญัติลิขสิทธิ์ พ.ศ. 2537) and applicable international
+    copyright treaties, including the Berne Convention and TRIPS Agreement.
+
+================================================================================
+
+SECTION 6 — DISCLAIMER AND LIABILITY (หมวดที่ 6 — ข้อจำกัดความรับผิด)
+
+6.1 THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS
+    OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF
+    MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE, TITLE, AND
+    NON-INFRINGEMENT.
+
+6.2 IN NO EVENT SHALL THE LICENSOR BE LIABLE FOR ANY DIRECT, INDIRECT,
+    INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING
+    BUT NOT LIMITED TO PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES, LOSS
+    OF USE, DATA, OR PROFITS, OR BUSINESS INTERRUPTION) ARISING OUT OF OR
+    IN CONNECTION WITH THE SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY
+    OF SUCH DAMAGES.
+
+6.3 THE LICENSOR'S TOTAL AGGREGATE LIABILITY UNDER THIS LICENSE SHALL NOT
+    EXCEED THE AMOUNT OF REVENUE SHARE PAYMENTS ACTUALLY RECEIVED FROM THE
+    LICENSEE IN THE 12 MONTHS PRECEDING THE CLAIM.
+
+================================================================================
+
+SECTION 7 — TERMINATION (หมวดที่ 7 — การยกเลิก)
+
+7.1 This license is effective until terminated.
+
+7.2 The Licensor may terminate this license immediately upon written notice
+    if the Licensee:
+    (a) Breaches any material term of this license;
+    (b) Fails to make required revenue-sharing payments within 60 days of
+        their due date;
+    (c) Makes false or misleading revenue reports;
+    (d) Uses the Software in violation of applicable law.
+
+7.3 Upon termination:
+    (a) All rights granted under this license cease immediately;
+    (b) The Licensee must cease all use and distribution of the Software;
+    (c) Outstanding revenue-sharing obligations remain enforceable;
+    (d) Sections 5, 6, 7.3, and 8 survive termination.
+
+================================================================================
+
+SECTION 8 — GOVERNING LAW AND DISPUTE RESOLUTION
+(หมวดที่ 8 — กฎหมายที่ใช้บังคับและการระงับข้อพิพาท)
+
+8.1 GOVERNING LAW
+    This license shall be governed by and construed in accordance with the
+    laws of the Kingdom of Thailand (ราชอาณาจักรไทย), including but not
+    limited to:
+    - Civil and Commercial Code (ประมวลกฎหมายแพ่งและพาณิชย์)
+    - Copyright Act B.E. 2537 (พ.ร.บ. ลิขสิทธิ์ พ.ศ. 2537)
+    - Computer Crime Act B.E. 2550 (พ.ร.บ. ว่าด้วยการกระทำความผิดเกี่ยวกับ
+      คอมพิวเตอร์ พ.ศ. 2550)
+    - Trade Secrets Act B.E. 2545 (พ.ร.บ. ความลับทางการค้า พ.ศ. 2545)
+    - Personal Data Protection Act B.E. 2562 (พ.ร.บ. คุ้มครองข้อมูลส่วนบุคคล
+      พ.ศ. 2562 — PDPA)
+
+8.2 DISPUTE RESOLUTION
+    (a) Any dispute arising from this license shall first be resolved through
+        good-faith negotiation between the parties for a period of 30 days;
+    (b) If negotiation fails, the dispute shall be submitted to mediation
+        administered by the Thai Arbitration Institute (สถาบันอนุญาโตตุลาการ);
+    (c) If mediation fails within 60 days, either party may submit the
+        dispute to the competent courts of Bangkok, Thailand
+        (ศาลที่มีเขตอำนาจในกรุงเทพมหานคร);
+    (d) For international disputes, the parties agree to submit to
+        arbitration under the UNCITRAL Arbitration Rules, with the seat of
+        arbitration in Bangkok, Thailand.
+
+8.3 LANGUAGE
+    In the event of any conflict between the English and Thai language
+    versions of this license, the English version shall prevail for
+    international disputes, and the Thai version shall prevail for
+    disputes within the Kingdom of Thailand.
+
+================================================================================
+
+SECTION 9 — MISCELLANEOUS (หมวดที่ 9 — บทเบ็ดเตล็ด)
+
+9.1 ENTIRE AGREEMENT — This license constitutes the entire agreement
+    between the parties regarding the Software for non-commercial use.
+    Commercial use is governed by a separate CLA that supplements (but
+    does not replace) this license.
+
+9.2 SEVERABILITY — If any provision of this license is held invalid or
+    unenforceable, the remaining provisions shall remain in full force.
+
+9.3 WAIVER — Failure to enforce any provision does not constitute a waiver
+    of the Licensor's right to enforce it in the future.
+
+9.4 AMENDMENT — This license may only be amended by a written document
+    signed by the Licensor. Updated versions of this license may be
+    published, but existing Licensees remain bound by the version in
+    effect at the time they obtained the Software, unless they accept
+    a newer version.
+
+9.5 ASSIGNMENT — The Licensee may not assign or transfer this license
+    without the Licensor's prior written consent. The Licensor may assign
+    this license to a successor entity.
+
+9.6 NOTICES — All notices under this license shall be in writing and
+    delivered to the contact information specified in Section 3.5.
+
+================================================================================
+
+SUMMARY TABLE — QUICK REFERENCE
+(ตารางสรุป — อ้างอิงด่วน)
+
+┌─────────────────────────┬─────────────────────────┬──────────┐
+│ Use Type                │ Allowed?                │ Fee      │
+├─────────────────────────┼─────────────────────────┼──────────┤
+│ Personal / Hobby        │ ✅ Yes                  │ Free     │
+│ Education / Research    │ ✅ Yes                  │ Free     │
+│ Open Source Contribution│ ✅ Yes                  │ Free     │
+│ Evaluation (≤90 days)   │ ✅ Yes                  │ Free     │
+│ Commercial (Small Biz)  │ ⚠️  Requires CLA        │ 10% Rev  │
+│ Commercial (Medium)     │ ⚠️  Requires CLA        │ 15% Rev  │
+│ Commercial (Enterprise) │ ⚠️  Requires CLA        │ 20% Rev  │
+│ Resale / White-label    │ ⚠️  Requires CLA + NDA  │ Custom   │
+└─────────────────────────┴─────────────────────────┴──────────┘
+
+================================================================================
+
+                        END OF LICENSE
+
+            Copyright (c) 2024-2026 Tirawat Nantamas
+                      Dotmini Software
+                   Bangkok, Thailand 🇹🇭
+================================================================================
