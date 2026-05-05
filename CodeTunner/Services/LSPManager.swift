@@ -38,13 +38,22 @@ class LSPManager: ObservableObject {
     /// Get or start LSP client for a language
     func clientFor(language: String) async throws -> LSPClientService? {
         guard let serverType = LanguageServer.serverFor(language: language) else {
-            print("⚠️ [LSPManager] No LSP server configured for language: \(language)")
+            // No LSP server configured for this language — return nil immediately, don't hang
             return nil
         }
         
         // Return existing client if already running
         if let existing = activeClients[serverType], existing.isRunning {
             return existing
+        }
+        
+        // FIX: Check if the server binary actually exists before trying to start
+        // This prevents indefinite hangs when opening .cpp, .txt, .json etc.
+        // where no language server is installed on the system
+        let serverExists = serverType.searchPaths.contains { FileManager.default.isExecutableFile(atPath: $0) }
+        guard serverExists else {
+            // Server binary not found — don't attempt to start, return nil silently
+            return nil
         }
         
         // Create and start new client
@@ -67,6 +76,11 @@ class LSPManager: ObservableObject {
     
     /// Notify that a document was opened
     func documentOpened(uri: String, language: String, content: String) async {
+        // FIX: Early exit if no server is configured or installed
+        guard let serverType = LanguageServer.serverFor(language: language) else { return }
+        let serverExists = serverType.searchPaths.contains { FileManager.default.isExecutableFile(atPath: $0) }
+        guard serverExists else { return }
+        
         documentVersions[uri] = 1
         
         guard let client = try? await clientFor(language: language) else { return }
@@ -80,6 +94,12 @@ class LSPManager: ObservableObject {
     
     /// Notify that a document was changed
     func documentChanged(uri: String, language: String, content: String) async {
+        // FIX: Skip LSP notification if no server is configured or installed for this language
+        // This prevents freezes when typing in files without a matching LSP server
+        guard let serverType = LanguageServer.serverFor(language: language) else { return }
+        let serverExists = serverType.searchPaths.contains { FileManager.default.isExecutableFile(atPath: $0) }
+        guard serverExists else { return }
+        
         let version = (documentVersions[uri] ?? 0) + 1
         documentVersions[uri] = version
         

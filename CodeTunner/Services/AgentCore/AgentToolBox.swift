@@ -51,6 +51,11 @@ class AgentToolBox: ObservableObject {
         register(ShellCommandTool())
         register(GitStatusTool())
         register(WebFetchTool())
+        register(CreateDirectoryTool())
+        register(RenameFileTool())
+        register(FindSymbolTool())
+        register(PatchFileTool())
+        register(MultiFileReadTool())
     }
     
     func register(_ tool: any AgentTool) {
@@ -465,3 +470,198 @@ struct WebFetchTool: AgentTool {
         return content
     }
 }
+
+// MARK: - Enhanced Tools for Project Operations
+
+struct CreateDirectoryTool: AgentTool {
+    let name = "create_directory"
+    let description = "Create a directory (and parent directories if needed)"
+    let parameters = [
+        ToolParameter(name: "path", type: "string", description: "Absolute path of the directory to create", required: true)
+    ]
+    
+    func execute(params: [String: Any]) async throws -> String {
+        guard let path = params["path"] as? String else {
+            throw ToolBoxError.invalidParams("path is required")
+        }
+        let url = URL(fileURLWithPath: path)
+        try FileManager.default.createDirectory(at: url, withIntermediateDirectories: true)
+        return "✅ Created directory: \(url.lastPathComponent)"
+    }
+}
+
+struct RenameFileTool: AgentTool {
+    let name = "rename_file"
+    let description = "Rename or move a file from one path to another"
+    let parameters = [
+        ToolParameter(name: "old_path", type: "string", description: "Current file path", required: true),
+        ToolParameter(name: "new_path", type: "string", description: "New file path", required: true)
+    ]
+    
+    func execute(params: [String: Any]) async throws -> String {
+        guard let oldPath = params["old_path"] as? String,
+              let newPath = params["new_path"] as? String else {
+            throw ToolBoxError.invalidParams("old_path and new_path are required")
+        }
+        
+        let oldURL = URL(fileURLWithPath: oldPath)
+        let newURL = URL(fileURLWithPath: newPath)
+        
+        // Create parent directory if needed
+        try FileManager.default.createDirectory(at: newURL.deletingLastPathComponent(), withIntermediateDirectories: true)
+        try FileManager.default.moveItem(at: oldURL, to: newURL)
+        return "✅ Renamed: \(oldURL.lastPathComponent) → \(newURL.lastPathComponent)"
+    }
+}
+
+struct FindSymbolTool: AgentTool {
+    let name = "find_symbol"
+    let description = "Find function, class, struct, or other symbol definitions in the workspace. Uses grep to search for common code patterns."
+    let parameters = [
+        ToolParameter(name: "symbol", type: "string", description: "Symbol name to find (function, class, struct name)", required: true),
+        ToolParameter(name: "directory", type: "string", description: "Directory to search in", required: true),
+        ToolParameter(name: "type", type: "string", description: "Symbol type: function, class, struct, enum, or all (default: all)", required: false)
+    ]
+    
+    func execute(params: [String: Any]) async throws -> String {
+        guard let symbol = params["symbol"] as? String,
+              let directory = params["directory"] as? String else {
+            throw ToolBoxError.invalidParams("symbol and directory are required")
+        }
+        
+        let symbolType = params["type"] as? String ?? "all"
+        
+        // Build pattern based on symbol type
+        let patterns: [String]
+        switch symbolType {
+        case "function":
+            patterns = ["func \\b\(symbol)\\b", "fn \\b\(symbol)\\b", "def \\b\(symbol)\\b", "function \\b\(symbol)\\b"]
+        case "class":
+            patterns = ["class \\b\(symbol)\\b", "interface \\b\(symbol)\\b"]
+        case "struct":
+            patterns = ["struct \\b\(symbol)\\b"]
+        case "enum":
+            patterns = ["enum \\b\(symbol)\\b"]
+        default:
+            patterns = ["\\b\(symbol)\\b"]
+        }
+        
+        var allResults = ""
+        for pattern in patterns {
+            let process = Process()
+            process.executableURL = URL(fileURLWithPath: "/usr/bin/grep")
+            process.arguments = ["-rn", "--color=never", "-I", "-E", "-m", "20", pattern, directory]
+            
+            let pipe = Pipe()
+            process.standardOutput = pipe
+            process.standardError = Pipe()
+            
+            try process.run()
+            process.waitUntilExit()
+            
+            let data = pipe.fileHandleForReading.readDataToEndOfFile()
+            if let output = String(data: data, encoding: .utf8), !output.isEmpty {
+                allResults += output
+            }
+        }
+        
+        return allResults.isEmpty ? "No symbols matching '\(symbol)' found in \(directory)" : allResults
+    }
+}
+
+struct PatchFileTool: AgentTool {
+    let name = "patch_file"
+    let description = "Apply multiple find-and-replace edits to a file in a single operation. More efficient than multiple replace_in_file calls."
+    let parameters = [
+        ToolParameter(name: "path", type: "string", description: "Absolute file path", required: true),
+        ToolParameter(name: "edits", type: "string", description: "JSON array of edits: [{\"old\": \"text to find\", \"new\": \"replacement text\"}, ...]", required: true)
+    ]
+    
+    func execute(params: [String: Any]) async throws -> String {
+        guard let path = params["path"] as? String,
+              let editsStr = params["edits"] as? String else {
+            throw ToolBoxError.invalidParams("path and edits are required")
+        }
+        
+        let url = URL(fileURLWithPath: path)
+        var content = try String(contentsOf: url, encoding: .utf8)
+        
+        // Parse edits JSON
+        guard let editsData = editsStr.data(using: .utf8),
+              let edits = try? JSONSerialization.jsonObject(with: editsData) as? [[String: String]] else {
+            throw ToolBoxError.invalidParams("edits must be a valid JSON array of {old, new} objects")
+        }
+        
+        var appliedCount = 0
+        var failedEdits: [String] = []
+        
+        for edit in edits {
+            guard let old = edit["old"], let new = edit["new"] else { continue }
+            if content.contains(old) {
+                content = content.replacingOccurrences(of: old, with: new)
+                appliedCount += 1
+            } else {
+                failedEdits.append("Could not find: \(old.prefix(60))...")
+            }
+        }
+        
+        try content.write(to: url, atomically: true, encoding: .utf8)
+        
+        var result = "✅ Applied \(appliedCount)/\(edits.count) edits to \(url.lastPathComponent)"
+        if !failedEdits.isEmpty {
+            result += "\n⚠️ Failed edits:\n" + failedEdits.joined(separator: "\n")
+        }
+        return result
+    }
+}
+
+struct MultiFileReadTool: AgentTool {
+    let name = "multi_file_read"
+    let description = "Read multiple files at once. More efficient than multiple file_read calls. Returns combined content with file headers."
+    let parameters = [
+        ToolParameter(name: "paths", type: "string", description: "Comma-separated list of absolute file paths to read", required: true),
+        ToolParameter(name: "max_lines", type: "integer", description: "Maximum lines per file (default: 100)", required: false)
+    ]
+    
+    func execute(params: [String: Any]) async throws -> String {
+        guard let pathsStr = params["paths"] as? String else {
+            throw ToolBoxError.invalidParams("paths is required")
+        }
+        
+        let maxLines = params["max_lines"] as? Int ?? 100
+        let paths = pathsStr.components(separatedBy: ",").map { $0.trimmingCharacters(in: .whitespaces) }
+        
+        var result = ""
+        var totalChars = 0
+        let charBudget = 12000 // Total budget across all files
+        
+        for path in paths {
+            guard totalChars < charBudget else {
+                result += "\n--- (remaining files skipped - token budget reached) ---"
+                break
+            }
+            
+            let url = URL(fileURLWithPath: path)
+            
+            do {
+                let content = try String(contentsOf: url, encoding: .utf8)
+                let lines = content.components(separatedBy: "\n")
+                let limited = Array(lines.prefix(maxLines))
+                let fileContent = limited.joined(separator: "\n")
+                let truncated = lines.count > maxLines
+                
+                result += "\n═══ \(url.lastPathComponent) ═══\n"
+                result += fileContent
+                if truncated { result += "\n... (\(lines.count - maxLines) more lines)" }
+                result += "\n"
+                
+                totalChars += fileContent.count
+            } catch {
+                result += "\n═══ \(url.lastPathComponent) ═══\n⚠️ Error: \(error.localizedDescription)\n"
+            }
+        }
+        
+        return result
+    }
+}
+

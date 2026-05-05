@@ -133,6 +133,7 @@ let package = Package(
                 "Services/UITreeExtractor.swift",
                 "Services/AutoHealerService.swift",
                 "Services/AgentCore/HealerAgent.swift",
+                "Services/AgentCore/TokenOptimizer.swift",
                 "Services/DatabaseService.swift",
                 "Services/DataFrameService.swift",
                 "Services/APIClientService.swift",

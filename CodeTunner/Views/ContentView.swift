@@ -42,11 +42,55 @@ struct ContentView: View {
                         .frame(minWidth: 260, maxWidth: 350)
                 }
                 
-                // AI Chat Panel
+                // AI Agent Panel (Cursor-style inline agent)
                 if appState.aiChatVisible {
-                    AIChatPanel()
-                        .environmentObject(appState)
-                        .frame(minWidth: 320, idealWidth: 380, maxWidth: 500)
+                    VStack(spacing: 0) {
+                        // Drag handle / collapse bar
+                        HStack(spacing: 6) {
+                            Image(systemName: "brain.head.profile.fill")
+                                .font(.system(size: 10))
+                                .foregroundStyle(LinearGradient(colors: [.purple, .blue], startPoint: .topLeading, endPoint: .bottomTrailing))
+                            Text("AGENT")
+                                .font(.system(size: 9, weight: .heavy, design: .rounded))
+                                .foregroundColor(.secondary)
+                            
+                            Spacer()
+                            
+                            // Expand to full screen
+                            Button {
+                                appState.aiChatVisible = false
+                                appState.toggleEditorMode(.aiAgent)
+                            } label: {
+                                Image(systemName: "arrow.up.left.and.arrow.down.right")
+                                    .font(.system(size: 9))
+                                    .foregroundColor(.secondary)
+                            }
+                            .buttonStyle(.plain)
+                            .help("Expand to Full Screen")
+                            
+                            Button {
+                                withAnimation(.easeInOut(duration: 0.2)) {
+                                    appState.aiChatVisible = false
+                                }
+                            } label: {
+                                Image(systemName: "xmark")
+                                    .font(.system(size: 9, weight: .bold))
+                                    .foregroundColor(.secondary)
+                            }
+                            .buttonStyle(.plain)
+                            .help("Close Agent Panel (⌘L)")
+                        }
+                        .padding(.horizontal, 10)
+                        .padding(.vertical, 6)
+                        .background(Color(nsColor: .windowBackgroundColor).opacity(0.6))
+                        
+                        Divider()
+                        
+                        AIAgentView()
+                            .environmentObject(appState)
+                    }
+                    .frame(minWidth: 360, idealWidth: 420, maxWidth: 560)
+                    .transition(.move(edge: .trailing).combined(with: .opacity))
                 }
             }
         }
@@ -158,6 +202,15 @@ struct ContentView: View {
         .background(
             Button("") { appState.createNewFile() }
                 .keyboardShortcut("n", modifiers: .command)
+                .hidden()
+        )
+        .background(
+            Button("") {
+                withAnimation(.easeInOut(duration: 0.2)) {
+                    appState.aiChatVisible.toggle()
+                }
+            }
+                .keyboardShortcut("l", modifiers: .command)
                 .hidden()
         )
         .overlay(
@@ -295,10 +348,19 @@ struct MainToolbar: View {
                 }
                 .help("Format Code (⌘⇧F)")
                 
-                ToolbarButton(icon: "brain.head.profile", isActive: appState.editorMode == .aiAgent, color: appState.editorMode == .aiAgent ? .purple : .primary) {
-                    appState.toggleEditorMode(.aiAgent)
+                ToolbarButton(icon: "brain.head.profile", isActive: appState.aiChatVisible || appState.editorMode == .aiAgent, color: (appState.aiChatVisible || appState.editorMode == .aiAgent) ? .purple : .primary) {
+                    // Cursor-style: Toggle inline panel instead of switching mode
+                    withAnimation(.easeInOut(duration: 0.2)) {
+                        if appState.editorMode == .aiAgent {
+                            // If already in full agent mode, switch back to code
+                            appState.toggleEditorMode(.code)
+                        } else {
+                            // Toggle the inline agent panel
+                            appState.aiChatVisible.toggle()
+                        }
+                    }
                 }
-                .help("MicroCode Agent")
+                .help("Toggle Agent Panel (⌘L)")
                 
                 ToolbarButton(icon: "chart.bar.doc.horizontal") {
                     appState.toggleConsole(tab: 3) // Open Console/Analysis tab

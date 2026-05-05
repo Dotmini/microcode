@@ -891,10 +891,19 @@ public struct SyntaxHighlightedCodeView: NSViewRepresentable {
         // Initialize and apply highlighting
         engine.setDocument(text, language: language)
         
-        // Notify LSP file opened
+        // Notify LSP file opened (non-blocking with timeout)
         if let url = context.coordinator.parent.fileURL {
-            Task {
-                await LSPManager.shared.documentOpened(uri: url.absoluteString, language: language, content: text)
+            Task.detached(priority: .utility) {
+                let lspTask = Task {
+                    await LSPManager.shared.documentOpened(uri: url.absoluteString, language: language, content: text)
+                }
+                // 2-second timeout
+                let timeoutTask = Task {
+                    try? await Task.sleep(nanoseconds: 2_000_000_000)
+                    lspTask.cancel()
+                }
+                await lspTask.value
+                timeoutTask.cancel()
             }
         }
         
@@ -902,7 +911,10 @@ public struct SyntaxHighlightedCodeView: NSViewRepresentable {
         // We set the cached text first (fast) then apply attributes later
         textView.string = text
         if let textStorage = textView.textStorage {
-            engine.applyHighlightingAsync(to: textStorage, fontSize: fontSize, font: textView.font)
+            // FIX: Guard against empty content — skip highlighting for empty files
+            if !text.isEmpty {
+                engine.applyHighlightingAsync(to: textStorage, fontSize: fontSize, font: textView.font)
+            }
         }
         
         return scrollView

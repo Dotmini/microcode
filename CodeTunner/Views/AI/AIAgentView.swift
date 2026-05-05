@@ -270,6 +270,13 @@ struct AIAgentView: View {
                     .frame(height: 14)
                     .padding(.horizontal, 4)
                 
+                // Token Stats Badge
+                tokenStatsBadge
+                
+                Divider()
+                    .frame(height: 14)
+                    .padding(.horizontal, 4)
+                
                 HeaderIconButton(icon: "arrow.uturn.backward", label: nil) {
                     // Remove last assistant + user message pair
                     if agent.messages.count >= 2 {
@@ -358,7 +365,7 @@ struct AIAgentView: View {
                 
                 // Text Field
                 if #available(macOS 13.0, *) {
-                    TextField("Instructions...", text: $inputText, axis: .vertical)
+                    TextField("Ask anything or give instructions...", text: $inputText, axis: .vertical)
                         .textFieldStyle(.plain)
                         .font(.system(size: 13, design: .monospaced))
                         .lineLimit(1...5)
@@ -374,7 +381,7 @@ struct AIAgentView: View {
                             if !inputText.isEmpty { sendMessage() }
                         }
                 } else {
-                    TextField("Instructions...", text: $inputText)
+                    TextField("Ask anything or give instructions...", text: $inputText)
                         .textFieldStyle(.plain)
                         .font(.system(size: 13, design: .monospaced))
                         .focused($isInputFocused)
@@ -508,6 +515,40 @@ struct AIAgentView: View {
     private var activityLogStrip: some View {
         ScrollView(.horizontal, showsIndicators: false) {
             HStack(spacing: 6) {
+                // Token savings indicator
+                let stats = TokenOptimizer.shared.stats
+                if stats.savedTokens > 0 {
+                    HStack(spacing: 3) {
+                        Image(systemName: "bolt.fill")
+                            .font(.system(size: 8))
+                            .foregroundColor(.green)
+                        Text("\(stats.formattedSavings)")
+                            .font(.system(size: 8, weight: .medium))
+                            .foregroundColor(.green)
+                    }
+                    .padding(.horizontal, 5)
+                    .padding(.vertical, 2)
+                    .background(Color.green.opacity(0.08))
+                    .cornerRadius(3)
+                }
+                
+                // Memory count
+                let memCount = AgentMemoryService.shared.memories.count
+                if memCount > 0 {
+                    HStack(spacing: 3) {
+                        Image(systemName: "brain")
+                            .font(.system(size: 8))
+                            .foregroundColor(.purple)
+                        Text("\(memCount)")
+                            .font(.system(size: 8))
+                            .foregroundColor(.purple)
+                    }
+                    .padding(.horizontal, 5)
+                    .padding(.vertical, 2)
+                    .background(Color.purple.opacity(0.06))
+                    .cornerRadius(3)
+                }
+                
                 ForEach(agent.activityLog.suffix(8)) { activity in
                     HStack(spacing: 3) {
                         Image(systemName: activity.type.icon)
@@ -642,7 +683,7 @@ struct AIAgentView: View {
             AIClient.shared.sendMessage(
                 prompt: userText,
                 attachments: currentAttachments,
-                systemPrompt: "You are MicroCode, a senior software engineer. Provide professional, concise, and correct solutions. Use code blocks for all code snippets.",
+                systemPrompt: "You are MicroCode, an intelligent AI assistant built into the MicroCode IDE. You can have natural conversations about any topic \u2014 technology, science, life, philosophy, or anything the user wants to discuss. When they ask about code, be a senior software engineer providing professional, concise solutions with code blocks. Use Thai or English based on the user's language. Be friendly, smart, and engaging.",
                 conversationHistory: history,
                 provider: provider,
                 model: model,
@@ -818,6 +859,80 @@ struct AIAgentView: View {
             return parts.prefix(2).joined(separator: "-")
         }
         return model
+    }
+    
+    // MARK: - Token Stats Badge
+    
+    private var tokenStatsBadge: some View {
+        Menu {
+            Text("📊 Token Optimizer Stats").font(.caption)
+            Divider()
+            
+            let stats = TokenOptimizer.shared.stats
+            Text("Input: \(formatTokenCount(stats.inputTokens))")
+            Text("Output: \(formatTokenCount(stats.outputTokens))")
+            Text("Saved: \(formatTokenCount(stats.savedTokens))")
+            
+            Divider()
+            
+            Text("Requests: \(stats.totalRequests)")
+            Text("Cost: $\(String(format: "%.4f", stats.totalCost))")
+            Text("Compression: \(String(format: "%.0f%%", stats.compressionRatio * 100))")
+            
+            Divider()
+            
+            // Memory stats
+            let memStats = AgentMemoryService.shared
+            Text("🧠 Memory: \(memStats.memories.count) entries")
+            Text("Topics: \(memStats.topicClusters.count)")
+            Text("Summaries: \(memStats.summaries.count)")
+            
+            Divider()
+            
+            Button("Reset Stats") {
+                TokenOptimizer.shared.resetStats()
+            }
+            Button("Clear Memory") {
+                AgentMemoryService.shared.clearAllMemories()
+            }
+        } label: {
+            HStack(spacing: 3) {
+                Image(systemName: "bolt.circle.fill")
+                    .font(.system(size: 10))
+                    .foregroundColor(tokenSavingsColor)
+                
+                let stats = TokenOptimizer.shared.stats
+                if stats.savedTokens > 0 {
+                    Text(stats.formattedSavings)
+                        .font(.system(size: 9, weight: .medium, design: .monospaced))
+                        .foregroundColor(tokenSavingsColor)
+                } else {
+                    Text("Optimizer")
+                        .font(.system(size: 9, weight: .medium))
+                        .foregroundColor(.secondary)
+                }
+            }
+            .padding(.horizontal, 6)
+            .padding(.vertical, 3)
+            .background(tokenSavingsColor.opacity(0.08))
+            .cornerRadius(4)
+        }
+        .menuStyle(.borderlessButton)
+        .fixedSize()
+        .help("Token Optimizer — \(TokenOptimizer.shared.stats.formattedSavings) saved")
+    }
+    
+    private var tokenSavingsColor: Color {
+        let ratio = TokenOptimizer.shared.stats.compressionRatio
+        if ratio > 0.3 { return .green }
+        if ratio > 0.1 { return .cyan }
+        return .secondary
+    }
+    
+    private func formatTokenCount(_ count: Int) -> String {
+        if count >= 1_000_000 { return String(format: "%.1fM", Double(count) / 1_000_000) }
+        if count >= 1_000 { return String(format: "%.1fK", Double(count) / 1_000) }
+        return "\(count)"
     }
 }
 

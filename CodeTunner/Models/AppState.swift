@@ -1423,8 +1423,24 @@ class AppState: ObservableObject {
             }
             
             // LSP: Notify language server that document was opened
+            // FIX: Use a detached task with timeout to prevent hanging on files
+            // where no LSP server is installed (e.g. .cpp, .txt, .json)
             let fileUri = url.absoluteString
-            await lspManager.documentOpened(uri: fileUri, language: language, content: content)
+            Task.detached(priority: .utility) {
+                // 3-second timeout to prevent indefinite hang
+                let lspTask = Task {
+                    await self.lspManager.documentOpened(uri: fileUri, language: language, content: content)
+                }
+                
+                // Race against timeout
+                let timeoutTask = Task {
+                    try? await Task.sleep(nanoseconds: 3_000_000_000)
+                    lspTask.cancel()
+                }
+                
+                await lspTask.value
+                timeoutTask.cancel()
+            }
         } catch {
             alertMessage = "Failed to open file: \(error.localizedDescription)"
         }
@@ -2814,6 +2830,11 @@ class AppState: ObservableObject {
     func setEditorMode(_ mode: EditorMode) {
         // Only update if different
         guard editorMode != mode else { return }
+        
+        // Mutual exclusion: Close inline agent panel when entering full agent mode
+        if mode == .aiAgent {
+            aiChatVisible = false
+        }
         
         // Force publish the change
         objectWillChange.send()
