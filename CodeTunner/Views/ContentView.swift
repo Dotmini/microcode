@@ -213,6 +213,11 @@ struct ContentView: View {
                 .keyboardShortcut("l", modifiers: .command)
                 .hidden()
         )
+        .background(
+            Button("") { appState.toggleEditorMode(.browser) }
+                .keyboardShortcut("b", modifiers: [.command, .shift])
+                .hidden()
+        )
         .overlay(
             Group {
                 if (appState.appTheme == .christmas || appState.appTheme == .christmasLight) {
@@ -361,6 +366,11 @@ struct MainToolbar: View {
                     }
                 }
                 .help("Toggle Agent Panel (⌘L)")
+                
+                ToolbarButton(icon: "globe", isActive: appState.editorMode == .browser, color: appState.editorMode == .browser ? .blue : .primary) {
+                    appState.toggleEditorMode(.browser)
+                }
+                .help("IDE Browser (⌘⇧B)")
                 
                 ToolbarButton(icon: "chart.bar.doc.horizontal") {
                     appState.toggleConsole(tab: 3) // Open Console/Analysis tab
@@ -854,6 +864,9 @@ struct EditorArea: View {
                     .environmentObject(appState)
             case .aiAgent:
                 AIAgentView()
+                    .environmentObject(appState)
+            case .browser:
+                IDEBrowserView()
                     .environmentObject(appState)
             case .code:
                 VStack(spacing: 0) {

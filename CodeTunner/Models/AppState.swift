@@ -641,6 +641,7 @@ enum EditorMode: String, CaseIterable, Identifiable {
     case remoteX = "Remote X"
     case embedded = "Embedded Studio"
     case aiAgent = "AI Agent"
+    case browser = "Browser"
     
     var id: String { rawValue }
     
@@ -654,6 +655,7 @@ enum EditorMode: String, CaseIterable, Identifiable {
         case .design: return "Design"
         case .embedded: return "Embedded Studio"
         case .aiAgent: return "AI Agent"
+        case .browser: return "Browser"
         }
     }
     
@@ -667,6 +669,7 @@ enum EditorMode: String, CaseIterable, Identifiable {
         case .design: return "paintbrush.pointed" // Penpot style icon
         case .embedded: return "cpu.fill" // Chip icon
         case .aiAgent: return "brain.head.profile" // AI brain icon
+        case .browser: return "globe" // Browser icon
         }
     }
 }
@@ -714,6 +717,17 @@ class AppState: ObservableObject {
     @Published var gitDiffFile: String = ""
     @Published var cicdRuns: [WorkflowRun] = []
     @Published var cicdLoading: Bool = false
+    
+    // Browser
+    @Published var browserURL: String = "https://www.google.com"
+    @Published var browserTitle: String = ""
+    @Published var browserIsLoading: Bool = false
+    @Published var browserCanGoBack: Bool = false
+    @Published var browserCanGoForward: Bool = false
+    @Published var browserHistory: [BrowserHistoryEntry] = []
+    @Published var browserBookmarks: [BrowserBookmark] = []
+    @Published var browserTabs: [BrowserTab] = [BrowserTab(url: "https://www.google.com", title: "New Tab")]
+    @Published var browserActiveTab: Int = 0
 
     @Published var hasUnsavedChanges: Bool = false
 
@@ -3435,6 +3449,31 @@ struct ExecutionOutput: Codable {
         case exitCode = "exit_code"
         case executionTime = "execution_time"
     }
+}
+
+// MARK: - Browser Models
+
+struct BrowserTab: Identifiable {
+    let id = UUID()
+    var url: String
+    var title: String
+    var isLoading: Bool = false
+    var canGoBack: Bool = false
+    var canGoForward: Bool = false
+}
+
+struct BrowserHistoryEntry: Identifiable {
+    let id = UUID()
+    let url: String
+    let title: String
+    let visitedAt: Date
+}
+
+struct BrowserBookmark: Identifiable, Codable {
+    var id = UUID()
+    var url: String
+    var title: String
+    var favicon: String?
 }
 
 // MARK: - Debug Helper
