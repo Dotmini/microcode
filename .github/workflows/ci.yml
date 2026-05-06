@@ -231,6 +231,38 @@ jobs:
           CI: true
           BUILD_NUMBER: ${{ steps.version.outputs.build_number }}
 
+      - name: Cache runtime downloads
+        uses: actions/cache@v4
+        with:
+          path: .runtime_cache
+          key: runtimes-${{ runner.arch }}-v3
+          restore-keys: |
+            runtimes-${{ runner.arch }}-
+
+      - name: "📦 Bundle Language Runtimes"
+        run: |
+          chmod +x bundle_runtimes.sh
+          # Find the app bundle
+          APP_BUNDLE=$(find Dist -name "*.app" -maxdepth 2 2>/dev/null | head -1)
+          if [ -z "$APP_BUNDLE" ]; then
+            APP_BUNDLE=$(find .build -name "*.app" -maxdepth 4 2>/dev/null | head -1)
+          fi
+          if [ -z "$APP_BUNDLE" ]; then
+            echo "⚠️ No .app bundle found — creating standalone runtime bundle"
+            APP_BUNDLE="Dist/MicroCode.app"
+            mkdir -p "$APP_BUNDLE/Contents/Resources"
+          fi
+          
+          # Detect arch
+          if [ "$(uname -m)" = "arm64" ]; then
+            ARCH="arm64"
+          else
+            ARCH="x86_64"
+          fi
+          
+          echo "🎯 Bundling runtimes into: $APP_BUNDLE ($ARCH)"
+          ./bundle_runtimes.sh "$APP_BUNDLE" "$ARCH"
+
       - name: Collect build artifacts
         run: |
           mkdir -p build-output
