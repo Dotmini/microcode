@@ -26,7 +26,7 @@ struct MCPRequest: Codable {
 struct MCPParams: Codable {
     // For tools/call
     let name: String?
-    let arguments: [String: AnyCodable]?
+    let arguments: [String: MCPAnyCodable]?
     
     // For resources/read
     let uri: String?
@@ -39,7 +39,7 @@ struct MCPParams: Codable {
 
 struct MCPClientCapabilities: Codable {
     let roots: MCPRootsCapability?
-    let sampling: [String: AnyCodable]?
+    let sampling: [String: MCPAnyCodable]?
 }
 
 struct MCPRootsCapability: Codable {
@@ -51,16 +51,16 @@ struct MCPClientInfo: Codable {
     let version: String?
 }
 
-struct MCPResponse: Codable {
+struct MCPResponse: Encodable {
     let jsonrpc: String
     let id: Int?
-    let result: AnyCodable?
+    let result: MCPAnyCodable?
     let error: MCPError?
     
     init(id: Int?, result: Any?) {
         self.jsonrpc = "2.0"
         self.id = id
-        self.result = result != nil ? AnyCodable(result!) : nil
+        self.result = result != nil ? MCPAnyCodable(result!) : nil
         self.error = nil
     }
     
@@ -86,7 +86,7 @@ struct MCPError: Codable {
 
 // MARK: - AnyCodable Helper
 
-struct AnyCodable: Codable {
+struct MCPAnyCodable: Codable {
     let value: Any
     
     init(_ value: Any) { self.value = value }
@@ -98,8 +98,8 @@ struct AnyCodable: Codable {
         else if let i = try? container.decode(Int.self) { value = i }
         else if let d = try? container.decode(Double.self) { value = d }
         else if let s = try? container.decode(String.self) { value = s }
-        else if let a = try? container.decode([AnyCodable].self) { value = a.map(\.value) }
-        else if let o = try? container.decode([String: AnyCodable].self) { value = o.mapValues(\.value) }
+        else if let a = try? container.decode([MCPAnyCodable].self) { value = a.map { $0.value } }
+        else if let o = try? container.decode([String: MCPAnyCodable].self) { value = o.mapValues { $0.value } }
         else { value = NSNull() }
     }
     
@@ -111,8 +111,8 @@ struct AnyCodable: Codable {
         case let i as Int: try container.encode(i)
         case let d as Double: try container.encode(d)
         case let s as String: try container.encode(s)
-        case let a as [Any]: try container.encode(a.map { AnyCodable($0) })
-        case let o as [String: Any]: try container.encode(o.mapValues { AnyCodable($0) })
+        case let a as [Any]: try container.encode(a.map { MCPAnyCodable($0) })
+        case let o as [String: Any]: try container.encode(o.mapValues { MCPAnyCodable($0) })
         default: try container.encodeNil()
         }
     }
@@ -242,7 +242,7 @@ class MCPServer: ObservableObject {
         requestCount += 1
         lastActivity = Date()
         
-        guard let data = jsonString.data(using: .utf8),
+        guard let data = jsonString.data(using: String.Encoding.utf8),
               let request = try? JSONDecoder().decode(MCPRequest.self, from: data) else {
             return encodeResponse(MCPResponse(id: nil, error: .parseError))
         }
@@ -252,9 +252,9 @@ class MCPServer: ObservableObject {
     }
     
     func handleRequestData(_ data: Data) async -> Data {
-        let jsonString = String(data: data, encoding: .utf8) ?? ""
+        let jsonString = String(data: data, encoding: String.Encoding.utf8) ?? ""
         let responseString = await handleRequest(jsonString)
-        return responseString.data(using: .utf8) ?? Data()
+        return responseString.data(using: String.Encoding.utf8) ?? Data()
     }
     
     // MARK: - Process Methods
@@ -465,7 +465,7 @@ class MCPServer: ObservableObject {
             guard FileManager.default.fileExists(atPath: resolved) else {
                 throw MCPToolError.fileNotFound(path)
             }
-            return try String(contentsOfFile: resolved, encoding: .utf8)
+            return try String(contentsOfFile: resolved, encoding: String.Encoding.utf8)
         case .failure(let error):
             throw MCPToolError.securityViolation(error.message)
         }
@@ -482,7 +482,7 @@ class MCPServer: ObservableObject {
             }
             let dir = (resolved as NSString).deletingLastPathComponent
             try FileManager.default.createDirectory(atPath: dir, withIntermediateDirectories: true)
-            try content.write(toFile: resolved, atomically: true, encoding: .utf8)
+            try content.write(toFile: resolved, atomically: true, encoding: String.Encoding.utf8)
             return "Written \(content.count) bytes to \(path)"
         case .failure(let error):
             throw MCPToolError.securityViolation(error.message)
@@ -496,12 +496,12 @@ class MCPServer: ObservableObject {
         
         switch sandbox.validatePath(path) {
         case .success(let resolved):
-            var content = try String(contentsOfFile: resolved, encoding: .utf8)
+            var content = try String(contentsOfFile: resolved, encoding: String.Encoding.utf8)
             guard content.contains(oldText) else {
                 throw MCPToolError.editFailed("Target text not found in file")
             }
             content = content.replacingOccurrences(of: oldText, with: newText)
-            try content.write(toFile: resolved, atomically: true, encoding: .utf8)
+            try content.write(toFile: resolved, atomically: true, encoding: String.Encoding.utf8)
             return "Edited \(path): replaced \(oldText.count) chars with \(newText.count) chars"
         case .failure(let error):
             throw MCPToolError.securityViolation(error.message)
@@ -700,7 +700,7 @@ class MCPServer: ObservableObject {
     
     private func encodeResponse(_ response: MCPResponse) -> String {
         guard let data = try? JSONEncoder().encode(response) else { return "{}" }
-        return String(data: data, encoding: .utf8) ?? "{}"
+        return String(data: data, encoding: String.Encoding.utf8) ?? "{}"
     }
 }
 

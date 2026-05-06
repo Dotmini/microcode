@@ -244,7 +244,9 @@ struct SASProcedureView: View {
     }
     
     private func loadMetadata() {
-        if let typeRaw = cell.procedureMetadata["moduleType"]?.value as? String,
+        let metadata = cell.procedureMetadata
+        if let typeValue = metadata["moduleType"],
+           let typeRaw = typeValue.value as? String,
            let type = SASModuleType(rawValue: typeRaw) {
             self.moduleType = type
         }
@@ -252,7 +254,9 @@ struct SASProcedureView: View {
     }
     
     private func updateMetadata() {
-        cell.procedureMetadata["moduleType"] = AnyCodable(moduleType.rawValue)
+        var metadata = cell.procedureMetadata
+        metadata["moduleType"] = AnyCodable(moduleType.rawValue)
+        cell.procedureMetadata = metadata
         cell.generatedCode = generatePythonCode()
     }
 }
