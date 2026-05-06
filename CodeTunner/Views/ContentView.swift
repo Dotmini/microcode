@@ -230,7 +230,7 @@ struct ContentView: View {
         }
         .sheet(isPresented: $appState.showingCICDView) {
             CICDPipelineView()
-                .frame(width: 800, height: 600)
+                .frame(minWidth: 900, idealWidth: 1100, minHeight: 650, idealHeight: 800)
         }
         .sheet(isPresented: $appState.showingProjectRuntime) {
             ProjectRuntimeView()

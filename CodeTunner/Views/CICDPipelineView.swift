@@ -10,13 +10,22 @@ struct CICDPipelineView: View {
     
     var body: some View {
         VStack(spacing: 0) {
-            HStack {
+            // Header with title and tab picker
+            HStack(spacing: 12) {
+                Image(systemName: "gearshape.2.fill")
+                    .font(.system(size: 14))
+                    .foregroundStyle(LinearGradient(colors: [.blue, .cyan], startPoint: .topLeading, endPoint: .bottomTrailing))
+                
+                Text("CI/CD Pipelines")
+                    .font(.system(size: 14, weight: .bold))
+                
                 Picker("", selection: $selectedTab) {
                     Text("Local Pipelines").tag(0)
                     Text("GitHub Actions").tag(1)
                 }
                 .pickerStyle(.segmented)
-                .frame(width: 280)
+                .frame(width: 250)
+                
                 Spacer()
                 
                 // Pipeline status indicator
@@ -26,23 +35,32 @@ struct CICDPipelineView: View {
                             .scaleEffect(0.5)
                             .frame(width: 12, height: 12)
                         Text("Running...")
-                            .font(.caption2)
+                            .font(.system(size: 10, weight: .medium))
                             .foregroundColor(.blue)
                     }
+                    .padding(.horizontal, 8)
+                    .padding(.vertical, 3)
+                    .background(Color.blue.opacity(0.08))
+                    .cornerRadius(4)
                 }
             }
-            .padding(.horizontal, 12)
-            .padding(.vertical, 8)
+            .padding(.horizontal, 14)
+            .padding(.vertical, 10)
             .background(Color(nsColor: .controlBackgroundColor))
             
-            Divider()
+            Rectangle()
+                .fill(LinearGradient(colors: [.blue.opacity(0.3), .cyan.opacity(0.2), .clear], startPoint: .leading, endPoint: .trailing))
+                .frame(height: 1)
             
             if selectedTab == 0 {
                 LocalPipelinesView()
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
             } else {
                 GitHubActionsView()
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
             }
         }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
     }
 }
 
@@ -261,6 +279,7 @@ struct LocalPipelinesView: View {
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
                 }
             }
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
             
             // Right: Live Console
             VStack(spacing: 0) {
@@ -313,6 +332,7 @@ struct LocalPipelinesView: View {
             }
             .frame(minWidth: 250, idealWidth: 350)
         }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
         .onAppear {
             if let workspace = appState.workspaceFolder {
                 runner.setWorkspace(workspace.path)
