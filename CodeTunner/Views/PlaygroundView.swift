@@ -1258,9 +1258,13 @@ struct PlaygroundView: View {
             let codeToAnalyze = code
             let currentLang = language
             
-            let analysisResult = await Task.detached(priority: .userInitiated) {
-                return self.analyzeCode(code: codeToAnalyze, language: currentLang)
-            }.value
+            // Run analysis on background — avoid capturing self in detached task
+            let analysisResult = await withCheckedContinuation { continuation in
+                DispatchQueue.global(qos: .userInitiated).async {
+                    let result = self.analyzeCode(code: codeToAnalyze, language: currentLang)
+                    continuation.resume(returning: result)
+                }
+            }
             
             guard !Task.isCancelled else { return }
             
@@ -2041,15 +2045,31 @@ struct PlaygroundView: View {
     private var cellEditorPanel: some View {
         ScrollView {
             VStack(spacing: 12) {
-                ForEach(cells) { cell in
-                    PlaygroundCellView(
-                        cell: cell,
-                        language: language,
-                        onRun: { runCell(cell: cell) },
-                        onDelete: { deleteCell(cell: cell) }
-                    )
-                    .environmentObject(appState)
-                    .environmentObject(cell)
+                if cells.isEmpty {
+                    // Empty state — prevent crash on empty array
+                    VStack(spacing: 12) {
+                        Image(systemName: "square.grid.2x2")
+                            .font(.system(size: 36))
+                            .foregroundColor(.secondary.opacity(0.4))
+                        Text("No cells yet")
+                            .font(.system(size: 14, weight: .medium))
+                            .foregroundColor(.secondary)
+                        Text("Click \"Add New Cell\" to get started")
+                            .font(.system(size: 12))
+                            .foregroundColor(.secondary.opacity(0.6))
+                    }
+                    .frame(maxWidth: .infinity)
+                    .padding(.vertical, 40)
+                } else {
+                    ForEach(cells) { cell in
+                        PlaygroundCellView(
+                            cell: cell,
+                            language: language,
+                            onRun: { runCell(cell: cell) },
+                            onDelete: { deleteCell(cell: cell) }
+                        )
+                        .environmentObject(appState)
+                    }
                 }
                 
                 Button(action: addCell) {

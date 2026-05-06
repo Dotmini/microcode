@@ -1371,17 +1371,34 @@ struct AgentCellModeView: View {
             ScrollViewReader { proxy in
                 ScrollView {
                     LazyVStack(spacing: 0) {
-                        ForEach($cells) { $cell in
-                            AgentCellRow(
-                                cell: $cell,
-                                isFocused: focusedCellId == cell.id,
-                                onFocus: { focusedCellId = cell.id },
-                                onRun: { runCell(cell) },
-                                onDelete: { deleteCell(cell.id) },
-                                onInsertBelow: { insertCell(below: cell.id) },
-                                appState: appState
-                            )
-                            .id(cell.id)
+                        if cells.isEmpty {
+                            // Empty state
+                            VStack(spacing: 12) {
+                                Image(systemName: "rectangle.grid.1x2")
+                                    .font(.system(size: 32))
+                                    .foregroundColor(.secondary.opacity(0.3))
+                                Text("No cells yet")
+                                    .font(.system(size: 13, weight: .medium))
+                                    .foregroundColor(.secondary)
+                                Text("Add a Code, Markdown, or AI cell below")
+                                    .font(.system(size: 11))
+                                    .foregroundColor(.secondary.opacity(0.6))
+                            }
+                            .frame(maxWidth: .infinity)
+                            .padding(.vertical, 40)
+                        } else {
+                            ForEach($cells) { $cell in
+                                AgentCellRow(
+                                    cell: $cell,
+                                    isFocused: focusedCellId == cell.id,
+                                    onFocus: { focusedCellId = cell.id },
+                                    onRun: { runCell(cell) },
+                                    onDelete: { deleteCell(cell.id) },
+                                    onInsertBelow: { insertCell(below: cell.id) },
+                                    appState: appState
+                                )
+                                .id(cell.id)
+                            }
                         }
                         
                         // Add Cell Button
@@ -1507,9 +1524,18 @@ struct AgentCellModeView: View {
         cells[idx].output = ""
         
         let providerString = appState.aiProvider
-        let model = appState.aiModel.isEmpty ? (StreamableAIProvider(rawValue: providerString) ?? .gemini).defaultModel : appState.aiModel
-        let apiKey = appState.apiKeys[providerString] ?? ""
         let provider: StreamableAIProvider = StreamableAIProvider(rawValue: providerString) ?? .gemini
+        let model = appState.aiModel.isEmpty ? provider.defaultModel : appState.aiModel
+        let apiKey = appState.apiKeys[providerString] ?? ""
+        
+        // Guard: no API key configured
+        guard !apiKey.isEmpty || providerString == "local" else {
+            if let i = cells.firstIndex(where: { $0.id == cell.id }) {
+                cells[i].output = "⚠️ No API key configured for \(providerString). Go to Settings → API Keys."
+                cells[i].isRunning = false
+            }
+            return
+        }
         
         // Build context from workspace + current file + previous cells
         var context = ""
@@ -1573,8 +1599,12 @@ struct AgentCellModeView: View {
     }
     
     private func deleteCell(_ id: UUID) {
-        if let idx = cells.firstIndex(where: { $0.id == id }) {
-            cells.remove(at: idx)
+        // Guard: never crash on invalid index
+        guard let idx = cells.firstIndex(where: { $0.id == id }) else { return }
+        cells.remove(at: idx)
+        // Clear focus if deleted cell was focused
+        if focusedCellId == id {
+            focusedCellId = cells.first?.id
         }
     }
     
