@@ -25,6 +25,8 @@ struct AIAgentView: View {
     @State private var isCellMode = false   // Cell Mode (notebook-style)
     @State private var currentPaperPage = 0
     @State private var showModelPicker = false
+    @State private var isPlanMode = false
+    @State private var isTaskMode = false
     @FocusState private var isInputFocused: Bool
     
     // Aesthetic Constants
@@ -49,7 +51,13 @@ struct AIAgentView: View {
                 Divider().background(borderColor)
                 
                 // 2. Main Content Area
-                if isPaperMode {
+                if isPlanMode {
+                    // Implementation Plan View
+                    planView
+                } else if isTaskMode {
+                    // Task.md / Agent.md Editor
+                    taskEditorView
+                } else if isPaperMode {
                     // A4 Paper Reading Mode
                     A4PaperView(
                         messages: agent.messages,
@@ -172,14 +180,20 @@ struct AIAgentView: View {
                 
                 // Mode pills (compact)
                 HStack(spacing: 2) {
-                    modePill("Chat", icon: "bubble.left.fill", isActive: !isPaperMode && !isCellMode) {
-                        isPaperMode = false; isCellMode = false
+                    modePill("Chat", icon: "bubble.left.fill", isActive: !isPaperMode && !isCellMode && !isPlanMode && !isTaskMode) {
+                        isPaperMode = false; isCellMode = false; isPlanMode = false; isTaskMode = false
+                    }
+                    modePill("Plan", icon: "list.bullet.clipboard.fill", isActive: isPlanMode) {
+                        isPlanMode = true; isPaperMode = false; isCellMode = false; isTaskMode = false
+                    }
+                    modePill("Task", icon: "doc.badge.gearshape.fill", isActive: isTaskMode) {
+                        isTaskMode = true; isPlanMode = false; isPaperMode = false; isCellMode = false
                     }
                     modePill("Report", icon: "doc.text.fill", isActive: isPaperMode) {
-                        isPaperMode = true; isCellMode = false
+                        isPaperMode = true; isCellMode = false; isPlanMode = false; isTaskMode = false
                     }
                     modePill("Cells", icon: "rectangle.grid.1x2.fill", isActive: isCellMode) {
-                        isCellMode = true; isPaperMode = false
+                        isCellMode = true; isPaperMode = false; isPlanMode = false; isTaskMode = false
                     }
                 }
                 .padding(2)
@@ -244,6 +258,223 @@ struct AIAgentView: View {
             .cornerRadius(4)
         }
         .buttonStyle(.plain)
+    }
+    
+    // MARK: - Implementation Plan View
+    
+    private var planView: some View {
+        ScrollView {
+            VStack(alignment: .leading, spacing: 16) {
+                // Header
+                HStack(spacing: 10) {
+                    ZStack {
+                        Circle()
+                            .fill(LinearGradient(colors: [.blue.opacity(0.15), .purple.opacity(0.1)], startPoint: .topLeading, endPoint: .bottomTrailing))
+                            .frame(width: 40, height: 40)
+                        Image(systemName: "list.bullet.clipboard.fill")
+                            .font(.system(size: 18))
+                            .foregroundStyle(LinearGradient(colors: [.blue, .purple], startPoint: .topLeading, endPoint: .bottomTrailing))
+                    }
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text("Implementation Plan")
+                            .font(.system(size: 16, weight: .bold, design: .rounded))
+                        Text("AI-generated execution steps for the current task")
+                            .font(.system(size: 11))
+                            .foregroundColor(.secondary)
+                    }
+                    Spacer()
+                }
+                .padding(.horizontal, 16)
+                .padding(.top, 16)
+                
+                // Plan steps (extracted from agent activity log)
+                let planSteps = extractPlanSteps()
+                if planSteps.isEmpty {
+                    VStack(spacing: 12) {
+                        Spacer().frame(height: 60)
+                        Image(systemName: "doc.text.magnifyingglass")
+                            .font(.system(size: 40))
+                            .foregroundColor(.secondary.opacity(0.3))
+                        Text("No plan generated yet")
+                            .font(.system(size: 13))
+                            .foregroundColor(.secondary)
+                        Text("Ask the AI to create a plan or start a task")
+                            .font(.system(size: 11))
+                            .foregroundColor(.secondary.opacity(0.6))
+                        Spacer()
+                    }
+                    .frame(maxWidth: .infinity)
+                } else {
+                    VStack(alignment: .leading, spacing: 6) {
+                        ForEach(Array(planSteps.enumerated()), id: \.offset) { idx, step in
+                            HStack(alignment: .top, spacing: 10) {
+                                // Step number circle
+                                ZStack {
+                                    Circle()
+                                        .fill(step.isDone ? Color.green.opacity(0.15) : Color.blue.opacity(0.1))
+                                        .frame(width: 24, height: 24)
+                                    if step.isDone {
+                                        Image(systemName: "checkmark")
+                                            .font(.system(size: 10, weight: .bold))
+                                            .foregroundColor(.green)
+                                    } else {
+                                        Text("\(idx + 1)")
+                                            .font(.system(size: 10, weight: .bold, design: .monospaced))
+                                            .foregroundColor(.blue)
+                                    }
+                                }
+                                
+                                VStack(alignment: .leading, spacing: 2) {
+                                    Text(step.title)
+                                        .font(.system(size: 12, weight: .medium))
+                                        .foregroundColor(step.isDone ? .secondary : .primary)
+                                        .strikethrough(step.isDone)
+                                    if !step.detail.isEmpty {
+                                        Text(step.detail)
+                                            .font(.system(size: 10))
+                                            .foregroundColor(.secondary)
+                                    }
+                                }
+                                
+                                Spacer()
+                            }
+                            .padding(.horizontal, 16)
+                            .padding(.vertical, 6)
+                            .background(
+                                RoundedRectangle(cornerRadius: 8)
+                                    .fill(step.isDone ? Color.green.opacity(0.03) : Color.clear)
+                            )
+                        }
+                    }
+                }
+            }
+        }
+        .background(Color(nsColor: .controlBackgroundColor).opacity(0.3))
+    }
+    
+    private struct PlanStep {
+        let title: String
+        let detail: String
+        let isDone: Bool
+    }
+    
+    private func extractPlanSteps() -> [PlanStep] {
+        // Extract plan steps from agent activity log
+        var steps: [PlanStep] = []
+        for activity in agent.activityLog {
+            switch activity.type {
+            case .fileChange:
+                steps.append(PlanStep(title: "File Change", detail: activity.message, isDone: true))
+            case .tool:
+                steps.append(PlanStep(title: "Tool Execution", detail: activity.message, isDone: true))
+            case .thinking:
+                steps.append(PlanStep(title: "Analysis", detail: activity.message, isDone: true))
+            case .success:
+                steps.append(PlanStep(title: "Completed", detail: activity.message, isDone: true))
+            case .error:
+                steps.append(PlanStep(title: "Error", detail: activity.message, isDone: false))
+            default:
+                break
+            }
+        }
+        return steps
+    }
+    
+    // MARK: - Task Editor View
+    
+    @State private var taskMdText: String = ""
+    @State private var agentMdText: String = ""
+    @State private var activeTaskTab: Int = 0 // 0 = task.md, 1 = agent.md
+    
+    private var taskEditorView: some View {
+        VStack(spacing: 0) {
+            // Tab bar
+            HStack(spacing: 0) {
+                taskEditorTab("task.md", icon: "checklist", idx: 0)
+                taskEditorTab("agent.md", icon: "brain", idx: 1)
+                Spacer()
+                
+                // Save button
+                Button(action: saveTaskFiles) {
+                    HStack(spacing: 4) {
+                        Image(systemName: "square.and.arrow.down")
+                            .font(.system(size: 10))
+                        Text("Save")
+                            .font(.system(size: 10, weight: .medium))
+                    }
+                    .foregroundColor(.white)
+                    .padding(.horizontal, 10)
+                    .padding(.vertical, 4)
+                    .background(LinearGradient(colors: [.blue, .purple], startPoint: .leading, endPoint: .trailing))
+                    .cornerRadius(5)
+                }
+                .buttonStyle(.plain)
+                .padding(.trailing, 12)
+            }
+            .padding(.leading, 12)
+            .padding(.vertical, 6)
+            .background(Color(nsColor: .controlBackgroundColor).opacity(0.5))
+            
+            Divider().opacity(0.3)
+            
+            // Editor
+            if activeTaskTab == 0 {
+                TextEditor(text: $taskMdText)
+                    .font(.system(size: 12, design: .monospaced))
+                    .scrollContentBackground(.hidden)
+                    .background(Color(nsColor: .textBackgroundColor).opacity(0.3))
+            } else {
+                TextEditor(text: $agentMdText)
+                    .font(.system(size: 12, design: .monospaced))
+                    .scrollContentBackground(.hidden)
+                    .background(Color(nsColor: .textBackgroundColor).opacity(0.3))
+            }
+        }
+        .onAppear { loadTaskFiles() }
+    }
+    
+    private func taskEditorTab(_ label: String, icon: String, idx: Int) -> some View {
+        Button(action: { withAnimation { activeTaskTab = idx } }) {
+            HStack(spacing: 4) {
+                Image(systemName: icon)
+                    .font(.system(size: 9))
+                Text(label)
+                    .font(.system(size: 10, weight: .medium, design: .monospaced))
+            }
+            .foregroundColor(activeTaskTab == idx ? .white : .secondary)
+            .padding(.horizontal, 10)
+            .padding(.vertical, 5)
+            .background(activeTaskTab == idx ? Color.accentColor.opacity(0.7) : Color.clear)
+            .cornerRadius(5)
+        }
+        .buttonStyle(.plain)
+    }
+    
+    private func loadTaskFiles() {
+        guard let workspace = appState.workspaceFolder?.path else { return }
+        let microcodeDir = (workspace as NSString).appendingPathComponent(".microcode")
+        
+        let taskPath = (microcodeDir as NSString).appendingPathComponent("task.md")
+        let agentPath = (microcodeDir as NSString).appendingPathComponent("agent.md")
+        
+        taskMdText = (try? String(contentsOfFile: taskPath, encoding: .utf8)) ?? "# Current Task\n\n## Objective\n<!-- Describe the current task here -->\n\n## Steps\n- [ ] Step 1\n- [ ] Step 2\n"
+        agentMdText = (try? String(contentsOfFile: agentPath, encoding: .utf8)) ?? "# Agent Instructions\n\n## Project Context\nEdit this file to customize AI agent behavior.\n\n## Rules\n- Follow existing code style\n- Write tests for new features\n"
+    }
+    
+    private func saveTaskFiles() {
+        guard let workspace = appState.workspaceFolder?.path else { return }
+        let microcodeDir = (workspace as NSString).appendingPathComponent(".microcode")
+        
+        try? FileManager.default.createDirectory(atPath: microcodeDir, withIntermediateDirectories: true)
+        
+        let taskPath = (microcodeDir as NSString).appendingPathComponent("task.md")
+        let agentPath = (microcodeDir as NSString).appendingPathComponent("agent.md")
+        
+        try? taskMdText.write(toFile: taskPath, atomically: true, encoding: .utf8)
+        try? agentMdText.write(toFile: agentPath, atomically: true, encoding: .utf8)
+        
+        // Reload into AgentService
+        agent.setWorkspace(workspace)
     }
     
     // MARK: - Input Area
@@ -2638,69 +2869,188 @@ private struct PendingChangeCard: View {
         .padding(8)
     }
     
-    // MARK: - Code Diff
+    // MARK: - Code Diff (GitHub-style Unified Diff)
     
     private var codeDiffSection: some View {
-        ScrollView {
-            VStack(alignment: .leading, spacing: 0) {
-                let lines = buildDiffLines()
-                ForEach(Array(lines.enumerated()), id: \.offset) { _, line in
-                    HStack(spacing: 0) {
-                        Text(line.num)
-                            .font(.system(size: 9, design: .monospaced))
-                            .foregroundColor(.secondary.opacity(0.4))
-                            .frame(width: 28, alignment: .trailing)
-                            .padding(.trailing, 4)
-                        Text(line.prefix)
-                            .font(.system(size: 10, weight: .bold, design: .monospaced))
-                            .foregroundColor(line.clr)
-                            .frame(width: 14, alignment: .center)
-                        Text(line.text)
-                            .font(.system(size: 10, design: .monospaced))
-                            .foregroundColor(line.clr.opacity(0.9))
-                            .lineLimit(1)
+        VStack(spacing: 0) {
+            // Diff header
+            HStack(spacing: 6) {
+                Image(systemName: "arrow.left.arrow.right")
+                    .font(.system(size: 9))
+                    .foregroundColor(.secondary)
+                Text(URL(fileURLWithPath: change.filePath).lastPathComponent)
+                    .font(.system(size: 10, weight: .medium, design: .monospaced))
+                    .foregroundColor(.primary.opacity(0.7))
+                Spacer()
+                Text("\(change.additions) additions, \(change.deletions) deletions")
+                    .font(.system(size: 9, design: .monospaced))
+                    .foregroundColor(.secondary)
+            }
+            .padding(.horizontal, 10)
+            .padding(.vertical, 5)
+            .background(Color.primary.opacity(0.03))
+            
+            Divider().opacity(0.3)
+            
+            // Diff content
+            ScrollView(.vertical, showsIndicators: true) {
+                ScrollView(.horizontal, showsIndicators: false) {
+                    VStack(alignment: .leading, spacing: 0) {
+                        let lines = buildUnifiedDiff()
+                        ForEach(Array(lines.enumerated()), id: \.offset) { _, line in
+                            HStack(spacing: 0) {
+                                // Old line number
+                                Text(line.oldNum)
+                                    .font(.system(size: 9, design: .monospaced))
+                                    .foregroundColor(.secondary.opacity(0.35))
+                                    .frame(width: 32, alignment: .trailing)
+                                
+                                // New line number
+                                Text(line.newNum)
+                                    .font(.system(size: 9, design: .monospaced))
+                                    .foregroundColor(.secondary.opacity(0.35))
+                                    .frame(width: 32, alignment: .trailing)
+                                
+                                // Prefix (+/-/space)
+                                Text(line.prefix)
+                                    .font(.system(size: 10, weight: .bold, design: .monospaced))
+                                    .foregroundColor(line.prefixColor)
+                                    .frame(width: 16, alignment: .center)
+                                
+                                // Code text
+                                Text(line.text)
+                                    .font(.system(size: 10, design: .monospaced))
+                                    .foregroundColor(line.textColor)
+                                    .lineLimit(1)
+                                
+                                Spacer(minLength: 20)
+                            }
+                            .padding(.vertical, 0.5)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                            .background(line.bgColor)
+                        }
                     }
-                    .padding(.horizontal, 4)
-                    .padding(.vertical, 1)
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                    .background(line.bg)
+                    .padding(.vertical, 4)
                 }
             }
+            .frame(maxHeight: 300)
+            .background(Color(nsColor: .textBackgroundColor).opacity(0.4))
         }
-        .frame(maxHeight: 250)
-        .background(Color(nsColor: .textBackgroundColor).opacity(0.5))
+        .cornerRadius(6)
+        .overlay(
+            RoundedRectangle(cornerRadius: 6)
+                .stroke(Color.primary.opacity(0.06), lineWidth: 1)
+        )
     }
     
-    private struct DiffRow {
-        let num: String; let prefix: String; let text: String; let clr: Color; let bg: Color
+    private struct UnifiedDiffLine {
+        let oldNum: String
+        let newNum: String
+        let prefix: String
+        let text: String
+        let type: DiffLineType
+        
+        enum DiffLineType {
+            case context, addition, deletion, hunkHeader
+        }
+        
+        var prefixColor: Color {
+            switch type {
+            case .addition: return .green
+            case .deletion: return .red
+            case .hunkHeader: return .cyan
+            case .context: return .secondary.opacity(0.3)
+            }
+        }
+        
+        var textColor: Color {
+            switch type {
+            case .addition: return Color.green.opacity(0.9)
+            case .deletion: return Color.red.opacity(0.8)
+            case .hunkHeader: return Color.cyan.opacity(0.7)
+            case .context: return Color.primary.opacity(0.55)
+            }
+        }
+        
+        var bgColor: Color {
+            switch type {
+            case .addition: return Color.green.opacity(0.08)
+            case .deletion: return Color.red.opacity(0.06)
+            case .hunkHeader: return Color.cyan.opacity(0.04)
+            case .context: return Color.clear
+            }
+        }
     }
     
-    private func buildDiffLines() -> [DiffRow] {
-        let oldL = change.oldContent.components(separatedBy: "\n")
-        let newL = change.newContent.components(separatedBy: "\n")
-        var res: [DiffRow] = []
-        var oi = 0; var ni = 0
-        while oi < oldL.count || ni < newL.count {
-            if oi < oldL.count && ni < newL.count {
-                if oldL[oi] == newL[ni] {
-                    res.append(DiffRow(num: "\(ni+1)", prefix: " ", text: newL[ni], clr: .primary.opacity(0.6), bg: .clear))
-                    oi += 1; ni += 1
+    /// Build a unified diff using LCS (Longest Common Subsequence) algorithm
+    private func buildUnifiedDiff() -> [UnifiedDiffLine] {
+        let oldLines = change.oldContent.components(separatedBy: "\n")
+        let newLines = change.newContent.components(separatedBy: "\n")
+        
+        // LCS table
+        let m = oldLines.count
+        let n = newLines.count
+        var dp = Array(repeating: Array(repeating: 0, count: n + 1), count: m + 1)
+        
+        for i in 1...max(1, m) {
+            for j in 1...max(1, n) {
+                if i <= m && j <= n && oldLines[i-1] == newLines[j-1] {
+                    dp[i][j] = dp[i-1][j-1] + 1
                 } else {
-                    res.append(DiffRow(num: "-", prefix: "-", text: oldL[oi], clr: .red, bg: Color.red.opacity(0.08)))
-                    oi += 1
-                    res.append(DiffRow(num: "\(ni+1)", prefix: "+", text: newL[ni], clr: .green, bg: Color.green.opacity(0.08)))
-                    ni += 1
+                    dp[i][j] = max(dp[i-1][j], dp[i][j-1])
                 }
-            } else if oi < oldL.count {
-                res.append(DiffRow(num: "-", prefix: "-", text: oldL[oi], clr: .red, bg: Color.red.opacity(0.08)))
-                oi += 1
-            } else {
-                res.append(DiffRow(num: "\(ni+1)", prefix: "+", text: newL[ni], clr: .green, bg: Color.green.opacity(0.08)))
-                ni += 1
             }
-            if res.count > 100 { break }
         }
-        return res
+        
+        // Backtrack to produce diff
+        enum DiffOp { case equal(String), delete(String), insert(String) }
+        var ops: [DiffOp] = []
+        var i = m, j = n
+        while i > 0 || j > 0 {
+            if i > 0 && j > 0 && oldLines[i-1] == newLines[j-1] {
+                ops.append(.equal(oldLines[i-1]))
+                i -= 1; j -= 1
+            } else if j > 0 && (i == 0 || dp[i][j-1] >= dp[i-1][j]) {
+                ops.append(.insert(newLines[j-1]))
+                j -= 1
+            } else if i > 0 {
+                ops.append(.delete(oldLines[i-1]))
+                i -= 1
+            }
+        }
+        ops.reverse()
+        
+        // Convert to UnifiedDiffLine with context awareness
+        var result: [UnifiedDiffLine] = []
+        var oldLineNum = 1
+        var newLineNum = 1
+        
+        for op in ops {
+            switch op {
+            case .equal(let text):
+                result.append(UnifiedDiffLine(
+                    oldNum: "\(oldLineNum)", newNum: "\(newLineNum)",
+                    prefix: " ", text: text, type: .context
+                ))
+                oldLineNum += 1; newLineNum += 1
+            case .delete(let text):
+                result.append(UnifiedDiffLine(
+                    oldNum: "\(oldLineNum)", newNum: "",
+                    prefix: "-", text: text, type: .deletion
+                ))
+                oldLineNum += 1
+            case .insert(let text):
+                result.append(UnifiedDiffLine(
+                    oldNum: "", newNum: "\(newLineNum)",
+                    prefix: "+", text: text, type: .addition
+                ))
+                newLineNum += 1
+            }
+            
+            if result.count > 200 { break } // Safety cap
+        }
+        
+        return result
     }
     
     private var changeCardActions: some View {
