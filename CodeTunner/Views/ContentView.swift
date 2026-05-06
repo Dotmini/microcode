@@ -218,10 +218,6 @@ struct ContentView: View {
             ContainerView()
                 .environmentObject(appState)
         }
-        .sheet(isPresented: $appState.showingPreviewView) {
-            PreviewView()
-                .environmentObject(appState)
-        }
         .sheet(isPresented: $appState.showingDatabaseStudio) {
             DatabaseStudioView()
         }
@@ -481,11 +477,6 @@ struct MainToolbar: View {
                     appState.showingContainerView = true
                 }
                 .help("Apple Container")
-                
-                ToolbarButton(icon: "macwindow", color: .purple) {
-                    appState.showingPreviewView = true
-                }
-                .help("GUI Preview")
                 
                 ToolbarButton(icon: "server.rack", color: .indigo) {
                     appState.showingDatabaseStudio = true
