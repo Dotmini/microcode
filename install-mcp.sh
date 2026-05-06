@@ -12,9 +12,9 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 MCP_SERVER="$SCRIPT_DIR/mcp-server.py"
 WORKSPACE="${1:-$SCRIPT_DIR}"
 
-# Claude Desktop config path
-CLAUDE_CONFIG="$HOME/.claude/claude_desktop_config.json"
-CLAUDE_DIR="$HOME/.claude"
+# Claude Desktop config path (macOS)
+CLAUDE_CONFIG="$HOME/Library/Application Support/Claude/claude_desktop_config.json"
+CLAUDE_DIR="$HOME/Library/Application Support/Claude"
 
 echo "🔧 MicroCode MCP Installer"
 echo "━━━━━━━━━━━━━━━━━━━━━━━━━"
