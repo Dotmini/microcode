@@ -352,12 +352,24 @@ class ScenarioManager: ObservableObject {
     @Published var activeScenario: ScenarioModel?
     @Published var isRunning: Bool = false
     @Published var logs: [ScenarioLog] = []
+    @Published var scheduleTimer: Timer?
+    @Published var isScheduled: Bool = false
+    @Published var scheduleIntervalSeconds: Int = 300
+    
+    private var scenarioDir: String {
+        let workspace = AgentToolBox.shared.workspaceRoot ?? NSHomeDirectory()
+        return (workspace as NSString).appendingPathComponent(".microcode/scenarios")
+    }
     
     private init() {
-        // Create default scenario
-        let defaultScenario = ScenarioModel(name: "My First Scenario")
-        scenarios.append(defaultScenario)
-        activeScenario = defaultScenario
+        loadScenarios()
+        if scenarios.isEmpty {
+            let defaultScenario = ScenarioModel(name: "My First Scenario")
+            scenarios.append(defaultScenario)
+            activeScenario = defaultScenario
+        } else {
+            activeScenario = scenarios.first
+        }
     }
     
     func createScenario(name: String) -> ScenarioModel {
@@ -396,165 +408,413 @@ class ScenarioManager: ObservableObject {
         scenario.connections.removeAll { $0.id == connection.id }
     }
     
-    // MARK: - Execution
+    // MARK: - Save / Load
+    
+    func saveScenario(_ scenario: ScenarioModel? = nil) {
+        let target = scenario ?? activeScenario
+        guard let s = target else { return }
+        
+        let fm = FileManager.default
+        try? fm.createDirectory(atPath: scenarioDir, withIntermediateDirectories: true)
+        
+        let data: [String: Any] = [
+            "id": s.id.uuidString,
+            "name": s.name,
+            "runCount": s.runCount,
+            "nodes": s.nodes.map { node -> [String: Any] in
+                let encoder = JSONEncoder()
+                let configData = (try? encoder.encode(node.config)) ?? Data()
+                let configDict = (try? JSONSerialization.jsonObject(with: configData)) as? [String: Any] ?? [:]
+                return [
+                    "id": node.id.uuidString,
+                    "type": node.type.rawValue,
+                    "name": node.name,
+                    "x": node.position.x,
+                    "y": node.position.y,
+                    "config": configDict
+                ]
+            },
+            "connections": s.connections.map { ["source": $0.sourceNodeId.uuidString, "target": $0.targetNodeId.uuidString] }
+        ]
+        
+        let filePath = (scenarioDir as NSString).appendingPathComponent("\(s.name.replacingOccurrences(of: " ", with: "_")).json")
+        if let jsonData = try? JSONSerialization.data(withJSONObject: data, options: [.prettyPrinted]) {
+            try? jsonData.write(to: URL(fileURLWithPath: filePath))
+            addLog("💾 Saved: \(s.name)")
+        }
+    }
+    
+    func loadScenarios() {
+        let fm = FileManager.default
+        guard fm.fileExists(atPath: scenarioDir),
+              let files = try? fm.contentsOfDirectory(atPath: scenarioDir) else { return }
+        
+        for file in files where file.hasSuffix(".json") {
+            let path = (scenarioDir as NSString).appendingPathComponent(file)
+            guard let data = fm.contents(atPath: path),
+                  let dict = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+                  let name = dict["name"] as? String else { continue }
+            
+            let scenario = ScenarioModel(name: name)
+            scenario.runCount = dict["runCount"] as? Int ?? 0
+            scenarios.append(scenario)
+        }
+    }
+    
+    // MARK: - Schedule
+    
+    func startSchedule(interval: Int) {
+        stopSchedule()
+        scheduleIntervalSeconds = interval
+        isScheduled = true
+        addLog("⏱ Schedule started: every \(interval)s")
+        scheduleTimer = Timer.scheduledTimer(withTimeInterval: TimeInterval(interval), repeats: true) { [weak self] _ in
+            Task { @MainActor in
+                await self?.runScenario()
+            }
+        }
+    }
+    
+    func stopSchedule() {
+        scheduleTimer?.invalidate()
+        scheduleTimer = nil
+        isScheduled = false
+    }
+    
+    // MARK: - Local Node Execution (no backend needed)
+    
+    func executeNodeLocally(_ node: ScenarioNode, input: String = "") async -> String {
+        switch node.type {
+        case .code:
+            return await runCodeLocally(language: node.config.codeLanguage, code: node.config.codeContent)
+        case .http:
+            return await runHTTPLocally(node.config)
+        case .delay:
+            try? await Task.sleep(nanoseconds: UInt64(node.config.delaySeconds) * 1_000_000_000)
+            return "⏱ Delayed \(node.config.delaySeconds)s"
+        case .trigger:
+            return "▶️ Triggered"
+        case .schedule:
+            return "🕐 Schedule trigger"
+        case .email:
+            return "📧 Email: To=\(node.config.emailTo) Subject=\(node.config.emailSubject)"
+        case .line:
+            return await sendLINELocally(node.config)
+        case .telegram:
+            return await sendTelegramLocally(node.config)
+        case .slack:
+            return await sendSlackLocally(node.config)
+        case .discord:
+            return await sendDiscordLocally(node.config)
+        case .openai, .gemini, .claude, .deepseek, .glm, .perplexity:
+            return await callAILocally(node.config, input: input)
+        case .transform:
+            return "🔄 Transform: \(node.config.transformExpression)"
+        case .filter:
+            return "🔍 Filter: \(node.config.filterCondition)"
+        default:
+            return "⚙️ \(node.type.rawValue) executed"
+        }
+    }
+    
+    private func runCodeLocally(language: String, code: String) async -> String {
+        let process = Process()
+        let pipe = Pipe()
+        let errPipe = Pipe()
+        process.standardOutput = pipe
+        process.standardError = errPipe
+        process.launchPath = "/bin/zsh"
+        
+        switch language {
+        case "python":
+            process.arguments = ["-c", "python3 -u -c \(shellEscape(code))"]
+        case "javascript":
+            process.arguments = ["-c", "node -e \(shellEscape(code))"]
+        default:
+            process.arguments = ["-c", "python3 -u -c \(shellEscape(code))"]
+        }
+        
+        do {
+            try process.run()
+            process.waitUntilExit()
+            let output = String(data: pipe.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? ""
+            let errOutput = String(data: errPipe.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? ""
+            if process.terminationStatus != 0 {
+                return "❌ Exit \(process.terminationStatus)\n\(errOutput)"
+            }
+            return output.isEmpty ? "(no output)" : output
+        } catch {
+            return "❌ \(error.localizedDescription)"
+        }
+    }
+    
+    private func shellEscape(_ s: String) -> String {
+        return "'" + s.replacingOccurrences(of: "'", with: "'\\''") + "'"
+    }
+    
+    private func runHTTPLocally(_ config: NodeConfig) async -> String {
+        guard let url = URL(string: config.httpUrl) else { return "❌ Invalid URL" }
+        var req = URLRequest(url: url)
+        req.httpMethod = config.httpMethod
+        req.timeoutInterval = TimeInterval(config.httpTimeout)
+        if !config.httpBody.isEmpty && config.httpMethod != "GET" {
+            req.httpBody = config.httpBody.data(using: .utf8)
+            req.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        }
+        do {
+            let (data, response) = try await URLSession.shared.data(for: req)
+            let status = (response as? HTTPURLResponse)?.statusCode ?? 0
+            let body = String(data: data, encoding: .utf8) ?? ""
+            let truncated = body.count > 2000 ? String(body.prefix(2000)) + "..." : body
+            return "✅ HTTP \(status)\n\(truncated)"
+        } catch {
+            return "❌ \(error.localizedDescription)"
+        }
+    }
+    
+    private func sendLINELocally(_ config: NodeConfig) async -> String {
+        guard !config.lineChannelToken.isEmpty else { return "❌ LINE Channel Token required" }
+        let url = URL(string: config.lineMessageType == "broadcast" ? "https://api.line.me/v2/bot/message/broadcast" : "https://api.line.me/v2/bot/message/push")!
+        var req = URLRequest(url: url)
+        req.httpMethod = "POST"
+        req.setValue("Bearer \(config.lineChannelToken)", forHTTPHeaderField: "Authorization")
+        req.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        
+        var body: [String: Any] = ["messages": [["type": "text", "text": config.lineMessage]]]
+        if config.lineMessageType == "push" {
+            body["to"] = config.lineUserId
+        }
+        req.httpBody = try? JSONSerialization.data(withJSONObject: body)
+        
+        do {
+            let (data, response) = try await URLSession.shared.data(for: req)
+            let status = (response as? HTTPURLResponse)?.statusCode ?? 0
+            return status == 200 ? "✅ LINE message sent" : "❌ LINE \(status): \(String(data: data, encoding: .utf8) ?? "")"
+        } catch {
+            return "❌ \(error.localizedDescription)"
+        }
+    }
+    
+    private func sendTelegramLocally(_ config: NodeConfig) async -> String {
+        guard !config.telegramBotToken.isEmpty else { return "❌ Bot Token required" }
+        let url = URL(string: "https://api.telegram.org/bot\(config.telegramBotToken)/sendMessage")!
+        var req = URLRequest(url: url)
+        req.httpMethod = "POST"
+        req.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        var body: [String: Any] = ["chat_id": config.telegramChatId, "text": config.telegramMessage]
+        if !config.telegramParseMode.isEmpty { body["parse_mode"] = config.telegramParseMode }
+        req.httpBody = try? JSONSerialization.data(withJSONObject: body)
+        do {
+            let (data, response) = try await URLSession.shared.data(for: req)
+            let status = (response as? HTTPURLResponse)?.statusCode ?? 0
+            return status == 200 ? "✅ Telegram sent" : "❌ Telegram \(status): \(String(data: data, encoding: .utf8) ?? "")"
+        } catch { return "❌ \(error.localizedDescription)" }
+    }
+    
+    private func sendSlackLocally(_ config: NodeConfig) async -> String {
+        guard !config.lineChannelToken.isEmpty else { return "❌ Slack Bot Token required" }
+        let url = URL(string: "https://slack.com/api/chat.postMessage")!
+        var req = URLRequest(url: url)
+        req.httpMethod = "POST"
+        req.setValue("Bearer \(config.lineChannelToken)", forHTTPHeaderField: "Authorization")
+        req.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        let body: [String: Any] = ["channel": config.lineGroupId, "text": config.lineMessage]
+        req.httpBody = try? JSONSerialization.data(withJSONObject: body)
+        do {
+            let (data, response) = try await URLSession.shared.data(for: req)
+            let status = (response as? HTTPURLResponse)?.statusCode ?? 0
+            return status == 200 ? "✅ Slack sent" : "❌ Slack \(status): \(String(data: data, encoding: .utf8) ?? "")"
+        } catch { return "❌ \(error.localizedDescription)" }
+    }
+    
+    private func sendDiscordLocally(_ config: NodeConfig) async -> String {
+        guard !config.lineChannelToken.isEmpty else { return "❌ Discord Bot Token required" }
+        let url = URL(string: "https://discord.com/api/v10/channels/\(config.lineGroupId)/messages")!
+        var req = URLRequest(url: url)
+        req.httpMethod = "POST"
+        req.setValue("Bot \(config.lineChannelToken)", forHTTPHeaderField: "Authorization")
+        req.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        let body: [String: Any] = ["content": config.lineMessage]
+        req.httpBody = try? JSONSerialization.data(withJSONObject: body)
+        do {
+            let (data, response) = try await URLSession.shared.data(for: req)
+            let status = (response as? HTTPURLResponse)?.statusCode ?? 0
+            return status == 200 ? "✅ Discord sent" : "❌ Discord \(status): \(String(data: data, encoding: .utf8) ?? "")"
+        } catch { return "❌ \(error.localizedDescription)" }
+    }
+    
+    private func callAILocally(_ config: NodeConfig, input: String) async -> String {
+        let key = config.aiApiKey
+        guard !key.isEmpty else { return "❌ API Key required" }
+        
+        var apiUrl: String
+        var model: String
+        var bodyDict: [String: Any]
+        
+        switch config.aiProvider {
+        case "chatgpt":
+            apiUrl = "https://api.openai.com/v1/chat/completions"
+            model = "gpt-4o-mini"
+            bodyDict = [
+                "model": model,
+                "messages": [
+                    ["role": "system", "content": config.aiSystemPrompt.isEmpty ? "You are a helpful assistant." : config.aiSystemPrompt],
+                    ["role": "user", "content": config.aiPrompt.isEmpty ? input : config.aiPrompt]
+                ],
+                "max_tokens": config.aiMaxTokens,
+                "temperature": config.aiTemperature
+            ]
+        case "gemini":
+            apiUrl = "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key=\(key)"
+            bodyDict = ["contents": [["parts": [["text": config.aiPrompt.isEmpty ? input : config.aiPrompt]]]]]
+        case "claude":
+            apiUrl = "https://api.anthropic.com/v1/messages"
+            bodyDict = [
+                "model": "claude-sonnet-4-20250514",
+                "max_tokens": config.aiMaxTokens,
+                "messages": [["role": "user", "content": config.aiPrompt.isEmpty ? input : config.aiPrompt]]
+            ]
+        case "deepseek":
+            apiUrl = "https://api.deepseek.com/chat/completions"
+            bodyDict = [
+                "model": "deepseek-chat",
+                "messages": [["role": "user", "content": config.aiPrompt.isEmpty ? input : config.aiPrompt]],
+                "max_tokens": config.aiMaxTokens
+            ]
+        default:
+            return "❌ Unsupported provider: \(config.aiProvider)"
+        }
+        
+        guard let url = URL(string: apiUrl) else { return "❌ Invalid API URL" }
+        var req = URLRequest(url: url)
+        req.httpMethod = "POST"
+        req.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        
+        if config.aiProvider == "claude" {
+            req.setValue(key, forHTTPHeaderField: "x-api-key")
+            req.setValue("2023-06-01", forHTTPHeaderField: "anthropic-version")
+        } else if config.aiProvider != "gemini" {
+            req.setValue("Bearer \(key)", forHTTPHeaderField: "Authorization")
+        }
+        
+        req.httpBody = try? JSONSerialization.data(withJSONObject: bodyDict)
+        req.timeoutInterval = 60
+        
+        do {
+            let (data, response) = try await URLSession.shared.data(for: req)
+            let status = (response as? HTTPURLResponse)?.statusCode ?? 0
+            if status != 200 {
+                return "❌ AI \(status): \(String(data: data, encoding: .utf8) ?? "")"
+            }
+            let json = try JSONSerialization.jsonObject(with: data) as? [String: Any]
+            
+            // Extract response text
+            if let choices = json?["choices"] as? [[String: Any]],
+               let message = choices.first?["message"] as? [String: Any],
+               let content = message["content"] as? String {
+                return content
+            }
+            if let content = json?["content"] as? [[String: Any]],
+               let text = content.first?["text"] as? String {
+                return text
+            }
+            if let candidates = json?["candidates"] as? [[String: Any]],
+               let parts = (candidates.first?["content"] as? [String: Any])?["parts"] as? [[String: Any]],
+               let text = parts.first?["text"] as? String {
+                return text
+            }
+            return String(data: data, encoding: .utf8) ?? "(no response)"
+        } catch {
+            return "❌ \(error.localizedDescription)"
+        }
+    }
     
     func runScenario() async {
         guard let scenario = activeScenario else { return }
         
         isRunning = true
         scenario.isRunning = true
+        scenario.runCount += 1
         addLog("🚀 Starting scenario: \(scenario.name)...")
         
-        // Prepare DTO
-        let nodesDTO = scenario.nodes.map { node in
-            ScenarioNodeDTO(
-                id: node.id.uuidString,
-                nodeType: node.type.rawValue, // or lowercase? Rust expects string match
-                name: node.name,
-                config: node.config
-            )
-        }
+        // Build execution order from connections (topological sort)
+        let executionOrder = buildExecutionOrder(scenario)
+        var lastOutput = ""
+        var hasFailure = false
         
-        let connectionsDTO = scenario.connections.map { conn in
-            ScenarioConnectionDTO(
-                id: conn.id.uuidString,
-                sourceNodeId: conn.sourceNodeId.uuidString,
-                targetNodeId: conn.targetNodeId.uuidString
-            )
-        }
-        
-        let request = ScenarioExecuteRequest(
-            id: scenario.id.uuidString,
-            name: scenario.name,
-            nodes: nodesDTO,
-            connections: connectionsDTO
-        )
-        
-        // Send to Backend
-        do {
-            let url = URL(string: "http://localhost:3000/api/scenario/execute")!
-            var urlRequest = URLRequest(url: url)
-            urlRequest.httpMethod = "POST"
-            urlRequest.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        for node in executionOrder {
+            addLog("▶️ \(node.name)...")
+            let result = await executeNodeLocally(node, input: lastOutput)
+            node.lastOutput = result
             
-            let encoder = JSONEncoder()
-            encoder.keyEncodingStrategy = .convertToSnakeCase
-            urlRequest.httpBody = try encoder.encode(request)
-            
-            let (data, response) = try await URLSession.shared.data(for: urlRequest)
-            
-            guard let httpResponse = response as? HTTPURLResponse, httpResponse.statusCode == 200 else {
-                let errorMsg = String(data: data, encoding: .utf8) ?? "Unknown error"
-                addLog("❌ Backend execution failed: \(errorMsg)")
-                isRunning = false
-                scenario.isRunning = false
-                return
+            if result.hasPrefix("❌") {
+                node.hasError = true
+                hasFailure = true
+                addLog("❌ \(node.name): \(result)")
+                break // Stop on error
+            } else {
+                node.hasError = false
+                lastOutput = result
+                addLog("✅ \(node.name): \(String(result.prefix(200)))")
             }
+        }
+        
+        isRunning = false
+        scenario.isRunning = false
+        addLog(hasFailure ? "❌ Scenario failed" : "✅ Scenario completed (\(executionOrder.count) nodes)")
+        saveScenario()
+    }
+    
+    private func buildExecutionOrder(_ scenario: ScenarioModel) -> [ScenarioNode] {
+        // Find root nodes (no incoming connections)
+        let targetIds = Set(scenario.connections.map { $0.targetNodeId })
+        var roots = scenario.nodes.filter { !targetIds.contains($0.id) }
+        if roots.isEmpty { roots = scenario.nodes }
+        
+        // BFS from roots
+        var ordered: [ScenarioNode] = []
+        var visited = Set<UUID>()
+        var queue = roots
+        
+        while !queue.isEmpty {
+            let node = queue.removeFirst()
+            guard !visited.contains(node.id) else { continue }
+            visited.insert(node.id)
+            ordered.append(node)
             
-            // decode result
-                let decoder = JSONDecoder()
-                decoder.keyDecodingStrategy = .convertFromSnakeCase
-                let executionResult = try decoder.decode(ScenarioExecutionResult.self, from: data)
-                
-                // Update UI with logs and results
-                DispatchQueue.main.async {
-                    self.logs = executionResult.logs.map { ScenarioLog(timestamp: Date(), message: $0) }
-                    
-                    // Update last output for nodes
-                    for nodeResult in executionResult.nodeResults {
-                        if let node = scenario.nodes.first(where: { $0.id.uuidString == nodeResult.nodeId }) {
-                            node.hasError = !nodeResult.success
-                            // node.lastOutput = nodeResult.output // Need to handle AnyCodable
-                            if let output = nodeResult.output {
-                                node.lastOutput = self.jsonString(from: output)
-                            }
-                        }
-                    }
-                    
-                    self.isRunning = false
-                    scenario.isRunning = false
-                    self.addLog(executionResult.success ? "✅ Scenario completed successfully" : "❌ Scenario failed")
-                }
-                
-            } catch {
-                DispatchQueue.main.async {
-                    self.addLog("❌ API Error: \(error.localizedDescription)")
-                    self.isRunning = false
-                    scenario.isRunning = false
+            // Find children
+            let childIds = scenario.connections.filter { $0.sourceNodeId == node.id }.map { $0.targetNodeId }
+            for childId in childIds {
+                if let child = scenario.nodes.first(where: { $0.id == childId }) {
+                    queue.append(child)
                 }
             }
         }
+        
+        // Add any unconnected nodes
+        for node in scenario.nodes where !visited.contains(node.id) {
+            ordered.append(node)
+        }
+        
+        return ordered
+    }
 
     
     func executeSingleNode(_ node: ScenarioNode) async {
         addLog("▶️ Testing node: \(node.name)...")
         
-        let nodeDTO = ScenarioNodeDTO(
-            id: node.id.uuidString,
-            nodeType: node.type.rawValue,
-            name: node.name,
-            config: node.config
-        )
+        let result = await executeNodeLocally(node)
+        node.lastOutput = result
         
-        // Mock input for testing (empty or previous node result?)
-        // For simple testing, we send empty input, or the user might want to provide input JSON in the future.
-        // For now, let's assume empty input for standalone test.
-        _ = [String: AnyCodable]() 
-        
-        _ = [
-            "node": try! JSONEncoder().encode(nodeDTO), // This will be nested JSON string? No, allow Encodable
-             // Rust expects a body with node and input... wait, let's check Rust handler.
-             "input": [String: AnyCodable]()
-        ] as [String : Any]// Actually, let's check Rust endpoint structure. 
-        // Rust: axum::Json(payload): axum::Json<ExecuteNodeRequest>
-        // struct ExecuteNodeRequest { node: ScenarioNode, input: Option<serde_json::Value> }
-        
-        struct ExecuteNodeRequest: Encodable {
-            let node: ScenarioNodeDTO
-            let input: AnyCodable?
-        }
-        
-        let requestPayload = ExecuteNodeRequest(node: nodeDTO, input: nil)
-        
-        do {
-            let url = URL(string: "http://localhost:3000/api/scenario/node/execute")!
-            var urlRequest = URLRequest(url: url)
-            urlRequest.httpMethod = "POST"
-            urlRequest.setValue("application/json", forHTTPHeaderField: "Content-Type")
-            
-            let encoder = JSONEncoder()
-            encoder.keyEncodingStrategy = .convertToSnakeCase
-            urlRequest.httpBody = try encoder.encode(requestPayload)
-            
-            let (data, response) = try await URLSession.shared.data(for: urlRequest)
-            
-            guard let httpResponse = response as? HTTPURLResponse, httpResponse.statusCode == 200 else {
-                let errorMsg = String(data: data, encoding: .utf8) ?? "Unknown error"
-                DispatchQueue.main.async { self.addLog("❌ Test failed: \(errorMsg)") }
-                return
-            }
-            
-            // Decode ExecutionResult (Rust: ExecutionResult)
-            let decoder = JSONDecoder()
-            decoder.keyDecodingStrategy = .convertFromSnakeCase
-            let result = try decoder.decode(NodeExecutionResult.self, from: data)
-            
-            DispatchQueue.main.async {
-                node.hasError = !result.success
-                if let output = result.output {
-                    let outputStr = self.jsonString(from: output)
-                    node.lastOutput = outputStr
-                    self.addLog(outputStr)
-                }
-                self.addLog(result.success ? "✅ Test passed" : "❌ Test failed: \(result.error ?? "")")
-            }
-            
-        } catch {
-            DispatchQueue.main.async {
-                self.addLog("❌ Error: \(error.localizedDescription)")
-            }
+        if result.hasPrefix("❌") {
+            node.hasError = true
+            addLog("❌ Test failed: \(result)")
+        } else {
+            node.hasError = false
+            addLog("✅ Test passed: \(String(result.prefix(300)))")
         }
     }
+    
     
     private func jsonString(from anyCodable: AnyCodable) -> String {
         let encoder = JSONEncoder()

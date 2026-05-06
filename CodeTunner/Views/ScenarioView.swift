@@ -32,6 +32,15 @@ struct ScenarioView: View {
     @State private var isAddingConnection = false
     @State private var connectionSourceNode: ScenarioNode?
     
+    // New features
+    @State private var isEditingName = false
+    @State private var editingName = ""
+    @State private var showScheduleSheet = false
+    @State private var scheduleMinutes = 5
+    @State private var isPresentMode = false
+    @State private var showNewScenarioSheet = false
+    @State private var newScenarioName = ""
+    
     var body: some View {
         VStack(spacing: 0) {
             // Top Toolbar
@@ -65,25 +74,69 @@ struct ScenarioView: View {
     // MARK: - Toolbar
     
     private var scenarioToolbar: some View {
-        HStack(spacing: 16) {
-            // Scenario name
-            HStack(spacing: 8) {
-                Image(systemName: "flowchart.fill")
-                    .font(.system(size: 18))
-                    .foregroundColor(.orange)
-                
-                Text(manager.activeScenario?.name ?? "Untitled")
-                    .font(.system(size: 15, weight: .semibold))
+        HStack(spacing: 12) {
+            // Scenario Switcher
+            Menu {
+                ForEach(manager.scenarios, id: \.id) { scenario in
+                    Button(action: { manager.activeScenario = scenario }) {
+                        HStack {
+                            Text(scenario.name)
+                            if scenario.id == manager.activeScenario?.id {
+                                Image(systemName: "checkmark")
+                            }
+                        }
+                    }
+                }
+                Divider()
+                Button("New Scenario...") {
+                    newScenarioName = ""
+                    showNewScenarioSheet = true
+                }
+            } label: {
+                HStack(spacing: 6) {
+                    Image(systemName: "flowchart.fill")
+                        .font(.system(size: 16))
+                        .foregroundColor(.orange)
+                    
+                    if isEditingName {
+                        TextField("Name", text: $editingName, onCommit: {
+                            manager.activeScenario?.name = editingName
+                            isEditingName = false
+                        })
+                        .textFieldStyle(.plain)
+                        .font(.system(size: 14, weight: .semibold))
+                        .frame(width: 160)
+                    } else {
+                        Text(manager.activeScenario?.name ?? "Untitled")
+                            .font(.system(size: 14, weight: .semibold))
+                            .onTapGesture(count: 2) {
+                                editingName = manager.activeScenario?.name ?? ""
+                                isEditingName = true
+                            }
+                    }
+                    
+                    Image(systemName: "chevron.down")
+                        .font(.system(size: 9))
+                        .foregroundColor(.secondary)
+                }
             }
+            .menuStyle(.borderlessButton)
             
-            // Node count badge
-            if let count = manager.activeScenario?.nodes.count, count > 0 {
-                Text("\(count)")
-                    .font(.system(size: 11, weight: .medium))
-                    .padding(.horizontal, 8)
-                    .padding(.vertical, 2)
-                    .background(Color.orange.opacity(0.2))
-                    .cornerRadius(10)
+            // Node count + run count
+            if let scenario = manager.activeScenario {
+                if !scenario.nodes.isEmpty {
+                    Text("\(scenario.nodes.count) nodes")
+                        .font(.system(size: 10, weight: .medium))
+                        .padding(.horizontal, 8)
+                        .padding(.vertical, 3)
+                        .background(Color.orange.opacity(0.15))
+                        .cornerRadius(10)
+                }
+                if scenario.runCount > 0 {
+                    Text("×\(scenario.runCount)")
+                        .font(.system(size: 10, weight: .medium))
+                        .foregroundColor(.green)
+                }
             }
             
             Spacer()
@@ -94,21 +147,54 @@ struct ScenarioView: View {
                     Image(systemName: node.icon)
                         .foregroundColor(node.color)
                     Text("Click canvas to place: \(node.rawValue)")
-                        .font(.system(size: 12))
-                    
-                    Button("Cancel") {
-                        selectedPaletteNode = nil
-                    }
-                    .buttonStyle(.bordered)
-                    .controlSize(.small)
+                        .font(.system(size: 11))
+                    Button("Cancel") { selectedPaletteNode = nil }
+                        .buttonStyle(.bordered)
+                        .controlSize(.small)
                 }
-                .padding(.horizontal, 12)
-                .padding(.vertical, 6)
+                .padding(.horizontal, 10)
+                .padding(.vertical, 5)
                 .background(node.color.opacity(0.1))
                 .cornerRadius(8)
             }
             
             Spacer()
+            
+            // Schedule indicator
+            if manager.isScheduled {
+                HStack(spacing: 4) {
+                    Circle()
+                        .fill(Color.green)
+                        .frame(width: 6, height: 6)
+                    Text("Every \(manager.scheduleIntervalSeconds)s")
+                        .font(.system(size: 10))
+                        .foregroundColor(.green)
+                }
+                .padding(.horizontal, 8)
+                .padding(.vertical, 4)
+                .background(Color.green.opacity(0.1))
+                .cornerRadius(6)
+            }
+            
+            // Save
+            Button(action: { manager.saveScenario() }) {
+                Image(systemName: "square.and.arrow.down")
+                    .font(.system(size: 13))
+            }
+            .buttonStyle(.plain)
+            .help("Save Scenario")
+            
+            // Schedule
+            Button(action: { showScheduleSheet.toggle() }) {
+                Image(systemName: manager.isScheduled ? "clock.fill" : "clock")
+                    .font(.system(size: 13))
+                    .foregroundColor(manager.isScheduled ? .green : .secondary)
+            }
+            .buttonStyle(.plain)
+            .help("Schedule")
+            .popover(isPresented: $showScheduleSheet) {
+                schedulePopover
+            }
             
             // Panel toggles
             Button(action: { showNodeSettings.toggle() }) {
@@ -125,35 +211,107 @@ struct ScenarioView: View {
             .buttonStyle(.plain)
             .help("Logs")
             
-            Divider()
-                .frame(height: 20)
+            Divider().frame(height: 18)
+            
+            // Present Mode
+            Button(action: { isPresentMode.toggle() }) {
+                Image(systemName: isPresentMode ? "rectangle.inset.filled" : "rectangle.expand.vertical")
+                    .font(.system(size: 12))
+            }
+            .buttonStyle(.plain)
+            .help("Present Mode")
             
             // Run button
             Button(action: {
-                Task { await manager.runScenario() }
+                if manager.isRunning {
+                    manager.isRunning = false
+                } else {
+                    Task { await manager.runScenario() }
+                }
             }) {
-                HStack(spacing: 6) {
+                HStack(spacing: 5) {
                     Image(systemName: manager.isRunning ? "stop.fill" : "play.fill")
                     Text(manager.isRunning ? "Stop" : "Run")
                 }
                 .font(.system(size: 12, weight: .medium))
-                .padding(.horizontal, 16)
-                .padding(.vertical, 8)
+                .padding(.horizontal, 14)
+                .padding(.vertical, 7)
             }
             .buttonStyle(.borderedProminent)
             .tint(.green)
             .disabled(manager.activeScenario?.nodes.isEmpty ?? true)
             
-            // Clear button
+            // Clear
             Button(action: clearCanvas) {
                 Image(systemName: "trash")
                     .foregroundColor(.red)
+                    .font(.system(size: 12))
             }
             .buttonStyle(.plain)
             .help("Clear Canvas")
         }
-        .padding(.horizontal, 20)
-        .padding(.vertical, 12)
+        .padding(.horizontal, 16)
+        .padding(.vertical, 10)
+        .sheet(isPresented: $showNewScenarioSheet) {
+            VStack(spacing: 16) {
+                Text("New Scenario")
+                    .font(.headline)
+                TextField("Scenario Name", text: $newScenarioName)
+                    .textFieldStyle(.roundedBorder)
+                HStack {
+                    Button("Cancel") { showNewScenarioSheet = false }
+                    Spacer()
+                    Button("Create") {
+                        if !newScenarioName.isEmpty {
+                            let s = manager.createScenario(name: newScenarioName)
+                            manager.activeScenario = s
+                            showNewScenarioSheet = false
+                        }
+                    }
+                    .buttonStyle(.borderedProminent)
+                    .disabled(newScenarioName.isEmpty)
+                }
+            }
+            .padding(24)
+            .frame(width: 350)
+        }
+    }
+    
+    // MARK: - Schedule Popover
+    
+    private var schedulePopover: some View {
+        VStack(spacing: 14) {
+            Text("⏱ Schedule")
+                .font(.system(size: 13, weight: .semibold))
+            
+            Picker("Interval", selection: $scheduleMinutes) {
+                Text("30 sec").tag(1) // 30s mapped as 1 for simplicity
+                Text("1 min").tag(1)
+                Text("5 min").tag(5)
+                Text("15 min").tag(15)
+                Text("30 min").tag(30)
+                Text("1 hour").tag(60)
+            }
+            .pickerStyle(.segmented)
+            
+            if manager.isScheduled {
+                Button("Stop Schedule") {
+                    manager.stopSchedule()
+                    showScheduleSheet = false
+                }
+                .buttonStyle(.bordered)
+                .tint(.red)
+            } else {
+                Button("Start Schedule") {
+                    manager.startSchedule(interval: scheduleMinutes * 60)
+                    showScheduleSheet = false
+                }
+                .buttonStyle(.borderedProminent)
+                .tint(.green)
+            }
+        }
+        .padding(16)
+        .frame(width: 280)
     }
     
     // MARK: - Node Palette (n8n style)
