@@ -1,0 +1,11 @@
+{
+  "mcpServers": {
+    "microcode": {
+      "command": "python3",
+      "args": ["REPLACE_WITH_ABSOLUTE_PATH/mcp-server.py"],
+      "env": {
+        "MICROCODE_WORKSPACE": "REPLACE_WITH_YOUR_PROJECT_PATH"
+      }
+    }
+  }
+}
