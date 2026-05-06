@@ -155,86 +155,93 @@ struct AIAgentView: View {
     
     private var headerBar: some View {
         VStack(spacing: 0) {
-            HStack(spacing: 6) {
-                // Sidebar Toggle
-                Button(action: { agent.showChatSidebar.toggle() }) {
-                    Image(systemName: "sidebar.left")
-                        .font(.system(size: 11))
-                        .foregroundColor(agent.showChatSidebar ? .accentColor : .secondary)
-                        .frame(width: 24, height: 24)
-                }
-                .buttonStyle(.plain)
-                .help("Chat History")
+            GeometryReader { geo in
+                let isCompact = geo.size.width < 320
                 
-                // New Chat
-                Button(action: { _ = agent.createNewChat() }) {
-                    Image(systemName: "plus.message")
-                        .font(.system(size: 11))
-                        .foregroundColor(.secondary)
-                        .frame(width: 24, height: 24)
-                }
-                .buttonStyle(.plain)
-                .help("New Chat")
-                
-                Spacer()
-                
-                // Mode pills (compact)
-                HStack(spacing: 2) {
-                    modePill("Chat", icon: "bubble.left.fill", isActive: !isPaperMode && !isCellMode && !isPlanMode && !isTaskMode) {
-                        isPaperMode = false; isCellMode = false; isPlanMode = false; isTaskMode = false
-                    }
-                    modePill("Plan", icon: "list.bullet.clipboard.fill", isActive: isPlanMode) {
-                        isPlanMode = true; isPaperMode = false; isCellMode = false; isTaskMode = false
-                    }
-                    modePill("Task", icon: "doc.badge.gearshape.fill", isActive: isTaskMode) {
-                        isTaskMode = true; isPlanMode = false; isPaperMode = false; isCellMode = false
-                    }
-                    modePill("Report", icon: "doc.text.fill", isActive: isPaperMode) {
-                        isPaperMode = true; isCellMode = false; isPlanMode = false; isTaskMode = false
-                    }
-                    modePill("Cells", icon: "rectangle.grid.1x2.fill", isActive: isCellMode) {
-                        isCellMode = true; isPaperMode = false; isPlanMode = false; isTaskMode = false
-                    }
-                }
-                .padding(2)
-                .background(Color.white.opacity(0.04))
-                .cornerRadius(6)
-                
-                Spacer()
-                
-                // Compact actions
                 HStack(spacing: 4) {
-                    modelSelector
-                    
-                    Menu {
-                        Button { Task { await appState.microCodeService?.indexProject() } } label: {
-                            Label("Index Project", systemImage: "database")
-                        }
-                        Divider()
-                        Button {
-                            if agent.messages.count >= 2 {
-                                agent.messages.removeLast(2)
-                                agent.saveChats()
-                            }
-                        } label: { Label("Undo Last", systemImage: "arrow.uturn.backward") }
-                        Button(role: .destructive) {
-                            agent.clearCurrentChat()
-                            attachments.removeAll()
-                        } label: { Label("Clear Chat", systemImage: "trash") }
-                    } label: {
-                        Image(systemName: "ellipsis")
-                            .font(.system(size: 10))
-                            .foregroundColor(.secondary)
-                            .frame(width: 24, height: 24)
-                            .background(Color.white.opacity(0.04))
-                            .cornerRadius(4)
+                    // Sidebar Toggle
+                    Button(action: { agent.showChatSidebar.toggle() }) {
+                        Image(systemName: "sidebar.left")
+                            .font(.system(size: 11))
+                            .foregroundColor(agent.showChatSidebar ? .accentColor : .secondary)
+                            .frame(width: 26, height: 26)
                     }
-                    .menuStyle(.borderlessButton)
-                    .frame(width: 24)
+                    .buttonStyle(.plain)
+                    .help("Chat History")
+                    
+                    // New Chat
+                    Button(action: { _ = agent.createNewChat() }) {
+                        Image(systemName: "plus.message")
+                            .font(.system(size: 11))
+                            .foregroundColor(.secondary)
+                            .frame(width: 26, height: 26)
+                    }
+                    .buttonStyle(.plain)
+                    .help("New Chat")
+                    
+                    Divider().frame(height: 16).padding(.horizontal, 2)
+                    
+                    // Mode Tabs — responsive: icon-only when compact
+                    ScrollView(.horizontal, showsIndicators: false) {
+                        HStack(spacing: 1) {
+                            modePill("Chat", icon: "bubble.left.fill", isActive: !isPaperMode && !isCellMode && !isPlanMode && !isTaskMode, compact: isCompact) {
+                                isPaperMode = false; isCellMode = false; isPlanMode = false; isTaskMode = false
+                            }
+                            modePill("Plan", icon: "list.clipboard.fill", isActive: isPlanMode, compact: isCompact) {
+                                isPlanMode = true; isPaperMode = false; isCellMode = false; isTaskMode = false
+                            }
+                            modePill("Task", icon: "checkmark.circle.fill", isActive: isTaskMode, compact: isCompact) {
+                                isTaskMode = true; isPlanMode = false; isPaperMode = false; isCellMode = false
+                            }
+                            modePill("Report", icon: "doc.text.fill", isActive: isPaperMode, compact: isCompact) {
+                                isPaperMode = true; isCellMode = false; isPlanMode = false; isTaskMode = false
+                            }
+                            modePill("Cells", icon: "rectangle.grid.1x2.fill", isActive: isCellMode, compact: isCompact) {
+                                isCellMode = true; isPaperMode = false; isPlanMode = false; isTaskMode = false
+                            }
+                        }
+                        .padding(2)
+                        .background(Color.white.opacity(0.04))
+                        .cornerRadius(6)
+                    }
+                    
+                    Spacer(minLength: 4)
+                    
+                    // Model Selector + Menu
+                    HStack(spacing: 2) {
+                        modelSelector
+                        
+                        Menu {
+                            Button { Task { await appState.microCodeService?.indexProject() } } label: {
+                                Label("Index Project", systemImage: "database")
+                            }
+                            Divider()
+                            Button {
+                                if agent.messages.count >= 2 {
+                                    agent.messages.removeLast(2)
+                                    agent.saveChats()
+                                }
+                            } label: { Label("Undo Last", systemImage: "arrow.uturn.backward") }
+                            Button(role: .destructive) {
+                                agent.clearCurrentChat()
+                                attachments.removeAll()
+                            } label: { Label("Clear Chat", systemImage: "trash") }
+                        } label: {
+                            Image(systemName: "ellipsis")
+                                .font(.system(size: 10))
+                                .foregroundColor(.secondary)
+                                .frame(width: 24, height: 24)
+                                .background(Color.white.opacity(0.04))
+                                .cornerRadius(4)
+                        }
+                        .menuStyle(.borderlessButton)
+                        .frame(width: 24)
+                    }
                 }
+                .padding(.horizontal, 8)
+                .padding(.vertical, 5)
             }
-            .padding(.horizontal, 10)
-            .padding(.vertical, 6)
+            .frame(height: 36)
             .background(paneColor)
             
             Rectangle()
@@ -243,21 +250,24 @@ struct AIAgentView: View {
         }
     }
     
-    private func modePill(_ label: String, icon: String, isActive: Bool, action: @escaping () -> Void) -> some View {
+    private func modePill(_ label: String, icon: String, isActive: Bool, compact: Bool = false, action: @escaping () -> Void) -> some View {
         Button(action: { withAnimation(.easeInOut(duration: 0.2)) { action() } }) {
-            HStack(spacing: 3) {
+            HStack(spacing: compact ? 0 : 3) {
                 Image(systemName: icon)
-                    .font(.system(size: 8))
-                Text(label)
-                    .font(.system(size: 9, weight: .medium))
+                    .font(.system(size: 9))
+                if !compact {
+                    Text(label)
+                        .font(.system(size: 9, weight: .medium))
+                }
             }
             .foregroundColor(isActive ? .white : .secondary)
-            .padding(.horizontal, 8)
+            .padding(.horizontal, compact ? 6 : 8)
             .padding(.vertical, 4)
             .background(isActive ? Color.accentColor.opacity(0.8) : Color.clear)
             .cornerRadius(4)
         }
         .buttonStyle(.plain)
+        .help(label)
     }
     
     // MARK: - Implementation Plan View
@@ -1016,31 +1026,32 @@ struct AIAgentView: View {
         Menu {
             modelMenuContent
         } label: {
-            HStack(spacing: 5) {
+            HStack(spacing: 4) {
                 // Provider icon with color
                 providerIcon(for: appState.aiProvider)
-                    .font(.system(size: 10, weight: .semibold))
+                    .font(.system(size: 9, weight: .semibold))
                 
                 Text(appState.aiModel.isEmpty ? "Auto" : shortModelName(appState.aiModel))
-                    .font(.system(size: 10, weight: .medium))
+                    .font(.system(size: 9, weight: .medium))
                     .lineLimit(1)
+                    .truncationMode(.tail)
                 
                 // Connection status dot
                 Circle()
                     .fill(hasActiveKey(appState.aiProvider) ? Color.green : Color.orange)
-                    .frame(width: 5, height: 5)
+                    .frame(width: 4, height: 4)
                 
                 Image(systemName: "chevron.down")
-                    .font(.system(size: 7))
+                    .font(.system(size: 6))
             }
             .foregroundColor(.secondary)
-            .padding(.horizontal, 8)
+            .padding(.horizontal, 6)
             .padding(.vertical, 4)
             .background(Color.white.opacity(0.05))
             .cornerRadius(4)
         }
         .menuStyle(.borderlessButton)
-        .fixedSize()
+        .frame(maxWidth: 130)
         .help("Select AI Model")
     }
     
