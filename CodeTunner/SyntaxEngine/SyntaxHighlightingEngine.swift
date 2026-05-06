@@ -855,11 +855,11 @@ public struct SyntaxHighlightedCodeView: NSViewRepresentable {
         // Ensure default text color is set immediately in makeNSView
         textView.textColor = engine.themeManager.editorForegroundColor
         
-        // Disable Line Numbers to restore text visibility immediately
-        // let rulerView = LineNumberRulerView(textView: textView, scrollView: scrollView)
-        // scrollView.verticalRulerView = rulerView
-        // scrollView.hasVerticalRuler = true
-        // scrollView.rulersVisible = true
+        // Line Numbers
+        let rulerView = LineNumberRulerView(textView: textView, scrollView: scrollView)
+        scrollView.verticalRulerView = rulerView
+        scrollView.hasVerticalRuler = true
+        scrollView.rulersVisible = true
         
         scrollView.hasVerticalScroller = isScrollEnabled
         scrollView.hasHorizontalScroller = isScrollEnabled
