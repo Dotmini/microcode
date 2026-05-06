@@ -1,0 +1,11 @@
+{
+  "id": "cell_imports",
+  "language": "python",
+  "code": "\nimport numpy as np\nimport matplotlib\nmatplotlib.use('Agg')\nimport matplotlib.pyplot as plt\nfrom sklearn.datasets import make_classification\nfrom sklearn.model_selection import train_test_split\nfrom sklearn.preprocessing import StandardScaler\n\n# \u2500\u2500 \u0e2a\u0e23\u0e49\u0e32\u0e07 Dataset \u0e08\u0e33\u0e25\u0e2d\u0e07 (Binary Classification) \u2500\u2500\nnp.random.seed(42)\nX, y = make_classification(\n    n_samples=1000,\n    n_features=10,\n    n_informative=6,\n    n_redundant=2,\n    n_classes=2,\n    random_state=42\n)\n\nprint(\"=\" * 45)\nprint(\"  \ud83d\udcca  DATASET OVERVIEW\")\nprint(\"=\" * 45)\nprint(f\"  Total samples  : {X.shape[0]:,}\")\nprint(f\"  Features       : {X.shape[1]}\")\nprint(f\"  Class 0 (neg)  : {(y == 0).sum():,} samples\")\nprint(f\"  Class 1 (pos)  : {(y == 1).sum():,} samples\")\nprint(\"=\" * 45)\n",
+  "output": "=============================================\n  \ud83d\udcca  DATASET OVERVIEW\n=============================================\n  Total samples  : 1,000\n  Features       : 10\n  Class 0 (neg)  : 498 samples\n  Class 1 (pos)  : 502 samples\n=============================================\n",
+  "status": "success",
+  "color": "blue",
+  "title": "\ud83d\udce6 Import Libraries & Generate Dataset",
+  "created_at": "2026-05-07T02:21:32.469950",
+  "updated_at": "2026-05-07T02:21:42.414361"
+}
