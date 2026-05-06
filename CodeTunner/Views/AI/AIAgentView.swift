@@ -69,7 +69,7 @@ struct AIAgentView: View {
                         
                         ZStack(alignment: .bottom) {
                             // Chat Scroll
-                            AgentChatStage(messages: agent.messages, isLoading: agent.isLoading, currentToolExecution: agent.currentToolExecution, onApplyChange: { change in applyChange(change) }, onRejectChange: { change in rejectChange(change) })
+                            AgentChatStage(messages: agent.messages, isLoading: agent.isLoading, currentToolExecution: agent.currentToolExecution, onApplyChange: { change in applyChange(change) }, onRejectChange: { change in rejectChange(change) }, onSuggestionTap: { suggestion in inputText = suggestion; sendMessage() })
                             
                             VStack(spacing: 0) {
                                 // Suggested Action (after completion)
@@ -1830,6 +1830,7 @@ struct AgentChatStage: View {
     var currentToolExecution: String? = nil
     var onApplyChange: ((PendingChangeModel) -> Void)? = nil
     var onRejectChange: ((PendingChangeModel) -> Void)? = nil
+    var onSuggestionTap: ((String) -> Void)? = nil
     
     var body: some View {
         ScrollViewReader { proxy in
@@ -1879,8 +1880,7 @@ struct AgentChatStage: View {
                                     ("Write unit tests", "checkmark.shield")
                                 ], id: \.0) { suggestion, icon in
                                     Button(action: {
-                                        inputText = suggestion
-                                        sendMessage()
+                                        onSuggestionTap?(suggestion)
                                     }) {
                                         HStack(spacing: 8) {
                                             Image(systemName: icon)
