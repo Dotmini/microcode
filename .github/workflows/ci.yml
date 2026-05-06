@@ -237,8 +237,8 @@ jobs:
           if [ -d "Dist" ]; then
             cp -R Dist/* build-output/ 2>/dev/null || true
           fi
-          # Generate artifact checksums
-          find build-output -type f \( -name "*.dmg" -o -name "*.pkg" -o -name "*.app" -o -name "*.zip" \) | while read f; do
+          # Generate artifact checksums (only MicroCode artifacts)
+          find build-output -maxdepth 1 -type f \( -name "microcode_*" -o -name "MicroCode_*" -o -name "*.dmg" -o -name "*.pkg" \) | while read f; do
             shasum -a 256 "$f"
           done > build-output/ARTIFACT_CHECKSUMS.txt 2>/dev/null || true
           echo "📦 Build artifacts:"
@@ -248,9 +248,7 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: dist-${{ steps.version.outputs.version }}-${{ steps.version.outputs.short_sha }}
-          path: |
-            Dist/
-            build-output/
+          path: build-output/
           retention-days: 14
           if-no-files-found: warn
 
@@ -381,7 +379,8 @@ jobs:
           echo "# MicroCode v${VERSION} — SHA256 Checksums" > SHA256SUMS.txt
           echo "# Generated: $(date -u +%Y-%m-%dT%H:%M:%SZ)" >> SHA256SUMS.txt
           echo "" >> SHA256SUMS.txt
-          find artifacts/ -type f \( -name "*.dmg" -o -name "*.pkg" -o -name "*.zip" \) | sort | while read f; do
+          # Only checksum actual MicroCode release artifacts (not dependency test fixtures)
+          find artifacts/ -maxdepth 2 -type f \( -name "microcode_*" -o -name "MicroCode_*" \) \( -name "*.dmg" -o -name "*.pkg" \) | sort | while read f; do
             sha256sum "$f" >> SHA256SUMS.txt
           done
           cat SHA256SUMS.txt
@@ -389,9 +388,9 @@ jobs:
       - name: Collect release assets
         run: |
           mkdir -p release-assets
-          find artifacts/ -name "*.dmg" -exec cp {} release-assets/ \;
-          find artifacts/ -name "*.pkg" -exec cp {} release-assets/ \;
-          find artifacts/ -name "*.zip" -exec cp {} release-assets/ \;
+          # Only copy actual MicroCode artifacts — NOT random .zip test fixtures from dependencies
+          find artifacts/ -maxdepth 2 -type f -name "microcode_*" \( -name "*.dmg" -o -name "*.pkg" \) -exec cp {} release-assets/ \;
+          find artifacts/ -maxdepth 2 -type f -name "MicroCode_*" \( -name "*.dmg" -o -name "*.pkg" \) -exec cp {} release-assets/ \;
           cp SHA256SUMS.txt release-assets/ 2>/dev/null || true
           echo "📦 Release assets:"
           ls -lh release-assets/
