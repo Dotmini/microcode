@@ -393,20 +393,22 @@ struct AIAgentView: View {
             .padding(.vertical, 10)
             
             // Queue indicator
-            if !agent.messageQueue.isEmpty {
-                HStack(spacing: 6) {
-                    ProgressView().scaleEffect(0.5).frame(width: 12, height: 12)
-                    Text("\(agent.messageQueue.count) message\(agent.messageQueue.count > 1 ? "s" : "") queued")
-                        .font(.system(size: 10))
-                        .foregroundColor(.orange)
-                    Spacer()
-                    Button("Clear Queue") { agent.messageQueue.removeAll() }
-                        .font(.system(size: 9))
-                        .buttonStyle(.bordered)
-                        .controlSize(.mini)
+            Group {
+                if !agent.messageQueue.isEmpty {
+                    HStack(spacing: 6) {
+                        ProgressView().scaleEffect(0.5).frame(width: 12, height: 12)
+                        Text("\(agent.messageQueue.count) message\(agent.messageQueue.count > 1 ? "s" : "") queued")
+                            .font(.system(size: 10))
+                            .foregroundColor(.orange)
+                        Spacer()
+                        Button("Clear Queue") { agent.messageQueue.removeAll() }
+                            .font(.system(size: 9))
+                            .buttonStyle(.bordered)
+                            .controlSize(.mini)
+                    }
+                    .padding(.horizontal, 14)
+                    .padding(.bottom, 6)
                 }
-                .padding(.horizontal, 14)
-                .padding(.bottom, 6)
             }
             .background(paneColor)
         }
