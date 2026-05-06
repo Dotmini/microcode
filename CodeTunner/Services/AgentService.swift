@@ -70,7 +70,7 @@ class AgentService: ObservableObject {
         isLoading = false
         agentPhase = .idle
         currentToolExecution = nil
-        logActivity(.completed, "Generation stopped by user")
+        logActivity(.info, "Generation stopped by user")
         
         // Append stop marker to last AI message
         if let lastIdx = messages.lastIndex(where: { $0.role == .assistant }) {

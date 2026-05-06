@@ -72,7 +72,7 @@ struct MCPResponse: Encodable {
     }
 }
 
-struct MCPError: Codable {
+struct MCPError: Codable, Error {
     let code: Int
     let message: String
     let data: String?

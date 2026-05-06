@@ -39,6 +39,7 @@ class KeychainManager: ObservableObject {
             }
         }
         
+        #if RUST_FFI
         /// Map to Rust FFI LlmProviderType
         var ffiProvider: LlmProviderType {
             switch self {
@@ -50,6 +51,7 @@ class KeychainManager: ObservableObject {
             case .codex:     return .codex
             }
         }
+        #endif
     }
     
     // MARK: - CRUD Operations
@@ -157,6 +159,7 @@ class KeychainManager: ObservableObject {
     
     /// Call Rust init_llm_client after retrieving key from Keychain
     private func initializeRustProvider(_ provider: ProviderKey, key: String) {
+        #if RUST_FFI
         do {
             let result = try initLlmClient(provider: provider.ffiProvider, token: key)
             if result.success {
@@ -165,9 +168,12 @@ class KeychainManager: ObservableObject {
                 print("⚠️ Rust LLM init returned failure: \(result.message)")
             }
         } catch {
-            // FFI not available (e.g., in preview mode)
             print("⚠️ Rust FFI not available: \(error.localizedDescription)")
         }
+        #else
+        // No-op when Rust FFI is not linked (e.g. CI, previews)
+        _ = (provider, key)
+        #endif
     }
     
     /// Initialize all stored keys on app launch
@@ -181,11 +187,15 @@ class KeychainManager: ObservableObject {
     
     /// Get models for a provider via Rust FFI
     func getModels(for provider: ProviderKey) -> [String] {
+        #if RUST_FFI
         do {
             return try getProviderModels(provider: provider.ffiProvider)
         } catch {
-            // Fallback
             return []
         }
+        #else
+        _ = provider
+        return []
+        #endif
     }
 }
