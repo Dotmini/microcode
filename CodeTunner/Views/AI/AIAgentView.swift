@@ -693,7 +693,7 @@ struct AIAgentView: View {
             AIClient.shared.sendMessage(
                 prompt: userText,
                 attachments: currentAttachments,
-                systemPrompt: "You are MicroCode, an intelligent AI assistant built into the MicroCode IDE. You can have natural conversations about any topic \u{2014} technology, science, life, philosophy, or anything the user wants to discuss. When they ask about code, be a senior software engineer providing professional, concise solutions with code blocks. Use Thai or English based on the user's language. Be friendly, smart, and engaging.",
+                systemPrompt: "You are MicroCode AI \u{2014} a professional software engineering assistant integrated into the MicroCode IDE. Maintain a professional, clear, and authoritative tone. Provide well-structured, accurate responses with precise technical terminology. When the user asks about code, act as a senior software engineer providing production-quality solutions with clear code blocks. When the user writes in Thai, respond in Thai. When in English, respond in English. Be thorough but concise.",
                 conversationHistory: history,
                 provider: provider,
                 model: model,
@@ -1872,12 +1872,21 @@ struct AgentChatStage: View {
                             
                             // Quick suggestions
                             VStack(spacing: 8) {
-                                ForEach(["Explain this code", "Find bugs in my project", "Refactor for performance", "Write unit tests"], id: \.self) { suggestion in
-                                    Button(action: {}) {
+                                ForEach([
+                                    ("Explain this code", "doc.text.magnifyingglass"),
+                                    ("Find bugs in my project", "ladybug"),
+                                    ("Refactor for performance", "gauge.with.dots.needle.67percent"),
+                                    ("Write unit tests", "checkmark.shield")
+                                ], id: \.0) { suggestion, icon in
+                                    Button(action: {
+                                        inputText = suggestion
+                                        sendMessage()
+                                    }) {
                                         HStack(spacing: 8) {
-                                            Image(systemName: "sparkle")
-                                                .font(.system(size: 9))
+                                            Image(systemName: icon)
+                                                .font(.system(size: 10))
                                                 .foregroundColor(.purple)
+                                                .frame(width: 16)
                                             Text(suggestion)
                                                 .font(.system(size: 11))
                                                 .foregroundColor(.primary.opacity(0.7))

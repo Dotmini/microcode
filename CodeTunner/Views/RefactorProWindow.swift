@@ -370,18 +370,33 @@ struct RefactorProWindow: View {
             }
             
             VStack(spacing: 8) {
-                ForEach(selectedMode == .migration
-                    ? ["Direct Translation", "Idiomatic Style", "Type-Safe Migration"]
-                    : ["Clean Code", "Add Error Handling", "Optimize Performance"], id: \.self) { tip in
-                    HStack(spacing: 8) {
-                        Image(systemName: "sparkle").font(.system(size: 9)).foregroundColor(.purple)
-                        Text(tip).font(.system(size: 11)).foregroundColor(.primary.opacity(0.6))
-                        Spacer()
+                let tips: [(String, String)] = selectedMode == .migration
+                    ? [("Direct Translation", "Translate this \(sourceLanguage) code to \(targetLanguage) with exact equivalent functionality."),
+                       ("Idiomatic Style", "Convert to idiomatic \(targetLanguage) code using language-specific best practices."),
+                       ("Type-Safe Migration", "Migrate with strong type safety. Add all type annotations and handle null/nil cases.")]
+                    : [("Clean Code", "Apply clean code principles: simplify logic, extract methods, reduce nesting."),
+                       ("Add Error Handling", "Add comprehensive error handling with try-catch blocks and proper error messages."),
+                       ("Optimize Performance", "Optimize for better performance: reduce complexity, improve algorithms.")]
+                
+                ForEach(tips, id: \.0) { tip, instruction in
+                    Button(action: {
+                        instructions = instruction
+                        if !originalCode.isEmpty {
+                            generateRefactor()
+                        }
+                    }) {
+                        HStack(spacing: 8) {
+                            Image(systemName: "sparkle").font(.system(size: 9)).foregroundColor(.purple)
+                            Text(tip).font(.system(size: 11)).foregroundColor(.primary.opacity(0.6))
+                            Spacer()
+                            Image(systemName: "arrow.right").font(.system(size: 8)).foregroundColor(.secondary.opacity(0.4))
+                        }
+                        .padding(.horizontal, 14).padding(.vertical, 8)
+                        .background(Color.white.opacity(0.03))
+                        .cornerRadius(8)
+                        .overlay(RoundedRectangle(cornerRadius: 8).stroke(Color.white.opacity(0.06)))
                     }
-                    .padding(.horizontal, 14).padding(.vertical, 8)
-                    .background(Color.white.opacity(0.03))
-                    .cornerRadius(8)
-                    .overlay(RoundedRectangle(cornerRadius: 8).stroke(Color.white.opacity(0.06)))
+                    .buttonStyle(.plain)
                 }
             }
             .padding(.horizontal, 40)
