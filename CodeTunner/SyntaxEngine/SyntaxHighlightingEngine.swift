@@ -959,38 +959,27 @@ public struct SyntaxHighlightedCodeView: NSViewRepresentable {
         scrollView.backgroundColor = isTransparent ? .clear : engine.themeManager.editorBackgroundColor
         scrollView.drawsBackground = !isTransparent
         
-        // Ensure explicit text color (fixes invisible text if highlighting lags)
-        // Ensure explicit text color (fixes invisible text if highlighting lags)
-        // Guard updates to prevent typingAttributes reset
-        // REMOVED: textColor assignment here can reset typingAttributes.
-        // It is already set in makeNSView.
-        // let fgColor = engine.themeManager.editorForegroundColor
-        // if textView.textColor != fgColor {
-        //    textView.textColor = fgColor
-        // }
-        // textView.insertionPointColor = engine.themeManager.caretColor
+        // Ensure explicit text color (fixes invisible text when opening project files)
+        // Guard: only update if color actually changed to prevent layout loops
+        let fgColor = engine.themeManager.editorForegroundColor
+        if textView.insertionPointColor != fgColor {
+            textView.insertionPointColor = fgColor
+        }
+        // FIX DIM TEXT: Always ensure textColor is set on theme/language changes
+        // The textColor is the fallback color for any text not covered by syntax tokens
+        if textView.textColor != fgColor {
+            textView.textColor = fgColor
+        }
+        // FIX: Ensure typingAttributes always have foreground color
+        if textView.typingAttributes[.foregroundColor] == nil {
+            textView.typingAttributes[.foregroundColor] = fgColor
+        }
         
+        // Selection color
         let selectionColor = engine.themeManager.selectionColor
-        // Equality check for attributes dictionary is hard, we assume if theme changed, we update.
-        // We rely on 'loop protection' above for theme checks, but being explicit helps.
-        // If we really want to check:
-        // let currentSel = textView.selectedTextAttributes[.backgroundColor] as? NSColor
-        // if currentSel != selectionColor { ... }
-        // For now, let's trust the logic, but re-assignment might be benign if identical?
-        // Let's guard it anyway for safety.
         let currentSelColor = textView.selectedTextAttributes[.backgroundColor] as? NSColor
         if currentSelColor != selectionColor {
-            var attributes: [NSAttributedString.Key: Any] = [
-                .backgroundColor: selectionColor
-            ]
-            // Only force white text if selection color is very dark, otherwise keep original syntax/theme color
-            // Actually, for "transparent beautiful", we usually just want the background selection 
-            // and keep the syntax highlighting visible underneath if possible, 
-            // OR use the system default which does that automatically if we don't override foreground.
-            // But if we override background, we might need to be careful.
-            
-            // Fix: Don't force foreground color to white. Let syntax highlighting shine through or use system default behavior.
-            textView.selectedTextAttributes = attributes
+            textView.selectedTextAttributes = [.backgroundColor: selectionColor]
         }
         
         // Update Font
@@ -1005,25 +994,18 @@ public struct SyntaxHighlightedCodeView: NSViewRepresentable {
         default: fontWeightValue = .regular
         }
         
-        // Optimize Update: Check if font actually changed before setting
-        // This prevents the layout manager from invalidating layout unnecessarily
         let font = NSFont.monospacedSystemFont(ofSize: fontSize, weight: fontWeightValue)
         let customFont = NSFont(name: fontName, size: fontSize) ?? font
         
         if textView.font != customFont {
             textView.font = customFont
             textView.typingAttributes[.font] = customFont
-            textView.typingAttributes[.font] = customFont
-            textView.typingAttributes[.ligature] = 0 // Disable ligatures
-            textView.typingAttributes[.foregroundColor] = engine.themeManager.editorForegroundColor
+            textView.typingAttributes[.ligature] = 0
+            textView.typingAttributes[.foregroundColor] = fgColor
         }
         
-        // Ensure specific attributes are present without full reset
         if textView.typingAttributes[.ligature] == nil {
-             textView.typingAttributes[.ligature] = 0
-        }
-        if textView.typingAttributes[.foregroundColor] == nil {
-             textView.typingAttributes[.foregroundColor] = engine.themeManager.editorForegroundColor
+            textView.typingAttributes[.ligature] = 0
         }
         
         // Check if text or language changed
