@@ -91,6 +91,7 @@ logs/
 *.sqlite
 *.sqlite3
 secrets/
+Secrets.plist
 
 # ----- Generated / Temp Files -----
 *.o

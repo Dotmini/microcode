@@ -762,7 +762,9 @@ class MCPClient: ObservableObject {
         stdout.fileHandleForReading.readabilityHandler = { [weak self] handle in
             let data = handle.availableData
             guard !data.isEmpty else { return }
-            self?.handleOutput(data)
+            DispatchQueue.main.async {
+                self?.handleOutput(data)
+            }
         }
         
         do {

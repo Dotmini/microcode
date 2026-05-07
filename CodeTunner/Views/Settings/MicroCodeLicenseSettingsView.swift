@@ -14,13 +14,33 @@ struct MicroCodeLicenseSettingsView: View {
     @State private var verifyStatus: String = ""
     @State private var showStatus = false
     
-    // Firebase Config (assembled at runtime to avoid secret scanners)
+    // Firebase Config — loaded from Secrets.plist (gitignored, see Secrets.plist.example)
     private var firebaseApiKey: String {
-        // Split to avoid hardcoded secret detection in CI
-        let parts = ["AIza", "REDACTED_PART1", "REDACTED_PART2", "REDACTED_PART3", "REDACTED_PART4"]
-        return parts.joined()
+        Self.secretsDict["FIREBASE_API_KEY"] as? String ?? ""
     }
-    private let firebaseDbUrl = "https://microrentofficial-default-rtdb.firebaseio.com"
+    private var firebaseDbUrl: String {
+        Self.secretsDict["FIREBASE_DB_URL"] as? String ?? ""
+    }
+    
+    /// Load Secrets.plist once (from bundle or workspace root)
+    private static let secretsDict: [String: Any] = {
+        // Try bundle first (for release builds)
+        if let bundlePath = Bundle.main.path(forResource: "Secrets", ofType: "plist"),
+           let dict = NSDictionary(contentsOfFile: bundlePath) as? [String: Any] {
+            return dict
+        }
+        // Fallback: workspace root (for dev builds)
+        let devPath = URL(fileURLWithPath: #file)
+            .deletingLastPathComponent() // Settings/
+            .deletingLastPathComponent() // Views/
+            .deletingLastPathComponent() // CodeTunner/
+            .deletingLastPathComponent() // project root
+            .appendingPathComponent("Secrets.plist")
+        if let dict = NSDictionary(contentsOf: devPath) as? [String: Any] {
+            return dict
+        }
+        return [:]
+    }()
     
     var body: some View {
         VStack(alignment: .leading, spacing: 20) {
