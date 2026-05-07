@@ -87,6 +87,9 @@ logs/
 .env.*.local
 *.pem
 *.key
+*.db
+*.sqlite
+*.sqlite3
 secrets/
 
 # ----- Generated / Temp Files -----
@@ -112,3 +115,4 @@ presentation/
 
 # ----- Enterprise Module (PROPRIETARY — not open source) -----
 Enterprise/
+microrent-ai-proxy/

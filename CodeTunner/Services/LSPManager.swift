@@ -20,6 +20,9 @@ class LSPManager: ObservableObject {
     /// Active LSP clients by server type
     @Published var activeClients: [LanguageServer: LSPClientService] = [:]
     
+    /// Latest diagnostics by file URI
+    @Published var fileDiagnostics: [String: [LSPDiagnostic]] = [:]
+    
     /// Current root URI for workspace
     private var rootUri: String?
     

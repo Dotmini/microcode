@@ -437,7 +437,7 @@ class MCPServer: ObservableObject {
             case "git_status":
                 result = try await executeGitStatus(args, sandbox: sandbox)
             case "get_diagnostics":
-                result = try executeGetDiagnostics(args)
+                result = try await executeGetDiagnostics(args)
             default:
                 return MCPResponse(id: request.id, error: .custom("Unknown tool: \(name)"))
             }
@@ -579,11 +579,37 @@ class MCPServer: ObservableObject {
         return try await runShellCommand(cmd, cwd: workspacePath, timeout: 10)
     }
     
-    private func executeGetDiagnostics(_ args: [String: Any]) throws -> String {
-        // Return current LSP diagnostics if available
-        return "No diagnostics available (LSP integration pending)"
+    private func executeGetDiagnostics(_ args: [String: Any]) async throws -> String {
+        guard let path = args["path"] as? String else {
+            throw MCPError.invalidParams("Missing 'path' argument")
+        }
+        
+        let url = URL(fileURLWithPath: path)
+        let uri = url.absoluteString
+        
+        return await MainActor.run {
+            if let diagnostics = LSPManager.shared.fileDiagnostics[uri], !diagnostics.isEmpty {
+                var output = "Diagnostics for \(url.lastPathComponent):\n\n"
+                for diag in diagnostics {
+                    let severityStr: String
+                    switch diag.severity {
+                    case 1: severityStr = "ERROR"
+                    case 2: severityStr = "WARNING"
+                    case 3: severityStr = "INFO"
+                    case 4: severityStr = "HINT"
+                    default: severityStr = "ISSUE"
+                    }
+                    
+                    let line = diag.range.start.line + 1
+                    let char = diag.range.start.character + 1
+                    output += "[\(severityStr)] Line \(line):\(char) - \(diag.message)\n"
+                }
+                return output
+            } else {
+                return "No diagnostics or issues found for \(url.lastPathComponent)."
+            }
+        }
     }
-    
     // MARK: - Resources
     
     private func handleResourcesList(_ request: MCPRequest) -> MCPResponse {

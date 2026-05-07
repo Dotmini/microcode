@@ -14,6 +14,7 @@ import Combine
 // MARK: - Local LLM Server Type
 
 enum LocalLLMServerType: String, CaseIterable, Identifiable {
+    case mlx = "Apple MLX"
     case lmStudio = "LM Studio"
     case ollama = "Ollama"
     case textGenWebUI = "Text Gen WebUI"
@@ -24,6 +25,7 @@ enum LocalLLMServerType: String, CaseIterable, Identifiable {
     
     var defaultPorts: [Int] {
         switch self {
+        case .mlx: return [8080, 8081]
         case .lmStudio: return [1234, 8080, 1235]
         case .ollama: return [11434, 11435]
         case .textGenWebUI: return [5000, 5001, 7860]
@@ -45,6 +47,7 @@ enum LocalLLMServerType: String, CaseIterable, Identifiable {
     
     var icon: String {
         switch self {
+        case .mlx: return "applelogo"
         case .lmStudio: return "desktopcomputer"
         case .ollama: return "terminal"
         case .textGenWebUI: return "globe"
@@ -55,6 +58,7 @@ enum LocalLLMServerType: String, CaseIterable, Identifiable {
     
     var color: String {
         switch self {
+        case .mlx: return "gray"
         case .lmStudio: return "blue"
         case .ollama: return "green"
         case .textGenWebUI: return "orange"
@@ -135,12 +139,16 @@ class LocalLLMService: ObservableObject {
     nonisolated(unsafe) static var cachedModel: String = "local-model"
     
     let modelCatalog: [DownloadableModel] = [
+        DownloadableModel(id: "mlx-qwen-coder", name: "Qwen 2.5 Coder", provider: "MLX Community", description: "Incredibly fast coding model natively optimized for Apple Silicon (MLX).", params: "7B", sizeGB: 4.2, capabilities: ["Code", "Reasoning", "MLX"], ollamaTag: "mlx-community/Qwen2.5-Coder-7B-Instruct-4bit"),
+        DownloadableModel(id: "mlx-llama-3", name: "Llama 3.1", provider: "MLX Community", description: "Meta's Llama 3.1 optimized for Mac M-Series chips.", params: "8B", sizeGB: 4.7, capabilities: ["Chat", "Reasoning", "MLX"], ollamaTag: "mlx-community/Meta-Llama-3.1-8B-Instruct-4bit"),
+        DownloadableModel(id: "mlx-deepseek-r1", name: "DeepSeek R1", provider: "MLX Community", description: "DeepSeek R1 distilled model for Apple Silicon.", params: "8B", sizeGB: 4.9, capabilities: ["Reasoning", "Code", "MLX"], ollamaTag: "mlx-community/DeepSeek-R1-Distill-Llama-8B-4bit"),
+        
         DownloadableModel(id: "gemma3", name: "Gemma 3", provider: "Google", description: "Google's efficient open model. Great for coding and reasoning.", params: "4B", sizeGB: 3.3, capabilities: ["Code", "Reasoning"], ollamaTag: "gemma3"),
         DownloadableModel(id: "gemma3-12b", name: "Gemma 3 12B", provider: "Google", description: "Larger Gemma with stronger performance.", params: "12B", sizeGB: 8.1, capabilities: ["Code", "Reasoning", "Vision"], ollamaTag: "gemma3:12b"),
         DownloadableModel(id: "qwen3", name: "Qwen 3", provider: "Alibaba", description: "Hybrid thinking. Strong multilingual and code.", params: "8B", sizeGB: 5.2, capabilities: ["Code", "Reasoning", "Tool Use"], ollamaTag: "qwen3"),
         DownloadableModel(id: "llama3.3", name: "Llama 3.3", provider: "Meta", description: "Meta's latest. Excellent for general and code tasks.", params: "70B", sizeGB: 43.0, capabilities: ["Code", "Reasoning"], ollamaTag: "llama3.3"),
         DownloadableModel(id: "llama3.2", name: "Llama 3.2", provider: "Meta", description: "Efficient small model. Fast local inference.", params: "3B", sizeGB: 2.0, capabilities: ["Code", "Chat"], ollamaTag: "llama3.2"),
-        DownloadableModel(id: "deepseek-r1", name: "DeepSeek R1", provider: "DeepSeek", description: "Reasoning-focused. Great for complex problem solving.", params: "8B", sizeGB: 5.0, capabilities: ["Reasoning", "Code"], ollamaTag: "deepseek-r1:8b"),
+        DownloadableModel(id: "deepseek-r1-ollama", name: "DeepSeek R1 (Ollama)", provider: "DeepSeek", description: "Reasoning-focused. Great for complex problem solving.", params: "8B", sizeGB: 5.0, capabilities: ["Reasoning", "Code"], ollamaTag: "deepseek-r1:8b"),
         DownloadableModel(id: "codellama", name: "Code Llama", provider: "Meta", description: "Specialized for code generation and debugging.", params: "7B", sizeGB: 3.8, capabilities: ["Code"], ollamaTag: "codellama"),
         DownloadableModel(id: "mistral", name: "Mistral", provider: "Mistral AI", description: "Fast, efficient model with strong reasoning.", params: "7B", sizeGB: 4.1, capabilities: ["Code", "Chat"], ollamaTag: "mistral"),
         DownloadableModel(id: "phi4", name: "Phi-4", provider: "Microsoft", description: "Compact but powerful reasoning model.", params: "14B", sizeGB: 9.1, capabilities: ["Code", "Reasoning"], ollamaTag: "phi4"),
@@ -332,6 +340,69 @@ class LocalLLMService: ObservableObject {
         _ = try? await URLSession.shared.data(for: request)
         scanLog.append("🗑 Deleted \(modelName)")
         await scanForServers()
+    }
+    
+    // MARK: - MLX Server Support
+    
+    func startMLXServer(model: DownloadableModel) async {
+        downloadingModels[model.id] = 0.1
+        scanLog.append("🍎 Preparing Apple MLX Server for \(model.name)...")
+        
+        let repoID = model.ollamaTag // e.g. "mlx-community/Qwen2.5-Coder-7B-Instruct-4bit"
+        
+        // Run MLX Server in the background via Process
+        let script = """
+        if ! command -v python3 &> /dev/null; then
+            echo "Python3 not found"
+            exit 1
+        fi
+        
+        # Ensure mlx-lm is installed
+        python3 -m pip install -U mlx-lm huggingface_hub > /dev/null 2>&1
+        
+        # Start the server (this will also auto-download the model if not present)
+        python3 -m mlx_lm.server --model \(repoID) --port 8080 &
+        """
+        
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: "/bin/zsh")
+        process.arguments = ["-c", script]
+        
+        do {
+            try process.run()
+            
+            // Wait for it to start
+            for _ in 0..<10 {
+                try await Task.sleep(nanoseconds: 1_000_000_000)
+                downloadingModels[model.id] = Double.random(in: 0.2...0.9) // Simulating progress
+                if await checkMLXServer() {
+                    scanLog.append("✅ MLX Server running on port 8080")
+                    downloadingModels.removeValue(forKey: model.id)
+                    await scanForServers()
+                    return
+                }
+            }
+            
+            scanLog.append("⏳ MLX Server is downloading weights or starting up. Please check back in a moment.")
+            downloadingModels.removeValue(forKey: model.id)
+            await scanForServers()
+            
+        } catch {
+            scanLog.append("❌ Failed to start MLX Server: \(error.localizedDescription)")
+            downloadingModels.removeValue(forKey: model.id)
+        }
+    }
+    
+    private func checkMLXServer() async -> Bool {
+        guard let url = URL(string: "http://127.0.0.1:8080/v1/models") else { return false }
+        var req = URLRequest(url: url)
+        req.timeoutInterval = 2
+        do {
+            let (_, res) = try await URLSession.shared.data(for: req)
+            return (res as? HTTPURLResponse)?.statusCode == 200
+        } catch {
+            return false
+        }
     }
     
     // MARK: - Parse Models

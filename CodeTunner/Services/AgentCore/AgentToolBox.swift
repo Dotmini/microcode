@@ -56,6 +56,7 @@ class AgentToolBox: ObservableObject {
         register(FindSymbolTool())
         register(PatchFileTool())
         register(MultiFileReadTool())
+        register(GetDiagnosticsTool())
     }
     
     func register(_ tool: any AgentTool) {
@@ -370,6 +371,45 @@ struct FileSearchTool: AgentTool {
     }
 }
 
+struct GetDiagnosticsTool: AgentTool {
+    let name = "get_diagnostics"
+    let description = "Get current editor diagnostics (errors, warnings) for a file via LSP."
+    let parameters = [
+        ToolParameter(name: "path", type: "string", description: "Absolute path to the file", required: true)
+    ]
+    
+    func execute(params: [String: Any]) async throws -> String {
+        guard let path = params["path"] as? String else {
+            throw ToolBoxError.invalidParameters("Missing 'path'")
+        }
+        
+        let url = URL(fileURLWithPath: path)
+        let uri = url.absoluteString
+        
+        return await MainActor.run {
+            if let diagnostics = LSPManager.shared.fileDiagnostics[uri], !diagnostics.isEmpty {
+                var output = "Diagnostics for \(url.lastPathComponent):\n\n"
+                for diag in diagnostics {
+                    let severityStr: String
+                    switch diag.severity {
+                    case 1: severityStr = "ERROR"
+                    case 2: severityStr = "WARNING"
+                    case 3: severityStr = "INFO"
+                    case 4: severityStr = "HINT"
+                    default: severityStr = "ISSUE"
+                    }
+                    let line = diag.range.start.line + 1
+                    let char = diag.range.start.character + 1
+                    output += "[\(severityStr)] Line \(line):\(char) - \(diag.message)\n"
+                }
+                return output
+            } else {
+                return "No diagnostics or issues found for \(url.lastPathComponent)."
+            }
+        }
+    }
+}
+
 struct ShellCommandTool: AgentTool {
     let name = "shell"
     let description = "Execute a shell command. Use for build, test, git, or other CLI operations."
@@ -665,3 +705,274 @@ struct MultiFileReadTool: AgentTool {
     }
 }
 
+// MARK: - MCP Client for External Tools (Python MCP Server)
+
+@MainActor
+class MCPClient: ObservableObject {
+    static let shared = MCPClient()
+    
+    private var process: Process?
+    private var stdinPipe: Pipe?
+    private var stdoutPipe: Pipe?
+    
+    @Published var isConnected = false
+    @Published var availableTools: [MCPToolSchema] = []
+    
+    private var pendingRequests: [Int: (Result<Any, Error>) -> Void] = [:]
+    private var requestIdCounter = 1
+    
+    struct MCPToolSchema: Codable {
+        let name: String
+        let description: String
+        let inputSchema: [String: AnyCodable]
+    }
+    
+    func start(workspacePath: String) {
+        guard !isConnected else { return }
+        
+        let process = Process()
+        
+        var scriptPath = Bundle.main.path(forResource: "mcp-server", ofType: "py")
+        if scriptPath == nil {
+            scriptPath = "/Users/dotmini/Documents/SX/codetunner-native/mcp-server.py"
+        }
+        
+        guard let path = scriptPath, FileManager.default.fileExists(atPath: path) else {
+            print("[MCPClient] Error: mcp-server.py not found")
+            return
+        }
+        
+        process.executableURL = URL(fileURLWithPath: "/usr/bin/env")
+        process.arguments = ["python3", "-u", path]
+        
+        var env = ProcessInfo.processInfo.environment
+        env["MICROCODE_WORKSPACE"] = workspacePath
+        process.environment = env
+        
+        let stdin = Pipe()
+        let stdout = Pipe()
+        
+        process.standardInput = stdin
+        process.standardOutput = stdout
+        
+        self.process = process
+        self.stdinPipe = stdin
+        self.stdoutPipe = stdout
+        
+        stdout.fileHandleForReading.readabilityHandler = { [weak self] handle in
+            let data = handle.availableData
+            guard !data.isEmpty else { return }
+            self?.handleOutput(data)
+        }
+        
+        do {
+            try process.run()
+            isConnected = true
+            print("[MCPClient] Started mcp-server.py")
+            
+            sendRequest(method: "initialize", params: [:]) { result in
+                switch result {
+                case .success(let res):
+                    print("[MCPClient] Initialized: \(res)")
+                    self.sendNotification(method: "notifications/initialized")
+                    self.fetchTools()
+                case .failure(let err):
+                    print("[MCPClient] Init Error: \(err)")
+                }
+            }
+        } catch {
+            print("[MCPClient] Failed to start process: \(error)")
+        }
+    }
+    
+    func stop() {
+        process?.terminate()
+        isConnected = false
+        process = nil
+        stdinPipe = nil
+        stdoutPipe?.fileHandleForReading.readabilityHandler = nil
+        stdoutPipe = nil
+        availableTools = []
+    }
+    
+    private func handleOutput(_ data: Data) {
+        guard let string = String(data: data, encoding: .utf8) else { return }
+        let lines = string.components(separatedBy: "\n").filter { !$0.isEmpty }
+        
+        for line in lines {
+            guard let jsonData = line.data(using: .utf8),
+                  let json = try? JSONSerialization.jsonObject(with: jsonData) as? [String: Any] else {
+                continue
+            }
+            
+            if let id = json["id"] as? Int {
+                if let error = json["error"] as? [String: Any] {
+                    let msg = error["message"] as? String ?? "Unknown error"
+                    pendingRequests[id]?.(.failure(NSError(domain: "MCP", code: -1, userInfo: [NSLocalizedDescriptionKey: msg])))
+                } else if let result = json["result"] {
+                    pendingRequests[id]?.(.success(result))
+                }
+                pendingRequests.removeValue(forKey: id)
+            }
+        }
+    }
+    
+    private func sendRequest(method: String, params: [String: Any] = [:], completion: @escaping (Result<Any, Error>) -> Void) {
+        let reqId = requestIdCounter
+        requestIdCounter += 1
+        pendingRequests[reqId] = completion
+        
+        let request: [String: Any] = [
+            "jsonrpc": "2.0",
+            "id": reqId,
+            "method": method,
+            "params": params
+        ]
+        sendRaw(request)
+    }
+    
+    private func sendNotification(method: String, params: [String: Any] = [:]) {
+        let request: [String: Any] = [
+            "jsonrpc": "2.0",
+            "method": method,
+            "params": params
+        ]
+        sendRaw(request)
+    }
+    
+    private func sendRaw(_ obj: [String: Any]) {
+        guard let data = try? JSONSerialization.data(withJSONObject: obj),
+              let pipe = stdinPipe else { return }
+        
+        var d = data
+        d.append("\n".data(using: .utf8)!)
+        try? pipe.fileHandleForWriting.write(contentsOf: d)
+    }
+    
+    private func fetchTools() {
+        sendRequest(method: "tools/list") { [weak self] result in
+            guard let self = self else { return }
+            switch result {
+            case .success(let res):
+                if let dict = res as? [String: Any],
+                   let toolsList = dict["tools"] as? [[String: Any]] {
+                    
+                    var parsedTools: [MCPToolSchema] = []
+                    for t in toolsList {
+                        if let name = t["name"] as? String,
+                           let desc = t["description"] as? String,
+                           let schema = t["inputSchema"] as? [String: Any],
+                           let schemaData = try? JSONSerialization.data(withJSONObject: schema),
+                           let parsedSchema = try? JSONDecoder().decode([String: AnyCodable].self, from: schemaData) {
+                            parsedTools.append(MCPToolSchema(name: name, description: desc, inputSchema: parsedSchema))
+                        }
+                    }
+                    
+                    DispatchQueue.main.async {
+                        self.availableTools = parsedTools
+                        self.registerToolsWithAgent()
+                    }
+                }
+            case .failure(let err):
+                print("[MCPClient] Fetch Tools Error: \(err)")
+            }
+        }
+    }
+    
+    private func registerToolsWithAgent() {
+        for schema in availableTools {
+            if AgentToolBox.shared.tools[schema.name] == nil {
+                let proxyTool = DynamicMCPTool(mcpClient: self, schema: schema)
+                AgentToolBox.shared.register(proxyTool)
+                print("[MCPClient] Registered external MCP Tool: \(schema.name)")
+            }
+        }
+    }
+    
+    func callTool(name: String, arguments: [String: Any]) async throws -> String {
+        return try await withCheckedThrowingContinuation { continuation in
+            let params: [String: Any] = [
+                "name": name,
+                "arguments": arguments
+            ]
+            
+            sendRequest(method: "tools/call", params: params) { result in
+                switch result {
+                case .success(let res):
+                    if let dict = res as? [String: Any],
+                       let isError = dict["isError"] as? Bool, isError {
+                        let content = (dict["content"] as? [[String: Any]])?.first?["text"] as? String ?? "Unknown error"
+                        continuation.resume(throwing: NSError(domain: "MCP", code: -1, userInfo: [NSLocalizedDescriptionKey: content]))
+                    } else if let dict = res as? [String: Any],
+                              let contentArray = dict["content"] as? [[String: Any]],
+                              let text = contentArray.first?["text"] as? String {
+                        continuation.resume(returning: text)
+                    } else {
+                        continuation.resume(returning: "Success")
+                    }
+                case .failure(let err):
+                    continuation.resume(throwing: err)
+                }
+            }
+        }
+    }
+}
+
+struct DynamicMCPTool: AgentTool {
+    let mcpClient: MCPClient
+    let schema: MCPClient.MCPToolSchema
+    
+    var name: String { schema.name }
+    var description: String { schema.description }
+    
+    var parameters: [ToolParameter] {
+        var params: [ToolParameter] = []
+        if let properties = schema.inputSchema["properties"]?.value as? [String: Any] {
+            let required = schema.inputSchema["required"]?.value as? [String] ?? []
+            for (key, val) in properties {
+                if let propDict = val as? [String: Any],
+                   let type = propDict["type"] as? String,
+                   let desc = propDict["description"] as? String {
+                    params.append(ToolParameter(name: key, type: type, description: desc, required: required.contains(key)))
+                }
+            }
+        }
+        return params
+    }
+    
+    func execute(params: [String: Any]) async throws -> String {
+        return try await mcpClient.callTool(name: name, arguments: params)
+    }
+}
+
+struct AnyCodable: Codable {
+    let value: Any
+    
+    init(from decoder: Decoder) throws {
+        let container = try decoder.singleValueContainer()
+        if container.decodeNil() { value = NSNull() }
+        else if let b = try? container.decode(Bool.self) { value = b }
+        else if let i = try? container.decode(Int.self) { value = i }
+        else if let d = try? container.decode(Double.self) { value = d }
+        else if let s = try? container.decode(String.self) { value = s }
+        else if let a = try? container.decode([AnyCodable].self) { value = a.map { $0.value } }
+        else if let o = try? container.decode([String: AnyCodable].self) { value = o.mapValues { $0.value } }
+        else { throw DecodingError.dataCorruptedError(in: container, debugDescription: "AnyCodable value cannot be decoded") }
+    }
+    
+    func encode(to encoder: Encoder) throws {
+        var container = encoder.singleValueContainer()
+        switch value {
+        case is NSNull: try container.encodeNil()
+        case let b as Bool: try container.encode(b)
+        case let i as Int: try container.encode(i)
+        case let d as Double: try container.encode(d)
+        case let s as String: try container.encode(s)
+        case let a as [Any]: try container.encode(a.map { AnyCodable(value: $0) })
+        case let o as [String: Any]: try container.encode(o.mapValues { AnyCodable(value: $0) })
+        default: try container.encodeNil()
+        }
+    }
+    
+    init(value: Any) { self.value = value }
+}

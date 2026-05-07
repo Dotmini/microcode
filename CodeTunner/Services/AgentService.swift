@@ -157,6 +157,7 @@ class AgentService: ObservableObject {
             8. Use multi_file_read to read multiple files efficiently.
             9. Use find_symbol to locate function/class definitions.
             10. For multi-file changes, use patch_file for efficiency.
+            11. Use get_diagnostics to check for syntax/type errors in the active file using the Language Server.
             
             ## Planning
             For complex tasks, create a brief plan FIRST:
@@ -168,8 +169,10 @@ class AgentService: ObservableObject {
             ## Workflow: Modify Code
             1. file_read → 2. replace_in_file/patch_file → 3. shell (verify) → 4. Report
             
-            ## Workflow: Create Project
-            1. list_directory_tree → 2. create_directory → 3. file_write (multiple) → 4. shell (install/build)
+            ## Task Persistence & Autonomy
+            - You MUST read `.microcode/task.md` to understand your current objectives.
+            - Once you complete a task, YOU MUST edit `.microcode/task.md` to check it off (change `[ ]` to `[x]`).
+            - Always follow instructions and rules declared in `.microcode/agent.md`.
             
             ## Output Quality
             - Show code changes with ```diff blocks showing - (old) and + (new) lines.
@@ -193,6 +196,19 @@ class AgentService: ObservableObject {
             if !ctx.openFiles.isEmpty {
                 editorInfo += "\nOpen: \(ctx.openFiles.suffix(5).map { URL(fileURLWithPath: $0).lastPathComponent }.joined(separator: ", "))"
             }
+            
+            // Auto-inject LSP Diagnostics for the active file
+            if let file = ctx.activeFile {
+                let uri = URL(fileURLWithPath: file).absoluteString
+                if let diagnostics = LSPManager.shared.fileDiagnostics[uri], !diagnostics.isEmpty {
+                    editorInfo += "\n\n### Current File Diagnostics (LSP)\n"
+                    for diag in diagnostics.prefix(10) { // Limit to top 10 issues
+                        let sev = diag.severity == 1 ? "ERROR" : (diag.severity == 2 ? "WARN" : "INFO")
+                        editorInfo += "- [\(sev)] Line \(diag.range.start.line + 1): \(diag.message)\n"
+                    }
+                }
+            }
+            
             prompt += editorInfo
         }
         
@@ -255,9 +271,28 @@ class AgentService: ObservableObject {
     func setWorkspace(_ path: String) {
         toolBox.workspaceRoot = path
         loadAgentWorkspaceFiles(path)
+        
+        // Start MCP Client to connect to mcp-server.py
+        MCPClient.shared.start(workspacePath: path)
     }
     
     // MARK: - Load agent.md / task.md / AI.arx
+    
+    func reloadAgentWorkspaceFiles() {
+        guard let workspacePath = toolBox.workspaceRoot else { return }
+        let fm = FileManager.default
+        let microcodeDir = (workspacePath as NSString).appendingPathComponent(".microcode")
+        
+        let agentMdPath = (microcodeDir as NSString).appendingPathComponent("agent.md")
+        if fm.fileExists(atPath: agentMdPath) {
+            agentMdContent = try? String(contentsOfFile: agentMdPath, encoding: .utf8)
+        }
+        
+        let taskMdPath = (microcodeDir as NSString).appendingPathComponent("task.md")
+        if fm.fileExists(atPath: taskMdPath) {
+            taskMdContent = try? String(contentsOfFile: taskMdPath, encoding: .utf8)
+        }
+    }
     
     private func loadAgentWorkspaceFiles(_ workspacePath: String) {
         let fm = FileManager.default
@@ -556,6 +591,11 @@ class AgentService: ObservableObject {
                                 oldContent: String(old.suffix(5000)), newContent: String(newContent.suffix(5000)),
                                 status: .accepted
                             ))
+                            
+                            // Hot-reload task/agent context if AI updated them autonomously
+                            if path.hasSuffix("task.md") || path.hasSuffix("agent.md") {
+                                Task { @MainActor in self.reloadAgentWorkspaceFiles() }
+                            }
                         }
                     }
                     
@@ -592,6 +632,8 @@ class AgentService: ObservableObject {
             
             Now continue with the task. If you have read the files, proceed to make the requested changes using file_write or replace_in_file, then run any commands using shell. Do NOT just describe what to do — actually do it.
             """))
+            
+            agentPhase = filesModified.isEmpty ? .thinking : .validating
         }
         
         // Finalize the assistant message
@@ -978,11 +1020,12 @@ enum AgentPhase: Equatable {
     case idle
     case thinking
     case executing(String) // tool name
+    case validating
     case done
     
     static func == (lhs: AgentPhase, rhs: AgentPhase) -> Bool {
         switch (lhs, rhs) {
-        case (.idle, .idle), (.thinking, .thinking), (.done, .done): return true
+        case (.idle, .idle), (.thinking, .thinking), (.done, .done), (.validating, .validating): return true
         case (.executing(let a), .executing(let b)): return a == b
         default: return false
         }
@@ -993,6 +1036,7 @@ enum AgentPhase: Equatable {
         case .idle: return "Ready"
         case .thinking: return "Thinking..."
         case .executing(let tool): return "Running \(tool)"
+        case .validating: return "Validating changes..."
         case .done: return "Done"
         }
     }
@@ -1002,6 +1046,7 @@ enum AgentPhase: Equatable {
         case .idle: return "circle"
         case .thinking: return "brain"
         case .executing: return "gearshape.2.fill"
+        case .validating: return "checkmark.shield.fill"
         case .done: return "checkmark.circle.fill"
         }
     }
@@ -1011,6 +1056,7 @@ enum AgentPhase: Equatable {
         case .idle: return .secondary
         case .thinking: return .purple
         case .executing: return .blue
+        case .validating: return .orange
         case .done: return .green
         }
     }

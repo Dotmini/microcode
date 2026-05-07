@@ -9,7 +9,7 @@ struct ModelBrowserSheet: View {
     @State private var selectedModel: DownloadableModel?
     @State private var filterProvider = "All"
     
-    private let providers = ["All", "Google", "Meta", "Alibaba", "DeepSeek", "Mistral AI", "Microsoft", "NVIDIA"]
+    private let providers = ["All", "MLX Community", "Google", "Meta", "Alibaba", "DeepSeek", "Mistral AI", "Microsoft", "NVIDIA"]
     
     private var filteredModels: [DownloadableModel] {
         llm.modelCatalog.filter { m in
@@ -226,12 +226,25 @@ struct ModelBrowserSheet: View {
                                 .background(Color.blue.opacity(0.1))
                                 .cornerRadius(6)
                             } else {
-                                Button(action: { Task { await llm.downloadModel(model) } }) {
-                                    Label("Download", systemImage: "arrow.down.circle.fill")
-                                        .font(.system(size: 11, weight: .medium))
+                                Button(action: {
+                                    Task {
+                                        if model.provider == "MLX Community" {
+                                            await llm.startMLXServer(model: model)
+                                        } else {
+                                            await llm.downloadModel(model)
+                                        }
+                                    }
+                                }) {
+                                    if model.provider == "MLX Community" {
+                                        Label("Start MLX Server", systemImage: "applelogo")
+                                            .font(.system(size: 11, weight: .medium))
+                                    } else {
+                                        Label("Download", systemImage: "arrow.down.circle.fill")
+                                            .font(.system(size: 11, weight: .medium))
+                                    }
                                 }
                                 .buttonStyle(.borderedProminent)
-                                .tint(.purple)
+                                .tint(model.provider == "MLX Community" ? .gray : .purple)
                                 .controlSize(.small)
                             }
                         }
@@ -258,7 +271,7 @@ struct ModelBrowserSheet: View {
                         }
                     }
                     
-                    if !llm.detectedServers.contains(where: { $0.type == .ollama && $0.isOnline }) {
+                    if model.provider != "MLX Community" && !llm.detectedServers.contains(where: { $0.type == .ollama && $0.isOnline }) {
                         HStack(spacing: 6) {
                             Image(systemName: "exclamationmark.triangle.fill").foregroundColor(.orange).font(.system(size: 11))
                             Text("Ollama must be running to download models. Install from ollama.com")
@@ -266,6 +279,15 @@ struct ModelBrowserSheet: View {
                         }
                         .padding(8)
                         .background(Color.orange.opacity(0.08))
+                        .cornerRadius(6)
+                    } else if model.provider == "MLX Community" {
+                        HStack(spacing: 6) {
+                            Image(systemName: "apple.logo").foregroundColor(.primary).font(.system(size: 11))
+                            Text("Starting the server will automatically download the MLX weights if not already present.")
+                                .font(.system(size: 11)).foregroundColor(.primary.opacity(0.7))
+                        }
+                        .padding(8)
+                        .background(Color.primary.opacity(0.05))
                         .cornerRadius(6)
                     }
                 }
@@ -290,6 +312,7 @@ struct ModelBrowserSheet: View {
     
     private func providerStyle(_ provider: String) -> (String, Color) {
         switch provider {
+        case "MLX Community": return ("apple.logo", .gray)
         case "Google": return ("sparkle", .blue)
         case "Meta": return ("brain.head.profile", .indigo)
         case "Alibaba": return ("cloud.fill", .purple)

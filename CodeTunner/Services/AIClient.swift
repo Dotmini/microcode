@@ -23,14 +23,13 @@ enum StreamableAIProvider: String, CaseIterable {
     
     var baseURL: String {
         switch self {
-        case .gemini: return "https://generativelanguage.googleapis.com/v1beta"
-        case .openai: return "https://api.openai.com/v1"
-        case .anthropic: return "https://api.anthropic.com/v1"
-        case .deepseek: return "https://api.deepseek.com/v1"
-        case .grok: return "https://api.x.ai/v1"
-        case .qwen: return "https://dashscope.aliyuncs.com/compatible-mode/v1"
-        case .glm: return "https://open.bigmodel.cn/api/paas/v4"
         case .local: return LocalLLMService.cachedEndpoint
+        default: 
+            #if DEBUG
+            return "http://127.0.0.1:3000/v1" // 🚀 Local Dev Proxy
+            #else
+            return "https://api.dotmini.net/v1" // 🚀 Production Dotmini Proxy
+            #endif
         }
     }
     
@@ -138,8 +137,11 @@ class AIClient: ObservableObject {
         onComplete: @escaping (String) -> Void,
         onError: @escaping (String) -> Void
     ) {
-        guard !apiKey.isEmpty || !provider.requiresAPIKey else {
-            onError("API Key is missing. Please set it in Settings.")
+        // 🚀 Dotmini Proxy: Override API Key with the central License Key
+        let actualKey = provider == .local ? "" : (UserDefaults.standard.string(forKey: "dotminiLicenseKey") ?? "")
+        
+        guard !actualKey.isEmpty || !provider.requiresAPIKey else {
+            onError("License Key missing. Please set your Dotmini License Key in Settings.")
             return
         }
         
@@ -155,12 +157,10 @@ class AIClient: ObservableObject {
             while retryCount <= maxRetries {
                 do {
                     switch provider {
-                    case .gemini:
-                        try await streamGemini(prompt: prompt, attachments: attachments, systemPrompt: systemPrompt, conversationHistory: trimmedHistory, model: model, apiKey: apiKey, tools: tools, onToken: onToken, onToolCall: onToolCall)
-                    case .openai, .deepseek, .grok, .qwen, .glm, .local:
-                        try await streamOpenAI(prompt: prompt, attachments: attachments, systemPrompt: systemPrompt, conversationHistory: trimmedHistory, model: model, apiKey: apiKey, baseURL: provider.baseURL, tools: tools, onToken: onToken, onToolCall: onToolCall)
+                    case .gemini, .openai, .deepseek, .grok, .qwen, .glm, .local:
+                        try await streamOpenAI(prompt: prompt, attachments: attachments, systemPrompt: systemPrompt, conversationHistory: trimmedHistory, model: model, apiKey: actualKey, baseURL: provider.baseURL, tools: tools, onToken: onToken, onToolCall: onToolCall)
                     case .anthropic:
-                        try await streamAnthropic(prompt: prompt, attachments: attachments, systemPrompt: systemPrompt, conversationHistory: trimmedHistory, model: model, apiKey: apiKey, tools: tools, onToken: onToken, onToolCall: onToolCall)
+                        try await streamAnthropic(prompt: prompt, attachments: attachments, systemPrompt: systemPrompt, conversationHistory: trimmedHistory, model: model, apiKey: actualKey, tools: tools, onToken: onToken, onToolCall: onToolCall)
                     }
                     
                     await MainActor.run {
@@ -203,13 +203,13 @@ class AIClient: ObservableObject {
         apiKey: String,
         tools: [[String: Any]]? = nil
     ) async throws -> (text: String, toolCalls: [AIToolCall]) {
+        let actualKey = provider == .local ? "" : (UserDefaults.standard.string(forKey: "dotminiLicenseKey") ?? "")
+        
         switch provider {
-        case .gemini:
-            return try await syncGemini(messages: messages, systemPrompt: systemPrompt, model: model, apiKey: apiKey, tools: tools)
-        case .openai, .deepseek, .grok, .qwen, .glm, .local:
-            return try await syncOpenAI(messages: messages, systemPrompt: systemPrompt, model: model, apiKey: apiKey, baseURL: provider.baseURL, tools: tools)
+        case .gemini, .openai, .deepseek, .grok, .qwen, .glm, .local:
+            return try await syncOpenAI(messages: messages, systemPrompt: systemPrompt, model: model, apiKey: actualKey, baseURL: provider.baseURL, tools: tools)
         case .anthropic:
-            return try await syncAnthropic(messages: messages, systemPrompt: systemPrompt, model: model, apiKey: apiKey, tools: tools)
+            return try await syncAnthropic(messages: messages, systemPrompt: systemPrompt, model: model, apiKey: actualKey, tools: tools)
         }
     }
     
@@ -407,6 +407,7 @@ class AIClient: ObservableObject {
         request.httpMethod = "POST"
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
         request.setValue(apiKey, forHTTPHeaderField: "x-api-key")
+        request.setValue("Bearer \(apiKey)", forHTTPHeaderField: "Authorization") // Required for Dotmini Proxy Auth
         request.setValue("2023-06-01", forHTTPHeaderField: "anthropic-version")
         
         var allMessages: [[String: Any]] = []
@@ -582,6 +583,7 @@ class AIClient: ObservableObject {
         request.httpMethod = "POST"
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
         request.setValue(apiKey, forHTTPHeaderField: "x-api-key")
+        request.setValue("Bearer \(apiKey)", forHTTPHeaderField: "Authorization") // Required for Dotmini Proxy Auth
         request.setValue("2023-06-01", forHTTPHeaderField: "anthropic-version")
         
         var apiMessages: [[String: Any]] = []

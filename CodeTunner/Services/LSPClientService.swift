@@ -584,10 +584,10 @@ class LSPClientService: ObservableObject {
                 if let notification = try? decoder.decode(JSONRPCNotification<PublishDiagnosticsParams>.self, from: data),
                    let params = notification.params {
                     print("✅ [LSP] Diagnostics for \(params.uri): \(params.diagnostics.count) items")
-                    for diag in params.diagnostics {
-                        print("  - [\(diag.severity ?? 1)] Line \(diag.range.start.line): \(diag.message)")
+                    // Propagate to LSPManager -> UI
+                    Task { @MainActor in
+                        LSPManager.shared.fileDiagnostics[params.uri] = params.diagnostics
                     }
-                    // TODO: Propagate to LSPManager -> UI
                 }
             }
         }

@@ -2193,7 +2193,7 @@ struct AgentChatStage: View {
                     }
                     
                     if isLoading {
-                        AgentThinkingView(currentTool: currentToolExecution)
+                        AgentThinkingView(currentTool: currentToolExecution, phase: AgentService.shared.agentPhase)
                             .id("thinking-indicator")
                     }
                 }
@@ -4074,6 +4074,7 @@ struct ChatListRow: View {
 
 struct AgentThinkingView: View {
     let currentTool: String?
+    let phase: AgentPhase
     
     @State private var pulsePhase = false
     @State private var dotCount = 0
@@ -4081,7 +4082,8 @@ struct AgentThinkingView: View {
     private let timer = Timer.publish(every: 0.5, on: .main, in: .common).autoconnect()
     
     private var toolIcon: String {
-        guard let tool = currentTool?.lowercased() else { return "brain" }
+        if phase == .validating { return "checkmark.shield.fill" }
+        guard let tool = currentTool?.lowercased() else { return phase.icon }
         if tool.contains("file_read") || tool.contains("reading") { return "doc.text.magnifyingglass" }
         if tool.contains("file_write") || tool.contains("writing") { return "doc.text.fill" }
         if tool.contains("replace") || tool.contains("editing") { return "pencil.line" }
@@ -4094,7 +4096,8 @@ struct AgentThinkingView: View {
     }
     
     private var toolColor: Color {
-        guard let tool = currentTool?.lowercased() else { return .accentColor }
+        if phase == .validating { return .orange }
+        guard let tool = currentTool?.lowercased() else { return phase.color }
         if tool.contains("file_read") || tool.contains("reading") { return .cyan }
         if tool.contains("file_write") || tool.contains("writing") { return .green }
         if tool.contains("replace") || tool.contains("editing") { return .orange }
@@ -4107,7 +4110,8 @@ struct AgentThinkingView: View {
     private var statusText: String {
         guard let tool = currentTool else {
             let dots = String(repeating: ".", count: (dotCount % 3) + 1)
-            return "Thinking\(dots)"
+            let baseText = phase == .validating ? "Validating changes" : "Thinking"
+            return "\(baseText)\(dots)"
         }
         return tool
     }
