@@ -581,7 +581,7 @@ class MCPServer: ObservableObject {
     
     private func executeGetDiagnostics(_ args: [String: Any]) async throws -> String {
         guard let path = args["path"] as? String else {
-            throw MCPError.invalidParams("Missing 'path' argument")
+            throw MCPError.custom("Missing 'path' argument")
         }
         
         let url = URL(fileURLWithPath: path)

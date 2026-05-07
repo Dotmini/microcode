@@ -8,6 +8,10 @@ struct AnyCodable: Codable, CustomStringConvertible {
         self.value = value
     }
     
+    init(value: Any) {
+        self.value = value
+    }
+    
     var description: String {
         return "\(value)"
     }

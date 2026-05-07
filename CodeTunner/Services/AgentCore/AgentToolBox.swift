@@ -380,7 +380,7 @@ struct GetDiagnosticsTool: AgentTool {
     
     func execute(params: [String: Any]) async throws -> String {
         guard let path = params["path"] as? String else {
-            throw ToolBoxError.invalidParameters("Missing 'path'")
+            throw ToolBoxError.invalidParams("Missing 'path'")
         }
         
         let url = URL(fileURLWithPath: path)
@@ -943,36 +943,4 @@ struct DynamicMCPTool: AgentTool {
     func execute(params: [String: Any]) async throws -> String {
         return try await mcpClient.callTool(name: name, arguments: params)
     }
-}
-
-struct AnyCodable: Codable {
-    let value: Any
-    
-    init(from decoder: Decoder) throws {
-        let container = try decoder.singleValueContainer()
-        if container.decodeNil() { value = NSNull() }
-        else if let b = try? container.decode(Bool.self) { value = b }
-        else if let i = try? container.decode(Int.self) { value = i }
-        else if let d = try? container.decode(Double.self) { value = d }
-        else if let s = try? container.decode(String.self) { value = s }
-        else if let a = try? container.decode([AnyCodable].self) { value = a.map { $0.value } }
-        else if let o = try? container.decode([String: AnyCodable].self) { value = o.mapValues { $0.value } }
-        else { throw DecodingError.dataCorruptedError(in: container, debugDescription: "AnyCodable value cannot be decoded") }
-    }
-    
-    func encode(to encoder: Encoder) throws {
-        var container = encoder.singleValueContainer()
-        switch value {
-        case is NSNull: try container.encodeNil()
-        case let b as Bool: try container.encode(b)
-        case let i as Int: try container.encode(i)
-        case let d as Double: try container.encode(d)
-        case let s as String: try container.encode(s)
-        case let a as [Any]: try container.encode(a.map { AnyCodable(value: $0) })
-        case let o as [String: Any]: try container.encode(o.mapValues { AnyCodable(value: $0) })
-        default: try container.encodeNil()
-        }
-    }
-    
-    init(value: Any) { self.value = value }
 }
