@@ -808,13 +808,14 @@ class MCPClient: ObservableObject {
             }
             
             if let id = json["id"] as? Int {
-                if let error = json["error"] as? [String: Any] {
-                    let msg = error["message"] as? String ?? "Unknown error"
-                    pendingRequests[id]?.(.failure(NSError(domain: "MCP", code: -1, userInfo: [NSLocalizedDescriptionKey: msg])))
-                } else if let result = json["result"] {
-                    pendingRequests[id]?.(.success(result))
+                if let callback = pendingRequests.removeValue(forKey: id) {
+                    if let error = json["error"] as? [String: Any] {
+                        let msg = error["message"] as? String ?? "Unknown error"
+                        callback(.failure(NSError(domain: "MCP", code: -1, userInfo: [NSLocalizedDescriptionKey: msg])))
+                    } else if let result = json["result"] {
+                        callback(.success(result))
+                    }
                 }
-                pendingRequests.removeValue(forKey: id)
             }
         }
     }

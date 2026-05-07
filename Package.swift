@@ -166,6 +166,7 @@ let package = Package(
                 "Views/CICDPipelineView.swift",
                 "Views/IDEBrowserView.swift",
                 "Views/ModelBrowserSheet.swift",
+                "Views/Settings/MicroCodeLicenseSettingsView.swift",
                 "Views/TerminalTextView.swift",
                 "Views/TerminalWebView.swift",
                 "Views/Components/PlaygroundTerminalView.swift",
