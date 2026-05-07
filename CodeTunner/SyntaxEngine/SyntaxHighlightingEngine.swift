@@ -818,13 +818,8 @@ public struct SyntaxHighlightedCodeView: NSViewRepresentable {
         let activeThemeID = (themeName != nil && themeName != "system" && !themeName!.isEmpty) ? themeName! : (isDark ? "dark" : "light")
         engine.themeManager.setActiveTheme(activeThemeID)
         
-        // ... (lines 791-860 unchanged in intent, but need to be careful with replace)
-        // I will target the specific block to avoid replacing too much.
         
-    // (I must use separate chunks or a larger block. I'll use a large block or multiple calls?
-    // replace_file_content supports single chunk. I will do makeNSView first)
 
-        
         // Set Font
         let fontWeightValue: NSFont.Weight
         switch fontWeight {
@@ -1041,6 +1036,7 @@ public struct SyntaxHighlightedCodeView: NSViewRepresentable {
         var parent: SyntaxHighlightedCodeView
         var highlightTimer: Timer?
         var isUpdating = false
+        var isInvalidated = false // Prevents async callbacks after teardown
         
         // Engine is now owned by the Coordinator (PERSISTENT)
         var engine: SyntaxHighlightingEngine? // Changed to var and optional
@@ -1058,6 +1054,8 @@ public struct SyntaxHighlightedCodeView: NSViewRepresentable {
         }
         
         deinit {
+            // Mark as invalidated FIRST so async callbacks bail out
+            isInvalidated = true
             // Cancel any in-flight highlighting task on deallocation
             highlightTimer?.invalidate()
             engine?.cancelHighlighting()
@@ -1136,7 +1134,7 @@ public struct SyntaxHighlightedCodeView: NSViewRepresentable {
             // ASYNC Binding Update: Breaks the Layout Recursion Loop
             let newText = textView.string
             DispatchQueue.main.async { [weak self] in
-                guard let self = self else { return }
+                guard let self = self, !self.isInvalidated else { return }
                 // Double check before updating to prevent race conditions
                 if self.parent.text != newText {
                     self.parent.text = newText
@@ -1184,7 +1182,7 @@ public struct SyntaxHighlightedCodeView: NSViewRepresentable {
             highlightTimer?.invalidate()
             highlightTimer = Timer.scheduledTimer(withTimeInterval: 0.15, repeats: false) { [weak self] _ in
                 Task { @MainActor in
-                    guard let self = self else { return }
+                    guard let self = self, !self.isInvalidated else { return }
                     if let tv = textView {
                         self.applyHighlighting(to: tv)
                     }

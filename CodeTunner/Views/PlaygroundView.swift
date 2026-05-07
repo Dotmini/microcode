@@ -102,8 +102,10 @@ struct PlaygroundView: View {
                     
                     if isCellMode {
                         cellEditorPanel
+                            .transition(.opacity)
                     } else {
                         codeEditorPanel
+                            .transition(.opacity)
                     }
                 }
                 .frame(minWidth: 350, maxWidth: .infinity)
@@ -2069,6 +2071,7 @@ struct PlaygroundView: View {
                             onDelete: { deleteCell(cell: cell) }
                         )
                         .environmentObject(appState)
+                        .id(cell.id) // Stabilize identity to prevent NSView recreation crash
                     }
                 }
                 

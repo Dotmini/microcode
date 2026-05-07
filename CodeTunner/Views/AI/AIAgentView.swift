@@ -67,6 +67,7 @@ struct AIAgentView: View {
                     // Cell Mode (Notebook-style AI Agent)
                     AgentCellModeView()
                         .environmentObject(appState)
+                        .transition(.opacity)
                 } else {
                     // Normal Chat Mode
                     VStack(spacing: 0) {
