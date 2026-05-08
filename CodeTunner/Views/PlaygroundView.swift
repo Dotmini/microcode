@@ -2141,9 +2141,11 @@ struct PlaygroundView: View {
     }
     
     func deleteCell(cell: PlaygroundCellModel) {
-        // Fast indexed removal instead of filter
-        if let idx = cells.firstIndex(where: { $0.id == cell.id }) {
-            cells.remove(at: idx)
+        // Fast indexed removal with animation to prevent NSView recreation crash
+        withAnimation(.easeInOut(duration: 0.2)) {
+            if let idx = cells.firstIndex(where: { $0.id == cell.id }) {
+                cells.remove(at: idx)
+            }
         }
         // Allow empty state — don't auto-add
     }
