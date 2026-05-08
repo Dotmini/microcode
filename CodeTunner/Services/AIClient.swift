@@ -24,7 +24,7 @@ enum StreamableAIProvider: String, CaseIterable {
     /// Dotmini Cloud proxy URL (license key route — hides real API keys)
     static var cloudProxyURL: String {
         UserDefaults.standard.string(forKey: "dotminiProxyURL")
-            ?? "https://microcode-proxy.dotmini.net/v1"
+            ?? "https://api.dotmini.net/v1"
     }
     
     /// Base URL when routing through Dotmini Cloud proxy
