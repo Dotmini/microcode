@@ -8,7 +8,8 @@ let package = Package(
         .macOS(.v13)
     ],
     products: [
-        .executable(name: "CodeTunner", targets: ["CodeTunner"])
+        .executable(name: "CodeTunner", targets: ["CodeTunner"]),
+        .library(name: "CodeTunnerCore", targets: ["CodeTunnerCore"])
     ],
     dependencies: [
         .package(url: "https://github.com/migueldeicaza/SwiftTerm.git", from: "1.0.0")
@@ -26,9 +27,14 @@ let package = Package(
             path: "CodeTunnerKernel",
             publicHeadersPath: "include"
         ),
+        .target(
+            name: "CodeTunnerCore",
+            dependencies: ["MicrocodeCoreSupport"],
+            path: "CodeTunnerCore/Sources"
+        ),
         .executableTarget(
             name: "CodeTunner",
-            dependencies: ["CodeTunnerSupport", "CodeTunnerKernel", "SwiftTerm", "MicrocodeCoreSupport"],
+            dependencies: ["CodeTunnerSupport", "CodeTunnerKernel", "SwiftTerm", "MicrocodeCoreSupport", "CodeTunnerCore"],
             path: "CodeTunner",
             exclude: [
                 "Views/Design/DesignModeView.swift",

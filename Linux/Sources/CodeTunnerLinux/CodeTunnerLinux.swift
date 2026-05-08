@@ -1,9 +1,13 @@
-// The Swift Programming Language
-// https://docs.swift.org/swift-book
+import CodeTunnerCore
 
 @main
 struct CodeTunnerLinux {
     static func main() {
-        print("Hello, world!")
+        print("Starting CodeTunner on Linux...")
+        let bridge = BackendBridge()
+        let result = bridge.startEngine()
+        print(result)
+        
+        // Loop or hook up Linux UI (e.g. GTK+)
     }
 }
