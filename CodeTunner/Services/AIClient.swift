@@ -275,7 +275,9 @@ class AIClient: ObservableObject {
     // MARK: - Gemini Streaming
     
     private func streamGemini(prompt: String, attachments: [AIAttachment], systemPrompt: String?, conversationHistory: [(role: String, content: String)], model: String, apiKey: String, tools: [[String: Any]]?, onToken: @escaping (String) -> Void, onToolCall: ((AIToolCall) -> Void)?) async throws {
-        let url = URL(string: "\(StreamableAIProvider.gemini.baseURL)/models/\(model):streamGenerateContent?alt=sse&key=\(apiKey)")!
+        let keyMode = UserDefaults.standard.string(forKey: "aiKeyMode") ?? "cloud"
+        let baseURL = keyMode == "direct" ? StreamableAIProvider.gemini.directBaseURL : StreamableAIProvider.gemini.cloudBaseURL
+        let url = URL(string: "\(baseURL)/models/\(model):streamGenerateContent?alt=sse&key=\(apiKey)")!
         
         var request = URLRequest(url: url, timeoutInterval: requestTimeout)
         request.httpMethod = "POST"
@@ -450,7 +452,9 @@ class AIClient: ObservableObject {
     // MARK: - Anthropic Streaming
     
     private func streamAnthropic(prompt: String, attachments: [AIAttachment], systemPrompt: String?, conversationHistory: [(role: String, content: String)], model: String, apiKey: String, tools: [[String: Any]]?, onToken: @escaping (String) -> Void, onToolCall: ((AIToolCall) -> Void)?) async throws {
-        let url = URL(string: "\(StreamableAIProvider.anthropic.baseURL)/messages")!
+        let keyMode = UserDefaults.standard.string(forKey: "aiKeyMode") ?? "cloud"
+        let baseURL = keyMode == "direct" ? StreamableAIProvider.anthropic.directBaseURL : StreamableAIProvider.anthropic.cloudBaseURL
+        let url = URL(string: "\(baseURL)/messages")!
         var request = URLRequest(url: url, timeoutInterval: requestTimeout)
         request.httpMethod = "POST"
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
@@ -539,7 +543,9 @@ class AIClient: ObservableObject {
     // MARK: - Sync Helpers (Non-streaming for Agent loops)
     
     private func syncGemini(messages: [[(String, Any)]], systemPrompt: String?, model: String, apiKey: String, tools: [[String: Any]]?) async throws -> (text: String, toolCalls: [AIToolCall]) {
-        let url = URL(string: "\(StreamableAIProvider.gemini.baseURL)/models/\(model):generateContent?key=\(apiKey)")!
+        let keyMode = UserDefaults.standard.string(forKey: "aiKeyMode") ?? "cloud"
+        let baseURL = keyMode == "direct" ? StreamableAIProvider.gemini.directBaseURL : StreamableAIProvider.gemini.cloudBaseURL
+        let url = URL(string: "\(baseURL)/models/\(model):generateContent?key=\(apiKey)")!
         var request = URLRequest(url: url, timeoutInterval: requestTimeout)
         request.httpMethod = "POST"
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
@@ -626,7 +632,9 @@ class AIClient: ObservableObject {
     }
     
     private func syncAnthropic(messages: [[(String, Any)]], systemPrompt: String?, model: String, apiKey: String, tools: [[String: Any]]?) async throws -> (text: String, toolCalls: [AIToolCall]) {
-        let url = URL(string: "\(StreamableAIProvider.anthropic.baseURL)/messages")!
+        let keyMode = UserDefaults.standard.string(forKey: "aiKeyMode") ?? "cloud"
+        let baseURL = keyMode == "direct" ? StreamableAIProvider.anthropic.directBaseURL : StreamableAIProvider.anthropic.cloudBaseURL
+        let url = URL(string: "\(baseURL)/messages")!
         var request = URLRequest(url: url, timeoutInterval: requestTimeout)
         request.httpMethod = "POST"
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
