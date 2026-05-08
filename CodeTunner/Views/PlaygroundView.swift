@@ -2103,23 +2103,19 @@ struct PlaygroundView: View {
     }
     
     func runCell(cell: PlaygroundCellModel) {
-        Task {
+        Task { @MainActor in
             cell.isExecuting = true
             cell.output = ""
             let startTime = Date()
             
             do {
                 let result = try await BackendService.shared.executeCode(code: cell.code, language: language)
-                await MainActor.run {
-                    cell.output = cleanANSI(result.stdout + result.stderr)
-                    cell.executionTime = Date().timeIntervalSince(startTime)
-                    cell.isExecuting = false
-                }
+                cell.output = cleanANSI(result.stdout + result.stderr)
+                cell.executionTime = Date().timeIntervalSince(startTime)
+                cell.isExecuting = false
             } catch {
-                await MainActor.run {
-                    cell.output = "Error: \(error.localizedDescription)"
-                    cell.isExecuting = false
-                }
+                cell.output = "Error: \(error.localizedDescription)"
+                cell.isExecuting = false
             }
         }
     }
