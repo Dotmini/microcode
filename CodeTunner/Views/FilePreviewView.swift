@@ -197,6 +197,3 @@ struct QuickLookPreviewView: NSViewRepresentable {
 }
 
 // MARK: - Preview Provider
-#Preview {
-    FilePreviewView(fileURL: URL(fileURLWithPath: "/Users/test/document.pdf"))
-}

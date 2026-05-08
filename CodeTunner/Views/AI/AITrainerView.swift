@@ -1431,7 +1431,3 @@ struct ExportModelSheet: View {
 }
 
 // MARK: - Preview
-
-#Preview {
-    AITrainerView()
-}

@@ -258,7 +258,3 @@ struct ExtensionRow: View {
         }
     }
 }
-
-#Preview {
-    ExtensionSettingsView()
-}

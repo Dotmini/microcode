@@ -194,7 +194,3 @@ struct RuntimeCard: View {
         .cornerRadius(12)
     }
 }
-
-#Preview {
-    RuntimeManagerView()
-}

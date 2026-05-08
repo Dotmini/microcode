@@ -549,8 +549,3 @@ struct GridBackground: View {
 }
 
 // MARK: - Preview
-
-#Preview {
-    PreviewView()
-        .environmentObject(AppState())
-}

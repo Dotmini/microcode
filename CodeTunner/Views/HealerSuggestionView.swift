@@ -97,18 +97,3 @@ struct HealerSuggestionView: View {
         )
     }
 }
-
-#Preview {
-    HealerSuggestionView(
-        suggestion: HealerSuggestion(
-            id: UUID(),
-            summary: "Fixed missing closing brace",
-            explanation: "The swift file was missing a '}' at the end of the class declaration.",
-            filePath: "/path/to/file.swift",
-            originalError: "Expected '}' in class",
-            proposedCode: "    }\n}"
-        ),
-        onApply: {},
-        onDismiss: {}
-    )
-}

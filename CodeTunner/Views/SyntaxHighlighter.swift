@@ -452,11 +452,3 @@ struct SyntaxHighlightedEditor: View {
         .background(Color(PlaygroundsColors.background).opacity(0.5))
     }
 }
-
-#Preview {
-    SyntaxHighlightedEditor(
-        code: .constant("func hello() {\n    print(\"Hello, World!\")\n    let x = 42\n}"),
-        language: "swift"
-    )
-    .frame(width: 400, height: 200)
-}

@@ -375,7 +375,3 @@ struct ParticipantRow: View {
 }
 
 // MARK: - Color Extension (Moved to ColorExtensions.swift)
-
-#Preview {
-    CollaborationView()
-}

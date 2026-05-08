@@ -2442,10 +2442,3 @@ struct BatteryIcon: View {
         }
     }
 }
-
-#Preview {
-    PlaygroundView()
-        .environmentObject(AppState())
-        .frame(width: 1200, height: 700)
-}
-

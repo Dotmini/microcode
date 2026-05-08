@@ -381,9 +381,14 @@ public class StateMachineLexer: LexerProtocol, @unchecked Sendable {
                 }
             } else if char.isNumber {
                 index = text.index(after: index)
-            } else if char == "." && !isFloat && index < text.index(before: text.endIndex) && text[text.index(after: index)].isNumber {
-                isFloat = true
-                index = text.index(after: index)
+            } else if char == "." && !isFloat {
+                let nextIdx = text.index(after: index)
+                if nextIdx < text.endIndex && text[nextIdx].isNumber {
+                    isFloat = true
+                    index = text.index(after: index)
+                } else {
+                    break
+                }
             } else if (char == "e" || char == "E") && !isHex {
                 index = text.index(after: index)
                 if index < text.endIndex && (text[index] == "+" || text[index] == "-") {

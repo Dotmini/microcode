@@ -954,8 +954,3 @@ struct DeploymentProfileSheet: View {
         .frame(width: 450)
     }
 }
-
-#Preview {
-    ContainerView()
-        .environmentObject(AppState())
-}

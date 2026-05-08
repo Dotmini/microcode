@@ -864,8 +864,3 @@ struct InfoRow: View {
         }
     }
 }
-
-#Preview {
-    GitSettingsView()
-        .environmentObject(AppState())
-}

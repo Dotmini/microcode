@@ -868,9 +868,12 @@ public struct SyntaxHighlightedCodeView: NSViewRepresentable {
         
         // FIX BLINK: Disable [.width] mask which fights with 'No Wrap' mode.
         // Use [.height] to fill vertically.
-        textView.autoresizingMask = [.height]
+        textView.autoresizingMask = [.width, .height]
         textView.isHorizontallyResizable = true
         textView.isVerticallyResizable = true
+        
+        textView.textContainer?.widthTracksTextView = false
+        textView.textContainer?.containerSize = NSSize(width: CGFloat.greatestFiniteMagnitude, height: CGFloat.greatestFiniteMagnitude)
         
         // FIX INVISIBLE TEXT: Ensure initial width is large enough so it doesn't collapse to 0
         let initialWidth = max(scrollView.frame.width, 800)

@@ -610,7 +610,3 @@ struct GitPanelView: View {
         appState.gitRefresh()
     }
 }
-
-#Preview {
-    GitPanelView().environmentObject(AppState()).frame(width: 300, height: 600)
-}

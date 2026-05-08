@@ -472,7 +472,3 @@ class AuthContextProvider: NSObject, ASWebAuthenticationPresentationContextProvi
         return NSApp.windows.first ?? ASPresentationAnchor()
     }
 }
-
-#Preview {
-    MicroCodeLicenseSettingsView()
-}

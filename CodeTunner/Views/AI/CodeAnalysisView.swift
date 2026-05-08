@@ -1172,8 +1172,3 @@ class CodeAnalysisViewModel: ObservableObject {
         }
     }
 }
-
-#Preview {
-    CodeAnalysisView()
-        .environmentObject(AppState())
-}
