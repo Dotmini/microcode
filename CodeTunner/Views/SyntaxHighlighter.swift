@@ -324,7 +324,8 @@ struct PlaygroundsSyntaxHighlighter {
     }
     
     private func tryMatchNumber(_ line: String, from start: String.Index) -> (String, String.Index)? {
-        guard line[start].isNumber || (line[start] == "." && start < line.endIndex && line[line.index(after: start)].isNumber) else {
+        let nextIndex = line.index(after: start)
+        guard line[start].isNumber || (line[start] == "." && nextIndex < line.endIndex && line[nextIndex].isNumber) else {
             return nil
         }
         
