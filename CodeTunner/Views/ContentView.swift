@@ -3461,6 +3461,7 @@ struct SettingsView: View {
     
     @State private var providerKeys: [String: String] = [:]
     @State private var showAPIKey: [String: Bool] = [:]
+    @State private var aiKeyMode: String = "cloud"  // "cloud" = Dotmini proxy, "direct" = user's own key
     
     private var aiSettingsContent: some View {
         VStack(alignment: .leading, spacing: 20) {
@@ -3550,6 +3551,30 @@ struct SettingsView: View {
                         .background(Color.orange.opacity(0.08))
                         .cornerRadius(6)
                     }
+                } else if aiKeyMode == "cloud" {
+                    // Cloud mode: Check license key status
+                    let licenseKey = UserDefaults.standard.string(forKey: "dotminiLicenseKey") ?? ""
+                    if !licenseKey.isEmpty {
+                        HStack(spacing: 6) {
+                            Circle().fill(Color.green).frame(width: 7, height: 7)
+                            Text("Dotmini Cloud connected")
+                                .font(.system(size: 11, weight: .medium))
+                                .foregroundColor(.green)
+                        }
+                        .padding(.horizontal, 10).padding(.vertical, 5)
+                        .background(Color.green.opacity(0.08))
+                        .cornerRadius(6)
+                    } else {
+                        HStack(spacing: 6) {
+                            Circle().fill(Color.orange).frame(width: 7, height: 7)
+                            Text("Set License Key in Subscription tab")
+                                .font(.system(size: 11, weight: .medium))
+                                .foregroundColor(.orange)
+                        }
+                        .padding(.horizontal, 10).padding(.vertical, 5)
+                        .background(Color.orange.opacity(0.08))
+                        .cornerRadius(6)
+                    }
                 } else if let key = providerKeys[selectedProvider], !key.isEmpty {
                     HStack(spacing: 6) {
                         Circle().fill(Color.green).frame(width: 7, height: 7)
@@ -3577,30 +3602,94 @@ struct SettingsView: View {
             .cornerRadius(12)
             .overlay(RoundedRectangle(cornerRadius: 12).stroke(Color.accentColor.opacity(0.2), lineWidth: 1))
             
-            // ── Provider API Keys ──
+            // ── AI Connection Mode ──
             VStack(alignment: .leading, spacing: 14) {
                 HStack(spacing: 8) {
-                    Image(systemName: "key.fill")
+                    Image(systemName: "cloud.fill")
                         .font(.system(size: 12))
-                        .foregroundColor(.accentColor)
-                    Text("API Keys")
+                        .foregroundStyle(LinearGradient(colors: [.cyan, .purple], startPoint: .leading, endPoint: .trailing))
+                    Text("AI Connection Mode")
                         .font(.system(size: 13, weight: .bold))
-                    
-                    Spacer()
-                    
-                    Text("Configure one or more providers. Keys are stored locally.")
-                        .font(.system(size: 11))
-                        .foregroundColor(.secondary)
                 }
                 
-                // Provider cards grid (exclude local — it has its own panel)
-                ForEach(aiProviders.filter { $0.id != "local" }, id: \.id) { provider in
-                    aiProviderKeyCard(provider)
+                Picker("", selection: $aiKeyMode) {
+                    HStack(spacing: 6) {
+                        Image(systemName: "cloud.fill")
+                        Text("Dotmini Cloud")
+                    }.tag("cloud")
+                    HStack(spacing: 6) {
+                        Image(systemName: "key.fill")
+                        Text("Bring Your Own Key")
+                    }.tag("direct")
+                }
+                .pickerStyle(.segmented)
+                .onChange(of: aiKeyMode) { _ in hasChanges = true }
+                
+                if aiKeyMode == "cloud" {
+                    HStack(spacing: 8) {
+                        Image(systemName: "lock.shield.fill")
+                            .foregroundColor(.green)
+                            .font(.system(size: 14))
+                        VStack(alignment: .leading, spacing: 2) {
+                            Text("All AI requests are routed through Dotmini Cloud.")
+                                .font(.system(size: 11, weight: .medium))
+                            Text("Your API keys are managed securely server-side. You only need a Dotmini License Key.")
+                                .font(.system(size: 10))
+                                .foregroundColor(.secondary)
+                        }
+                    }
+                    .padding(10)
+                    .background(Color.green.opacity(0.06))
+                    .cornerRadius(8)
+                } else {
+                    HStack(spacing: 8) {
+                        Image(systemName: "key.horizontal.fill")
+                            .foregroundColor(.orange)
+                            .font(.system(size: 14))
+                        VStack(alignment: .leading, spacing: 2) {
+                            Text("API calls go directly to each provider.")
+                                .font(.system(size: 11, weight: .medium))
+                            Text("Enter your own API key for each provider below. Keys are stored locally on your Mac only.")
+                                .font(.system(size: 10))
+                                .foregroundColor(.secondary)
+                        }
+                    }
+                    .padding(10)
+                    .background(Color.orange.opacity(0.06))
+                    .cornerRadius(8)
                 }
             }
             .padding(16)
             .background(Color(nsColor: .controlBackgroundColor))
             .cornerRadius(12)
+            .overlay(RoundedRectangle(cornerRadius: 12).stroke(Color.purple.opacity(0.15), lineWidth: 1))
+            
+            // ── Provider API Keys (Direct mode ONLY) ──
+            if aiKeyMode == "direct" {
+                VStack(alignment: .leading, spacing: 14) {
+                    HStack(spacing: 8) {
+                        Image(systemName: "key.fill")
+                            .font(.system(size: 12))
+                            .foregroundColor(.accentColor)
+                        Text("Your API Keys")
+                            .font(.system(size: 13, weight: .bold))
+                        
+                        Spacer()
+                        
+                        Text("Keys are stored locally and never sent to Dotmini.")
+                            .font(.system(size: 11))
+                            .foregroundColor(.secondary)
+                    }
+                    
+                    // Provider cards grid (exclude local — it has its own panel)
+                    ForEach(aiProviders.filter { $0.id != "local" }, id: \.id) { provider in
+                        aiProviderKeyCard(provider)
+                    }
+                }
+                .padding(16)
+                .background(Color(nsColor: .controlBackgroundColor))
+                .cornerRadius(12)
+            }
             
             // ── Local LLM Section ──
             localLLMSettingsPanel
@@ -4033,6 +4122,7 @@ struct SettingsView: View {
             providerKeys[p] = appState.apiKeys[p] ?? UserDefaults.standard.string(forKey: "\(p)_api_key") ?? ""
         }
         apiKey = providerKeys[selectedProvider] ?? ""
+        aiKeyMode = UserDefaults.standard.string(forKey: "aiKeyMode") ?? "cloud"
         microRentToken = UserDefaults.standard.string(forKey: "microRentToken") ?? ""
     }
     
@@ -4055,6 +4145,7 @@ struct SettingsView: View {
         
         // Save ALL provider keys
         let defaults = UserDefaults.standard
+        defaults.set(aiKeyMode, forKey: "aiKeyMode")
         for (provider, key) in providerKeys {
             if !key.isEmpty {
                 appState.apiKeys[provider] = key

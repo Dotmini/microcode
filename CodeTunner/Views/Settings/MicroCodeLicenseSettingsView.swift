@@ -219,12 +219,10 @@ struct MicroCodeLicenseSettingsView: View {
     private func verifyKey() {
         guard !dotminiLicenseKey.isEmpty else { return }
         
-        if dotminiLicenseKey == "mc_god_mode_secret" {
-            verifyStatus = "👑 GOD MODE ACTIVATED: Unlimited zero-latency access."
-        } else if dotminiLicenseKey.hasPrefix("mc_live_") {
-            verifyStatus = "✅ Subscription Active. Cloud AI enabled."
+        if dotminiLicenseKey.hasPrefix("mc_live_") || dotminiLicenseKey.hasPrefix("mc_") {
+            verifyStatus = "✅ License Key accepted. Cloud AI enabled."
         } else {
-            verifyStatus = "❌ Invalid License Key format."
+            verifyStatus = "❌ Invalid License Key format. Must start with mc_live_"
         }
         
         showStatus = true

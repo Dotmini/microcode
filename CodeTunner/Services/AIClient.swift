@@ -21,15 +21,31 @@ enum StreamableAIProvider: String, CaseIterable {
     case glm = "glm"
     case local = "local"
     
-    var baseURL: String {
+    /// Dotmini Cloud proxy URL (license key route — hides real API keys)
+    static var cloudProxyURL: String {
+        UserDefaults.standard.string(forKey: "dotminiProxyURL")
+            ?? "https://microcode-proxy.dotmini.net/v1"
+    }
+    
+    /// Base URL when routing through Dotmini Cloud proxy
+    var cloudBaseURL: String {
         switch self {
         case .local: return LocalLLMService.cachedEndpoint
-        default: 
-            #if DEBUG
-            return "http://127.0.0.1:3000/v1" // 🚀 Local Dev Proxy
-            #else
-            return "https://api.dotmini.net/v1" // 🚀 Production Dotmini Proxy
-            #endif
+        default: return Self.cloudProxyURL
+        }
+    }
+    
+    /// Base URL when user provides their own API key (direct to provider)
+    var directBaseURL: String {
+        switch self {
+        case .gemini: return "https://generativelanguage.googleapis.com/v1beta"
+        case .openai: return "https://api.openai.com/v1"
+        case .anthropic: return "https://api.anthropic.com/v1"
+        case .deepseek: return "https://api.deepseek.com/v1"
+        case .grok: return "https://api.x.ai/v1"
+        case .qwen: return "https://dashscope.aliyuncs.com/compatible-mode/v1"
+        case .glm: return "https://open.bigmodel.cn/api/paas/v4"
+        case .local: return LocalLLMService.cachedEndpoint
         }
     }
     
@@ -137,11 +153,30 @@ class AIClient: ObservableObject {
         onComplete: @escaping (String) -> Void,
         onError: @escaping (String) -> Void
     ) {
-        // 🚀 Dotmini Proxy: Override API Key with the central License Key
-        let actualKey = provider == .local ? "" : (UserDefaults.standard.string(forKey: "dotminiLicenseKey") ?? "")
+        // Determine key mode: "cloud" (Dotmini proxy) vs "direct" (user's own key)
+        let keyMode = UserDefaults.standard.string(forKey: "aiKeyMode") ?? "cloud"
+        let actualKey: String
+        let baseURL: String
+        
+        if provider == .local {
+            actualKey = ""
+            baseURL = provider.directBaseURL
+        } else if keyMode == "direct" {
+            // User's own API key → hit provider directly
+            actualKey = UserDefaults.standard.string(forKey: "\(provider.rawValue)_api_key") ?? apiKey
+            baseURL = provider.directBaseURL
+        } else {
+            // Dotmini Cloud → license key → proxy handles real API keys
+            actualKey = UserDefaults.standard.string(forKey: "dotminiLicenseKey") ?? ""
+            baseURL = provider.cloudBaseURL
+        }
         
         guard !actualKey.isEmpty || !provider.requiresAPIKey else {
-            onError("License Key missing. Please set your Dotmini License Key in Settings.")
+            if keyMode == "direct" {
+                onError("API key missing for \(provider.rawValue). Add your key in Settings → AI.")
+            } else {
+                onError("License Key missing. Sign in or set your Dotmini License Key in Settings → Subscription.")
+            }
             return
         }
         
@@ -158,7 +193,7 @@ class AIClient: ObservableObject {
                 do {
                     switch provider {
                     case .gemini, .openai, .deepseek, .grok, .qwen, .glm, .local:
-                        try await streamOpenAI(prompt: prompt, attachments: attachments, systemPrompt: systemPrompt, conversationHistory: trimmedHistory, model: model, apiKey: actualKey, baseURL: provider.baseURL, tools: tools, onToken: onToken, onToolCall: onToolCall)
+                        try await streamOpenAI(prompt: prompt, attachments: attachments, systemPrompt: systemPrompt, conversationHistory: trimmedHistory, model: model, apiKey: actualKey, baseURL: baseURL, tools: tools, onToken: onToken, onToolCall: onToolCall)
                     case .anthropic:
                         try await streamAnthropic(prompt: prompt, attachments: attachments, systemPrompt: systemPrompt, conversationHistory: trimmedHistory, model: model, apiKey: actualKey, tools: tools, onToken: onToken, onToolCall: onToolCall)
                     }
@@ -203,11 +238,24 @@ class AIClient: ObservableObject {
         apiKey: String,
         tools: [[String: Any]]? = nil
     ) async throws -> (text: String, toolCalls: [AIToolCall]) {
-        let actualKey = provider == .local ? "" : (UserDefaults.standard.string(forKey: "dotminiLicenseKey") ?? "")
+        let keyMode = UserDefaults.standard.string(forKey: "aiKeyMode") ?? "cloud"
+        let actualKey: String
+        let baseURL: String
+        
+        if provider == .local {
+            actualKey = ""
+            baseURL = provider.directBaseURL
+        } else if keyMode == "direct" {
+            actualKey = UserDefaults.standard.string(forKey: "\(provider.rawValue)_api_key") ?? apiKey
+            baseURL = provider.directBaseURL
+        } else {
+            actualKey = UserDefaults.standard.string(forKey: "dotminiLicenseKey") ?? ""
+            baseURL = provider.cloudBaseURL
+        }
         
         switch provider {
         case .gemini, .openai, .deepseek, .grok, .qwen, .glm, .local:
-            return try await syncOpenAI(messages: messages, systemPrompt: systemPrompt, model: model, apiKey: actualKey, baseURL: provider.baseURL, tools: tools)
+            return try await syncOpenAI(messages: messages, systemPrompt: systemPrompt, model: model, apiKey: actualKey, baseURL: baseURL, tools: tools)
         case .anthropic:
             return try await syncAnthropic(messages: messages, systemPrompt: systemPrompt, model: model, apiKey: actualKey, tools: tools)
         }
