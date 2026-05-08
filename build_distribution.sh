@@ -4,7 +4,7 @@ set -x
 
 APP_NAME="MicroCode"
 BUNDLE_ID="com.dotmini.codetunner"
-VERSION="2.0.0"
+VERSION="2.0.0 Developer"
 
 # Directories
 BUILD_ROOT=".build_dist"

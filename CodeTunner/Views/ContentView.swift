@@ -3167,7 +3167,7 @@ struct SettingsView: View {
                 .font(.system(size: 16, weight: .medium, design: .rounded))
                 .foregroundColor(.secondary)
             
-            Text("Version 2.0.0 (Build 2025.1)")
+            Text("Version 2.0.0 Developer (Build 2025.1)")
                 .font(.system(size: 14))
                 .foregroundColor(.secondary)
             

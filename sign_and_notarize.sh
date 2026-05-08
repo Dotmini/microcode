@@ -18,7 +18,7 @@ set -e
 # Configuration
 APP_NAME="CodeTunner"
 BUNDLE_ID="com.dotmini.codetunner"
-VERSION="2.0.0"
+VERSION="2.0.0 Developer"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 APP_PATH="$SCRIPT_DIR/Dist/$APP_NAME.app"
 DMG_PATH="$SCRIPT_DIR/Dist/$APP_NAME-$VERSION.dmg"
