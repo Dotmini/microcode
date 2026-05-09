@@ -85,50 +85,15 @@ struct PlaygroundView: View {
             Divider()
             
             // Main Content
-            HSplitView {
-                // Document Mode (Left Column) - Resizable
-                if showDocumentMode && !isDocumentPiP {
+            if showDocumentMode && !isDocumentPiP {
+                DraggableSplitView(initialProportion: 0.3) {
                     DocumentViewer(documentURL: $documentURL, isPiPActive: $isDocumentPiP)
-                        .frame(minWidth: 200, idealWidth: 350, maxWidth: 600)
+                        .frame(minWidth: 200)
+                } right: {
+                    mainAndRightPane
                 }
-                
-                // Center Pane: Editor & Data
-                VStack(spacing: 0) {
-                    if showDataFiles {
-                        dataFilesPanel
-                            .frame(minHeight: 150, maxHeight: 300)
-                        Divider()
-                    }
-                    
-                    if isCellMode {
-                        cellEditorPanel
-                            .transition(.opacity)
-                    } else {
-                        codeEditorPanel
-                            .transition(.opacity)
-                    }
-                }
-                .frame(minWidth: 350, maxWidth: .infinity)
-                
-                // Right Pane: Output & Preview
-                if (showOutput || showGUIPreview) && !isCellMode {
-                    VStack(spacing: 0) {
-                        if showGUIPreview {
-                            guiPreviewPanel
-                                .frame(minHeight: 200)
-                        }
-                        
-                        if showGUIPreview && showOutput {
-                            Divider()
-                        }
-                        
-                        if showOutput {
-                            outputPanel
-                                .frame(minHeight: 100, maxHeight: showGUIPreview ? 300 : .infinity)
-                        }
-                    }
-                    .frame(minWidth: 280, maxWidth: .infinity)
-                }
+            } else {
+                mainAndRightPane
             }
         }
         .onAppear {
@@ -166,6 +131,57 @@ struct PlaygroundView: View {
         .sheet(isPresented: $showingEnvManager) {
             PythonEnvSheet()
         }
+    }
+    
+    @ViewBuilder
+    private var mainAndRightPane: some View {
+        if (showOutput || showGUIPreview) && !isCellMode {
+            DraggableSplitView(initialProportion: 0.55) {
+                centerPane
+            } right: {
+                rightPane
+            }
+        } else {
+            centerPane
+        }
+    }
+    
+    private var centerPane: some View {
+        VStack(spacing: 0) {
+            if showDataFiles {
+                dataFilesPanel
+                    .frame(minHeight: 150, maxHeight: 300)
+                Divider()
+            }
+            
+            if isCellMode {
+                cellEditorPanel
+                    .transition(.opacity)
+            } else {
+                codeEditorPanel
+                    .transition(.opacity)
+            }
+        }
+        .frame(minWidth: 300, maxWidth: .infinity)
+    }
+    
+    private var rightPane: some View {
+        VStack(spacing: 0) {
+            if showGUIPreview {
+                guiPreviewPanel
+                    .frame(minHeight: 200)
+            }
+            
+            if showGUIPreview && showOutput {
+                Divider()
+            }
+            
+            if showOutput {
+                outputPanel
+                    .frame(minHeight: 100, maxHeight: showGUIPreview ? .infinity : .infinity)
+            }
+        }
+        .frame(minWidth: 250, maxWidth: .infinity)
     }
     
     // MARK: - Toolbar
