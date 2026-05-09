@@ -166,16 +166,16 @@ class AIClient: ObservableObject {
             actualKey = UserDefaults.standard.string(forKey: "\(provider.rawValue)_api_key") ?? apiKey
             baseURL = provider.directBaseURL
         } else {
-            // Dotmini Cloud → license key → proxy handles real API keys
-            actualKey = UserDefaults.standard.string(forKey: "dotminiLicenseKey") ?? ""
-            baseURL = provider.cloudBaseURL
+            // Dotmini Cloud → Secure Internal Developer Keys (Obfuscated)
+            actualKey = CloudKeyManager.getKey(for: provider)
+            baseURL = provider.directBaseURL
         }
         
         guard !actualKey.isEmpty || !provider.requiresAPIKey else {
             if keyMode == "direct" {
                 onError("API key missing for \(provider.rawValue). Add your key in Settings → AI.")
             } else {
-                onError("License Key missing. Sign in or set your Dotmini License Key in Settings → Subscription.")
+                onError("Cloud Dotmini API Key is not configured for \(provider.rawValue). Please use Bring Your Own Key.")
             }
             return
         }
@@ -191,19 +191,14 @@ class AIClient: ObservableObject {
             
             while retryCount <= maxRetries {
                 do {
-                    if keyMode == "cloud" {
-                        // Dotmini Cloud (OneAPI proxy) handles ALL models via OpenAI protocol
+                    // Use native protocols for both direct and cloud modes since proxy is bypassed for security
+                    switch provider {
+                    case .gemini:
+                        try await streamGemini(prompt: prompt, attachments: attachments, systemPrompt: systemPrompt, conversationHistory: trimmedHistory, model: model, apiKey: actualKey, tools: tools, onToken: onToken, onToolCall: onToolCall)
+                    case .anthropic:
+                        try await streamAnthropic(prompt: prompt, attachments: attachments, systemPrompt: systemPrompt, conversationHistory: trimmedHistory, model: model, apiKey: actualKey, tools: tools, onToken: onToken, onToolCall: onToolCall)
+                    case .openai, .deepseek, .grok, .qwen, .glm, .local:
                         try await streamOpenAI(prompt: prompt, attachments: attachments, systemPrompt: systemPrompt, conversationHistory: trimmedHistory, model: model, apiKey: actualKey, baseURL: baseURL, tools: tools, onToken: onToken, onToolCall: onToolCall)
-                    } else {
-                        // Direct mode: use native protocols where necessary
-                        switch provider {
-                        case .gemini:
-                            try await streamGemini(prompt: prompt, attachments: attachments, systemPrompt: systemPrompt, conversationHistory: trimmedHistory, model: model, apiKey: actualKey, tools: tools, onToken: onToken, onToolCall: onToolCall)
-                        case .anthropic:
-                            try await streamAnthropic(prompt: prompt, attachments: attachments, systemPrompt: systemPrompt, conversationHistory: trimmedHistory, model: model, apiKey: actualKey, tools: tools, onToken: onToken, onToolCall: onToolCall)
-                        case .openai, .deepseek, .grok, .qwen, .glm, .local:
-                            try await streamOpenAI(prompt: prompt, attachments: attachments, systemPrompt: systemPrompt, conversationHistory: trimmedHistory, model: model, apiKey: actualKey, baseURL: baseURL, tools: tools, onToken: onToken, onToolCall: onToolCall)
-                        }
                     }
                     
                     await MainActor.run {
@@ -257,23 +252,17 @@ class AIClient: ObservableObject {
             actualKey = UserDefaults.standard.string(forKey: "\(provider.rawValue)_api_key") ?? apiKey
             baseURL = provider.directBaseURL
         } else {
-            actualKey = UserDefaults.standard.string(forKey: "dotminiLicenseKey") ?? ""
-            baseURL = provider.cloudBaseURL
+            actualKey = CloudKeyManager.getKey(for: provider)
+            baseURL = provider.directBaseURL
         }
         
-        if keyMode == "cloud" {
-            // Dotmini Cloud (OneAPI proxy) handles ALL models via OpenAI protocol
+        switch provider {
+        case .gemini:
+            return try await syncGemini(messages: messages, systemPrompt: systemPrompt, model: model, apiKey: actualKey, tools: tools)
+        case .anthropic:
+            return try await syncAnthropic(messages: messages, systemPrompt: systemPrompt, model: model, apiKey: actualKey, tools: tools)
+        case .openai, .deepseek, .grok, .qwen, .glm, .local:
             return try await syncOpenAI(messages: messages, systemPrompt: systemPrompt, model: model, apiKey: actualKey, baseURL: baseURL, tools: tools)
-        } else {
-            // Direct mode: use native protocols
-            switch provider {
-            case .gemini:
-                return try await syncGemini(messages: messages, systemPrompt: systemPrompt, model: model, apiKey: actualKey, tools: tools)
-            case .anthropic:
-                return try await syncAnthropic(messages: messages, systemPrompt: systemPrompt, model: model, apiKey: actualKey, tools: tools)
-            case .openai, .deepseek, .grok, .qwen, .glm, .local:
-                return try await syncOpenAI(messages: messages, systemPrompt: systemPrompt, model: model, apiKey: actualKey, baseURL: baseURL, tools: tools)
-            }
         }
     }
     
