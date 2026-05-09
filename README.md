@@ -15,6 +15,7 @@
   <img src="https://img.shields.io/badge/Rust-1.75+-DEA584?style=flat-square&logo=rust&logoColor=white" />
   <img src="https://img.shields.io/badge/Metal-GPU_Accelerated-8E8E93?style=flat-square&logo=apple&logoColor=white" />
   <img src="https://img.shields.io/badge/License-MPL_v1.0-blue?style=flat-square" />
+  <img src="https://img.shields.io/github/actions/workflow/status/Dotmini/microcode/ci.yml?style=flat-square&logo=githubactions&logoColor=white&label=CI/CD" alt="Build Status" />
   <img src="https://img.shields.io/github/v/release/Dotmini/microcode?style=flat-square&color=green" />
 </p>
 
