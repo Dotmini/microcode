@@ -521,21 +521,16 @@ struct RemoteXView: View {
     @State private var sidebarVisible: Bool = true
     
     var body: some View {
-        CompatHSplitView {
-            // Left: Server List
+        Group {
             if sidebarVisible {
-                serverListPanel
-                    .frame(minWidth: 250, idealWidth: 280, maxWidth: 350)
-            }
-            
-            // Right: Connection View
-            // Priority: Show connected server first, then selectedServer
-            if manager.isConnected, let connectedServer = manager.currentConnection {
-                connectionPanel(server: connectedServer)
-            } else if let server = selectedServer {
-                connectionPanel(server: server)
+                DraggableSplitView(initialProportion: 0.3) {
+                    serverListPanel
+                        .frame(minWidth: 250)
+                } right: {
+                    mainConnectionContent
+                }
             } else {
-                emptyStateView
+                mainConnectionContent
             }
         }
         .sheet(isPresented: $showingConfigSheet) {
@@ -551,6 +546,17 @@ struct RemoteXView: View {
             Button("OK", role: .cancel) { }
         } message: {
             Text(manager.lastError ?? "Unknown error occurred.")
+        }
+    }
+    
+    @ViewBuilder
+    private var mainConnectionContent: some View {
+        if manager.isConnected, let connectedServer = manager.currentConnection {
+            connectionPanel(server: connectedServer)
+        } else if let server = selectedServer {
+            connectionPanel(server: server)
+        } else {
+            emptyStateView
         }
     }
     
@@ -1553,10 +1559,10 @@ struct RemoteFilesTab: View {
     }
     
     var body: some View {
-        CompatHSplitView {
+        DraggableSplitView(initialProportion: 0.5) {
             // LEFT: Local
             localPane
-            
+        } right: {
             // RIGHT: Remote
             remotePane
         }
