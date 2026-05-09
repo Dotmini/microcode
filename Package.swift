@@ -167,6 +167,7 @@ let package = Package(
                 "Views/Components/AuthenticTerminal.swift",
                 "Views/Components/FestiveOverlayView.swift",
                 "Views/Components/LineNumberRulerView.swift",
+                "Views/Components/DraggableSplitView.swift",
                 "Views/DatabaseStudioView.swift",
                 "Views/APIClientView.swift",
                 "Views/CICDPipelineView.swift",
