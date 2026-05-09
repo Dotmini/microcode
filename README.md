@@ -252,8 +252,8 @@ This is a **source-available** license designed to protect the creator's rights 
 | 🤝 **Open Source Contributions** | ✅ Free | $0 |
 | 🔍 **Evaluation** (≤ 90 days) | ✅ Free | $0 |
 | 🏢 **Commercial** (Small Biz ≤ ฿10M) | ⚠️ Requires CLA | **0.5% Revenue Share** |
-| 🏬 **Commercial** (Medium ≤ ฿100M) | ⚠️ Requires CLA | **1.5% Revenue Share** |
-| 🏛️ **Commercial** (Enterprise > ฿100M) | ⚠️ Requires CLA | **2.5% Revenue Share** |
+| 🏬 **Commercial** (Medium ≤ ฿100M) | ⚠️ Requires CLA | **$2,999 / Year (Flat-rate)** |
+| 🏛️ **Commercial** (Enterprise > ฿100M) | ⚠️ Requires CLA | **Contact Sales for Custom License** |
 
 ### Commercial License Agreement (CLA)
 
