@@ -20,7 +20,8 @@ struct MicroCodeLicenseSettingsView: View {
         Self.secretsDict["FIREBASE_API_KEY"] as? String ?? ""
     }
     private var firebaseDbUrl: String {
-        Self.secretsDict["FIREBASE_DB_URL"] as? String ?? ""
+        let secret = Self.secretsDict["FIREBASE_DB_URL"] as? String ?? ""
+        return secret.isEmpty ? "https://microrentofficial-default-rtdb.firebaseio.com" : secret
     }
     
     /// Load Secrets.plist once (from bundle or workspace root)
@@ -384,13 +385,24 @@ struct MicroCodeLicenseSettingsView: View {
         URLSession.shared.dataTask(with: req) { data, resp, err in
             DispatchQueue.main.async {
                 self.isLoggingIn = false
-                guard let data = data,
-                      let userJson = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
+                
+                guard let data = data else {
+                    withAnimation { self.loginStatus = "Failed to load user data. Check network." }
+                    return
+                }
+                
+                // If Firebase returns "null", it means the user node doesn't exist (no license)
+                if let str = String(data: data, encoding: .utf8), str.trimmingCharacters(in: .whitespacesAndNewlines) == "null" {
+                    withAnimation { self.loginStatus = "No active license found. Please subscribe." }
+                    return
+                }
+                
+                guard let userJson = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
                     withAnimation { self.loginStatus = "Failed to load user data." }
                     return
                 }
                 
-                if let license = userJson["licenseKey"] as? String {
+                if let license = userJson["licenseKey"] as? String, !license.isEmpty {
                     withAnimation {
                         self.dotminiLicenseKey = license
                         self.loggedInEmail = self.email
