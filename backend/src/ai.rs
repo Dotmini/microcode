@@ -288,19 +288,31 @@ impl AIProvider for GeminiProvider {
                 id: "gemini-3.1-pro".to_string(),
                 name: "Gemini 3.1 Pro".to_string(),
                 provider: "gemini".to_string(),
-                context_length: 1048576,
+                context_length: 2000000,
             },
             AIModel {
                 id: "gemini-2.5-pro-preview-05-06".to_string(),
                 name: "Gemini 2.5 Pro".to_string(),
                 provider: "gemini".to_string(),
-                context_length: 1048576,
+                context_length: 2000000,
             },
             AIModel {
                 id: "gemini-2.5-flash".to_string(),
                 name: "Gemini 2.5 Flash".to_string(),
                 provider: "gemini".to_string(),
                 context_length: 1048576,
+            },
+            AIModel {
+                id: "gemini-2.5-flash-lite".to_string(),
+                name: "Gemini 2.5 Flash-Lite".to_string(),
+                provider: "gemini".to_string(),
+                context_length: 1048576,
+            },
+            AIModel {
+                id: "gemma-3n-e4".to_string(),
+                name: "Gemma 3n".to_string(),
+                provider: "gemini".to_string(),
+                context_length: 8192,
             },
         ]
     }
@@ -536,6 +548,12 @@ impl AIProvider for OpenAIProvider {
             AIModel {
                 id: "gpt-4o".to_string(),
                 name: "GPT-4o".to_string(),
+                provider: "openai".to_string(),
+                context_length: 128000,
+            },
+            AIModel {
+                id: "gpt-4o-mini".to_string(),
+                name: "GPT-4o Mini".to_string(),
                 provider: "openai".to_string(),
                 context_length: 128000,
             },
@@ -793,6 +811,12 @@ impl AIProvider for ClaudeProvider {
                 context_length: 200000,
             },
             AIModel {
+                id: "claude-3-5-sonnet-20241022".to_string(),
+                name: "Claude 3.5 Sonnet".to_string(),
+                provider: "anthropic".to_string(),
+                context_length: 200000,
+            },
+            AIModel {
                 id: "claude-3-5-haiku-20241022".to_string(),
                 name: "Claude 3.5 Haiku".to_string(),
                 provider: "anthropic".to_string(),
@@ -1041,6 +1065,12 @@ impl AIProvider for DeepSeekProvider {
                 provider: "deepseek".to_string(),
                 context_length: 128000,
             },
+            AIModel {
+                id: "deepseek-reasoner".to_string(),
+                name: "DeepSeek Reasoner".to_string(),
+                provider: "deepseek".to_string(),
+                context_length: 128000,
+            },
         ]
     }
 }
@@ -1233,14 +1263,20 @@ impl AIProvider for GLMProvider {
     fn models(&self) -> Vec<AIModel> {
         vec![
             AIModel {
-                id: "glm-4".to_string(),
-                name: "GLM-4".to_string(),
+                id: "glm-4.6".to_string(),
+                name: "GLM-4.6".to_string(),
                 provider: "glm".to_string(),
                 context_length: 128000,
             },
             AIModel {
-                id: "glm-3-turbo".to_string(),
-                name: "GLM-3 Turbo".to_string(),
+                id: "glm-4-plus".to_string(),
+                name: "GLM-4 Plus".to_string(),
+                provider: "glm".to_string(),
+                context_length: 128000,
+            },
+            AIModel {
+                id: "glm-4-flash".to_string(),
+                name: "GLM-4 Flash".to_string(),
                 provider: "glm".to_string(),
                 context_length: 128000,
             },
@@ -1334,7 +1370,10 @@ impl AIProvider for GrokProvider {
 
     fn name(&self) -> &str { "grok" }
     fn models(&self) -> Vec<AIModel> {
-        vec![AIModel { id: "grok-beta".to_string(), name: "Grok Beta".to_string(), provider: "grok".to_string(), context_length: 131072 }]
+        vec![
+            AIModel { id: "grok-3".to_string(), name: "Grok 3".to_string(), provider: "grok".to_string(), context_length: 131072 },
+            AIModel { id: "grok-3-mini".to_string(), name: "Grok 3 Mini".to_string(), provider: "grok".to_string(), context_length: 131072 },
+        ]
     }
 }
 
@@ -1428,6 +1467,7 @@ impl AIProvider for QwenProvider {
     fn name(&self) -> &str { "qwen" }
     fn models(&self) -> Vec<AIModel> {
         vec![
+            AIModel { id: "qwen3-235b-a22b".to_string(), name: "Qwen3 235B-A22B".to_string(), provider: "qwen".to_string(), context_length: 128000 },
             AIModel { id: "qwen-max".to_string(), name: "Qwen Max".to_string(), provider: "qwen".to_string(), context_length: 30000 },
             AIModel { id: "qwen-plus".to_string(), name: "Qwen Plus".to_string(), provider: "qwen".to_string(), context_length: 30000 },
         ]

@@ -40,7 +40,7 @@ struct AIProviderConfig: Identifiable, Codable, Equatable {
 // MARK: - Provider Metadata
 
 enum AIProviderMeta: String, CaseIterable, Identifiable {
-    case openai, anthropic, deepseek, gemini, grok, codex
+    case openai, anthropic, deepseek, gemini, grok, codex, qwen, glm
     
     var id: String { rawValue }
     
@@ -51,6 +51,8 @@ enum AIProviderMeta: String, CaseIterable, Identifiable {
         case .deepseek: return "DeepSeek"
         case .gemini: return "Google Gemini"
         case .grok: return "Grok (xAI)"
+        case .qwen: return "Qwen (Alibaba)"
+        case .glm: return "GLM (Zhipu AI)"
         case .codex: return "Codex (OpenAI)"
         }
     }
@@ -62,6 +64,8 @@ enum AIProviderMeta: String, CaseIterable, Identifiable {
         case .deepseek: return "water.waves"
         case .gemini: return "sparkles"
         case .grok: return "bolt.fill"
+        case .qwen: return "cloud.fill"
+        case .glm: return "globe.asia.australia"
         case .codex: return "chevron.left.forwardslash.chevron.right"
         }
     }
@@ -72,7 +76,9 @@ enum AIProviderMeta: String, CaseIterable, Identifiable {
         case .anthropic: return .orange
         case .deepseek: return .blue
         case .gemini: return .purple
-        case .grok: return .red
+        case .grok: return .purple
+        case .qwen: return .indigo
+        case .glm: return .red
         case .codex: return .cyan
         }
     }
@@ -84,6 +90,8 @@ enum AIProviderMeta: String, CaseIterable, Identifiable {
         case .deepseek: return "sk-"
         case .gemini: return "AI"
         case .grok: return "xai-"
+        case .qwen: return "sk-"
+        case .glm: return ""
         }
     }
     
@@ -94,17 +102,21 @@ enum AIProviderMeta: String, CaseIterable, Identifiable {
         case .deepseek: return "https://api.deepseek.com/v1"
         case .gemini: return "https://generativelanguage.googleapis.com/v1beta"
         case .grok: return "https://api.x.ai/v1"
+        case .qwen: return "https://dashscope.aliyuncs.com/compatible-mode/v1"
+        case .glm: return "https://open.bigmodel.cn/api/paas/v4"
         case .codex: return "https://api.openai.com/v1"
         }
     }
     
     var defaultModels: [String] {
         switch self {
-        case .openai: return ["gpt-4o", "gpt-4o-mini", "gpt-4.1", "gpt-4.1-mini", "gpt-4.1-nano", "o4-mini", "o3-mini"]
-        case .anthropic: return ["claude-sonnet-4-20250514", "claude-3-5-sonnet-20241022", "claude-3-5-haiku-20241022", "claude-3-opus-20240229"]
-        case .deepseek: return ["deepseek-chat", "deepseek-reasoner"]
-        case .gemini: return ["gemini-2.5-flash", "gemini-2.5-pro", "gemini-2.0-flash"]
-        case .grok: return ["grok-3", "grok-3-mini", "grok-2"]
+        case .openai: return ["gpt-5", "gpt-4o", "gpt-4o-mini", "o3", "o4-mini"]
+        case .anthropic: return ["claude-4.7-opus-20260501", "claude-sonnet-4-20250514", "claude-3-5-sonnet-20241022", "claude-3-5-haiku-20241022"]
+        case .deepseek: return ["deepseek-chat-v4", "deepseek-chat", "deepseek-coder", "deepseek-reasoner"]
+        case .gemini: return ["gemini-3.1-pro", "gemini-2.5-pro-preview-05-06", "gemini-2.5-flash", "gemini-2.5-flash-lite", "gemma-3n-e4"]
+        case .grok: return ["grok-3", "grok-3-mini"]
+        case .qwen: return ["qwen3-235b-a22b", "qwen-max", "qwen-plus"]
+        case .glm: return ["glm-4.6", "glm-4-plus", "glm-4-flash"]
         case .codex: return ["codex-mini-latest", "o4-mini"]
         }
     }
@@ -131,6 +143,8 @@ enum AIProviderMeta: String, CaseIterable, Identifiable {
         case .deepseek: return .deepseek
         case .gemini: return .gemini
         case .grok: return .grok
+        case .qwen: return .qwen
+        case .glm: return .glm
         }
     }
 }
@@ -246,7 +260,7 @@ class AIProviderAuthService: ObservableObject {
                 return try await validateOpenAI(apiKey: apiKey, baseURL: meta.baseURL)
             case .gemini:
                 return try await validateGemini(apiKey: apiKey)
-            case .grok:
+            case .grok, .qwen, .glm:
                 return try await validateOpenAI(apiKey: apiKey, baseURL: meta.baseURL)
             }
         } catch {
@@ -288,7 +302,7 @@ class AIProviderAuthService: ObservableObject {
     func fetchModels(_ meta: AIProviderMeta, apiKey: String) async -> [String]? {
         do {
             switch meta {
-            case .openai, .codex, .deepseek, .grok:
+            case .openai, .codex, .deepseek, .grok, .qwen, .glm:
                 var request = URLRequest(url: URL(string: "\(meta.baseURL)/models")!)
                 request.setValue("Bearer \(apiKey)", forHTTPHeaderField: "Authorization")
                 request.timeoutInterval = 10
@@ -302,6 +316,8 @@ class AIProviderAuthService: ObservableObject {
                             case .openai, .codex: return id.contains("gpt") || id.contains("o1") || id.contains("o3") || id.contains("o4") || id.contains("codex")
                             case .deepseek: return id.contains("deepseek")
                             case .grok: return id.contains("grok")
+                            case .qwen: return id.contains("qwen")
+                            case .glm: return id.contains("glm")
                             default: return true
                             }
                         }
