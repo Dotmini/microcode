@@ -1738,26 +1738,51 @@ struct WelcomeScreen: View {
                     )
                     
                     ScrollView {
-                        VStack(alignment: .leading, spacing: 40) {
-                            // Header
-                            HStack(spacing: 20) {
-                                MicroCodeLogoView()
-                                VStack(alignment: .leading, spacing: 4) {
-                                    Text("MicroCode")
+                        VStack(spacing: 32) {
+                            
+                            // App Icon
+                            ZStack {
+                                RoundedRectangle(cornerRadius: 28, style: .continuous)
+                                    .fill(LinearGradient(
+                                        colors: [Color(red: 0.1, green: 0.11, blue: 0.15), Color(red: 0.05, green: 0.06, blue: 0.08)],
+                                        startPoint: .topLeading,
+                                        endPoint: .bottomTrailing
+                                    ))
+                                    .frame(width: 120, height: 120)
+                                    
+                                RoundedRectangle(cornerRadius: 24, style: .continuous)
+                                    .stroke(Color(red: 0.17, green: 0.18, blue: 0.25), lineWidth: 4)
+                                    .frame(width: 112, height: 112)
+                                
+                                HStack(spacing: -6) {
+                                    Image(systemName: "chevron.left")
                                         .font(.system(size: 36, weight: .bold))
-                                    Text("What are we building today?")
-                                        .font(.system(size: 16))
-                                        .foregroundColor(.secondary)
+                                        .foregroundColor(Color(red: 0.48, green: 0.64, blue: 0.97)) // Tokyo Night Blue
+                                    
+                                    Image(systemName: "chevron.right")
+                                        .font(.system(size: 36, weight: .bold))
+                                        .foregroundColor(Color(red: 0.97, green: 0.46, blue: 0.56)) // Tokyo Night Pink
                                 }
-                                Spacer()
+                                .shadow(color: Color(red: 0.73, green: 0.6, blue: 0.97).opacity(0.8), radius: 12, x: 0, y: 0) // Purple glow
                             }
-                            .padding(.top, 60)
+                            .shadow(color: .black.opacity(0.4), radius: 20, x: 0, y: 10)
+                            
+                            // App Title
+                            VStack(spacing: 8) {
+                                Text("MicroCode")
+                                    .font(.system(size: 36, weight: .bold))
+                                    .foregroundColor(.primary)
+                                
+                                Text("What are we building today?")
+                                    .font(.system(size: 16))
+                                    .foregroundColor(.secondary)
+                            }
                             
                             // AI Project Builder
                             VStack(alignment: .leading, spacing: 12) {
                                 HStack {
                                     Image(systemName: "sparkles")
-                                        .foregroundColor(.purple)
+                                        .foregroundColor(.accentColor)
                                     Text("AI Project Builder")
                                         .font(.headline)
                                 }
@@ -1770,17 +1795,17 @@ struct WelcomeScreen: View {
                                         .cornerRadius(8)
                                         .overlay(
                                             RoundedRectangle(cornerRadius: 8)
-                                                .stroke(isHoveringAI ? Color.purple.opacity(0.5) : Color(nsColor: .separatorColor), lineWidth: 1)
+                                                .stroke(isHoveringAI ? Color.accentColor.opacity(0.5) : Color(nsColor: .separatorColor), lineWidth: 1)
                                         )
                                         .onSubmit { buildWithAI() }
                                     
                                     Button(action: buildWithAI) {
                                         Text("Generate")
-                                            .font(.system(size: 14, weight: .bold))
+                                            .font(.system(size: 14, weight: .semibold))
                                             .foregroundColor(.white)
                                             .padding(.horizontal, 24)
                                             .padding(.vertical, 14)
-                                            .background(LinearGradient(colors: [.purple, .blue], startPoint: .leading, endPoint: .trailing))
+                                            .background(Color.accentColor)
                                             .cornerRadius(8)
                                     }
                                     .buttonStyle(.plain)
@@ -1791,6 +1816,8 @@ struct WelcomeScreen: View {
                                     .font(.caption)
                                     .foregroundColor(.secondary)
                             }
+                            .frame(maxWidth: 640)
+                            .padding(.top, 16)
                             
                             HStack(alignment: .top, spacing: 40) {
                                 // Killer Features (New Project)
@@ -1798,7 +1825,7 @@ struct WelcomeScreen: View {
                                     Text("Start a New Project")
                                         .font(.headline)
                                     
-                                    LazyVGrid(columns: [GridItem(.adaptive(minimum: 140, maximum: 200), spacing: 16)], spacing: 16) {
+                                    LazyVGrid(columns: [GridItem(.adaptive(minimum: 120, maximum: 140), spacing: 12)], spacing: 12) {
                                         ProjectTemplateCard(title: "Vite + React", icon: "atom", color: .cyan) { createProject("vite") }
                                         ProjectTemplateCard(title: "Next.js", icon: "n.square.fill", color: .primary) { createProject("nextjs") }
                                         ProjectTemplateCard(title: "Express API", icon: "server.rack", color: .green) { createProject("express") }
@@ -1808,7 +1835,7 @@ struct WelcomeScreen: View {
                                         ProjectTemplateCard(title: "Go Gin", icon: "g.circle.fill", color: .cyan) { createProject("go") }
                                     }
                                 }
-                                .frame(maxWidth: .infinity, alignment: .leading)
+                                .frame(maxWidth: 360, alignment: .leading)
                                 
                                 // Recent Projects
                                 VStack(alignment: .leading, spacing: 16) {
@@ -1829,11 +1856,14 @@ struct WelcomeScreen: View {
                                         }
                                     }
                                 }
-                                .frame(width: 300)
+                                .frame(width: 240)
                             }
+                            .frame(maxWidth: 640)
+                            .padding(.top, 16)
+                            
                         }
-                        .padding(.horizontal, 60)
-                        .padding(.bottom, 60)
+                        .padding(.vertical, 60)
+                        .frame(maxWidth: .infinity)
                     }
                 }
             }
@@ -1864,35 +1894,6 @@ struct WelcomeScreen: View {
     }
 }
 
-struct MicroCodeLogoView: View {
-    var body: some View {
-        ZStack {
-            RoundedRectangle(cornerRadius: 20, style: .continuous)
-                .fill(LinearGradient(
-                    colors: [Color(red: 0.1, green: 0.11, blue: 0.15), Color(red: 0.05, green: 0.06, blue: 0.08)],
-                    startPoint: .topLeading,
-                    endPoint: .bottomTrailing
-                ))
-                .frame(width: 80, height: 80)
-                
-            RoundedRectangle(cornerRadius: 18, style: .continuous)
-                .stroke(Color(red: 0.17, green: 0.18, blue: 0.25), lineWidth: 3)
-                .frame(width: 74, height: 74)
-            
-            HStack(spacing: -5) {
-                Image(systemName: "chevron.left")
-                    .font(.system(size: 26, weight: .bold))
-                    .foregroundColor(Color(red: 0.48, green: 0.64, blue: 0.97)) // Tokyo Night Blue
-                
-                Image(systemName: "chevron.right")
-                    .font(.system(size: 26, weight: .bold))
-                    .foregroundColor(Color(red: 0.97, green: 0.46, blue: 0.56)) // Tokyo Night Pink
-            }
-            .shadow(color: Color(red: 0.73, green: 0.6, blue: 0.97).opacity(0.8), radius: 8, x: 0, y: 0) // Purple glow
-        }
-    }
-}
-
 struct ProjectTemplateCard: View {
     let title: String
     let icon: String
@@ -1902,21 +1903,21 @@ struct ProjectTemplateCard: View {
     
     var body: some View {
         Button(action: action) {
-            VStack(alignment: .leading, spacing: 12) {
+            VStack(alignment: .leading, spacing: 8) {
                 Image(systemName: icon)
-                    .font(.system(size: 24))
+                    .font(.system(size: 20))
                     .foregroundColor(color)
                 
                 Text(title)
-                    .font(.system(size: 14, weight: .medium))
+                    .font(.system(size: 13, weight: .medium))
                     .foregroundColor(.primary)
             }
-            .padding(16)
+            .padding(12)
             .frame(maxWidth: .infinity, alignment: .leading)
             .background(isHovering ? Color.accentColor.opacity(0.1) : Color(nsColor: .controlBackgroundColor))
-            .cornerRadius(12)
+            .cornerRadius(8)
             .overlay(
-                RoundedRectangle(cornerRadius: 12)
+                RoundedRectangle(cornerRadius: 8)
                     .stroke(isHovering ? Color.accentColor.opacity(0.3) : Color(nsColor: .separatorColor).opacity(0.5), lineWidth: 1)
             )
         }
