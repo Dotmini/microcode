@@ -166,16 +166,16 @@ class AIClient: ObservableObject {
             actualKey = UserDefaults.standard.string(forKey: "\(provider.rawValue)_api_key") ?? apiKey
             baseURL = provider.directBaseURL
         } else {
-            // Dotmini Cloud → Secure Internal Developer Keys (Obfuscated)
-            actualKey = CloudKeyManager.getKey(for: provider)
-            baseURL = provider.directBaseURL
+            // Dotmini Cloud → license key → proxy handles real API keys
+            actualKey = UserDefaults.standard.string(forKey: "dotminiLicenseKey") ?? ""
+            baseURL = provider.cloudBaseURL
         }
         
         guard !actualKey.isEmpty || !provider.requiresAPIKey else {
             if keyMode == "direct" {
                 onError("API key missing for \(provider.rawValue). Add your key in Settings → AI.")
             } else {
-                onError("Cloud Dotmini API Key is not configured for \(provider.rawValue). Please use Bring Your Own Key.")
+                onError("License Key missing. Sign in or set your Dotmini License Key in Settings → Subscription.")
             }
             return
         }
@@ -191,14 +191,19 @@ class AIClient: ObservableObject {
             
             while retryCount <= maxRetries {
                 do {
-                    // Use native protocols for both direct and cloud modes since proxy is bypassed for security
-                    switch provider {
-                    case .gemini:
-                        try await streamGemini(prompt: prompt, attachments: attachments, systemPrompt: systemPrompt, conversationHistory: trimmedHistory, model: model, apiKey: actualKey, tools: tools, onToken: onToken, onToolCall: onToolCall)
-                    case .anthropic:
-                        try await streamAnthropic(prompt: prompt, attachments: attachments, systemPrompt: systemPrompt, conversationHistory: trimmedHistory, model: model, apiKey: actualKey, tools: tools, onToken: onToken, onToolCall: onToolCall)
-                    case .openai, .deepseek, .grok, .qwen, .glm, .local:
+                    if keyMode == "cloud" {
+                        // Dotmini Cloud (OneAPI proxy) handles ALL models via OpenAI protocol
                         try await streamOpenAI(prompt: prompt, attachments: attachments, systemPrompt: systemPrompt, conversationHistory: trimmedHistory, model: model, apiKey: actualKey, baseURL: baseURL, tools: tools, onToken: onToken, onToolCall: onToolCall)
+                    } else {
+                        // Direct mode: use native protocols where necessary
+                        switch provider {
+                        case .gemini:
+                            try await streamGemini(prompt: prompt, attachments: attachments, systemPrompt: systemPrompt, conversationHistory: trimmedHistory, model: model, apiKey: actualKey, tools: tools, onToken: onToken, onToolCall: onToolCall)
+                        case .anthropic:
+                            try await streamAnthropic(prompt: prompt, attachments: attachments, systemPrompt: systemPrompt, conversationHistory: trimmedHistory, model: model, apiKey: actualKey, tools: tools, onToken: onToken, onToolCall: onToolCall)
+                        case .openai, .deepseek, .grok, .qwen, .glm, .local:
+                            try await streamOpenAI(prompt: prompt, attachments: attachments, systemPrompt: systemPrompt, conversationHistory: trimmedHistory, model: model, apiKey: actualKey, baseURL: baseURL, tools: tools, onToken: onToken, onToolCall: onToolCall)
+                        }
                     }
                     
                     await MainActor.run {
@@ -252,17 +257,23 @@ class AIClient: ObservableObject {
             actualKey = UserDefaults.standard.string(forKey: "\(provider.rawValue)_api_key") ?? apiKey
             baseURL = provider.directBaseURL
         } else {
-            actualKey = CloudKeyManager.getKey(for: provider)
-            baseURL = provider.directBaseURL
+            actualKey = UserDefaults.standard.string(forKey: "dotminiLicenseKey") ?? ""
+            baseURL = provider.cloudBaseURL
         }
         
-        switch provider {
-        case .gemini:
-            return try await syncGemini(messages: messages, systemPrompt: systemPrompt, model: model, apiKey: actualKey, tools: tools)
-        case .anthropic:
-            return try await syncAnthropic(messages: messages, systemPrompt: systemPrompt, model: model, apiKey: actualKey, tools: tools)
-        case .openai, .deepseek, .grok, .qwen, .glm, .local:
+        if keyMode == "cloud" {
+            // Dotmini Cloud (OneAPI proxy) handles ALL models via OpenAI protocol
             return try await syncOpenAI(messages: messages, systemPrompt: systemPrompt, model: model, apiKey: actualKey, baseURL: baseURL, tools: tools)
+        } else {
+            // Direct mode: use native protocols
+            switch provider {
+            case .gemini:
+                return try await syncGemini(messages: messages, systemPrompt: systemPrompt, model: model, apiKey: actualKey, tools: tools)
+            case .anthropic:
+                return try await syncAnthropic(messages: messages, systemPrompt: systemPrompt, model: model, apiKey: actualKey, tools: tools)
+            case .openai, .deepseek, .grok, .qwen, .glm, .local:
+                return try await syncOpenAI(messages: messages, systemPrompt: systemPrompt, model: model, apiKey: actualKey, baseURL: baseURL, tools: tools)
+            }
         }
     }
     
@@ -319,7 +330,7 @@ class AIClient: ObservableObject {
         
         var body: [String: Any] = [
             "contents": contents,
-            "generationConfig": ["temperature": 0.7, "maxOutputTokens": 16384]
+            "generationConfig": ["temperature": 0.7, "maxOutputTokens": 4096]
         ]
         
         // Add tools for function calling
@@ -393,7 +404,7 @@ class AIClient: ObservableObject {
         }
         messages.append(["role": "user", "content": contentArray])
         
-        var body: [String: Any] = ["model": model, "messages": messages, "stream": true, "temperature": 0.7, "max_tokens": 16384]
+        var body: [String: Any] = ["model": model, "messages": messages, "stream": true, "temperature": 0.7, "max_tokens": 4096]
         
         if let tools = tools, !tools.isEmpty {
             body["tools"] = tools.map { ["type": "function", "function": $0] as [String: Any] }
@@ -481,7 +492,7 @@ class AIClient: ObservableObject {
         messageContent.append(["type": "text", "text": prompt])
         allMessages.append(["role": "user", "content": messageContent])
         
-        var body: [String: Any] = ["model": model, "max_tokens": 16384, "stream": true, "messages": allMessages]
+        var body: [String: Any] = ["model": model, "max_tokens": 4096, "stream": true, "messages": allMessages]
         if let sys = systemPrompt { body["system"] = sys }
         
         if let tools = tools, !tools.isEmpty {
@@ -571,7 +582,7 @@ class AIClient: ObservableObject {
             contents.append(["role": role == "assistant" ? "model" : role, "parts": parts])
         }
         
-        var body: [String: Any] = ["contents": contents, "generationConfig": ["temperature": 0.7, "maxOutputTokens": 16384]]
+        var body: [String: Any] = ["contents": contents, "generationConfig": ["temperature": 0.7, "maxOutputTokens": 4096]]
         if let tools = tools, !tools.isEmpty { body["tools"] = [["functionDeclarations": tools]] }
         
         request.httpBody = try JSONSerialization.data(withJSONObject: body)
@@ -610,7 +621,7 @@ class AIClient: ObservableObject {
             apiMessages.append(["role": role, "content": content])
         }
         
-        var body: [String: Any] = ["model": model, "messages": apiMessages, "temperature": 0.7, "max_tokens": 16384]
+        var body: [String: Any] = ["model": model, "messages": apiMessages, "temperature": 0.7, "max_tokens": 4096]
         if let tools = tools, !tools.isEmpty { body["tools"] = tools.map { ["type": "function", "function": $0] as [String: Any] } }
         
         request.httpBody = try JSONSerialization.data(withJSONObject: body)
@@ -654,7 +665,7 @@ class AIClient: ObservableObject {
             apiMessages.append(["role": role, "content": content])
         }
         
-        var body: [String: Any] = ["model": model, "max_tokens": 16384, "messages": apiMessages]
+        var body: [String: Any] = ["model": model, "max_tokens": 4096, "messages": apiMessages]
         if let sys = systemPrompt { body["system"] = sys }
         
         request.httpBody = try JSONSerialization.data(withJSONObject: body)
