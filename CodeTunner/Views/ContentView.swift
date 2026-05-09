@@ -223,6 +223,7 @@ struct ContentView: View {
         }
         .sheet(isPresented: $appState.showingAPIClient) {
             APIClientView()
+                .frame(minWidth: 900, idealWidth: 1100, minHeight: 600, idealHeight: 700)
         }
         .sheet(isPresented: $appState.showingCICDView) {
             CICDPipelineView()

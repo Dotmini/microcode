@@ -17,10 +17,19 @@ struct APIClientView: View {
     @State private var showEnvSheet = false
     @State private var searchText = ""
 
+    @Environment(\.presentationMode) var presentationMode
+
     var body: some View {
         HSplitView {
             sidebar.frame(minWidth: 220, maxWidth: 280)
             mainContent
+        }
+        .toolbar {
+            ToolbarItem(placement: .cancellationAction) {
+                Button("Close") {
+                    presentationMode.wrappedValue.dismiss()
+                }
+            }
         }
     }
 
