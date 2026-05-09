@@ -281,7 +281,7 @@ Disputes are resolved in the courts of **Bangkok, Thailand**.
 
 <table>
   <tr>
-    <td align="center"><strong>Tirawat Nantamas (ถิรวัฒน์ นันตมาศ)</strong><br/><em>Founder & Lead Architect</em><br/>Dotmini Software</td>
+    <td align="center"><strong>Tirawat Nantamas (ถิรวัฒน์ นันตมาศ)</strong><br/><em>Founder & CEO</em><br/>Dotmini Software</td>
   </tr>
 </table>
 
