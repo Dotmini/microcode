@@ -412,7 +412,7 @@ jobs:
           echo "# Generated: $(date -u +%Y-%m-%dT%H:%M:%SZ)" >> SHA256SUMS.txt
           echo "" >> SHA256SUMS.txt
           # Only checksum actual MicroCode release artifacts (not dependency test fixtures)
-          find artifacts/ -maxdepth 2 -type f \( -name "microcode_*" -o -name "MicroCode_*" \) \( -name "*.dmg" -o -name "*.pkg" \) | sort | while read f; do
+          find artifacts/ -maxdepth 2 -type f \( -name "*microcode_*" -o -name "*MicroCode_*" \) \( -name "*.dmg" -o -name "*.pkg" \) | sort | while read f; do
             sha256sum "$f" >> SHA256SUMS.txt
           done
           cat SHA256SUMS.txt
@@ -421,8 +421,8 @@ jobs:
         run: |
           mkdir -p release-assets
           # Only copy actual MicroCode artifacts — NOT random .zip test fixtures from dependencies
-          find artifacts/ -maxdepth 2 -type f -name "microcode_*" \( -name "*.dmg" -o -name "*.pkg" \) -exec cp {} release-assets/ \;
-          find artifacts/ -maxdepth 2 -type f -name "MicroCode_*" \( -name "*.dmg" -o -name "*.pkg" \) -exec cp {} release-assets/ \;
+          find artifacts/ -maxdepth 2 -type f -name "*microcode_*" \( -name "*.dmg" -o -name "*.pkg" \) -exec cp {} release-assets/ \;
+          find artifacts/ -maxdepth 2 -type f -name "*MicroCode_*" \( -name "*.dmg" -o -name "*.pkg" \) -exec cp {} release-assets/ \;
           cp SHA256SUMS.txt release-assets/ 2>/dev/null || true
           echo "📦 Release assets:"
           ls -lh release-assets/
