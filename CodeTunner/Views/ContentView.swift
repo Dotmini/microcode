@@ -1879,18 +1879,34 @@ struct WelcomeScreen: View {
     private func buildWithAI() {
         guard !aiPrompt.isEmpty else { return }
         let prompt = "Please create a project structure for: \(aiPrompt). Use shell commands (mkdir, touch, etc.) to generate the folders and initial files in the current workspace."
-        appState.aiChatVisible = true
-        Task {
-            await AgentService.shared.sendMessage(prompt)
-        }
-        aiPrompt = ""
+        selectFolderAndRunAI(prompt: prompt)
     }
     
     private func createProject(_ type: String) {
-        appState.aiChatVisible = true
-        Task {
-            await AgentService.shared.sendMessage("Please initialize a new \(type) project in a new folder here. Use the standard CLI tool (e.g. npx create-next-app, npm create vite, etc.) with default/non-interactive flags.")
+        let prompt = "Please initialize a new \(type) project in a new folder here. Use the standard CLI tool (e.g. npx create-next-app, npm create vite, etc.) with default/non-interactive flags."
+        selectFolderAndRunAI(prompt: prompt)
+    }
+    
+    private func selectFolderAndRunAI(prompt: String) {
+        let panel = NSOpenPanel()
+        panel.canChooseFiles = false
+        panel.canChooseDirectories = true
+        panel.canCreateDirectories = true
+        panel.title = "Select a folder for the new project"
+        panel.prompt = "Select Workspace"
+        
+        if panel.runModal() == .OK, let url = panel.url {
+            appState.workspaceFolder = url
+            
+            // Allow UI state to settle before triggering AI
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
+                appState.aiChatVisible = true
+                Task {
+                    await AgentService.shared.sendMessage(prompt)
+                }
+            }
         }
+        aiPrompt = ""
     }
 }
 

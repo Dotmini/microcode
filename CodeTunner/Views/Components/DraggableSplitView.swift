@@ -5,6 +5,7 @@ struct DraggableSplitView<Left: View, Right: View>: View {
     let right: Right
     
     @State private var leftProportion: CGFloat
+    @State private var dragStartProportion: CGFloat = 0.5
     @State private var isDragging: Bool = false
     @State private var hoverDivider: Bool = false
     
@@ -44,9 +45,12 @@ struct DraggableSplitView<Left: View, Right: View>: View {
                 .gesture(
                     DragGesture()
                         .onChanged { value in
-                            isDragging = true
+                            if !isDragging {
+                                isDragging = true
+                                dragStartProportion = leftProportion
+                            }
                             let delta = value.translation.width / geo.size.width
-                            leftProportion = max(0.1, min(0.9, leftProportion + delta))
+                            leftProportion = max(0.1, min(0.9, dragStartProportion + delta))
                         }
                         .onEnded { _ in
                             isDragging = false
