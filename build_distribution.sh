@@ -452,22 +452,22 @@ done
 # ==============================================================================
 
 # Target 1: ARM64 Full
-package_variant "microcode_ARM64_Full" "arm64" "true" "Dist/arm64"
+package_variant "Dotmini_MicroCode_ARM64_Full" "arm64" "true" "Dist/arm64"
 
 # Target 2: Intel Full
-package_variant "microcode_Intel_Full" "x86_64" "true" "Dist/x86_64"
+package_variant "Dotmini_MicroCode_Intel_Full" "x86_64" "true" "Dist/x86_64"
 
 # Target 3: Lite Universal
-package_variant "microcode_Lite" "universal" "false" "Dist/Lite"
+package_variant "Dotmini_MicroCode_Lite" "universal" "false" "Dist/Lite"
 
 echo "========================================"
 echo "🎉 3-Version Build Cycle Complete!"
 echo "   Version: ${VERSION}"
 echo "========================================"
 echo "Artifacts:"
-echo "1. Dist/arm64/microcode_ARM64_Full.dmg"
-echo "2. Dist/x86_64/microcode_Intel_Full.dmg"
-echo "3. Dist/Lite/microcode_Lite.dmg (< 50MB)"
+echo "1. Dist/arm64/Dotmini_MicroCode_ARM64_Full.dmg"
+echo "2. Dist/x86_64/Dotmini_MicroCode_Intel_Full.dmg"
+echo "3. Dist/Lite/Dotmini_MicroCode_Lite.dmg (< 50MB)"
 
 # ==============================================================================
 # 4. OPTIONAL: Sign & Notarize
