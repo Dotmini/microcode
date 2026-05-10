@@ -13,12 +13,22 @@ DIST_ROOT="Dist"
 # Argument Parsing
 DEV_MODE="false"
 SIGN_AFTER="false"
+TARGET_ARCH="all"
+TARGET_MODE="all"
 
 while [[ $# -gt 0 ]]; do
     case $1 in
         --dev)
             DEV_MODE="true"
             shift
+            ;;
+        --arch)
+            TARGET_ARCH="$2"
+            shift 2
+            ;;
+        --mode)
+            TARGET_MODE="$2"
+            shift 2
             ;;
         --version)
             VERSION="$2"
@@ -33,6 +43,8 @@ while [[ $# -gt 0 ]]; do
             echo ""
             echo "Options:"
             echo "  --dev              Fast build, host arch only, no DMG/PKG"
+            echo "  --arch <ARCH>      Build specific arch (arm64, x86_64, all)"
+            echo "  --mode <MODE>      Build mode (full, lite-only, all)"
             echo "  --version <VER>    Override version (default: 1.0.0)"
             echo "  --sign             Run sign_and_notarize.sh after build"
             echo "  --help             Show this help"
@@ -411,65 +423,97 @@ if [ "$DEV_MODE" = "true" ]; then
     exit 0
 fi
 
-compile_arch "arm64"
-compile_arch "x86_64"
-
-# 1.4 Create Universal Binaries for Lite Version
-echo "========================================"
-echo "⚖️  Creating Universal Binaries (Lite)..."
-echo "========================================"
-UNIVERSAL_BUILD_DIR="${BUILD_ROOT}/universal"
-mkdir -p "${UNIVERSAL_BUILD_DIR}"
-
-lipo -create "${BUILD_ROOT}/arm64/CodeTunner" "${BUILD_ROOT}/x86_64/CodeTunner" -output "${UNIVERSAL_BUILD_DIR}/CodeTunner"
-lipo -create "${BUILD_ROOT}/arm64/codetunner-backend" "${BUILD_ROOT}/x86_64/codetunner-backend" -output "${UNIVERSAL_BUILD_DIR}/codetunner-backend"
-
-# Universal dylibs (CRITICAL: without these, the app crashes at launch)
-for DYLIB_NAME in libcodetunner_embedded.dylib libmicrocode_core.dylib; do
-    ARM64_DYLIB="${BUILD_ROOT}/arm64/${DYLIB_NAME}"
-    X86_DYLIB="${BUILD_ROOT}/x86_64/${DYLIB_NAME}"
-    
-    if [ -f "${ARM64_DYLIB}" ] && [ -f "${X86_DYLIB}" ]; then
-        lipo -create "${ARM64_DYLIB}" "${X86_DYLIB}" -output "${UNIVERSAL_BUILD_DIR}/${DYLIB_NAME}"
-        echo "   → Created universal ${DYLIB_NAME}"
-    elif [ -f "${ARM64_DYLIB}" ]; then
-        cp "${ARM64_DYLIB}" "${UNIVERSAL_BUILD_DIR}/${DYLIB_NAME}"
-        echo "   → Copied arm64-only ${DYLIB_NAME}"
-    elif [ -f "${X86_DYLIB}" ]; then
-        cp "${X86_DYLIB}" "${UNIVERSAL_BUILD_DIR}/${DYLIB_NAME}"
-        echo "   → Copied x86_64-only ${DYLIB_NAME}"
+if [ "$TARGET_MODE" = "full" ]; then
+    if [ "$TARGET_ARCH" = "arm64" ]; then
+        compile_arch "arm64"
+        package_variant "Dotmini_MicroCode_ARM64_Full" "arm64" "true" "Dist/arm64"
+    elif [ "$TARGET_ARCH" = "x86_64" ]; then
+        compile_arch "x86_64"
+        package_variant "Dotmini_MicroCode_Intel_Full" "x86_64" "true" "Dist/x86_64"
     else
-        echo "   ⚠️  ${DYLIB_NAME} not found for either arch!"
+        compile_arch "arm64"
+        compile_arch "x86_64"
+        package_variant "Dotmini_MicroCode_ARM64_Full" "arm64" "true" "Dist/arm64"
+        package_variant "Dotmini_MicroCode_Intel_Full" "x86_64" "true" "Dist/x86_64"
     fi
-done
+elif [ "$TARGET_MODE" = "lite-only" ]; then
+    # Assumes arm64 and x86_64 are already compiled and placed in .build_dist/
+    echo "========================================"
+    echo "⚖️  Creating Universal Binaries (Lite)..."
+    echo "========================================"
+    UNIVERSAL_BUILD_DIR="${BUILD_ROOT}/universal"
+    mkdir -p "${UNIVERSAL_BUILD_DIR}"
 
-# ==============================================================================
-# 2. PACKAGING PHASE
-# ==============================================================================
+    if [ -f "${BUILD_ROOT}/arm64/CodeTunner" ] && [ -f "${BUILD_ROOT}/x86_64/CodeTunner" ]; then
+        lipo -create "${BUILD_ROOT}/arm64/CodeTunner" "${BUILD_ROOT}/x86_64/CodeTunner" -output "${UNIVERSAL_BUILD_DIR}/CodeTunner"
+        lipo -create "${BUILD_ROOT}/arm64/codetunner-backend" "${BUILD_ROOT}/x86_64/codetunner-backend" -output "${UNIVERSAL_BUILD_DIR}/codetunner-backend"
 
+        # Universal dylibs
+        for DYLIB_NAME in libcodetunner_embedded.dylib libmicrocode_core.dylib; do
+            ARM64_DYLIB="${BUILD_ROOT}/arm64/${DYLIB_NAME}"
+            X86_DYLIB="${BUILD_ROOT}/x86_64/${DYLIB_NAME}"
+            if [ -f "${ARM64_DYLIB}" ] && [ -f "${X86_DYLIB}" ]; then
+                lipo -create "${ARM64_DYLIB}" "${X86_DYLIB}" -output "${UNIVERSAL_BUILD_DIR}/${DYLIB_NAME}"
+                echo "   → Created universal ${DYLIB_NAME}"
+            fi
+        done
+        package_variant "Dotmini_MicroCode_Lite" "universal" "false" "Dist/Lite"
+    else
+        echo "❌ Cannot build Lite: Missing arm64 or x86_64 compiled binaries in ${BUILD_ROOT}"
+        exit 1
+    fi
+else
+    # Default (all)
+    compile_arch "arm64"
+    compile_arch "x86_64"
 
+    # 1.4 Create Universal Binaries for Lite Version
+    echo "========================================"
+    echo "⚖️  Creating Universal Binaries (Lite)..."
+    echo "========================================"
+    UNIVERSAL_BUILD_DIR="${BUILD_ROOT}/universal"
+    mkdir -p "${UNIVERSAL_BUILD_DIR}"
 
-# ==============================================================================
-# 3. EXECUTE TARGETS
-# ==============================================================================
+    lipo -create "${BUILD_ROOT}/arm64/CodeTunner" "${BUILD_ROOT}/x86_64/CodeTunner" -output "${UNIVERSAL_BUILD_DIR}/CodeTunner"
+    lipo -create "${BUILD_ROOT}/arm64/codetunner-backend" "${BUILD_ROOT}/x86_64/codetunner-backend" -output "${UNIVERSAL_BUILD_DIR}/codetunner-backend"
 
-# Target 1: ARM64 Full
-package_variant "Dotmini_MicroCode_ARM64_Full" "arm64" "true" "Dist/arm64"
+    # Universal dylibs (CRITICAL: without these, the app crashes at launch)
+    for DYLIB_NAME in libcodetunner_embedded.dylib libmicrocode_core.dylib; do
+        ARM64_DYLIB="${BUILD_ROOT}/arm64/${DYLIB_NAME}"
+        X86_DYLIB="${BUILD_ROOT}/x86_64/${DYLIB_NAME}"
+        
+        if [ -f "${ARM64_DYLIB}" ] && [ -f "${X86_DYLIB}" ]; then
+            lipo -create "${ARM64_DYLIB}" "${X86_DYLIB}" -output "${UNIVERSAL_BUILD_DIR}/${DYLIB_NAME}"
+            echo "   → Created universal ${DYLIB_NAME}"
+        elif [ -f "${ARM64_DYLIB}" ]; then
+            cp "${ARM64_DYLIB}" "${UNIVERSAL_BUILD_DIR}/${DYLIB_NAME}"
+            echo "   → Copied arm64-only ${DYLIB_NAME}"
+        elif [ -f "${X86_DYLIB}" ]; then
+            cp "${X86_DYLIB}" "${UNIVERSAL_BUILD_DIR}/${DYLIB_NAME}"
+            echo "   → Copied x86_64-only ${DYLIB_NAME}"
+        else
+            echo "   ⚠️  ${DYLIB_NAME} not found for either arch!"
+        fi
+    done
 
-# Target 2: Intel Full
-package_variant "Dotmini_MicroCode_Intel_Full" "x86_64" "true" "Dist/x86_64"
+    # Target 1: ARM64 Full
+    package_variant "Dotmini_MicroCode_ARM64_Full" "arm64" "true" "Dist/arm64"
 
-# Target 3: Lite Universal
-package_variant "Dotmini_MicroCode_Lite" "universal" "false" "Dist/Lite"
+    # Target 2: Intel Full
+    package_variant "Dotmini_MicroCode_Intel_Full" "x86_64" "true" "Dist/x86_64"
 
-echo "========================================"
-echo "🎉 3-Version Build Cycle Complete!"
-echo "   Version: ${VERSION}"
-echo "========================================"
-echo "Artifacts:"
-echo "1. Dist/arm64/Dotmini_MicroCode_ARM64_Full.dmg"
-echo "2. Dist/x86_64/Dotmini_MicroCode_Intel_Full.dmg"
-echo "3. Dist/Lite/Dotmini_MicroCode_Lite.dmg (< 50MB)"
+    # Target 3: Lite Universal
+    package_variant "Dotmini_MicroCode_Lite" "universal" "false" "Dist/Lite"
+
+    echo "========================================"
+    echo "🎉 3-Version Build Cycle Complete!"
+    echo "   Version: ${VERSION}"
+    echo "========================================"
+    echo "Artifacts:"
+    echo "1. Dist/arm64/Dotmini_MicroCode_ARM64_Full.dmg"
+    echo "2. Dist/x86_64/Dotmini_MicroCode_Intel_Full.dmg"
+    echo "3. Dist/Lite/Dotmini_MicroCode_Lite.dmg (< 50MB)"
+fi
 
 # ==============================================================================
 # 4. OPTIONAL: Sign & Notarize
