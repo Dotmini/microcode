@@ -274,16 +274,18 @@ EOF
                 "${FRAMEWORKS_DIR}/${DYLIB_NAME}"
             
             # Fix the main binary's reference to this dylib
-            OLD_NAME=$(otool -L "${APP_BUNDLE}/Contents/MacOS/CodeTunner" | \
-                grep "${DYLIB_NAME}" | awk '{print $1}' | head -1)
+            OLD_NAMES=$(otool -L "${APP_BUNDLE}/Contents/MacOS/CodeTunner" | \
+                grep "${DYLIB_NAME}" | awk '{print $1}' | sort | uniq)
             
-            if [ -n "${OLD_NAME}" ]; then
-                echo "        Rewriting: ${OLD_NAME}"
-                echo "              → @executable_path/../Frameworks/${DYLIB_NAME}"
-                install_name_tool -change "${OLD_NAME}" \
-                    "@executable_path/../Frameworks/${DYLIB_NAME}" \
-                    "${APP_BUNDLE}/Contents/MacOS/CodeTunner"
-            fi
+            for OLD_NAME in $OLD_NAMES; do
+                if [ -n "${OLD_NAME}" ]; then
+                    echo "        Rewriting: ${OLD_NAME}"
+                    echo "              → @executable_path/../Frameworks/${DYLIB_NAME}"
+                    install_name_tool -change "${OLD_NAME}" \
+                        "@executable_path/../Frameworks/${DYLIB_NAME}" \
+                        "${APP_BUNDLE}/Contents/MacOS/CodeTunner"
+                fi
+            done
         else
             echo "      ❌ FATAL: ${DYLIB_NAME} not found at ${DYLIB_PATH}"
             echo "         Available files in ${BUILD_ROOT}/${SOURCE_ARCH}/:"
