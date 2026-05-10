@@ -434,6 +434,121 @@ class PythonEnvManager: ObservableObject {
         }
     }
     
+    // MARK: - Streaming & Async Execution
+    
+    func cancelCurrentProcess() {
+        processLock.lock()
+        if let existing = currentProcess, existing.isRunning {
+            existing.terminate()
+        }
+        processLock.unlock()
+    }
+    
+    func executeCodeStreaming(code: String, language: String, pythonPath: String? = nil, progress: @escaping (String) -> Void) async throws -> String {
+        let lang = language.lowercased()
+        
+        let executablePath: String
+        var arguments: [String] = []
+        var forceUnbuffered = false
+        
+        // Sanitize code
+        let sanitizedCode = code
+            .replacingOccurrences(of: "\u{2018}", with: "'")
+            .replacingOccurrences(of: "\u{2019}", with: "'")
+            .replacingOccurrences(of: "\u{201C}", with: "\"")
+            .replacingOccurrences(of: "\u{201D}", with: "\"")
+            
+        switch lang {
+        case "python":
+            executablePath = pythonPath ?? systemPython
+            arguments = ["-c", sanitizedCode]
+            forceUnbuffered = true
+        case "r":
+            // Attempt to find Rscript in standard locations
+            executablePath = ["/opt/homebrew/bin/Rscript", "/usr/local/bin/Rscript", "/usr/bin/Rscript"].first { FileManager.default.fileExists(atPath: $0) } ?? "Rscript"
+            arguments = ["-e", sanitizedCode]
+        case "julia":
+            executablePath = ["/opt/homebrew/bin/julia", "/usr/local/bin/julia", "/usr/bin/julia"].first { FileManager.default.fileExists(atPath: $0) } ?? "julia"
+            arguments = ["-e", sanitizedCode]
+        default:
+            throw NSError(domain: "EnvManager", code: 400, userInfo: [NSLocalizedDescriptionKey: "Unsupported language: \(language)"])
+        }
+            
+        cancelCurrentProcess()
+        
+        return try await withCheckedThrowingContinuation { continuation in
+            DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+                guard let self = self else {
+                    continuation.resume(throwing: URLError(.cancelled))
+                    return
+                }
+                
+                let process = Process()
+                process.executableURL = URL(fileURLWithPath: executablePath)
+                process.arguments = arguments
+                
+                // Inherit environment and patch if needed
+                var env = ProcessInfo.processInfo.environment
+                if forceUnbuffered {
+                    env["PYTHONUNBUFFERED"] = "1" // Force unbuffered stdout to stream immediately
+                }
+                process.environment = env
+                
+                let outputPipe = Pipe()
+                let errorPipe = Pipe()
+                process.standardOutput = outputPipe
+                process.standardError = errorPipe
+                
+                self.processLock.lock()
+                self.currentProcess = process
+                self.processLock.unlock()
+                
+                // Set up streaming
+                outputPipe.fileHandleForReading.readabilityHandler = { handle in
+                    let data = handle.availableData
+                    if let text = String(data: data, encoding: .utf8), !text.isEmpty {
+                        progress(text)
+                    }
+                }
+                
+                errorPipe.fileHandleForReading.readabilityHandler = { handle in
+                    let data = handle.availableData
+                    if let text = String(data: data, encoding: .utf8), !text.isEmpty {
+                        progress(text)
+                    }
+                }
+                
+                do {
+                    try process.run()
+                    process.waitUntilExit()
+                    
+                    outputPipe.fileHandleForReading.readabilityHandler = nil
+                    errorPipe.fileHandleForReading.readabilityHandler = nil
+                    
+                    self.processLock.lock()
+                    if self.currentProcess === process {
+                        self.currentProcess = nil
+                    }
+                    self.processLock.unlock()
+                    
+                    if process.terminationStatus == 0 || process.terminationStatus == 15 {
+                        continuation.resume(returning: "")
+                    } else {
+                        continuation.resume(throwing: NSError(domain: "PythonEnv", code: Int(process.terminationStatus), userInfo: [NSLocalizedDescriptionKey: "Process exited with status \(process.terminationStatus)"]))
+                    }
+                } catch {
+                    self.processLock.lock()
+                    if self.currentProcess === process {
+                        self.currentProcess = nil
+                    }
+                    self.processLock.unlock()
+                    
+                    continuation.resume(throwing: error)
+                }
+            }
+        }
+    }
+    
     // MARK: - Helpers
     
     private func getPythonVersion(at envPath: URL) -> String {

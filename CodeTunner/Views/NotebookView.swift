@@ -307,10 +307,13 @@ final class NotebookCellModel: ObservableObject, Identifiable {
     
     func clearOutput() {
         output = ""
-        output = ""
         outputImages = []
         dataFramePath = nil
         isDataFrame = false
+    }
+    
+    func appendOutput(_ text: String) {
+        output += text
     }
     
     // Get the effective background color
@@ -446,12 +449,43 @@ final class NotebookViewModel: ObservableObject {
         notebook.modifiedAt = Date()
     }
     
-    func runCell(_ cell: NotebookCellModel) {
+    func runCell(_ cell: NotebookCellModel, computeTarget: ComputeTarget = .localCPU) {
         guard cell.type == .code || cell.type == .procedure else { return }
         
         cell.isExecuting = true
         cell.clearOutput()
         kernelStatus = "Running"
+        
+        // If it's not a local execution, route to the Compute Kernel
+        if computeTarget != .localCPU && computeTarget != .localMLX && computeTarget != .localNvidia {
+            Task {
+                do {
+                    let kernel = ComputeKernelRouter.shared.getKernel(for: computeTarget)
+                    try await kernel.start()
+                    
+                    let result = try await kernel.execute(code: cell.content, language: cell.language.rawValue) { progress in
+                        DispatchQueue.main.async {
+                            cell.appendOutput(progress)
+                        }
+                    }
+                    
+                    DispatchQueue.main.async {
+                        cell.appendOutput(result + "\n")
+                        cell.isExecuting = false
+                        self.kernelStatus = "Idle"
+                        cell.executionCount = (cell.executionCount ?? 0) + 1
+                        self.totalExecutions += 1
+                    }
+                } catch {
+                    DispatchQueue.main.async {
+                        cell.appendOutput("❌ Kernel Error: \(error.localizedDescription)\n")
+                        cell.isExecuting = false
+                        self.kernelStatus = "Error"
+                    }
+                }
+            }
+            return
+        }
         
         if cell.type == .procedure {
             runProcedureCell(cell)
@@ -1273,12 +1307,12 @@ final class NotebookViewModel: ObservableObject {
     
     // MARK: - Run Cells by Color
     
-    func runCellsByColor(_ colorTheme: CellColorTheme) {
+    func runCellsByColor(_ colorTheme: CellColorTheme, computeTarget: ComputeTarget = .localCPU) {
         guard let notebook = activeNotebook else { return }
         let cellsToRun = notebook.cells.filter { $0.colorTheme == colorTheme && $0.type == .code }
         
         for cell in cellsToRun {
-            runCell(cell)
+            runCell(cell, computeTarget: computeTarget)
         }
     }
     
@@ -1301,17 +1335,17 @@ final class NotebookViewModel: ObservableObject {
         return grouped.keys.sorted { $0.rawValue < $1.rawValue }
     }
     
-    func runSelectedCell() {
+    func runSelectedCell(computeTarget: ComputeTarget = .localCPU) {
         guard let notebook = activeNotebook,
               let id = selectedCellId,
               let cell = notebook.cells.first(where: { $0.id == id }) else { return }
-        runCell(cell)
+        runCell(cell, computeTarget: computeTarget)
     }
     
-    func runAllCells() {
+    func runAllCells(computeTarget: ComputeTarget = .localCPU) {
         guard let notebook = activeNotebook else { return }
         for cell in notebook.cells where cell.type == .code {
-            runCell(cell)
+            runCell(cell, computeTarget: computeTarget)
         }
     }
     
@@ -1738,6 +1772,7 @@ struct NotebookView: View {
     @ObservedObject private var shmService = SharedMemoryService.shared
     @State private var isReady = false
     @State private var showAIPanel = false
+    @State private var showingHPCSettings = false
     
     private var panelBackground: Color {
         appState.appTheme == .transparent ? Color.white.opacity(0.05) : Color(nsColor: .windowBackgroundColor)
@@ -1771,7 +1806,7 @@ struct NotebookView: View {
                                     cell: cell,
                                     isSelected: viewModel.selectedCellId == cell.id,
                                     onSelect: { viewModel.selectedCellId = cell.id },
-                                    onRun: { viewModel.runCell(cell) },
+                                    onRun: { viewModel.runCell(cell, computeTarget: appState.currentComputeTarget) },
                                     onDelete: { viewModel.deleteCell(cell) },
                                     onMoveUp: { viewModel.moveCell(cell, direction: -1) },
                                     onMoveDown: { viewModel.moveCell(cell, direction: 1) },
@@ -1779,7 +1814,7 @@ struct NotebookView: View {
                                         viewModel.addCell(type: .code, language: .python)
                                         if let lastCell = viewModel.activeNotebook?.cells.last {
                                             lastCell.content = code
-                                            viewModel.runCell(lastCell)
+                                            viewModel.runCell(lastCell, computeTarget: appState.currentComputeTarget)
                                         }
                                     }
                                 )
@@ -2063,7 +2098,7 @@ struct NotebookView: View {
                     // Actions
                     GroupBox {
                         VStack(spacing: 8) {
-                            Button(action: { viewModel.runAllCells() }) {
+                            Button(action: { viewModel.runAllCells(computeTarget: appState.currentComputeTarget) }) {
                                 HStack {
                                     Image(systemName: "play.fill")
                                     Text("Run All")
@@ -2148,6 +2183,70 @@ struct NotebookView: View {
             
             // --- Right side: compact icon buttons ---
             
+            // Compute Engine Selector
+            Menu {
+                Text("Compute Engine")
+                    .font(.caption)
+                    .foregroundColor(.secondary)
+                
+                ForEach(ComputeTarget.allCases) { target in
+                    Button {
+                        appState.currentComputeTarget = target
+                    } label: {
+                        HStack {
+                            Text(target.rawValue)
+                            if appState.currentComputeTarget == target {
+                                Image(systemName: "checkmark")
+                            }
+                            if target.isPremium {
+                                Image(systemName: "star.fill")
+                            }
+                        }
+                    }
+                }
+            } label: {
+                HStack(spacing: 4) {
+                    Image(systemName: appState.currentComputeTarget.icon)
+                        .foregroundColor(appState.currentComputeTarget.isPremium ? .orange : .secondary)
+                    Image(systemName: "chevron.down")
+                        .font(.system(size: 8))
+                }
+                .font(.system(size: 11))
+            }
+            .menuIndicator(.hidden)
+            .help("Select Compute Engine: \(appState.currentComputeTarget.rawValue)")
+            
+            if appState.currentComputeTarget == .customHPC {
+                Button(action: { showingHPCSettings = true }) {
+                    Image(systemName: "gearshape.fill")
+                        .font(.system(size: 10))
+                        .foregroundColor(.blue)
+                }
+                .buttonStyle(.plain)
+                .help("Configure Custom HPC Agent")
+                .popover(isPresented: $showingHPCSettings, arrowEdge: .bottom) {
+                    HPCSettingsView()
+                        .environmentObject(appState)
+                }
+            }
+            
+            // Token Balance
+            if appState.currentComputeTarget.isPremium || appState.userTokenBalance > 0 {
+                HStack(spacing: 2) {
+                    Image(systemName: "bolt.circle.fill")
+                        .foregroundColor(.yellow)
+                    Text("\(appState.userTokenBalance)")
+                        .font(.system(size: 10, weight: .bold, design: .monospaced))
+                }
+                .padding(.horizontal, 4)
+                .padding(.vertical, 2)
+                .background(Color.yellow.opacity(0.1))
+                .cornerRadius(4)
+                .help("Token Balance: \(appState.userTokenBalance)")
+                
+                Divider().frame(height: 14)
+            }
+            
             // Python version (icon-only)
             pythonVersionMenu
             
@@ -2222,7 +2321,7 @@ struct NotebookView: View {
             Divider().frame(height: 14)
             
             // Run
-            Button(action: { viewModel.runSelectedCell() }) {
+            Button(action: { viewModel.runSelectedCell(computeTarget: appState.currentComputeTarget) }) {
                 Image(systemName: "play.fill")
                     .font(.system(size: 11))
             }
@@ -2231,7 +2330,7 @@ struct NotebookView: View {
             
             // Run All
             Menu {
-                Button(action: { viewModel.runAllCells() }) {
+                Button(action: { viewModel.runAllCells(computeTarget: appState.currentComputeTarget) }) {
                     Label("Run All Cells", systemImage: "forward.fill")
                 }
                 
@@ -2239,7 +2338,7 @@ struct NotebookView: View {
                 
                 ForEach(viewModel.getUsedColors()) { theme in
                     Button {
-                        viewModel.runCellsByColor(theme)
+                        viewModel.runCellsByColor(theme, computeTarget: appState.currentComputeTarget)
                     } label: {
                         HStack {
                             Circle().fill(theme.iconColor).frame(width: 8, height: 8)
@@ -2251,7 +2350,7 @@ struct NotebookView: View {
                 Image(systemName: "forward.fill")
                     .font(.system(size: 11))
             } primaryAction: {
-                viewModel.runAllCells()
+                viewModel.runAllCells(computeTarget: appState.currentComputeTarget)
             }
             .menuIndicator(.hidden)
             .help("Run All")
@@ -2985,5 +3084,57 @@ struct NotebookCellView: View {
         case .raw: return .gray
         case .procedure: return .orange
         }
+    }
+}
+
+// MARK: - HPC Settings View
+
+struct HPCSettingsView: View {
+    @EnvironmentObject var appState: AppState
+    
+    var body: some View {
+        VStack(alignment: .leading, spacing: 16) {
+            HStack {
+                Image(systemName: "server.rack")
+                    .font(.title2)
+                    .foregroundColor(.blue)
+                Text("Custom HPC Agent Settings")
+                    .font(.headline)
+            }
+            
+            Text("Run `microcode-agent` on your remote server to generate these credentials.")
+                .font(.caption)
+                .foregroundColor(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+            
+            VStack(alignment: .leading, spacing: 4) {
+                Text("WebSocket Endpoint")
+                    .font(.caption)
+                    .fontWeight(.semibold)
+                TextField("ws://192.168.1.55:8080", text: $appState.hpcEndpoint)
+                    .textFieldStyle(RoundedBorderTextFieldStyle())
+                    .disableAutocorrection(true)
+            }
+            
+            VStack(alignment: .leading, spacing: 4) {
+                Text("Agent Auth Token (Bearer)")
+                    .font(.caption)
+                    .fontWeight(.semibold)
+                SecureField("Paste UUID token here", text: $appState.hpcToken)
+                    .textFieldStyle(RoundedBorderTextFieldStyle())
+            }
+            
+            HStack {
+                Spacer()
+                Button("Done") {
+                    // Popover is dismissed by user clicking outside, but we can also provide a dismiss button if we pass @Environment(\.presentationMode) or just let it autosave via @AppStorage.
+                }
+                .keyboardShortcut(.defaultAction)
+                .opacity(0) // Hidden but keeps the keyboard shortcut active for return key
+                .frame(width: 0, height: 0)
+            }
+        }
+        .padding()
+        .frame(width: 300)
     }
 }

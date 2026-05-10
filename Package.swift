@@ -154,6 +154,11 @@ let package = Package(
                 "Services/LocalLLMService.swift",     // Local LLM Detection (LM Studio, Ollama)
                 "Services/MicroCore/MicroCore.swift", // AI Core Bridge
                 "Services/MicroCodeService.swift",    // AI Core Service Wrapper
+                "Kernel/ComputeKernel.swift",
+                "Views/Design/AIDesignPanel.swift",
+                "Services/AIDesignEngine.swift",
+                "Services/BillingService.swift",
+                "Services/MicroCore/microcode_core.swift",
                 "Views/HealerSuggestionView.swift",
                 "Views/UniversalPreviewView.swift",
                 "Views/Components/UniversalFilePreview.swift",
