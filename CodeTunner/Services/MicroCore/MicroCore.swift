@@ -1140,6 +1140,32 @@ fileprivate struct FfiConverterSequenceTypeSearchResult: FfiConverterRustBuffer 
         return seq
     }
 }
+/**
+ * Get low-level network status
+ */
+public func getKernelNetworkStatus() -> String {
+    return try!  FfiConverterString.lift(try! rustCall() {
+    uniffi_microcode_core_fn_func_get_kernel_network_status($0
+    )
+})
+}
+/**
+ * Change the power profile mode directly without IPC overhead
+ */
+public func setKernelPowerMode(mode: String)throws  {try rustCallWithError(FfiConverterTypeCoreError.lift) {
+    uniffi_microcode_core_fn_func_set_kernel_power_mode(
+        FfiConverterString.lower(mode),$0
+    )
+}
+}
+/**
+ * Trigger a kernel panic to test crash handlers
+ */
+public func triggerKernelPanic() {try! rustCall() {
+    uniffi_microcode_core_fn_func_trigger_kernel_panic($0
+    )
+}
+}
 
 private enum InitializationResult {
     case ok
@@ -1155,6 +1181,15 @@ private var initializationResult: InitializationResult = {
     let scaffolding_contract_version = ffi_microcode_core_uniffi_contract_version()
     if bindings_contract_version != scaffolding_contract_version {
         return InitializationResult.contractVersionMismatch
+    }
+    if (uniffi_microcode_core_checksum_func_get_kernel_network_status() != 3159) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_microcode_core_checksum_func_set_kernel_power_mode() != 410) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_microcode_core_checksum_func_trigger_kernel_panic() != 47956) {
+        return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_microcode_core_checksum_method_microcore_apply_edit() != 46628) {
         return InitializationResult.apiChecksumMismatch

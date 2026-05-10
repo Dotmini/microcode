@@ -306,6 +306,23 @@ RustBuffer uniffi_microcode_core_fn_method_microcore_semantic_search(void*_Nonnu
 void uniffi_microcode_core_fn_method_microcore_write_file(void*_Nonnull ptr, RustBuffer file_path, RustBuffer content, RustCallStatus *_Nonnull out_status
 );
 #endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_MICROCODE_CORE_FN_FUNC_GET_KERNEL_NETWORK_STATUS
+#define UNIFFI_FFIDEF_UNIFFI_MICROCODE_CORE_FN_FUNC_GET_KERNEL_NETWORK_STATUS
+RustBuffer uniffi_microcode_core_fn_func_get_kernel_network_status(RustCallStatus *_Nonnull out_status
+    
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_MICROCODE_CORE_FN_FUNC_SET_KERNEL_POWER_MODE
+#define UNIFFI_FFIDEF_UNIFFI_MICROCODE_CORE_FN_FUNC_SET_KERNEL_POWER_MODE
+void uniffi_microcode_core_fn_func_set_kernel_power_mode(RustBuffer mode, RustCallStatus *_Nonnull out_status
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_MICROCODE_CORE_FN_FUNC_TRIGGER_KERNEL_PANIC
+#define UNIFFI_FFIDEF_UNIFFI_MICROCODE_CORE_FN_FUNC_TRIGGER_KERNEL_PANIC
+void uniffi_microcode_core_fn_func_trigger_kernel_panic(RustCallStatus *_Nonnull out_status
+    
+);
+#endif
 #ifndef UNIFFI_FFIDEF_FFI_MICROCODE_CORE_RUSTBUFFER_ALLOC
 #define UNIFFI_FFIDEF_FFI_MICROCODE_CORE_RUSTBUFFER_ALLOC
 RustBuffer ffi_microcode_core_rustbuffer_alloc(uint64_t size, RustCallStatus *_Nonnull out_status
@@ -584,6 +601,24 @@ void ffi_microcode_core_rust_future_free_void(uint64_t handle
 #ifndef UNIFFI_FFIDEF_FFI_MICROCODE_CORE_RUST_FUTURE_COMPLETE_VOID
 #define UNIFFI_FFIDEF_FFI_MICROCODE_CORE_RUST_FUTURE_COMPLETE_VOID
 void ffi_microcode_core_rust_future_complete_void(uint64_t handle, RustCallStatus *_Nonnull out_status
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_MICROCODE_CORE_CHECKSUM_FUNC_GET_KERNEL_NETWORK_STATUS
+#define UNIFFI_FFIDEF_UNIFFI_MICROCODE_CORE_CHECKSUM_FUNC_GET_KERNEL_NETWORK_STATUS
+uint16_t uniffi_microcode_core_checksum_func_get_kernel_network_status(void
+    
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_MICROCODE_CORE_CHECKSUM_FUNC_SET_KERNEL_POWER_MODE
+#define UNIFFI_FFIDEF_UNIFFI_MICROCODE_CORE_CHECKSUM_FUNC_SET_KERNEL_POWER_MODE
+uint16_t uniffi_microcode_core_checksum_func_set_kernel_power_mode(void
+    
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_MICROCODE_CORE_CHECKSUM_FUNC_TRIGGER_KERNEL_PANIC
+#define UNIFFI_FFIDEF_UNIFFI_MICROCODE_CORE_CHECKSUM_FUNC_TRIGGER_KERNEL_PANIC
+uint16_t uniffi_microcode_core_checksum_func_trigger_kernel_panic(void
+    
 );
 #endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_MICROCODE_CORE_CHECKSUM_METHOD_MICROCORE_APPLY_EDIT
