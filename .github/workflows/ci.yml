@@ -113,6 +113,7 @@ jobs:
     name: "🔍 Lint"
     runs-on: macos-14
     timeout-minutes: 15
+    if: "!startsWith(github.ref, 'refs/tags/v')"
 
     steps:
       - uses: actions/checkout@v4
@@ -148,15 +149,24 @@ jobs:
   # ══════════════════════════════════════════════════════════════════════════
   # Job 3: Build (depends on security)
   # ══════════════════════════════════════════════════════════════════════════
-  build:
-    name: "🔨 Build"
+  build-arch:
+    name: "🔨 Build ${{ matrix.arch }}"
     needs: security
-    runs-on: macos-14
-    timeout-minutes: 60
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: arm64
+            os: macos-14
+          - arch: x86_64
+            os: macos-13
 
     outputs:
       version: ${{ steps.version.outputs.version }}
       build_number: ${{ steps.version.outputs.build_number }}
+      short_sha: ${{ steps.version.outputs.short_sha }}
 
     steps:
       - uses: actions/checkout@v4
@@ -178,7 +188,6 @@ jobs:
           echo "version=${VERSION}" >> $GITHUB_OUTPUT
           echo "build_number=${BUILD_NUMBER}" >> $GITHUB_OUTPUT
           echo "short_sha=${SHORT_SHA}" >> $GITHUB_OUTPUT
-          echo "📦 Version: ${VERSION} (build ${BUILD_NUMBER}, ${SHORT_SHA})"
 
       - name: Setup Xcode
         uses: maxim-lobanov/setup-xcode@v1
@@ -188,11 +197,7 @@ jobs:
       - name: Setup Rust
         uses: dtolnay/rust-toolchain@stable
         with:
-          targets: aarch64-apple-darwin,x86_64-apple-darwin
-
-      - name: Install system dependencies
-        run: |
-          brew install protobuf 2>/dev/null || true
+          targets: ${{ matrix.arch == 'arm64' && 'aarch64-apple-darwin' || 'x86_64-apple-darwin' }}
 
       - name: Cache Rust
         uses: Swatinem/rust-cache@v2
@@ -200,86 +205,99 @@ jobs:
           workspaces: |
             backend -> target
             microcode_core -> target
-          shared-key: microcode-rust-${{ runner.arch }}
+          shared-key: microcode-rust-${{ matrix.arch }}
 
       - name: Cache Swift PM
         uses: actions/cache@v4
         with:
           path: .build
-          key: ${{ runner.os }}-spm-${{ hashFiles('**/Package.resolved', 'Package.swift') }}
+          key: ${{ matrix.os }}-spm-${{ hashFiles('**/Package.resolved', 'Package.swift') }}
           restore-keys: |
-            ${{ runner.os }}-spm-
+            ${{ matrix.os }}-spm-
 
       - name: Prepare build
         run: |
           chmod +x build_distribution.sh bundle_runtimes.sh generate_checksums.sh 2>/dev/null || true
           VERSION="${{ steps.version.outputs.version }}"
-          BUILD="${{ steps.version.outputs.build_number }}"
           if [ -f "build_distribution.sh" ]; then
             sed -i '' "s/^VERSION=\".*\"/VERSION=\"${VERSION}\"/" build_distribution.sh 2>/dev/null || true
           fi
-
-      - name: "🏗️ Full Distribution Build"
-        run: |
-          if [ -f "build_distribution.sh" ]; then
-            ./build_distribution.sh
-          else
-            echo "⚠️ build_distribution.sh not found, using swift build"
-            swift build -c release
-          fi
-        env:
-          CI: true
-          BUILD_NUMBER: ${{ steps.version.outputs.build_number }}
 
       - name: Cache runtime downloads
         uses: actions/cache@v4
         with:
           path: .runtime_cache
-          key: runtimes-${{ runner.arch }}-v3
+          key: runtimes-${{ matrix.arch }}-v3
           restore-keys: |
-            runtimes-${{ runner.arch }}-
+            runtimes-${{ matrix.arch }}-
 
-      - name: "📦 Bundle Language Runtimes"
+      - name: "🏗️ Build Full DMG (${{ matrix.arch }})"
         run: |
-          chmod +x bundle_runtimes.sh
-          # Find the app bundle
-          APP_BUNDLE=$(find Dist -name "*.app" -maxdepth 2 2>/dev/null | head -1)
-          if [ -z "$APP_BUNDLE" ]; then
-            APP_BUNDLE=$(find .build -name "*.app" -maxdepth 4 2>/dev/null | head -1)
-          fi
-          if [ -z "$APP_BUNDLE" ]; then
-            echo "⚠️ No .app bundle found — creating standalone runtime bundle"
-            APP_BUNDLE="Dist/MicroCode.app"
-            mkdir -p "$APP_BUNDLE/Contents/Resources"
-          fi
-          
-          # Detect arch
-          if [ "$(uname -m)" = "arm64" ]; then
-            ARCH="arm64"
-          else
-            ARCH="x86_64"
-          fi
-          
-          echo "🎯 Bundling runtimes into: $APP_BUNDLE ($ARCH)"
-          ./bundle_runtimes.sh "$APP_BUNDLE" "$ARCH"
+          ./build_distribution.sh --arch ${{ matrix.arch }} --mode full
+        env:
+          CI: true
+          BUILD_NUMBER: ${{ steps.version.outputs.build_number }}
 
-      - name: Collect build artifacts
-        run: |
-          mkdir -p build-output
-          if [ -d "Dist" ]; then
-            cp -R Dist/* build-output/ 2>/dev/null || true
-          fi
-          # Generate artifact checksums (only MicroCode artifacts)
-          find build-output -maxdepth 1 -type f \( -name "microcode_*" -o -name "MicroCode_*" -o -name "*.dmg" -o -name "*.pkg" \) | while read f; do
-            shasum -a 256 "$f"
-          done > build-output/ARTIFACT_CHECKSUMS.txt 2>/dev/null || true
-          echo "📦 Build artifacts:"
-          ls -lh build-output/ 2>/dev/null || echo "No artifacts in build-output/"
-
-      - name: Upload build artifacts
+      - name: Upload Raw Binaries for Lite
         uses: actions/upload-artifact@v4
         with:
-          name: dist-${{ steps.version.outputs.version }}-${{ steps.version.outputs.short_sha }}
+          name: raw-binaries-${{ matrix.arch }}
+          path: .build_dist/${{ matrix.arch }}/
+          retention-days: 1
+          if-no-files-found: warn
+
+      - name: Collect DMG
+        run: |
+          mkdir -p build-output
+          cp Dist/${{ matrix.arch }}/*.dmg build-output/ 2>/dev/null || true
+
+      - name: Upload Full DMG
+        uses: actions/upload-artifact@v4
+        with:
+          name: dist-${{ steps.version.outputs.version }}-${{ steps.version.outputs.short_sha }}-${{ matrix.arch }}
+          path: build-output/
+          retention-days: 14
+          if-no-files-found: warn
+
+  package-lite:
+    name: "📦 Package Universal Lite"
+    needs: build-arch
+    runs-on: macos-14
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Prepare build
+        run: |
+          chmod +x build_distribution.sh 2>/dev/null || true
+          VERSION="${{ needs.build-arch.outputs.version }}"
+          sed -i '' "s/^VERSION=\".*\"/VERSION=\"${VERSION}\"/" build_distribution.sh 2>/dev/null || true
+          mkdir -p .build_dist/arm64 .build_dist/x86_64
+
+      - name: Download ARM64 binaries
+        uses: actions/download-artifact@v4
+        with:
+          name: raw-binaries-arm64
+          path: .build_dist/arm64/
+
+      - name: Download x86_64 binaries
+        uses: actions/download-artifact@v4
+        with:
+          name: raw-binaries-x86_64
+          path: .build_dist/x86_64/
+
+      - name: "🏗️ Package Lite Universal DMG"
+        run: ./build_distribution.sh --mode lite-only
+
+      - name: Collect DMG
+        run: |
+          mkdir -p build-output
+          cp Dist/Lite/*.dmg build-output/ 2>/dev/null || true
+
+      - name: Upload Lite DMG
+        uses: actions/upload-artifact@v4
+        with:
+          name: dist-${{ needs.build-arch.outputs.version }}-${{ needs.build-arch.outputs.short_sha }}-lite
           path: build-output/
           retention-days: 14
           if-no-files-found: warn
@@ -292,7 +310,7 @@ jobs:
     needs: security
     runs-on: macos-14
     timeout-minutes: 30
-    if: ${{ !inputs.skip_tests }}
+    if: "!inputs.skip_tests && !startsWith(github.ref, 'refs/tags/v')"
 
     steps:
       - uses: actions/checkout@v4
@@ -353,7 +371,7 @@ jobs:
   # ══════════════════════════════════════════════════════════════════════════
   checksums:
     name: "🔒 Auto-Checksums"
-    needs: [build, lint]
+    needs: [build-arch]
     runs-on: macos-14
     timeout-minutes: 5
     if: github.event_name == 'push' && github.ref == 'refs/heads/main' && !startsWith(github.ref, 'refs/tags/')
@@ -389,7 +407,7 @@ jobs:
   release:
     name: "🚀 Release"
     if: startsWith(github.ref, 'refs/tags/v')
-    needs: [build, test]
+    needs: [build-arch, package-lite]
     runs-on: ubuntu-latest
     timeout-minutes: 15
 
@@ -407,7 +425,7 @@ jobs:
 
       - name: Generate release checksums
         run: |
-          VERSION="${{ needs.build.outputs.version }}"
+          VERSION="${{ needs.build-arch.outputs.version }}"
           echo "# MicroCode v${VERSION} — SHA256 Checksums" > SHA256SUMS.txt
           echo "# Generated: $(date -u +%Y-%m-%dT%H:%M:%SZ)" >> SHA256SUMS.txt
           echo "" >> SHA256SUMS.txt
@@ -430,7 +448,7 @@ jobs:
       - name: Generate changelog
         id: changelog
         run: |
-          VERSION="${{ needs.build.outputs.version }}"
+          VERSION="${{ needs.build-arch.outputs.version }}"
           PREV_TAG=$(git describe --tags --abbrev=0 HEAD^ 2>/dev/null || echo "")
 
           if [ -n "$PREV_TAG" ]; then
@@ -444,9 +462,9 @@ jobs:
           fi
 
           cat > release-body.md << 'HEREDOC'
-          ## MicroCode v${{ needs.build.outputs.version }}
+          ## MicroCode v${{ needs.build-arch.outputs.version }}
 
-          **Build:** ${{ needs.build.outputs.build_number }} | **License:** MPL v1.0
+          **Build:** ${{ needs.build-arch.outputs.build_number }} | **License:** MPL v1.0
 
           ### 📥 Downloads
           | Platform | DMG | PKG |
