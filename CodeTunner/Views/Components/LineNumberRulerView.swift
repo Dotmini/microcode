@@ -207,10 +207,11 @@ final class LineNumberRulerView: NSRulerView {
             
             // Move to next line
             lineIndex += 1
-            index = NSMaxRange(lineRange)
             
-            // Safety: prevent infinite loop
-            if index <= lineRange.location { break }
+            // Safety: prevent infinite loop (NSString.lineRange can return the range of the last line when index is at the end of the string)
+            let nextIndex = NSMaxRange(lineRange)
+            if index == nextIndex { break }
+            index = nextIndex
         }
     }
     
@@ -219,8 +220,20 @@ final class LineNumberRulerView: NSRulerView {
     /// Calculate the 1-based line number for a character index
     private func lineNumber(for charIndex: Int, in string: String) -> Int {
         let nsString = string as NSString
-        let clampedIndex = min(charIndex, nsString.length)
-        let substring = nsString.substring(to: clampedIndex)
-        return substring.components(separatedBy: "\n").count
+        let clampedIndex = max(0, min(charIndex, nsString.length))
+        
+        // Fast line counting
+        var count = 1
+        let utf16 = string.utf16
+        if clampedIndex <= utf16.count {
+            let prefix = utf16.prefix(clampedIndex)
+            for codeUnit in prefix {
+                // 10 is the utf16 code unit for \n
+                if codeUnit == 10 {
+                    count += 1
+                }
+            }
+        }
+        return count
     }
 }

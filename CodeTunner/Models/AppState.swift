@@ -12,8 +12,7 @@ import Foundation
 import CodeTunnerSupport
 import CodeTunnerKernel
 import AppKit
-
-// MARK: - Chat Models
+import CryptoKit
 
 struct ChatMessage: Identifiable {
     let id = UUID()
@@ -1868,13 +1867,21 @@ class AppState: ObservableObject {
     public func executeScript(code: String, language: String) async -> (stdout: String, stderr: String, exitCode: Int32) {
         let tempDir = FileManager.default.temporaryDirectory
         let ext = fileExtension(for: language)
-        let filename = "script_\(UUID().uuidString).\(ext)"
+        
+        // Fast hashing for intelligent execution cache
+        let data = Data(code.utf8)
+        let hash = SHA256.hash(data: data)
+        let codeHash = hash.compactMap { String(format: "%02x", $0) }.joined().prefix(16)
+        
+        let filename = "script_\(codeHash).\(ext)"
         let sourceFile = tempDir.appendingPathComponent(filename)
         
         do {
-            try code.write(to: sourceFile, atomically: true, encoding: .utf8)
-            let result = await executeLocalCommand(language: language, sourcePath: sourceFile.path, tempDir: tempDir)
-            try? FileManager.default.removeItem(at: sourceFile)
+            if !FileManager.default.fileExists(atPath: sourceFile.path) {
+                try code.write(to: sourceFile, atomically: true, encoding: .utf8)
+            }
+            let result = await executeLocalCommand(language: language, sourcePath: sourceFile.path, tempDir: tempDir, codeHash: String(codeHash))
+            // Do not remove source file to allow caching for same code runs
             return result
         } catch {
             return ("", "Error: Failed to write temp file: \(error.localizedDescription)", 1)
@@ -1925,10 +1932,12 @@ class AppState: ObservableObject {
     }
 
     /// Execute command for specific language
-    func executeLocalCommand(language: String, sourcePath: String, tempDir: URL) async -> (stdout: String, stderr: String, exitCode: Int32) {
+    func executeLocalCommand(language: String, sourcePath: String, tempDir: URL, codeHash: String = "") async -> (stdout: String, stderr: String, exitCode: Int32) {
         let lang = language.lowercased()
         var args: [String] = []
         var executable = "/usr/bin/env"
+        
+        let hashSuffix = codeHash.isEmpty ? UUID().uuidString : codeHash
         
         switch lang {
         case "python", "py", "python3":
@@ -1938,30 +1947,48 @@ class AppState: ObservableObject {
             args = ["node", sourcePath]
             
         case "typescript", "ts":
-            let jsPath = tempDir.appendingPathComponent("output.js").path
-            let compileResult = await runProcess(executable: "/usr/bin/env", arguments: ["npx", "tsc", "--outFile", jsPath, sourcePath])
-            if compileResult.exitCode != 0 { return compileResult }
+            let jsPath = tempDir.appendingPathComponent("output_\(hashSuffix).js").path
+            if !FileManager.default.fileExists(atPath: jsPath) {
+                let compileResult = await runProcess(executable: "/usr/bin/env", arguments: ["npx", "tsc", "--outFile", jsPath, sourcePath])
+                if compileResult.exitCode != 0 { return compileResult }
+            }
             args = ["node", jsPath]
             
         case "swift":
-            args = ["swift", sourcePath]
+            let outputPath = tempDir.appendingPathComponent("output_swift_\(hashSuffix)").path
+            if !FileManager.default.fileExists(atPath: outputPath) {
+                let compileResult = await runProcess(executable: "/usr/bin/env", arguments: ["swiftc", "-O", "-o", outputPath, sourcePath])
+                if compileResult.exitCode != 0 { return await runProcess(executable: "/usr/bin/env", arguments: ["swift", sourcePath]) }
+            }
+            return await runProcess(executable: outputPath, arguments: [])
             
         case "java":
             let className = (sourcePath as NSString).lastPathComponent.replacingOccurrences(of: ".java", with: "")
-            let classDir = (sourcePath as NSString).deletingLastPathComponent
-            let compileResult = await runProcess(executable: "/usr/bin/env", arguments: ["javac", "-d", classDir, sourcePath])
-            if compileResult.exitCode != 0 { return compileResult }
+            let classDir = tempDir.appendingPathComponent("class_\(hashSuffix)").path
+            let classFilePath = (classDir as NSString).appendingPathComponent("\(className).class")
+            
+            if !FileManager.default.fileExists(atPath: classFilePath) {
+                try? FileManager.default.createDirectory(atPath: classDir, withIntermediateDirectories: true, attributes: nil)
+                let compileResult = await runProcess(executable: "/usr/bin/env", arguments: ["javac", "-d", classDir, sourcePath])
+                if compileResult.exitCode != 0 { return compileResult }
+            }
             return await runProcess(executable: "/usr/bin/env", arguments: ["java", "-cp", classDir, className])
             
         case "kotlin", "kt":
-            let jarPath = tempDir.appendingPathComponent("output.jar").path
-            // Assumes kotlinc is in path
-            let compileResult = await runProcess(executable: "/usr/bin/env", arguments: ["kotlinc", sourcePath, "-include-runtime", "-d", jarPath])
-            if compileResult.exitCode != 0 { return compileResult }
+            let jarPath = tempDir.appendingPathComponent("output_\(hashSuffix).jar").path
+            if !FileManager.default.fileExists(atPath: jarPath) {
+                let compileResult = await runProcess(executable: "/usr/bin/env", arguments: ["kotlinc", sourcePath, "-include-runtime", "-d", jarPath])
+                if compileResult.exitCode != 0 { return compileResult }
+            }
             return await runProcess(executable: "/usr/bin/env", arguments: ["java", "-jar", jarPath])
             
         case "go", "golang":
-            args = ["go", "run", sourcePath]
+            let outputPath = tempDir.appendingPathComponent("output_go_\(hashSuffix)").path
+            if !FileManager.default.fileExists(atPath: outputPath) {
+                let compileResult = await runProcess(executable: "/usr/bin/env", arguments: ["go", "build", "-o", outputPath, sourcePath])
+                if compileResult.exitCode != 0 { return await runProcess(executable: "/usr/bin/env", arguments: ["go", "run", sourcePath]) }
+            }
+            return await runProcess(executable: outputPath, arguments: [])
             
         // Systems
         case "rust", "rs":
@@ -1971,39 +1998,46 @@ class AppState: ObservableObject {
             return await runProcess(executable: outputPath, arguments: [])
             
         case "c":
-            let outputPath = tempDir.appendingPathComponent("output_c").path
-            let compileResult = await runProcess(executable: "/usr/bin/env", arguments: ["clang", "-o", outputPath, sourcePath])
-            if compileResult.exitCode != 0 { return compileResult }
+            let outputPath = tempDir.appendingPathComponent("output_c_\(hashSuffix)").path
+            if !FileManager.default.fileExists(atPath: outputPath) {
+                let compileResult = await runProcess(executable: "/usr/bin/env", arguments: ["clang", "-o", outputPath, sourcePath])
+                if compileResult.exitCode != 0 { return compileResult }
+            }
             return await runProcess(executable: outputPath, arguments: [])
             
         case "cpp", "c++", "cxx", "cc":
-            let outputPath = tempDir.appendingPathComponent("output_cpp").path
-            let compileResult = await runProcess(executable: "/usr/bin/env", arguments: ["clang++", "-std=c++20", "-o", outputPath, sourcePath])
-            if compileResult.exitCode != 0 { return compileResult }
+            let outputPath = tempDir.appendingPathComponent("output_cpp_\(hashSuffix)").path
+            if !FileManager.default.fileExists(atPath: outputPath) {
+                let compileResult = await runProcess(executable: "/usr/bin/env", arguments: ["clang++", "-std=c++20", "-o", outputPath, sourcePath])
+                if compileResult.exitCode != 0 { return compileResult }
+            }
             return await runProcess(executable: outputPath, arguments: [])
             
         case "objective-c", "objc", "m":
-            let outputPath = tempDir.appendingPathComponent("output_objc").path
-            let compileResult = await runProcess(executable: "/usr/bin/env", arguments: ["clang", "-framework", "Foundation", "-o", outputPath, sourcePath])
-            if compileResult.exitCode != 0 { return compileResult }
+            let outputPath = tempDir.appendingPathComponent("output_objc_\(hashSuffix)").path
+            if !FileManager.default.fileExists(atPath: outputPath) {
+                let compileResult = await runProcess(executable: "/usr/bin/env", arguments: ["clang", "-framework", "Foundation", "-o", outputPath, sourcePath])
+                if compileResult.exitCode != 0 { return compileResult }
+            }
             return await runProcess(executable: outputPath, arguments: [])
             
         case "objective-c++", "objective-cpp", "objcpp", "mm":
-            let outputPath = tempDir.appendingPathComponent("output_objcpp").path
-            let compileResult = await runProcess(executable: "/usr/bin/env", arguments: ["clang++", "-framework", "Foundation", "-o", outputPath, sourcePath])
-            if compileResult.exitCode != 0 { return compileResult }
+            let outputPath = tempDir.appendingPathComponent("output_objcpp_\(hashSuffix)").path
+            if !FileManager.default.fileExists(atPath: outputPath) {
+                let compileResult = await runProcess(executable: "/usr/bin/env", arguments: ["clang++", "-framework", "Foundation", "-o", outputPath, sourcePath])
+                if compileResult.exitCode != 0 { return compileResult }
+            }
             return await runProcess(executable: outputPath, arguments: [])
             
         // .NET / C#
         case "csharp", "cs":
             // Try mono mcs first for single file
-            let binPath = tempDir.appendingPathComponent("out.exe").path
-            let compileResult = await runProcess(executable: "/usr/bin/env", arguments: ["mcs", sourcePath, "-out:" + binPath])
-            if compileResult.exitCode == 0 {
-                return await runProcess(executable: "/usr/bin/env", arguments: ["mono", binPath])
+            let binPath = tempDir.appendingPathComponent("out_\(hashSuffix).exe").path
+            if !FileManager.default.fileExists(atPath: binPath) {
+                let compileResult = await runProcess(executable: "/usr/bin/env", arguments: ["mcs", sourcePath, "-out:" + binPath])
+                if compileResult.exitCode != 0 { return compileResult }
             }
-            // Fallback to dotnet run (requires project file usually, but maybe simple?)
-            return compileResult
+            return await runProcess(executable: "/usr/bin/env", arguments: ["mono", binPath])
             
         // Scripting
         case "ruby", "rb": args = ["ruby", sourcePath]
@@ -2035,26 +2069,31 @@ class AppState: ObservableObject {
         
         // Legacy / Low Level
         case "fortran", "f90", "f95":
-            let outputPath = tempDir.appendingPathComponent("output_f90").path
-            let compileResult = await runProcess(executable: "/usr/bin/env", arguments: ["gfortran", "-o", outputPath, sourcePath])
-            if compileResult.exitCode != 0 { return compileResult }
+            let outputPath = tempDir.appendingPathComponent("output_f90_\(hashSuffix)").path
+            if !FileManager.default.fileExists(atPath: outputPath) {
+                let compileResult = await runProcess(executable: "/usr/bin/env", arguments: ["gfortran", "-o", outputPath, sourcePath])
+                if compileResult.exitCode != 0 { return compileResult }
+            }
             return await runProcess(executable: outputPath, arguments: [])
             
         case "pascal", "pas":
-            let compileResult = await runProcess(executable: "/usr/bin/env", arguments: ["fpc", sourcePath])
-            if compileResult.exitCode != 0 { return compileResult }
-            let binaryName = (sourcePath as NSString).lastPathComponent.replacingOccurrences(of: ".\((sourcePath as NSString).pathExtension)", with: "")
-            let binaryPath = tempDir.appendingPathComponent(binaryName).path
+            let binaryPath = tempDir.appendingPathComponent("output_pas_\(hashSuffix)").path
+            if !FileManager.default.fileExists(atPath: binaryPath) {
+                let compileResult = await runProcess(executable: "/usr/bin/env", arguments: ["fpc", "-o" + binaryPath, sourcePath])
+                if compileResult.exitCode != 0 { return compileResult }
+            }
             return await runProcess(executable: binaryPath, arguments: [])
             
         case "assembly", "asm", "s":
-             let objPath = tempDir.appendingPathComponent("out.o").path
-             let binPath = tempDir.appendingPathComponent("out").path
-             let asResult = await runProcess(executable: "/usr/bin/env", arguments: ["as", "-o", objPath, sourcePath])
-             if asResult.exitCode != 0 { return asResult }
-             let sdkPath = await runProcess(executable: "/usr/bin/env", arguments: ["xcrun", "-sdk", "macosx", "--show-sdk-path"]).stdout.trimmingCharacters(in: .whitespacesAndNewlines)
-             let ldResult = await runProcess(executable: "/usr/bin/env", arguments: ["ld", "-o", binPath, objPath, "-lSystem", "-syslibroot", sdkPath, "-e", "_main", "-arch", "arm64"])
-             if ldResult.exitCode != 0 { return ldResult }
+             let binPath = tempDir.appendingPathComponent("out_\(hashSuffix)").path
+             if !FileManager.default.fileExists(atPath: binPath) {
+                 let objPath = tempDir.appendingPathComponent("out_\(hashSuffix).o").path
+                 let asResult = await runProcess(executable: "/usr/bin/env", arguments: ["as", "-o", objPath, sourcePath])
+                 if asResult.exitCode != 0 { return asResult }
+                 let sdkPath = await runProcess(executable: "/usr/bin/env", arguments: ["xcrun", "-sdk", "macosx", "--show-sdk-path"]).stdout.trimmingCharacters(in: .whitespacesAndNewlines)
+                 let ldResult = await runProcess(executable: "/usr/bin/env", arguments: ["ld", "-o", binPath, objPath, "-lSystem", "-syslibroot", sdkPath, "-e", "_main", "-arch", "arm64"])
+                 if ldResult.exitCode != 0 { return ldResult }
+             }
              return await runProcess(executable: binPath, arguments: [])
              
         case "metal":

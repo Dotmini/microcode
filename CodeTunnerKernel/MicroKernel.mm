@@ -14,7 +14,7 @@ static std::jmp_buf jump_buffer;
 void signal_handler(int signal) {
     std::cerr << "\n[MicroVM Panic] Caught Low-Level Signal: " << signal << std::endl;
     std::cerr << "[MicroVM Recovery] Restoring CPU context..." << std::endl;
-    
+
     // กระโดดกลับไปยังจุดที่ปลอดภัย (longjmp)
     std::longjmp(jump_buffer, 1);
 }
@@ -25,14 +25,14 @@ void MicroGuard::logSystemInfo() {
     // 1. ใช้ uname เพื่อดึงข้อมูล Kernel ระดับต่ำ
     struct utsname systemInfo;
     uname(&systemInfo);
-    
+
     std::cout << "=== Low-Level OS Info ===" << std::endl;
     std::cout << "Kernel Name: " << systemInfo.sysname << std::endl;
     std::cout << "Node Name:   " << systemInfo.nodename << std::endl;
     std::cout << "Release:     " << systemInfo.release << std::endl;
     std::cout << "Version:     " << systemInfo.version << std::endl;
     std::cout << "Machine:     " << systemInfo.machine << std::endl; // เช่น arm64
-    
+
     // 2. ใช้ sysctl ดึงจำนวน CPU
     int mib[2];
     size_t len;
@@ -60,13 +60,13 @@ bool MicroGuard::executeSafe(std::function<void()> task) {
     // ถ้า setjmp คืนค่า 0 คือการรันปกติ
     // ถ้าคืนค่าอื่น แสดงว่าถูกโยนมาจาก signal_handler (เกิด Crash)
     if (setjmp(jump_buffer) == 0) {
-        
-        // 3. Layer ป้องกันระดับ Objective-C และ C++ Exception
+
+        // 3. ป้องกันระดับ Objective-C และ C++ Exception
         @try {
             try {
                 // *** รันโค้ดของผู้ใช้ที่นี่ ***
                 task();
-                
+
             } catch (const std::exception& e) {
                 std::cerr << "[MicroVM] Caught C++ Exception: " << e.what() << std::endl;
                 return false;
@@ -80,16 +80,16 @@ bool MicroGuard::executeSafe(std::function<void()> task) {
         } @finally {
             // Cleanup code if needed
         }
-        
+
     } else {
-        // เข้ามาที่นี่เมื่อเกิด Fatal Crash แล้วถูกกู้คืนโดย longjmp
+        // เข้าที่นี่เมื่อเกิด Fatal Crash แล้วถูกกู้คืนโดย longjmp
         std::cerr << "[MicroVM] FATAL CRASH DETECTED! Execution terminated safely. App is still alive." << std::endl;
-        
+
         // Reset signal handler เพื่อป้องกัน Loop นรก
         std::signal(SIGSEGV, SIG_DFL);
         return false;
     }
-    
+
     std::cout << "[MicroVM] Execution completed successfully." << std::endl;
     return true;
 }
@@ -105,7 +105,7 @@ bool MicroGuard::executeSafe(std::function<void()> task) {
 
 + (BOOL)executeSafe:(void(NS_NOESCAPE ^)(void))block {
     if (!block) return NO;
-    
+
     // Convert Obj-C Block to C++ Lambda
     // Note: We use a simple lambda that calls the block.
     // The block is invoked synchronously, so stack-based capture is fine.
