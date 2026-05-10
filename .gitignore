@@ -117,3 +117,4 @@ presentation/
 # ----- Enterprise Module (PROPRIETARY — not open source) -----
 Enterprise/
 microrent-ai-proxy/
+.microcode/
