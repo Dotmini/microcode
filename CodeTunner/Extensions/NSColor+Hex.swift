@@ -45,7 +45,8 @@ extension NSColor {
         }
         
         // Handle catalog/dynamic colors by converting through CGColor
-        if let cgColor = self.cgColor, let nsColor = NSColor(cgColor: cgColor), let rgbColor = nsColor.usingColorSpace(.sRGB) {
+        let cgColor = self.cgColor
+        if let nsColor = NSColor(cgColor: cgColor), let rgbColor = nsColor.usingColorSpace(.sRGB) {
             let r = Int(max(0, min(1, rgbColor.redComponent)) * 255)
             let g = Int(max(0, min(1, rgbColor.greenComponent)) * 255)
             let b = Int(max(0, min(1, rgbColor.blueComponent)) * 255)
