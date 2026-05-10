@@ -737,6 +737,15 @@ class AppState: ObservableObject {
     @Published var browserActiveTab: Int = 0
 
     @Published var hasUnsavedChanges: Bool = false
+    
+    // MARK: - Compute & Billing State
+    @Published var currentComputeTarget: ComputeTarget = .localCPU
+    @Published var userTokenBalance: Int = 0
+    @Published var isPremiumSubscriber: Bool = false
+    
+    // Custom HPC Configuration
+    @AppStorage("hpcEndpoint") var hpcEndpoint: String = ""
+    @AppStorage("hpcToken") var hpcToken: String = ""
 
     @Published var fontSize: CGFloat = 13
     @Published var fontFamily: String = "Menlo"

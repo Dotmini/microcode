@@ -10,6 +10,34 @@
 
 import SwiftUI
 
+import SwiftUI
+
+// MARK: - Compute Target (Cell Execution)
+
+enum ComputeTarget: String, CaseIterable, Identifiable, Codable {
+    case localCPU = "Local CPU"
+    case localMLX = "Apple MLX (NPU)"
+    case localNvidia = "Nvidia GPU (Local)"
+    case cloudPremium = "Cloud Premium (A100/H100)"
+    case customHPC = "Custom HPC Server"
+    
+    var id: String { rawValue }
+    
+    var icon: String {
+        switch self {
+        case .localCPU: return "cpu"
+        case .localMLX: return "applelogo"
+        case .localNvidia: return "memorychip"
+        case .cloudPremium: return "cloud.fill"
+        case .customHPC: return "server.rack"
+        }
+    }
+    
+    var isPremium: Bool {
+        return self == .cloudPremium
+    }
+}
+
 // MARK: - Cell Color Theme
 
 enum CellColorTheme: String, CaseIterable, Identifiable, Codable {
