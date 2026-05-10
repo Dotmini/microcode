@@ -1072,6 +1072,9 @@ public struct SyntaxHighlightedCodeView: NSViewRepresentable {
             // Cancel any in-flight highlighting task on deallocation
             highlightTimer?.invalidate()
             engine?.cancelHighlighting()
+            
+            // Break possible retain cycles
+            engine = nil
         }
         
         // MARK: - NSTextStorageDelegate (Incremental Updates)

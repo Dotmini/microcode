@@ -744,7 +744,7 @@ class AppState: ObservableObject {
     @Published var isPremiumSubscriber: Bool = false
     
     // Custom HPC Configuration
-    @AppStorage("hpcEndpoint") var hpcEndpoint: String = ""
+    @AppStorage("hpcEndpoint") var hpcEndpoint: String = "ws://127.0.0.1:8080/v1/agent"
     @AppStorage("hpcToken") var hpcToken: String = ""
 
     @Published var fontSize: CGFloat = 13

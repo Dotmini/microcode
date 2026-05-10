@@ -57,3 +57,18 @@ extension NSColor {
         return "#D4D4D4"
     }
 }
+
+extension NSColor {
+    /// Returns true if the color is perceived as dark
+    var isDarkColor: Bool {
+        guard let rgbColor = self.usingColorSpace(.sRGB) else { return true }
+        
+        // Calculate relative luminance
+        let r = rgbColor.redComponent
+        let g = rgbColor.greenComponent
+        let b = rgbColor.blueComponent
+        
+        let luminance = (0.299 * r + 0.587 * g + 0.114 * b)
+        return luminance < 0.5
+    }
+}

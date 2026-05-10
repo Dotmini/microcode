@@ -600,6 +600,7 @@ struct PlaygroundView: View {
             )
             .padding(4)
             .background(editorBackground)
+            .clipped()
         }
     }
     
