@@ -1,6 +1,6 @@
 import Foundation
 import SwiftUI
-
+//Tirawat Nantamas | Dotmini Software
 // MARK: - Enums
 
 enum DesignElementType: String, Codable, CaseIterable {

@@ -61,7 +61,7 @@ let package = Package(
                 "Views/ExpandCodeWindow.swift",
                 "Views/FormatCodeWindow.swift",
                 "Views/CodeAnalysisWindow.swift",
-                "Views/ExportWindow.swift",
+
                 "Views/PlaygroundView.swift",
                 "Views/PlaygroundCellView.swift",
                 "Views/DocumentViewer.swift",

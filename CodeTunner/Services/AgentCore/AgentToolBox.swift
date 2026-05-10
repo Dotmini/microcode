@@ -68,9 +68,31 @@ class AgentToolBox: ObservableObject {
             throw ToolBoxError.toolNotFound(toolName)
         }
         
+        var resolvedParams = params
+        
+        // Auto-resolve relative paths
+        if let root = workspaceRoot {
+            let resolvePath = { (p: String) -> String in
+                if p.hasPrefix("/") { return p }
+                if p.hasPrefix("~") { return (p as NSString).expandingTildeInPath }
+                return (root as NSString).appendingPathComponent(p)
+            }
+            
+            if let path = params["path"] as? String {
+                resolvedParams["path"] = resolvePath(path)
+            }
+            if let directory = params["directory"] as? String {
+                resolvedParams["directory"] = resolvePath(directory)
+            }
+            if let pathsStr = params["paths"] as? String {
+                let paths = pathsStr.components(separatedBy: ",").map { $0.trimmingCharacters(in: .whitespaces) }
+                resolvedParams["paths"] = paths.map { resolvePath($0) }.joined(separator: ",")
+            }
+        }
+        
         // Sandbox validation for file operations
-        if ["file_read", "file_write", "replace_in_file", "grep_search", "list_directory_tree"].contains(toolName) {
-            if let path = params["path"] as? String ?? params["directory"] as? String {
+        if ["file_read", "file_write", "replace_in_file", "grep_search", "list_directory_tree", "patch_file", "multi_file_read"].contains(toolName) {
+            if let path = resolvedParams["path"] as? String ?? resolvedParams["directory"] as? String {
                 try validateSandbox(path)
             }
         }
@@ -78,8 +100,8 @@ class AgentToolBox: ObservableObject {
         let startTime = Date()
         
         do {
-            let result = try await tool.execute(params: params)
-            let execution = ToolExecution(toolName: toolName, params: params, result: result, success: true, duration: Date().timeIntervalSince(startTime))
+            let result = try await tool.execute(params: resolvedParams)
+            let execution = ToolExecution(toolName: toolName, params: resolvedParams, result: result, success: true, duration: Date().timeIntervalSince(startTime))
             executionHistory.append(execution)
             
             // Truncate very large outputs
@@ -182,12 +204,31 @@ struct FileReadTool: AgentTool {
             throw ToolBoxError.invalidParams("path is required")
         }
         let url = URL(fileURLWithPath: path)
-        let content = try String(contentsOf: url, encoding: .utf8)
-        // Truncate very large files
-        if content.count > 10000 {
-            return String(content.prefix(10000)) + "\n\n... (file truncated at 10K chars, total: \(content.count) chars)"
+        
+        // Check if it's binary
+        let ext = url.pathExtension.lowercased()
+        let binaryExtensions = ["class", "png", "jpg", "jpeg", "gif", "pdf", "zip", "tar", "gz", "mp3", "mp4", "exe", "dll", "dylib", "so", "bin", "dmg", "pkg"]
+        if binaryExtensions.contains(ext) {
+            return "Error: File '\(url.lastPathComponent)' is a binary file and cannot be read as text."
         }
-        return content
+        
+        do {
+            let content = try String(contentsOf: url, encoding: .utf8)
+            // Truncate very large files
+            if content.count > 10000 {
+                return String(content.prefix(10000)) + "\n\n... (file truncated at 10K chars, total: \(content.count) chars)"
+            }
+            return content
+        } catch {
+            // Fallback for different encodings
+            if let content = try? String(contentsOf: url, encoding: .isoLatin1) {
+                if content.count > 10000 {
+                    return String(content.prefix(10000)) + "\n\n... (file truncated at 10K chars, total: \(content.count) chars)"
+                }
+                return content
+            }
+            throw error
+        }
     }
 }
 

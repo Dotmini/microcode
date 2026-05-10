@@ -623,7 +623,15 @@ enum AppTheme: String, CaseIterable {
                 "number": TokenStyleConfig(foreground: numberColor.hexString),
                 "type": TokenStyleConfig(foreground: typeColor.hexString),
                 "function": TokenStyleConfig(foreground: functionColor.hexString),
-                "identifier": TokenStyleConfig(foreground: editorText.hexString)
+                "identifier": TokenStyleConfig(foreground: editorText.hexString),
+                "variable": TokenStyleConfig(foreground: typeColor.hexString), // Better than plain text
+                "property": TokenStyleConfig(foreground: typeColor.hexString),
+                "parameter": TokenStyleConfig(foreground: typeColor.hexString),
+                "boolean": TokenStyleConfig(foreground: keywordColor.hexString),
+                "null": TokenStyleConfig(foreground: keywordColor.hexString),
+                "operator": TokenStyleConfig(foreground: editorText.hexString),
+                "punctuation": TokenStyleConfig(foreground: editorText.hexString),
+                "escape": TokenStyleConfig(foreground: numberColor.hexString)
             ]
         )
     }
@@ -753,7 +761,7 @@ class AppState: ObservableObject {
     @Published var showingExpandCodeWindow: Bool = false
     @Published var showingFormatCodeWindow: Bool = false
     @Published var showingCodeAnalysisWindow: Bool = false
-    @Published var showingExportWindow: Bool = false
+    // Removed showingExportWindow
     @Published var showingCommitDialog: Bool = false
     @Published var showingSettingsDialog: Bool = false
     @Published var showingSimulatorDialog: Bool = false
@@ -1005,7 +1013,7 @@ class AppState: ObservableObject {
         }
     }
 
-    private func saveSettings() {
+    func saveSettings() {
         let defaults = UserDefaults.standard
         defaults.set(Double(fontSize), forKey: "fontSize")
         defaults.set(fontFamily, forKey: "fontFamily")

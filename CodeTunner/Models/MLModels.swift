@@ -3,7 +3,7 @@
 //  CodeTunner
 //
 //  Enterprise ML Training Types & Models
-//  Created by SPU AI CLUB
+//  Created by Tirawat Nantamas | Dotmini Software
 //  Copyright © 2025 Dotmini Software. All rights reserved.
 //
 
