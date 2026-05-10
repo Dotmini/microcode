@@ -530,6 +530,14 @@ public final class SyntaxHighlightingEngine: @unchecked Sendable {
     private func applyTokens(_ tokens: [SyntaxToken], to textStorage: NSTextStorage, fontSize: CGFloat, font: NSFont?) {
         assert(Thread.isMainThread, "applyTokens must be called on the main thread")
         
+        // Ensure default color is applied to the entire text before highlighting
+        let fullRange = NSRange(location: 0, length: textStorage.length)
+        if fullRange.length > 0 {
+            textStorage.beginEditing()
+            textStorage.addAttribute(.foregroundColor, value: themeManager.editorForegroundColor, range: fullRange)
+            textStorage.endEditing()
+        }
+        
         // CHUNK SIZE: Apply 2000 tokens at a time to keep frame rate high
         // 2000 tokens ~ 200 lines of code roughly.
         let chunkSize = 2000

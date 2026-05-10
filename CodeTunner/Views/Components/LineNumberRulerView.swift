@@ -32,21 +32,17 @@ final class LineNumberRulerView: NSRulerView {
     
     /// Line number text color
     private var lineNumberColor: NSColor {
-        return NSColor.secondaryLabelColor
+        return ThemeManager.shared.editorGutterTextColor
     }
     
     /// Current line highlight color
     private var currentLineColor: NSColor {
-        return NSColor.labelColor.withAlphaComponent(0.85)
+        return ThemeManager.shared.editorForegroundColor.withAlphaComponent(0.85)
     }
     
     /// Gutter background color
     private var gutterBackgroundColor: NSColor {
-        if let bgColor = textView?.backgroundColor {
-            // Slightly different shade than editor background
-            return bgColor.blended(withFraction: 0.06, of: NSColor.labelColor) ?? bgColor
-        }
-        return NSColor.controlBackgroundColor
+        return ThemeManager.shared.editorGutterColor
     }
     
     /// Separator line color
@@ -183,13 +179,13 @@ final class LineNumberRulerView: NSRulerView {
             let lineGlyphRange = layoutManager.glyphRange(forCharacterRange: lineRange, actualCharacterRange: nil)
             
             // Get the bounding rect for the first glyph in this line
-            var lineRect = layoutManager.lineFragmentRect(forGlyphAt: lineGlyphRange.location, effectiveRange: nil)
+            let lineRect = layoutManager.lineFragmentRect(forGlyphAt: lineGlyphRange.location, effectiveRange: nil)
             
-            // Adjust for text container inset
-            lineRect.origin.y += textView.textContainerInset.height
+            // Adjust for text container inset using actual origin
+            let yPositionInTextView = lineRect.origin.y + textView.textContainerOrigin.y
             
             // Convert to ruler coordinates
-            let yPosition = lineRect.origin.y - visibleRect.origin.y
+            let yPosition = yPositionInTextView - visibleRect.origin.y
             
             // Draw line number
             let lineNumberString = "\(lineIndex)"

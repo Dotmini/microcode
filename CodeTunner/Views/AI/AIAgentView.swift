@@ -1109,7 +1109,7 @@ struct AIAgentView: View {
         
         // Claude (Anthropic)
         Menu {
-            ForEach(["claude-sonnet-4-20250514", "claude-3-5-sonnet-20241022", "claude-3-5-haiku-20241022", "claude-3-opus-20240229"], id: \.self) { model in
+            ForEach(["claude-3-7-sonnet-20250219", "claude-3-5-sonnet-20241022", "claude-3-5-haiku-20241022", "claude-3-opus-20240229"], id: \.self) { model in
                 Button(action: { setModel("anthropic", model) }) {
                     HStack {
                         Text(model)
@@ -1950,7 +1950,7 @@ struct MessageContentParser {
         var blocks: [MessageBlock] = []
         
         // Extract code blocks, converting latex/math to LaTeX blocks
-        let codePattern = "```([a-zA-Z0-9]*)\\n([\\s\\S]*?)```"
+        let codePattern = "```([a-zA-Z0-9\\+\\-\\_\\#]*)[ \\t]*\\r?\\n([\\s\\S]*?)```"
         if let regex = try? NSRegularExpression(pattern: codePattern, options: []) {
             let nsContent = content as NSString
             let matches = regex.matches(in: content, options: [], range: NSRange(location: 0, length: nsContent.length))

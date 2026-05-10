@@ -1578,7 +1578,7 @@ struct TextEditorView: NSViewRepresentable {
 
 struct DebugArea: View {
     @EnvironmentObject var appState: AppState
-    @State private var commandInput: String = ""
+
     
     var body: some View {
         VStack(spacing: 0) {
@@ -1637,35 +1637,14 @@ struct DebugArea: View {
                 .background(appState.appTheme == .extraClear ? Color.clear : Color(nsColor: appState.appTheme.editorBackground))
                 
             case 1: // Terminal
-                VStack(spacing: 0) {
-                    TerminalTextView(
-                        text: $appState.terminalService.output,
-                        font: .monospacedSystemFont(ofSize: 12, weight: .regular),
-                        textColor: appState.appTheme.editorText,
-                        backgroundColor: appState.appTheme.editorBackground
-                    )
-                    .frame(minHeight: 80)
-                    
-                    Divider()
-                    
-                    // Command input
-                    HStack(spacing: 8) {
-                        Text("$")
-                            .font(.system(size: 13, weight: .bold, design: .monospaced))
-                            .foregroundColor(.green)
-                        
-                        TextField("Type command...", text: $commandInput)
-                            .textFieldStyle(.plain)
-                            .font(.system(size: 12, design: .monospaced))
-                            .foregroundColor(Color(nsColor: appState.appTheme.editorText))
-                            .onSubmit {
-                                executeCommand()
-                            }
-                    }
-                    .padding(.horizontal, 12)
-                    .padding(.vertical, 8)
-                    .background(appState.appTheme == .extraClear ? Color.clear : Color(nsColor: .controlBackgroundColor))
-                }
+                AuthenticTerminal(
+                    shell: "/bin/zsh",
+                    fontName: appState.playgroundFontName,
+                    fontSize: 13,
+                    textColor: appState.appTheme.editorText,
+                    backgroundColor: appState.appTheme.editorBackground,
+                    isTransparent: appState.appTheme == .extraClear
+                )
                 .frame(minHeight: 120, maxHeight: 350)
                 .background(appState.appTheme == .extraClear ? Color.clear : Color(nsColor: appState.appTheme.editorBackground))
                 
@@ -1689,13 +1668,7 @@ struct DebugArea: View {
             }
         }
     }
-    
-    private func executeCommand() {
-        guard !commandInput.isEmpty else { return }
-        let cmd = commandInput
-        commandInput = ""
-        appState.terminalService.sendCommand(cmd)
-    }
+
 }
 
 struct ConsoleTabButton: View {
@@ -2642,7 +2615,7 @@ struct AIChatPanel: View {
                     }
                     Section("Anthropic Claude") {
                         Button("Claude 4.7 Opus ✨") { setModel("claude-4.7-opus-20260501", provider: "anthropic") }
-                        Button("Claude Sonnet 4") { setModel("claude-sonnet-4-20250514", provider: "anthropic") }
+                        Button("Claude 3.7 Sonnet") { setModel("claude-3-7-sonnet-20250219", provider: "anthropic") }
                         Button("Claude 3.5 Haiku") { setModel("claude-3-5-haiku-20241022", provider: "anthropic") }
                     }
                     Section("DeepSeek") {
@@ -2813,7 +2786,7 @@ struct AIChatPanel: View {
         case "o3": return "o3"
         case "o4-mini": return "o4‑mini"
         case let m where m.contains("claude-4.7"): return "Claude Opus"
-        case let m where m.contains("claude-sonnet-4"): return "Sonnet 4"
+        case let m where m.contains("claude-3-7-sonnet"): return "Sonnet 3.7"
         case let m where m.contains("claude-3-5-sonnet"): return "Sonnet 3.5"
         case let m where m.contains("claude-3-5-haiku"): return "Haiku 3.5"
         case "deepseek-chat-v4": return "DS V4"
@@ -2933,7 +2906,7 @@ struct ChatMessageView: View {
                     .foregroundColor(.secondary.opacity(0.7))
                     .padding(.top, 2)
             }
-            .frame(maxWidth: 320, alignment: message.role == .user ? .trailing : .leading)
+            .frame(maxWidth: .infinity, alignment: message.role == .user ? .trailing : .leading)
             
             if message.role != .user {
                 Spacer()
@@ -3533,7 +3506,7 @@ struct SettingsView: View {
                           endpoint: "api.anthropic.com",
                           models: [
                               ("Claude 4.7 Opus", "claude-4.7-opus-20260501", "NEW"),
-                              ("Claude Sonnet 4", "claude-sonnet-4-20250514", ""),
+                              ("Claude 3.7 Sonnet", "claude-3-7-sonnet-20250219", ""),
                               ("Claude 3.5 Sonnet", "claude-3-5-sonnet-20241022", ""),
                               ("Claude 3.5 Haiku", "claude-3-5-haiku-20241022", "FAST"),
                           ]),
