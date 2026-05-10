@@ -361,10 +361,11 @@ class CustomHPCKernel: ComputeKernel {
         progress("🔌 Connecting to MicroCode Agent via WebSocket...\n")
         
         return try await withCheckedThrowingContinuation { continuation in
-            let endpoint = agentEndpoint
+            var endpoint = agentEndpoint
             if endpoint.isEmpty {
-                continuation.resume(throwing: NSError(domain: "ComputeKernel", code: 400, userInfo: [NSLocalizedDescriptionKey: "HPC Endpoint is not configured. Please set it in Settings."]))
-                return
+                // Fallback to local default instead of erroring out to allow offline usage
+                endpoint = "ws://127.0.0.1:8080/v1/agent"
+                ReportLogManager.shared.log("HPC Endpoint empty, falling back to local: \(endpoint)", type: .warning)
             }
             
             guard let url = URL(string: endpoint) else {
