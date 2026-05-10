@@ -32,7 +32,7 @@ class BillingService: ObservableObject {
     private init() {
         // Automatically fetch initial balance if token exists
         Task {
-            await fetchBalance()
+            try? await fetchBalance()
         }
     }
     
@@ -41,7 +41,7 @@ class BillingService: ObservableObject {
     func setAuthToken(_ token: String) {
         self.authToken = token
         Task {
-            await fetchBalance()
+            try? await fetchBalance()
         }
     }
     

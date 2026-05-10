@@ -194,6 +194,10 @@ jobs:
         with:
           xcode-version: latest-stable
 
+      - name: Install system dependencies
+        run: |
+          brew install protobuf 2>/dev/null || true
+
       - name: Setup Rust
         uses: dtolnay/rust-toolchain@stable
         with:

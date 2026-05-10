@@ -230,6 +230,7 @@ class CloudGPUKernel: ComputeKernel {
     let target: ComputeTarget = .cloudPremium
     var state: ComputeKernelState = .idle
     
+    private let billingService = BillingService.shared
     private var streamManager = WebSocketStreamManager()
     
     func start() async throws {

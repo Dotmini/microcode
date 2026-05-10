@@ -744,171 +744,6 @@ public func FfiConverterTypeMicroCore_lower(_ value: MicroCore) -> UnsafeMutable
 }
 
 
-
-
-public protocol SystemKernelProtocol : AnyObject {
-    
-    /**
-     * Get low-level network status
-     */
-    func getNetworkStatus()  -> String
-    
-    /**
-     * Change the power profile mode directly without IPC overhead
-     */
-    func setPowerMode(mode: String) throws 
-    
-    /**
-     * Trigger a kernel panic to test crash handlers
-     */
-    func triggerPanic() 
-    
-}
-
-open class SystemKernel:
-    SystemKernelProtocol {
-    fileprivate let pointer: UnsafeMutableRawPointer!
-
-    /// Used to instantiate a [FFIObject] without an actual pointer, for fakes in tests, mostly.
-#if swift(>=5.8)
-    @_documentation(visibility: private)
-#endif
-    public struct NoPointer {
-        public init() {}
-    }
-
-    // TODO: We'd like this to be `private` but for Swifty reasons,
-    // we can't implement `FfiConverter` without making this `required` and we can't
-    // make it `required` without making it `public`.
-    required public init(unsafeFromRawPointer pointer: UnsafeMutableRawPointer) {
-        self.pointer = pointer
-    }
-
-    // This constructor can be used to instantiate a fake object.
-    // - Parameter noPointer: Placeholder value so we can have a constructor separate from the default empty one that may be implemented for classes extending [FFIObject].
-    //
-    // - Warning:
-    //     Any object instantiated with this constructor cannot be passed to an actual Rust-backed object. Since there isn't a backing [Pointer] the FFI lower functions will crash.
-#if swift(>=5.8)
-    @_documentation(visibility: private)
-#endif
-    public init(noPointer: NoPointer) {
-        self.pointer = nil
-    }
-
-#if swift(>=5.8)
-    @_documentation(visibility: private)
-#endif
-    public func uniffiClonePointer() -> UnsafeMutableRawPointer {
-        return try! rustCall { uniffi_microcode_core_fn_clone_systemkernel(self.pointer, $0) }
-    }
-    /**
-     * Initialize a new System Kernel bridge
-     */
-public convenience init() {
-    let pointer =
-        try! rustCall() {
-    uniffi_microcode_core_fn_constructor_systemkernel_new($0
-    )
-}
-    self.init(unsafeFromRawPointer: pointer)
-}
-
-    deinit {
-        guard let pointer = pointer else {
-            return
-        }
-
-        try! rustCall { uniffi_microcode_core_fn_free_systemkernel(pointer, $0) }
-    }
-
-    
-
-    
-    /**
-     * Get low-level network status
-     */
-open func getNetworkStatus() -> String {
-    return try!  FfiConverterString.lift(try! rustCall() {
-    uniffi_microcode_core_fn_method_systemkernel_get_network_status(self.uniffiClonePointer(),$0
-    )
-})
-}
-    
-    /**
-     * Change the power profile mode directly without IPC overhead
-     */
-open func setPowerMode(mode: String)throws  {try rustCallWithError(FfiConverterTypeCoreError.lift) {
-    uniffi_microcode_core_fn_method_systemkernel_set_power_mode(self.uniffiClonePointer(),
-        FfiConverterString.lower(mode),$0
-    )
-}
-}
-    
-    /**
-     * Trigger a kernel panic to test crash handlers
-     */
-open func triggerPanic() {try! rustCall() {
-    uniffi_microcode_core_fn_method_systemkernel_trigger_panic(self.uniffiClonePointer(),$0
-    )
-}
-}
-    
-
-}
-
-#if swift(>=5.8)
-@_documentation(visibility: private)
-#endif
-public struct FfiConverterTypeSystemKernel: FfiConverter {
-
-    typealias FfiType = UnsafeMutableRawPointer
-    typealias SwiftType = SystemKernel
-
-    public static func lift(_ pointer: UnsafeMutableRawPointer) throws -> SystemKernel {
-        return SystemKernel(unsafeFromRawPointer: pointer)
-    }
-
-    public static func lower(_ value: SystemKernel) -> UnsafeMutableRawPointer {
-        return value.uniffiClonePointer()
-    }
-
-    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> SystemKernel {
-        let v: UInt64 = try readInt(&buf)
-        // The Rust code won't compile if a pointer won't fit in a UInt64.
-        // We have to go via `UInt` because that's the thing that's the size of a pointer.
-        let ptr = UnsafeMutableRawPointer(bitPattern: UInt(truncatingIfNeeded: v))
-        if (ptr == nil) {
-            throw UniffiInternalError.unexpectedNullPointer
-        }
-        return try lift(ptr!)
-    }
-
-    public static func write(_ value: SystemKernel, into buf: inout [UInt8]) {
-        // This fiddling is because `Int` is the thing that's the same size as a pointer.
-        // The Rust code won't compile if a pointer won't fit in a `UInt64`.
-        writeInt(&buf, UInt64(bitPattern: Int64(Int(bitPattern: lower(value)))))
-    }
-}
-
-
-
-
-#if swift(>=5.8)
-@_documentation(visibility: private)
-#endif
-public func FfiConverterTypeSystemKernel_lift(_ pointer: UnsafeMutableRawPointer) throws -> SystemKernel {
-    return try FfiConverterTypeSystemKernel.lift(pointer)
-}
-
-#if swift(>=5.8)
-@_documentation(visibility: private)
-#endif
-public func FfiConverterTypeSystemKernel_lower(_ value: SystemKernel) -> UnsafeMutableRawPointer {
-    return FfiConverterTypeSystemKernel.lower(value)
-}
-
-
 public struct AgentConfig {
     public var workspacePath: String
     public var vectorDbPath: String?
@@ -1305,6 +1140,32 @@ fileprivate struct FfiConverterSequenceTypeSearchResult: FfiConverterRustBuffer 
         return seq
     }
 }
+/**
+ * Get low-level network status
+ */
+public func getKernelNetworkStatus() -> String {
+    return try!  FfiConverterString.lift(try! rustCall() {
+    uniffi_microcode_core_fn_func_get_kernel_network_status($0
+    )
+})
+}
+/**
+ * Change the power profile mode directly without IPC overhead
+ */
+public func setKernelPowerMode(mode: String)throws  {try rustCallWithError(FfiConverterTypeCoreError.lift) {
+    uniffi_microcode_core_fn_func_set_kernel_power_mode(
+        FfiConverterString.lower(mode),$0
+    )
+}
+}
+/**
+ * Trigger a kernel panic to test crash handlers
+ */
+public func triggerKernelPanic() {try! rustCall() {
+    uniffi_microcode_core_fn_func_trigger_kernel_panic($0
+    )
+}
+}
 
 private enum InitializationResult {
     case ok
@@ -1320,6 +1181,15 @@ private var initializationResult: InitializationResult = {
     let scaffolding_contract_version = ffi_microcode_core_uniffi_contract_version()
     if bindings_contract_version != scaffolding_contract_version {
         return InitializationResult.contractVersionMismatch
+    }
+    if (uniffi_microcode_core_checksum_func_get_kernel_network_status() != 3159) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_microcode_core_checksum_func_set_kernel_power_mode() != 410) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_microcode_core_checksum_func_trigger_kernel_panic() != 47956) {
+        return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_microcode_core_checksum_method_microcore_apply_edit() != 46628) {
         return InitializationResult.apiChecksumMismatch
@@ -1345,19 +1215,7 @@ private var initializationResult: InitializationResult = {
     if (uniffi_microcode_core_checksum_method_microcore_write_file() != 50289) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_microcode_core_checksum_method_systemkernel_get_network_status() != 42467) {
-        return InitializationResult.apiChecksumMismatch
-    }
-    if (uniffi_microcode_core_checksum_method_systemkernel_set_power_mode() != 64992) {
-        return InitializationResult.apiChecksumMismatch
-    }
-    if (uniffi_microcode_core_checksum_method_systemkernel_trigger_panic() != 27859) {
-        return InitializationResult.apiChecksumMismatch
-    }
     if (uniffi_microcode_core_checksum_constructor_microcore_new() != 17168) {
-        return InitializationResult.apiChecksumMismatch
-    }
-    if (uniffi_microcode_core_checksum_constructor_systemkernel_new() != 16885) {
         return InitializationResult.apiChecksumMismatch
     }
 

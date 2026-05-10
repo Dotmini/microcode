@@ -152,7 +152,7 @@ let package = Package(
                 "Services/KeychainManager.swift",      // Keychain CRUD + Rust FFI Bridge
                 "Services/MCPServer.swift",            // MCP Protocol Server
                 "Services/LocalLLMService.swift",     // Local LLM Detection (LM Studio, Ollama)
-                "Services/MicroCore/MicroCore.swift", // AI Core Bridge
+
                 "Services/MicroCodeService.swift",    // AI Core Service Wrapper
                 "Kernel/ComputeKernel.swift",
                 "Views/Design/AIDesignPanel.swift",
