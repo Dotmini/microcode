@@ -8,7 +8,7 @@ import WebKit
 
 struct IDEBrowserView: View {
     @EnvironmentObject var appState: AppState
-    @State private var urlInput: String = "https://www.google.com"
+    @State private var urlInput: String = "https://microcode.dotmini.net"
     @State private var showBookmarks = false
     @State private var showHistory = false
     @State private var showDevTools = false
@@ -321,14 +321,29 @@ struct WebViewContainer: NSViewRepresentable {
         config.preferences.setValue(true, forKey: "developerExtrasEnabled")
         config.defaultWebpagePreferences.allowsContentJavaScript = true
         
+        // 1. Persist Session (Cookies, Local Storage, Logins)
+        config.websiteDataStore = WKWebsiteDataStore.default()
+        
+        // 2. Allow media/video playback automatically
+        config.mediaTypesRequiringUserActionForPlayback = []
+        config.allowsAirPlayForMediaPlayback = true
+        
+        // 3. Bypass Bot/Captcha checking
+        let antiBotScript = WKUserScript(source: """
+            Object.defineProperty(navigator, 'webdriver', { get: () => false });
+            Object.defineProperty(navigator, 'languages', { get: () => ['en-US', 'en', 'th'] });
+            Object.defineProperty(navigator, 'plugins', { get: () => [1, 2, 3] });
+        """, injectionTime: .atDocumentStart, forMainFrameOnly: false)
+        config.userContentController.addUserScript(antiBotScript)
+        
         let webView = WKWebView(frame: .zero, configuration: config)
         webView.navigationDelegate = context.coordinator
         webView.uiDelegate = context.coordinator
         webView.allowsBackForwardNavigationGestures = true
         webView.allowsMagnification = true
         
-        // Custom user agent
-        webView.customUserAgent = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) MicroCode/1.0 Safari/605.1.15"
+        // Custom user agent to look like a standard Mac Safari
+        webView.customUserAgent = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.4 Safari/605.1.15"
         
         context.coordinator.webView = webView
         context.coordinator.setupObservers()

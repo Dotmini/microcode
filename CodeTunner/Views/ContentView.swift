@@ -165,11 +165,6 @@ struct ContentView: View {
             FormatCodeWindow()
                 .environmentObject(appState)
         }
-
-        .sheet(isPresented: $appState.showingExportWindow) {
-            ExportWindow()
-                .environmentObject(appState)
-        }
         .sheet(isPresented: $appState.showingDotnetProject) {
             DotnetProjectView()
                 .environmentObject(appState)
@@ -363,6 +358,23 @@ struct MainToolbar: View {
                     appState.buildProject()
                 }
                 .help("Build & Run Project (⌘B)")
+                
+                ToolbarButton(icon: "safari.fill", color: .cyan) {
+                    appState.editorMode = .browser
+                    var port = "3000"
+                    switch appState.currentProjectType {
+                    case .php: port = "8000"
+                    case .java, .go: port = "8080"
+                    case .dotnet: port = "5000"
+                    case .nodejs: port = "5173" // Vite default
+                    default: port = "3000"
+                    }
+                    // Wait a slight moment for the browser view to mount if it wasn't already
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) {
+                        NotificationCenter.default.post(name: .browserNavigate, object: "http://localhost:\(port)")
+                    }
+                }
+                .help("Live Preview (Web App)")
 
                 Divider().frame(height: 16).padding(.horizontal, 6)
 
@@ -431,11 +443,6 @@ struct MainToolbar: View {
                     appState.toggleConsole(tab: 3) // Open Console/Analysis tab
                 }
                 .help("Code Analysis")
-                
-                ToolbarButton(icon: "square.and.arrow.up") {
-                    appState.showingExportWindow = true
-                }
-                .help("Export Code")
                 
                 ToolbarButton(icon: "play.rectangle", isActive: appState.editorMode == .playground, color: appState.editorMode == .playground ? .accentColor : .primary) {
                     appState.toggleEditorMode(.playground)
@@ -1716,105 +1723,95 @@ struct WelcomeScreen: View {
                             
                             // App Icon
                             ZStack {
-                                RoundedRectangle(cornerRadius: 28, style: .continuous)
-                                    .fill(LinearGradient(
-                                        colors: [Color(red: 0.1, green: 0.11, blue: 0.15), Color(red: 0.05, green: 0.06, blue: 0.08)],
-                                        startPoint: .topLeading,
-                                        endPoint: .bottomTrailing
-                                    ))
-                                    .frame(width: 120, height: 120)
+                                RoundedRectangle(cornerRadius: 22, style: .continuous)
+                                    .fill(Color(nsColor: .windowBackgroundColor))
+                                    .frame(width: 88, height: 88)
+                                    .shadow(color: Color.black.opacity(0.15), radius: 10, x: 0, y: 5)
                                     
-                                RoundedRectangle(cornerRadius: 24, style: .continuous)
-                                    .stroke(Color(red: 0.17, green: 0.18, blue: 0.25), lineWidth: 4)
-                                    .frame(width: 112, height: 112)
+                                RoundedRectangle(cornerRadius: 22, style: .continuous)
+                                    .stroke(Color(nsColor: .separatorColor).opacity(0.3), lineWidth: 1)
+                                    .frame(width: 88, height: 88)
                                 
-                                HStack(spacing: -6) {
-                                    Image(systemName: "chevron.left")
-                                        .font(.system(size: 36, weight: .bold))
-                                        .foregroundColor(Color(red: 0.48, green: 0.64, blue: 0.97)) // Tokyo Night Blue
-                                    
-                                    Image(systemName: "chevron.right")
-                                        .font(.system(size: 36, weight: .bold))
-                                        .foregroundColor(Color(red: 0.97, green: 0.46, blue: 0.56)) // Tokyo Night Pink
-                                }
-                                .shadow(color: Color(red: 0.73, green: 0.6, blue: 0.97).opacity(0.8), radius: 12, x: 0, y: 0) // Purple glow
+                                Image(systemName: "chevron.left.forwardslash.chevron.right")
+                                    .font(.system(size: 32, weight: .light))
+                                    .foregroundColor(.secondary)
                             }
-                            .shadow(color: .black.opacity(0.4), radius: 20, x: 0, y: 10)
                             
                             // App Title
-                            VStack(spacing: 8) {
+                            VStack(spacing: 6) {
                                 Text("MicroCode")
-                                    .font(.system(size: 36, weight: .bold))
+                                    .font(.system(size: 32, weight: .semibold))
                                     .foregroundColor(.primary)
                                 
-                                Text("What are we building today?")
-                                    .font(.system(size: 16))
+                                Text("Version 2.0")
+                                    .font(.system(size: 13, weight: .medium))
                                     .foregroundColor(.secondary)
                             }
                             
                             // AI Project Builder
-                            VStack(alignment: .leading, spacing: 12) {
-                                HStack {
-                                    Image(systemName: "sparkles")
-                                        .foregroundColor(.accentColor)
-                                    Text("AI Project Builder")
-                                        .font(.headline)
-                                }
+                            VStack(alignment: .leading, spacing: 10) {
+                                Text("Bootstrap via AI Agent")
+                                    .font(.system(size: 13, weight: .semibold))
+                                    .foregroundColor(.secondary)
                                 
-                                HStack {
-                                    TextField("e.g. Swift Frontend + Go Backend with PostgreSQL", text: $aiPrompt)
+                                HStack(spacing: 12) {
+                                    Image(systemName: "sparkles")
+                                        .foregroundColor(.secondary)
+                                        .font(.system(size: 14))
+                                    
+                                    TextField("Describe the project architecture...", text: $aiPrompt)
                                         .textFieldStyle(.plain)
-                                        .padding(14)
-                                        .background(Color(nsColor: .controlBackgroundColor))
-                                        .cornerRadius(8)
-                                        .overlay(
-                                            RoundedRectangle(cornerRadius: 8)
-                                                .stroke(isHoveringAI ? Color.accentColor.opacity(0.5) : Color(nsColor: .separatorColor), lineWidth: 1)
-                                        )
+                                        .font(.system(size: 13))
                                         .onSubmit { buildWithAI() }
                                     
-                                    Button(action: buildWithAI) {
-                                        Text("Generate")
-                                            .font(.system(size: 14, weight: .semibold))
-                                            .foregroundColor(.white)
-                                            .padding(.horizontal, 24)
-                                            .padding(.vertical, 14)
-                                            .background(Color.accentColor)
-                                            .cornerRadius(8)
+                                    if !aiPrompt.isEmpty {
+                                        Button(action: buildWithAI) {
+                                            Image(systemName: "return")
+                                                .font(.system(size: 11, weight: .bold))
+                                                .foregroundColor(.primary)
+                                                .padding(4)
+                                                .background(Color(nsColor: .windowBackgroundColor))
+                                                .cornerRadius(4)
+                                        }
+                                        .buttonStyle(.plain)
                                     }
-                                    .buttonStyle(.plain)
                                 }
+                                .padding(12)
+                                .background(Color(nsColor: .controlBackgroundColor))
+                                .cornerRadius(6)
+                                .overlay(
+                                    RoundedRectangle(cornerRadius: 6)
+                                        .stroke(isHoveringAI ? Color.accentColor.opacity(0.5) : Color(nsColor: .separatorColor).opacity(0.4), lineWidth: 1)
+                                )
                                 .onHover { isHoveringAI = $0 }
-                                
-                                Text("MicroCode AI will automatically create the folder structure and initialize the project.")
-                                    .font(.caption)
-                                    .foregroundColor(.secondary)
                             }
                             .frame(maxWidth: 640)
                             .padding(.top, 16)
                             
                             HStack(alignment: .top, spacing: 40) {
                                 // Killer Features (New Project)
-                                VStack(alignment: .leading, spacing: 16) {
-                                    Text("Start a New Project")
-                                        .font(.headline)
+                                VStack(alignment: .leading, spacing: 12) {
+                                    Text("New Workspace")
+                                        .font(.system(size: 13, weight: .semibold))
+                                        .foregroundColor(.secondary)
                                     
-                                    LazyVGrid(columns: [GridItem(.adaptive(minimum: 120, maximum: 140), spacing: 12)], spacing: 12) {
-                                        ProjectTemplateCard(title: "Vite + React", icon: "atom", color: .cyan) { createProject("vite") }
-                                        ProjectTemplateCard(title: "Next.js", icon: "n.square.fill", color: .primary) { createProject("nextjs") }
-                                        ProjectTemplateCard(title: "Express API", icon: "server.rack", color: .green) { createProject("express") }
-                                        ProjectTemplateCard(title: "Spring Boot", icon: "leaf.fill", color: .green) { createProject("spring") }
-                                        ProjectTemplateCard(title: "React Native", icon: "iphone", color: .blue) { createProject("react-native") }
-                                        ProjectTemplateCard(title: "SwiftUI App", icon: "swift", color: .orange) { createProject("swift") }
-                                        ProjectTemplateCard(title: "Go Gin", icon: "g.circle.fill", color: .cyan) { createProject("go") }
+                                    LazyVGrid(columns: [GridItem(.adaptive(minimum: 120, maximum: 140), spacing: 10)], spacing: 10) {
+                                        ProjectTemplateCard(title: "Vite + React", icon: "atom", color: .secondary) { createProject("vite") }
+                                        ProjectTemplateCard(title: "Next.js", icon: "n.square.fill", color: .secondary) { createProject("nextjs") }
+                                        ProjectTemplateCard(title: "Express API", icon: "server.rack", color: .secondary) { createProject("express") }
+                                        ProjectTemplateCard(title: "Spring Boot", icon: "leaf.fill", color: .secondary) { createProject("spring") }
+                                        ProjectTemplateCard(title: "React Native", icon: "iphone", color: .secondary) { createProject("react-native") }
+                                        ProjectTemplateCard(title: "SwiftUI App", icon: "swift", color: .secondary) { createProject("swift") }
+                                        ProjectTemplateCard(title: "Go Gin", icon: "g.circle.fill", color: .secondary) { createProject("go") }
                                     }
                                 }
                                 .frame(maxWidth: 360, alignment: .leading)
                                 
                                 // Recent Projects
-                                VStack(alignment: .leading, spacing: 16) {
-                                    Text("Recent Projects")
-                                        .font(.headline)
+                                VStack(alignment: .leading, spacing: 12) {
+                                    Text("Recent")
+                                        .font(.system(size: 13, weight: .semibold))
+                                        .foregroundColor(.secondary)
                                     
                                     if recentProjects.isEmpty {
                                         Text("No recent projects found.")
@@ -1895,20 +1892,20 @@ struct ProjectTemplateCard: View {
         Button(action: action) {
             VStack(alignment: .leading, spacing: 8) {
                 Image(systemName: icon)
-                    .font(.system(size: 20))
-                    .foregroundColor(color)
+                    .font(.system(size: 16))
+                    .foregroundColor(isHovering ? .primary : color)
                 
                 Text(title)
-                    .font(.system(size: 13, weight: .medium))
-                    .foregroundColor(.primary)
+                    .font(.system(size: 12, weight: .medium))
+                    .foregroundColor(isHovering ? .primary : .secondary)
             }
             .padding(12)
             .frame(maxWidth: .infinity, alignment: .leading)
-            .background(isHovering ? Color.accentColor.opacity(0.1) : Color(nsColor: .controlBackgroundColor))
-            .cornerRadius(8)
+            .background(isHovering ? Color(nsColor: .windowBackgroundColor) : Color(nsColor: .controlBackgroundColor))
+            .cornerRadius(6)
             .overlay(
-                RoundedRectangle(cornerRadius: 8)
-                    .stroke(isHovering ? Color.accentColor.opacity(0.3) : Color(nsColor: .separatorColor).opacity(0.5), lineWidth: 1)
+                RoundedRectangle(cornerRadius: 6)
+                    .stroke(isHovering ? Color.secondary.opacity(0.4) : Color(nsColor: .separatorColor).opacity(0.3), lineWidth: 1)
             )
         }
         .buttonStyle(.plain)
@@ -3686,16 +3683,16 @@ struct SettingsView: View {
             }
             .padding(16)
             .background(Color(nsColor: .controlBackgroundColor))
-            .cornerRadius(12)
-            .overlay(RoundedRectangle(cornerRadius: 12).stroke(Color.accentColor.opacity(0.2), lineWidth: 1))
+            .cornerRadius(8)
+            .overlay(RoundedRectangle(cornerRadius: 8).stroke(Color.primary.opacity(0.1), lineWidth: 1))
             
             // ── AI Connection Mode ──
             VStack(alignment: .leading, spacing: 14) {
                 HStack(spacing: 8) {
-                    Image(systemName: "cloud.fill")
+                    Image(systemName: "network")
                         .font(.system(size: 12))
-                        .foregroundStyle(LinearGradient(colors: [.cyan, .purple], startPoint: .leading, endPoint: .trailing))
-                    Text("AI Connection Mode")
+                        .foregroundColor(.secondary)
+                    Text("API Connection Mode")
                         .font(.system(size: 13, weight: .bold))
                 }
                 
@@ -3726,8 +3723,8 @@ struct SettingsView: View {
                         }
                     }
                     .padding(10)
-                    .background(Color.green.opacity(0.06))
-                    .cornerRadius(8)
+                    .background(Color(nsColor: .windowBackgroundColor))
+                    .cornerRadius(6)
                 } else {
                     HStack(spacing: 8) {
                         Image(systemName: "key.horizontal.fill")
@@ -3742,14 +3739,14 @@ struct SettingsView: View {
                         }
                     }
                     .padding(10)
-                    .background(Color.orange.opacity(0.06))
-                    .cornerRadius(8)
+                    .background(Color(nsColor: .windowBackgroundColor))
+                    .cornerRadius(6)
                 }
             }
             .padding(16)
             .background(Color(nsColor: .controlBackgroundColor))
-            .cornerRadius(12)
-            .overlay(RoundedRectangle(cornerRadius: 12).stroke(Color.purple.opacity(0.15), lineWidth: 1))
+            .cornerRadius(8)
+            .overlay(RoundedRectangle(cornerRadius: 8).stroke(Color.primary.opacity(0.1), lineWidth: 1))
             
             // ── Provider API Keys (Direct mode ONLY) ──
             if aiKeyMode == "direct" {
@@ -3757,7 +3754,7 @@ struct SettingsView: View {
                     HStack(spacing: 8) {
                         Image(systemName: "key.fill")
                             .font(.system(size: 12))
-                            .foregroundColor(.accentColor)
+                            .foregroundColor(.secondary)
                         Text("Your API Keys")
                             .font(.system(size: 13, weight: .bold))
                         
@@ -3775,7 +3772,7 @@ struct SettingsView: View {
                 }
                 .padding(16)
                 .background(Color(nsColor: .controlBackgroundColor))
-                .cornerRadius(12)
+                .cornerRadius(8)
             }
             
             // ── Local LLM Section ──
@@ -3793,7 +3790,7 @@ struct SettingsView: View {
             HStack(spacing: 8) {
                 Image(systemName: "server.rack")
                     .font(.system(size: 14))
-                    .foregroundStyle(LinearGradient(colors: [.purple, .cyan], startPoint: .topLeading, endPoint: .bottomTrailing))
+                    .foregroundColor(.secondary)
                 Text("MCP Protocol Server")
                     .font(.system(size: 13, weight: .bold))
                 Spacer()

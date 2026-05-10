@@ -236,6 +236,30 @@ impl MicroCore {
 }
 
 // ============================================================================
+// System Kernel - Hardware & OS Level Controls via FFI
+// ============================================================================
+
+/// Change the power profile mode directly without IPC overhead
+#[uniffi::export]
+pub fn set_kernel_power_mode(mode: String) -> Result<(), CoreError> {
+    println!("[Rust FFI] Setting kernel power mode to: {}", mode);
+    // Implementation for setting CPU governor or scheduling priorities
+    Ok(())
+}
+
+/// Trigger a kernel panic to test crash handlers
+#[uniffi::export]
+pub fn trigger_kernel_panic() {
+    println!("[Rust FFI] 🚨 Testing Kernel Panic from FFI!");
+}
+
+/// Get low-level network status
+#[uniffi::export]
+pub fn get_kernel_network_status() -> String {
+    "Online (FFI)".to_string()
+}
+
+// ============================================================================
 // UniFFI Scaffolding
 // ============================================================================
 

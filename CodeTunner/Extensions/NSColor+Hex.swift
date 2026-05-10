@@ -36,14 +36,23 @@ extension NSColor {
     
     /// Convert to hex string
     var hexString: String {
-        guard let rgbColor = usingColorSpace(.sRGB) else {
-            return "#000000"
+        // Try direct sRGB conversion first
+        if let rgbColor = self.usingColorSpace(.sRGB) {
+            let r = Int(max(0, min(1, rgbColor.redComponent)) * 255)
+            let g = Int(max(0, min(1, rgbColor.greenComponent)) * 255)
+            let b = Int(max(0, min(1, rgbColor.blueComponent)) * 255)
+            return String(format: "#%02X%02X%02X", r, g, b)
         }
         
-        let r = Int(rgbColor.redComponent * 255)
-        let g = Int(rgbColor.greenComponent * 255)
-        let b = Int(rgbColor.blueComponent * 255)
+        // Handle catalog/dynamic colors by converting through CGColor
+        if let cgColor = self.cgColor, let nsColor = NSColor(cgColor: cgColor), let rgbColor = nsColor.usingColorSpace(.sRGB) {
+            let r = Int(max(0, min(1, rgbColor.redComponent)) * 255)
+            let g = Int(max(0, min(1, rgbColor.greenComponent)) * 255)
+            let b = Int(max(0, min(1, rgbColor.blueComponent)) * 255)
+            return String(format: "#%02X%02X%02X", r, g, b)
+        }
         
-        return String(format: "#%02X%02X%02X", r, g, b)
+        // Fallback for unresolvable colors (better than black)
+        return "#D4D4D4"
     }
 }

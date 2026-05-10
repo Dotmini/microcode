@@ -823,7 +823,8 @@ public struct SyntaxHighlightedCodeView: NSViewRepresentable {
         context.coordinator.engine = engine
         
         // Set theme
-        let activeThemeID = (themeName != nil && themeName != "system" && !themeName!.isEmpty) ? themeName! : (isDark ? "dark" : "light")
+        let lowerTheme = themeName?.lowercased() ?? ""
+        let activeThemeID = (!lowerTheme.isEmpty && lowerTheme != "system") ? themeName! : (isDark ? "dark" : "light")
         engine.themeManager.setActiveTheme(activeThemeID)
         
         
@@ -956,7 +957,8 @@ public struct SyntaxHighlightedCodeView: NSViewRepresentable {
         context.coordinator.lastIsDark = isDark
         
         // Update theme
-        let activeThemeID = (themeName != nil && themeName != "system" && !themeName!.isEmpty) ? themeName! : (isDark ? "dark" : "light")
+        let lowerTheme = themeName?.lowercased() ?? ""
+        let activeThemeID = (!lowerTheme.isEmpty && lowerTheme != "system") ? themeName! : (isDark ? "dark" : "light")
         engine.themeManager.setActiveTheme(activeThemeID)
         
         let isTransparent = themeName == "transparent" || themeName == "extraClear"

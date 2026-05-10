@@ -1267,6 +1267,7 @@ struct AIAgentView: View {
     private func setModel(_ provider: String, _ model: String) {
         appState.aiProvider = provider
         appState.aiModel = model
+        appState.saveSettings()
     }
     
     private func shortModelName(_ model: String) -> String {
@@ -2708,14 +2709,13 @@ struct RichMessageRow: View {
     
     private var aiAvatar: some View {
         RoundedRectangle(cornerRadius: 6)
-            .fill(aiGradient)
+            .fill(Color.secondary.opacity(0.15))
             .frame(width: 28, height: 28)
             .overlay(
                 Image(systemName: "command")
-                    .font(.system(size: 12, weight: .semibold))
-                    .foregroundColor(.white)
+                    .font(.system(size: 13, weight: .medium))
+                    .foregroundColor(.primary.opacity(0.8))
             )
-            .shadow(color: Color.accentColor.opacity(0.2), radius: 4, y: 2)
             .padding(.top, 4)
     }
     
@@ -2745,14 +2745,8 @@ struct RichMessageRow: View {
                 pendingChangesSection
             }
         }
-        .padding(14)
-        .background(Color(nsColor: .controlBackgroundColor).opacity(0.8))
-        .cornerRadius(12, corners: [.topRight, .bottomRight, .bottomLeft])
-        .overlay(
-            RoundedRectangle(cornerRadius: 12, style: .continuous)
-                .stroke(Color.white.opacity(0.1), lineWidth: 1)
-                .mask(RoundedCornerShape(radius: 12, corners: [.topRight, .bottomRight, .bottomLeft]))
-        )
+        .padding(.vertical, 8)
+        .padding(.horizontal, 2)
     }
     
     @ViewBuilder
@@ -4184,12 +4178,13 @@ struct ToolExecutionStepsView: View {
                 ToolStepRow(result: result, stepNumber: index + 1, isLast: index == results.count - 1)
             }
         }
-        .padding(1)
-        .background(Color.primary.opacity(0.02))
-        .cornerRadius(10)
+        .padding(.vertical, 6)
+        .padding(.horizontal, 4)
+        .background(Color(nsColor: .windowBackgroundColor).opacity(0.4))
+        .cornerRadius(6)
         .overlay(
-            RoundedRectangle(cornerRadius: 10)
-                .stroke(Color.primary.opacity(0.06), lineWidth: 1)
+            RoundedRectangle(cornerRadius: 6)
+                .stroke(Color.secondary.opacity(0.15), lineWidth: 1)
         )
     }
 }
@@ -4216,15 +4211,8 @@ struct ToolStepRow: View {
     }
     
     private var iconColor: Color {
-        guard result.success else { return .red }
-        let name = result.toolName.lowercased()
-        if name.contains("file_read") || name.contains("file_search") { return .cyan }
-        if name.contains("file_write") { return .green }
-        if name.contains("replace") { return .orange }
-        if name.contains("shell") { return .purple }
-        if name.contains("grep") || name.contains("search") { return .yellow }
-        if name.contains("git") { return .pink }
-        return .accentColor
+        guard result.success else { return .red.opacity(0.8) }
+        return .secondary
     }
     
     private var label: String {
@@ -4282,16 +4270,17 @@ struct ToolStepRow: View {
                     }
                     .frame(width: 8)
                     
-                    // Status icon
-                    Image(systemName: result.success ? "checkmark.circle.fill" : "exclamationmark.triangle.fill")
-                        .font(.system(size: 10))
-                        .foregroundColor(result.success ? .green : .red)
-                    
-                    // Tool icon
-                    Image(systemName: icon)
-                        .font(.system(size: 10))
-                        .foregroundColor(iconColor)
-                        .frame(width: 14)
+                    // Status/Tool icon (only show error if failed, otherwise tool icon)
+                    if !result.success {
+                        Image(systemName: "exclamationmark.triangle.fill")
+                            .font(.system(size: 10))
+                            .foregroundColor(.red.opacity(0.8))
+                    } else {
+                        Image(systemName: icon)
+                            .font(.system(size: 10))
+                            .foregroundColor(iconColor)
+                            .frame(width: 14)
+                    }
                     
                     // Label
                     Text(label)

@@ -255,6 +255,16 @@ struct APIClientView: View {
             TextEditor(text: $requestBody)
                 .font(.system(size: 12, design: .monospaced))
                 .padding(4)
+                .onChange(of: requestBody, perform: { newValue in
+                    let fixed = newValue
+                        .replacingOccurrences(of: "“", with: "\"")
+                        .replacingOccurrences(of: "”", with: "\"")
+                        .replacingOccurrences(of: "‘", with: "'")
+                        .replacingOccurrences(of: "’", with: "'")
+                    if fixed != newValue {
+                        requestBody = fixed
+                    }
+                })
         }
     }
 
