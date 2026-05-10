@@ -670,7 +670,7 @@ class ScenarioManager: ObservableObject {
         case "claude":
             apiUrl = "https://api.anthropic.com/v1/messages"
             bodyDict = [
-                "model": "claude-sonnet-4-20250514",
+                "model": "claude-3-7-sonnet-20250219",
                 "max_tokens": config.aiMaxTokens,
                 "messages": [["role": "user", "content": config.aiPrompt.isEmpty ? input : config.aiPrompt]]
             ]

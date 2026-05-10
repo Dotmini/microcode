@@ -226,7 +226,7 @@ class AIDesignEngine: ObservableObject {
         req.timeoutInterval = 60
         
         let body: [String: Any] = [
-            "model": "claude-sonnet-4-20250514",
+            "model": "claude-3-7-sonnet-20250219",
             "max_tokens": 4096,
             "system": systemPrompt,
             "messages": [

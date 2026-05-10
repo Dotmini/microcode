@@ -17,13 +17,18 @@ struct DraggableSplitView<Left: View, Right: View>: View {
     
     var body: some View {
         GeometryReader { geo in
+            let availableWidth = max(0, geo.size.width - 1)
             HStack(spacing: 0) {
                 left
-                    .frame(width: max(0, geo.size.width * leftProportion))
+                    .frame(width: max(0, availableWidth * leftProportion))
                     .clipped()
                 
                 // Divider
                 ZStack {
+                    Rectangle()
+                        .fill(Color.black.opacity(0.001)) // Invisible solid background to block window drag
+                        .frame(width: 16)
+                    
                     Rectangle()
                         .fill(hoverDivider || isDragging ? Color.accentColor.opacity(0.3) : Color.clear)
                         .frame(width: 12)
@@ -33,7 +38,7 @@ struct DraggableSplitView<Left: View, Right: View>: View {
                         .frame(width: 4, height: 32)
                 }
                 .frame(width: 1) // logical width
-                .contentShape(Rectangle().inset(by: -6))
+                .contentShape(Rectangle().inset(by: -8))
                 .onHover { hovering in
                     hoverDivider = hovering
                     if hovering {
@@ -43,13 +48,13 @@ struct DraggableSplitView<Left: View, Right: View>: View {
                     }
                 }
                 .gesture(
-                    DragGesture()
+                    DragGesture(minimumDistance: 0)
                         .onChanged { value in
                             if !isDragging {
                                 isDragging = true
                                 dragStartProportion = leftProportion
                             }
-                            let delta = value.translation.width / geo.size.width
+                            let delta = value.translation.width / availableWidth
                             leftProportion = max(0.1, min(0.9, dragStartProportion + delta))
                         }
                         .onEnded { _ in
@@ -59,7 +64,7 @@ struct DraggableSplitView<Left: View, Right: View>: View {
                 .zIndex(1)
                 
                 right
-                    .frame(width: max(0, geo.size.width * (1 - leftProportion)))
+                    .frame(maxWidth: .infinity)
                     .clipped()
             }
         }

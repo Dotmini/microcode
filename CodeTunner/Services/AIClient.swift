@@ -53,7 +53,7 @@ enum StreamableAIProvider: String, CaseIterable {
         switch self {
         case .gemini: return "gemini-2.5-flash"
         case .openai: return "gpt-4o"
-        case .anthropic: return "claude-sonnet-4-20250514"
+        case .anthropic: return "claude-3-7-sonnet-20250219"
         case .deepseek: return "deepseek-chat"
         case .grok: return "grok-3"
         case .qwen: return "qwen-max"

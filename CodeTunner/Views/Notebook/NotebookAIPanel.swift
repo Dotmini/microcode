@@ -434,7 +434,7 @@ struct NotebookAIPanel: View {
         guard let msg = messages.first(where: { $0.id == responseId }) else { return }
         
         // Extract code blocks from response
-        let pattern = "```([a-zA-Z0-9+#]*)\\n([\\s\\S]*?)```"
+        let pattern = "```([a-zA-Z0-9\\+\\-\\_\\#]*)[ \\t]*\\r?\\n([\\s\\S]*?)```"
         guard let regex = try? NSRegularExpression(pattern: pattern) else { return }
         
         let nsContent = msg.content as NSString

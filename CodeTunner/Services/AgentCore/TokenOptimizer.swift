@@ -483,7 +483,7 @@ class TokenOptimizer: ObservableObject {
                 return (2.50, 10.0)
             case _ where model.contains("gpt-4o-mini"):
                 return (0.15, 0.60)
-            case _ where model.contains("claude-sonnet-4"):
+            case _ where model.contains("claude-3-7-sonnet"):
                 return (3.0, 15.0)
             case _ where model.contains("claude-3-5-haiku"):
                 return (0.25, 1.25)
