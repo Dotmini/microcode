@@ -62,7 +62,9 @@ if [ "$DEV_MODE" = "true" ]; then
 fi
 
 # Clean up
-rm -rf "${BUILD_ROOT}"
+if [ "$TARGET_MODE" != "lite-only" ]; then
+    rm -rf "${BUILD_ROOT}"
+fi
 rm -rf "${DIST_ROOT}"
 mkdir -p "${DIST_ROOT}"
 
