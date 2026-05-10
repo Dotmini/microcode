@@ -91,8 +91,23 @@ class BackendService {
             
             // Wait and health check
             print("⏳ Waiting for backend to be ready...")
-            try await Task.sleep(nanoseconds: 1_500_000_000) // 1.5 seconds
-            try await self.healthCheck()
+            
+            // Fast polling: check every 50ms up to 2 seconds
+            var isReady = false
+            for i in 0..<40 {
+                if (try? await self.healthCheck()) != nil {
+                    isReady = true
+                    print("⚡ Backend became ready in \((i + 1) * 50)ms")
+                    break
+                }
+                try await Task.sleep(nanoseconds: 50_000_000) // 50ms
+            }
+            
+            if !isReady {
+                // Final check if loop finishes without success
+                try await self.healthCheck()
+            }
+            
             print("✅ Backend started successfully on port 3000")
         } catch {
             print("❌ Failed to start backend: \(error.localizedDescription)")
