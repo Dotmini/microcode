@@ -605,7 +605,7 @@ final class NotebookViewModel: ObservableObject {
                         
                         // Execute Tool
                         Task {
-                            let result = await toolBox.execute(toolName: toolName, args: args)
+                            let result = await toolBox.execute(toolName, params: args)
                             DispatchQueue.main.async {
                                 cell.appendOutput("\n[Tool Output (\(toolName))]:\n\(result.output)\n")
                                 cell.isExecuting = false
