@@ -110,7 +110,7 @@ enum AIProviderMeta: String, CaseIterable, Identifiable {
     
     var defaultModels: [String] {
         switch self {
-        case .openai: return ["gpt-5", "gpt-4o", "gpt-4o-mini", "o3", "o4-mini"]
+        case .openai: return ["gpt-5", "gpt-4.5-preview", "gpt-4o", "gpt-4o-mini", "o3-mini", "o4-mini"]
         case .anthropic: return ["claude-4.7-opus-20260501", "claude-3-7-sonnet-20250219", "claude-3-5-sonnet-20241022", "claude-3-5-haiku-20241022"]
         case .deepseek: return ["deepseek-chat-v4", "deepseek-chat", "deepseek-coder", "deepseek-reasoner"]
         case .gemini: return ["gemini-3.1-pro", "gemini-2.5-pro-preview-05-06", "gemini-2.5-flash", "gemini-2.5-flash-lite", "gemma-3n-e4"]

@@ -726,91 +726,108 @@ struct RefactorProWindow: View {
         \(originalCode)
         """
         
+        let keyMode = UserDefaults.standard.string(forKey: "aiKeyMode") ?? "cloud"
+        let isCloud = keyMode == "cloud"
+        let cloudURL = URL(string: UserDefaults.standard.string(forKey: "dotminiProxyURL") ?? "https://api.dotmini.net/v1/chat/completions")!
+        
         var request: URLRequest
         var body: [String: Any]
         
-        switch provider {
-        case "gemini":
-            let url = URL(string: "https://generativelanguage.googleapis.com/v1beta/models/\(model):generateContent?key=\(apiKey)")!
-            request = URLRequest(url: url)
+        if isCloud {
+            request = URLRequest(url: cloudURL)
+            request.setValue("Bearer \(apiKey)", forHTTPHeaderField: "Authorization")
             body = [
-                "contents": [
-                    ["role": "user", "parts": [["text": systemPrompt]]],
-                    ["role": "model", "parts": [["text": "Understood. I will output only the migrated/refactored code."]]],
-                    ["role": "user", "parts": [["text": userPrompt]]]
+                "model": model.isEmpty ? "gpt-4o" : model,
+                "messages": [
+                    ["role": "system", "content": systemPrompt],
+                    ["role": "user", "content": userPrompt]
                 ],
-                "generationConfig": [
-                    "temperature": 0.2,
-                    "maxOutputTokens": 8192
+                "temperature": 0.2
+            ]
+        } else {
+            switch provider {
+            case "gemini":
+                let url = URL(string: "https://generativelanguage.googleapis.com/v1beta/models/\(model):generateContent?key=\(apiKey)")!
+                request = URLRequest(url: url)
+                body = [
+                    "contents": [
+                        ["role": "user", "parts": [["text": systemPrompt]]],
+                        ["role": "model", "parts": [["text": "Understood. I will output only the migrated/refactored code."]]],
+                        ["role": "user", "parts": [["text": userPrompt]]]
+                    ],
+                    "generationConfig": [
+                        "temperature": 0.2,
+                        "maxOutputTokens": 8192
+                    ]
                 ]
-            ]
-        case "openai":
-            request = URLRequest(url: URL(string: "https://api.openai.com/v1/chat/completions")!)
-            request.setValue("Bearer \(apiKey)", forHTTPHeaderField: "Authorization")
-            body = [
-                "model": model,
-                "messages": [
-                    ["role": "system", "content": systemPrompt],
-                    ["role": "user", "content": userPrompt]
-                ],
-                "temperature": 0.2,
-                "max_tokens": 8192
-            ]
-        case "anthropic":
-            request = URLRequest(url: URL(string: "https://api.anthropic.com/v1/messages")!)
-            request.setValue(apiKey, forHTTPHeaderField: "x-api-key")
-            request.setValue("2023-06-01", forHTTPHeaderField: "anthropic-version")
-            body = [
-                "model": model,
-                "max_tokens": 8192,
-                "system": systemPrompt,
-                "messages": [["role": "user", "content": userPrompt]]
-            ]
-        case "deepseek":
-            request = URLRequest(url: URL(string: "https://api.deepseek.com/v1/chat/completions")!)
-            request.setValue("Bearer \(apiKey)", forHTTPHeaderField: "Authorization")
-            body = [
-                "model": model.isEmpty ? "deepseek-chat" : model,
-                "messages": [
-                    ["role": "system", "content": systemPrompt],
-                    ["role": "user", "content": userPrompt]
-                ],
-                "temperature": 0.2
-            ]
-        case "qwen":
-            request = URLRequest(url: URL(string: "https://dashscope.aliyuncs.com/compatible-mode/v1/chat/completions")!)
-            request.setValue("Bearer \(apiKey)", forHTTPHeaderField: "Authorization")
-            body = [
-                "model": model.isEmpty ? "qwen-plus" : model,
-                "messages": [
-                    ["role": "system", "content": systemPrompt],
-                    ["role": "user", "content": userPrompt]
-                ],
-                "temperature": 0.2
-            ]
-        case "grok":
-            request = URLRequest(url: URL(string: "https://api.x.ai/v1/chat/completions")!)
-            request.setValue("Bearer \(apiKey)", forHTTPHeaderField: "Authorization")
-            body = [
-                "model": model.isEmpty ? "grok-3-mini" : model,
-                "messages": [
-                    ["role": "system", "content": systemPrompt],
-                    ["role": "user", "content": userPrompt]
-                ],
-                "temperature": 0.2
-            ]
-        default:
-            // Default: OpenAI-compatible format (works for most providers)
-            request = URLRequest(url: URL(string: "https://api.openai.com/v1/chat/completions")!)
-            request.setValue("Bearer \(apiKey)", forHTTPHeaderField: "Authorization")
-            body = [
-                "model": model,
-                "messages": [
-                    ["role": "system", "content": systemPrompt],
-                    ["role": "user", "content": userPrompt]
-                ],
-                "temperature": 0.2
-            ]
+            case "openai":
+                request = URLRequest(url: URL(string: "https://api.openai.com/v1/chat/completions")!)
+                request.setValue("Bearer \(apiKey)", forHTTPHeaderField: "Authorization")
+                body = [
+                    "model": model,
+                    "messages": [
+                        ["role": "system", "content": systemPrompt],
+                        ["role": "user", "content": userPrompt]
+                    ],
+                    "temperature": 0.2,
+                    "max_tokens": 8192
+                ]
+            case "anthropic":
+                request = URLRequest(url: URL(string: "https://api.anthropic.com/v1/messages")!)
+                request.setValue(apiKey, forHTTPHeaderField: "x-api-key")
+                request.setValue("2023-06-01", forHTTPHeaderField: "anthropic-version")
+                body = [
+                    "model": model,
+                    "max_tokens": 8192,
+                    "system": systemPrompt,
+                    "messages": [["role": "user", "content": userPrompt]]
+                ]
+            case "deepseek":
+                request = URLRequest(url: URL(string: "https://api.deepseek.com/v1/chat/completions")!)
+                request.setValue("Bearer \(apiKey)", forHTTPHeaderField: "Authorization")
+                body = [
+                    "model": model.isEmpty ? "deepseek-chat" : model,
+                    "messages": [
+                        ["role": "system", "content": systemPrompt],
+                        ["role": "user", "content": userPrompt]
+                    ],
+                    "temperature": 0.2
+                ]
+            case "qwen":
+                request = URLRequest(url: URL(string: "https://dashscope.aliyuncs.com/compatible-mode/v1/chat/completions")!)
+                request.setValue("Bearer \(apiKey)", forHTTPHeaderField: "Authorization")
+                body = [
+                    "model": model.isEmpty ? "qwen-plus" : model,
+                    "messages": [
+                        ["role": "system", "content": systemPrompt],
+                        ["role": "user", "content": userPrompt]
+                    ],
+                    "temperature": 0.2
+                ]
+            case "grok":
+                request = URLRequest(url: URL(string: "https://api.x.ai/v1/chat/completions")!)
+                request.setValue("Bearer \(apiKey)", forHTTPHeaderField: "Authorization")
+                body = [
+                    "model": model.isEmpty ? "grok-3-mini" : model,
+                    "messages": [
+                        ["role": "system", "content": systemPrompt],
+                        ["role": "user", "content": userPrompt]
+                    ],
+                    "temperature": 0.2
+                ]
+            default:
+                // Default: OpenAI-compatible format (works for most providers)
+                request = URLRequest(url: URL(string: "https://api.openai.com/v1/chat/completions")!)
+                request.setValue("Bearer \(apiKey)", forHTTPHeaderField: "Authorization")
+                body = [
+                    "model": model,
+                    "messages": [
+                        ["role": "system", "content": systemPrompt],
+                        ["role": "user", "content": userPrompt]
+                    ],
+                    "temperature": 0.2
+                ]
+            }
         }
         
         request.httpMethod = "POST"

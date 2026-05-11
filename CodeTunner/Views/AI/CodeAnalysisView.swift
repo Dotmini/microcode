@@ -663,15 +663,18 @@ class CodeAnalysisViewModel: ObservableObject {
     }
     
     private func callAI(provider: AIProvider, apiKey: String, systemPrompt: String, userPrompt: String) async throws -> String {
+        let keyMode = UserDefaults.standard.string(forKey: "aiKeyMode") ?? "cloud"
+        let isCloud = keyMode == "cloud"
+        let cloudURL = URL(string: UserDefaults.standard.string(forKey: "dotminiProxyURL") ?? "https://api.dotmini.net/v1/chat/completions")!
+        
         var request: URLRequest
         var body: [String: Any]
         
-        switch provider {
-        case .chatgpt:
-            request = URLRequest(url: URL(string: "https://api.openai.com/v1/chat/completions")!)
+        if isCloud {
+            request = URLRequest(url: cloudURL)
             request.setValue("Bearer \(apiKey)", forHTTPHeaderField: "Authorization")
             body = [
-                "model": "gpt-4o-mini",
+                "model": "gpt-4o", // Dotmini Cloud default for analysis
                 "messages": [
                     ["role": "system", "content": systemPrompt],
                     ["role": "user", "content": userPrompt]
@@ -679,61 +682,76 @@ class CodeAnalysisViewModel: ObservableObject {
                 "temperature": 0.3,
                 "max_tokens": 4000
             ]
-            
-        case .gemini:
-            request = URLRequest(url: URL(string: "https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key=\(apiKey)")!)
-            body = [
-                "contents": [
-                    ["role": "user", "parts": [["text": systemPrompt]]],
-                    ["role": "model", "parts": [["text": "Understood."]]],
-                    ["role": "user", "parts": [["text": userPrompt]]]
+        } else {
+            switch provider {
+            case .chatgpt:
+                request = URLRequest(url: URL(string: "https://api.openai.com/v1/chat/completions")!)
+                request.setValue("Bearer \(apiKey)", forHTTPHeaderField: "Authorization")
+                body = [
+                    "model": "gpt-4o-mini",
+                    "messages": [
+                        ["role": "system", "content": systemPrompt],
+                        ["role": "user", "content": userPrompt]
+                    ],
+                    "temperature": 0.3,
+                    "max_tokens": 4000
                 ]
-            ]
-            
-        case .claude:
-            request = URLRequest(url: URL(string: "https://api.anthropic.com/v1/messages")!)
-            request.setValue(apiKey, forHTTPHeaderField: "x-api-key")
-            request.setValue("2023-06-01", forHTTPHeaderField: "anthropic-version")
-            body = [
-                "model": "claude-3-5-sonnet-20241022",
-                "max_tokens": 4000,
-                "system": systemPrompt,
-                "messages": [["role": "user", "content": userPrompt]]
-            ]
-            
-        case .deepseek:
-            request = URLRequest(url: URL(string: "https://api.deepseek.com/v1/chat/completions")!)
-            request.setValue("Bearer \(apiKey)", forHTTPHeaderField: "Authorization")
-            body = [
-                "model": "deepseek-chat",
-                "messages": [
-                    ["role": "system", "content": systemPrompt],
-                    ["role": "user", "content": userPrompt]
-                ],
-                "temperature": 0.3
-            ]
-            
-        case .perplexity:
-            request = URLRequest(url: URL(string: "https://api.perplexity.ai/chat/completions")!)
-            request.setValue("Bearer \(apiKey)", forHTTPHeaderField: "Authorization")
-            body = [
-                "model": "llama-3.1-sonar-small-128k-online",
-                "messages": [
-                    ["role": "system", "content": systemPrompt],
-                    ["role": "user", "content": userPrompt]
+                
+            case .gemini:
+                request = URLRequest(url: URL(string: "https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key=\(apiKey)")!)
+                body = [
+                    "contents": [
+                        ["role": "user", "parts": [["text": systemPrompt]]],
+                        ["role": "model", "parts": [["text": "Understood."]]],
+                        ["role": "user", "parts": [["text": userPrompt]]]
+                    ]
                 ]
-            ]
-            
-        case .glm:
-            request = URLRequest(url: URL(string: "https://open.bigmodel.cn/api/paas/v4/chat/completions")!)
-            request.setValue("Bearer \(apiKey)", forHTTPHeaderField: "Authorization")
-            body = [
-                "model": "glm-4",
-                "messages": [
-                    ["role": "system", "content": systemPrompt],
-                    ["role": "user", "content": userPrompt]
+                
+            case .claude:
+                request = URLRequest(url: URL(string: "https://api.anthropic.com/v1/messages")!)
+                request.setValue(apiKey, forHTTPHeaderField: "x-api-key")
+                request.setValue("2023-06-01", forHTTPHeaderField: "anthropic-version")
+                body = [
+                    "model": "claude-3-5-sonnet-20241022",
+                    "max_tokens": 4000,
+                    "system": systemPrompt,
+                    "messages": [["role": "user", "content": userPrompt]]
                 ]
-            ]
+                
+            case .deepseek:
+                request = URLRequest(url: URL(string: "https://api.deepseek.com/v1/chat/completions")!)
+                request.setValue("Bearer \(apiKey)", forHTTPHeaderField: "Authorization")
+                body = [
+                    "model": "deepseek-chat",
+                    "messages": [
+                        ["role": "system", "content": systemPrompt],
+                        ["role": "user", "content": userPrompt]
+                    ],
+                    "temperature": 0.3
+                ]
+                
+            case .perplexity:
+                request = URLRequest(url: URL(string: "https://api.perplexity.ai/chat/completions")!)
+                request.setValue("Bearer \(apiKey)", forHTTPHeaderField: "Authorization")
+                body = [
+                    "model": "llama-3.1-sonar-small-128k-online",
+                    "messages": [
+                        ["role": "system", "content": systemPrompt],
+                        ["role": "user", "content": userPrompt]
+                    ]
+                ]
+                
+            case .glm:
+                request = URLRequest(url: URL(string: "https://open.bigmodel.cn/api/paas/v4/chat/completions")!)
+                request.setValue("Bearer \(apiKey)", forHTTPHeaderField: "Authorization")
+                body = [
+                    "model": "glm-4",
+                    "messages": [
+                        ["role": "system", "content": systemPrompt],
+                        ["role": "user", "content": userPrompt]
+                    ]
+                ]
+            }
         }
         
         request.httpMethod = "POST"

@@ -1133,7 +1133,7 @@ struct AIAgentView: View {
         
         // OpenAI (ChatGPT)
         Menu {
-            ForEach(["gpt-4o", "gpt-4o-mini", "gpt-4.1", "gpt-4.1-mini", "o4-mini", "o3-mini"], id: \.self) { model in
+            ForEach(["gpt-4o", "gpt-4o-mini", "gpt-4.5-preview", "o4-mini", "o3-mini"], id: \.self) { model in
                 Button(action: { setModel("openai", model) }) {
                     HStack {
                         Text(model)

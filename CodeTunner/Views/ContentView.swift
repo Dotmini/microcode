@@ -2606,8 +2606,9 @@ struct AIChatPanel: View {
                     }
                     Section("OpenAI") {
                         Button("GPT‑5 ✨") { setModel("gpt-5", provider: "openai") }
+                        Button("GPT‑4.5 Preview") { setModel("gpt-4.5-preview", provider: "openai") }
                         Button("GPT‑4o") { setModel("gpt-4o", provider: "openai") }
-                        Button("o3") { setModel("o3", provider: "openai") }
+                        Button("o3-mini") { setModel("o3-mini", provider: "openai") }
                         Button("o4‑mini") { setModel("o4-mini", provider: "openai") }
                     }
                     Section("Anthropic Claude") {
@@ -2778,9 +2779,10 @@ struct AIChatPanel: View {
         case "gemini-2.5-flash": return "Gemini 2.5"
         case let m where m.contains("gemini-2.5-pro"): return "Gemini Pro"
         case "gpt-5": return "GPT‑5"
+        case "gpt-4.5-preview": return "GPT‑4.5"
         case "gpt-4o": return "GPT‑4o"
         case "gpt-4o-mini": return "GPT‑4o Mini"
-        case "o3": return "o3"
+        case "o3-mini": return "o3‑mini"
         case "o4-mini": return "o4‑mini"
         case let m where m.contains("claude-4.7"): return "Claude Opus"
         case let m where m.contains("claude-3-7-sonnet"): return "Sonnet 3.7"
@@ -3491,10 +3493,10 @@ struct SettingsView: View {
                           endpoint: "api.openai.com",
                           models: [
                               ("GPT‑5", "gpt-5", "NEW"),
+                              ("GPT‑4.5 Preview", "gpt-4.5-preview", ""),
                               ("GPT‑4o", "gpt-4o", ""),
-                              ("GPT‑4o Mini", "gpt-4o-mini", "FAST"),
-                              ("o3", "o3", "REASON"),
-                              ("o4‑mini", "o4-mini", "REASON"),
+                              ("o3-mini", "o3-mini", "FAST"),
+                              ("o4-mini", "o4-mini", "NEW"),
                           ]),
             AIProviderInfo(id: "anthropic", name: "Anthropic Claude", icon: "aqi.medium", color: .orange,
                           endpoint: "api.anthropic.com",
