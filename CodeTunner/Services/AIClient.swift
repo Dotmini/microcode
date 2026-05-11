@@ -167,7 +167,9 @@ class AIClient: ObservableObject {
             baseURL = provider.directBaseURL
         } else {
             // Dotmini Cloud → license key → proxy handles real API keys
-            actualKey = UserDefaults.standard.string(forKey: "dotminiLicenseKey") ?? ""
+            let dotminiKey = UserDefaults.standard.string(forKey: "dotminiLicenseKey") ?? ""
+            let microToken = UserDefaults.standard.string(forKey: "microRentToken") ?? ""
+            actualKey = !dotminiKey.isEmpty ? dotminiKey : microToken
             baseURL = provider.cloudBaseURL
         }
         
@@ -257,7 +259,9 @@ class AIClient: ObservableObject {
             actualKey = UserDefaults.standard.string(forKey: "\(provider.rawValue)_api_key") ?? apiKey
             baseURL = provider.directBaseURL
         } else {
-            actualKey = UserDefaults.standard.string(forKey: "dotminiLicenseKey") ?? ""
+            let dotminiKey = UserDefaults.standard.string(forKey: "dotminiLicenseKey") ?? ""
+            let microToken = UserDefaults.standard.string(forKey: "microRentToken") ?? ""
+            actualKey = !dotminiKey.isEmpty ? dotminiKey : microToken
             baseURL = provider.cloudBaseURL
         }
         
