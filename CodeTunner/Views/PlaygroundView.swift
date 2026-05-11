@@ -562,36 +562,38 @@ struct PlaygroundView: View {
     
     private var outputPanel: some View {
         VStack(alignment: .leading, spacing: 0) {
-            // Header
-            HStack {
-                Image(systemName: "terminal")
-                    .foregroundColor(.green)
-                Text("Output")
-                    .font(.system(size: 11, weight: .semibold))
-                
-                if isExecuting || pythonEnvManager.isWorking {
-                    ProgressView()
-                        .scaleEffect(0.6)
-                        .padding(.leading, 4)
-                }
-                
-                Spacer()
-                
-                if exitCode != 0 {
-                    HStack(spacing: 4) {
-                        Image(systemName: "exclamationmark.triangle.fill")
-                            .foregroundColor(.orange)
-                        Text("Exit \(exitCode)")
-                            .font(.system(size: 10))
-                            .foregroundColor(.orange)
+            if !isCellMode {
+                // Header
+                HStack {
+                    Image(systemName: "terminal")
+                        .foregroundColor(.green)
+                    Text("Output")
+                        .font(.system(size: 11, weight: .semibold))
+                    
+                    if isExecuting || pythonEnvManager.isWorking {
+                        ProgressView()
+                            .scaleEffect(0.6)
+                            .padding(.leading, 4)
+                    }
+                    
+                    Spacer()
+                    
+                    if exitCode != 0 {
+                        HStack(spacing: 4) {
+                            Image(systemName: "exclamationmark.triangle.fill")
+                                .foregroundColor(.orange)
+                            Text("Exit \(exitCode)")
+                                .font(.system(size: 10))
+                                .foregroundColor(.orange)
+                        }
                     }
                 }
+                .padding(.horizontal, 12)
+                .padding(.vertical, 8)
+                .background(panelBackground)
+                
+                Divider()
             }
-            .padding(.horizontal, 12)
-            .padding(.vertical, 8)
-            .background(panelBackground)
-            
-            Divider()
             
             PlaygroundTerminalView(
                 text: $output,

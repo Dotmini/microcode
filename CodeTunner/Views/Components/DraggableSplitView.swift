@@ -64,7 +64,7 @@ struct DraggableSplitView<Left: View, Right: View>: View {
                 .zIndex(1)
                 
                 right
-                    .frame(maxWidth: .infinity)
+                    .frame(width: max(0, availableWidth * (1.0 - leftProportion)))
                     .clipped()
             }
         }

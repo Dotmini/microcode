@@ -1032,11 +1032,19 @@ public struct SyntaxHighlightedCodeView: NSViewRepresentable {
         if textView.string != text || languageChanged || themeChanged {
             // Update the actual text view content if it changed
             if textView.string != text {
-                // Critical Fix: Disable Coordinator updates during full replacement
-                // We SKIP manipulating undoManager to avoid crashes, but we keep the isUpdating flag
-                // to prevent the O(N) diffing/deadlock in processEdit().
                 context.coordinator.isUpdating = true
-                textView.string = text
+                // CRITICAL FIX: Ensure default color is applied during replacement to prevent black-text void
+                let fullRange = NSRange(location: 0, length: (textView.textStorage?.length ?? 0))
+                textView.textStorage?.beginEditing()
+                textView.textStorage?.replaceCharacters(in: fullRange, with: text)
+                
+                let newRange = NSRange(location: 0, length: (text as NSString).length)
+                let customFont = NSFont(name: fontName, size: fontSize) ?? NSFont.monospacedSystemFont(ofSize: fontSize, weight: .regular)
+                textView.textStorage?.addAttributes([
+                    .foregroundColor: engine.themeManager.editorForegroundColor,
+                    .font: customFont
+                ], range: newRange)
+                textView.textStorage?.endEditing()
                 context.coordinator.isUpdating = false
             }
             

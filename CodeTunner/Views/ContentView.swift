@@ -3219,19 +3219,19 @@ struct SettingsView: View {
                     .shadow(color: .black.opacity(0.4), radius: 20, x: 0, y: 10)
                 
                 RoundedRectangle(cornerRadius: 32, style: .continuous)
-                    .strokeBorder(LinearGradient(colors: [Color.white.opacity(0.15), Color.clear], startPoint: .top, endPoint: .bottom), lineWidth: 1.5)
+                    .strokeBorder(Color.primary.opacity(0.15), lineWidth: 1.5)
                     .frame(width: 140, height: 140)
                 
                 // MicroCode 'M' interlocking logo
                 ZStack {
                     Image(systemName: "chevron.left")
                         .font(.system(size: 56, weight: .bold))
-                        .foregroundStyle(Color(red: 0.04, green: 0.52, blue: 1.0))
+                        .foregroundStyle(Color.primary)
                         .offset(x: -16)
                     
                     Image(systemName: "chevron.right")
                         .font(.system(size: 56, weight: .bold))
-                        .foregroundStyle(Color(red: 0.04, green: 0.52, blue: 1.0))
+                        .foregroundStyle(Color.primary)
                         .offset(x: 16)
                 }
             }
@@ -3244,7 +3244,7 @@ struct SettingsView: View {
                     .foregroundColor(.primary)
                 Text("PRO")
                     .font(.system(size: 32, weight: .heavy, design: .rounded))
-                    .foregroundStyle(Color(red: 0.04, green: 0.52, blue: 1.0))
+                    .foregroundStyle(Color.primary)
             }
             
             Text("Version 2.0")
@@ -3262,22 +3262,19 @@ struct SettingsView: View {
                 HStack(spacing: 0) {
                     Text("Created by Arsenal @ ")
                         .font(.system(size: 14, weight: .medium))
-                    Text("SPU AI")
+                        .foregroundColor(.secondary)
+                    Text("SPU AI CLUB")
                         .font(.system(size: 14, weight: .medium))
-                        .foregroundColor(.pink)
-                    Text(" CLUB")
-                        .font(.system(size: 14, weight: .medium))
+                        .foregroundColor(.primary)
                 }
                 
                 HStack(spacing: 0) {
                     Text("Property of ")
                         .font(.system(size: 12))
                         .foregroundColor(.secondary)
-                    Text("Dotmini Software")
+                    Text("Dotmini Software 2.0")
                         .font(.system(size: 12, weight: .semibold))
-                        .foregroundColor(.blue)
-                    Text(" 2.0")
-                        .font(.system(size: 12, weight: .semibold))
+                        .foregroundColor(.primary)
                     Text(" 2025")
                         .font(.system(size: 12))
                         .foregroundColor(.secondary)

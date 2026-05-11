@@ -54,9 +54,7 @@ struct MicroCodeLicenseSettingsView: View {
                 HStack(spacing: 12) {
                     ZStack {
                         RoundedRectangle(cornerRadius: 14, style: .continuous)
-                            .fill(LinearGradient(
-                                colors: [Color(red: 0.04, green: 0.52, blue: 1.0), Color.purple],
-                                startPoint: .topLeading, endPoint: .bottomTrailing))
+                            .fill(Color(nsColor: .controlAccentColor))
                             .frame(width: 48, height: 48)
                         Image(systemName: "crown.fill")
                             .font(.system(size: 22))
@@ -402,7 +400,20 @@ struct MicroCodeLicenseSettingsView: View {
                     return
                 }
                 
-                if let license = userJson["licenseKey"] as? String, !license.isEmpty {
+                // Comprehensive check for Pro/Subscription status from Firebase RTDB
+                let hasValidLicense: Bool = {
+                    if let lic = userJson["licenseKey"] as? String, !lic.isEmpty { return true }
+                    if let role = userJson["role"] as? String, ["pro", "premium", "admin"].contains(role.lowercased()) { return true }
+                    if let plan = userJson["plan"] as? String, ["pro", "premium"].contains(plan.lowercased()) { return true }
+                    if let tier = userJson["tier"] as? String, ["pro", "premium"].contains(tier.lowercased()) { return true }
+                    if let isPro = userJson["isPro"] as? Bool, isPro { return true }
+                    if let sub = userJson["subscription"] as? [String: Any], let status = sub["status"] as? String, status == "active" { return true }
+                    if let subStatus = userJson["subscriptionStatus"] as? String, subStatus == "active" { return true }
+                    return false
+                }()
+                
+                if hasValidLicense {
+                    let license = (userJson["licenseKey"] as? String) ?? "mc_live_\(uid)"
                     withAnimation {
                         self.dotminiLicenseKey = license
                         self.loggedInEmail = self.email
