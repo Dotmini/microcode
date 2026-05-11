@@ -135,7 +135,7 @@ struct PlaygroundView: View {
     
     @ViewBuilder
     private var mainAndRightPane: some View {
-        if (showOutput || showGUIPreview) && !isCellMode {
+        if showOutput || showGUIPreview {
             DraggableSplitView(initialProportion: 0.55) {
                 centerPane
             } right: {
@@ -154,13 +154,7 @@ struct PlaygroundView: View {
                 Divider()
             }
             
-            if isCellMode {
-                cellEditorPanel
-                    .transition(.opacity)
-            } else {
-                codeEditorPanel
-                    .transition(.opacity)
-            }
+            codeEditorPanel
         }
         .frame(minWidth: 300, maxWidth: .infinity)
     }
@@ -325,64 +319,6 @@ struct PlaygroundView: View {
             .toggleStyle(.button)
             .buttonStyle(.bordered)
             .tint(showGUIPreview ? .pink : .secondary)
-            .disabled(isCellMode)
-            
-            Divider()
-                .frame(height: 20)
-            
-            // Cell Mode Toggle
-            Toggle(isOn: $isCellMode) {
-                HStack(spacing: 4) {
-                    Image(systemName: "square.grid.2x2")
-                    Text("Cell Mode")
-                }
-                .font(.system(size: 12, weight: .bold))
-            }
-            .toggleStyle(.button)
-            .buttonStyle(.bordered)
-            .tint(isCellMode ? .purple : .secondary)
-            
-            if isCellMode {
-                // Run By Color Menu
-                Menu {
-                    // Colors with cells — show count
-                    ForEach(CellColorTheme.allCases) { theme in
-                        let count = cellCountForColor(theme)
-                        if count > 0 {
-                            Button(action: { runCellsByColor(theme) }) {
-                                HStack {
-                                    Image(systemName: "circle.fill")
-                                    Text("\(theme.rawValue) (\(count) cells)")
-                                    Image(systemName: "play.fill")
-                                }
-                            }
-                        }
-                    }
-                    
-                    Divider()
-                    
-                    Button(action: { runAllCells() }) {
-                        Label("Run All Cells (\(cells.count))", systemImage: "play.circle.fill")
-                    }
-                } label: {
-                    HStack(spacing: 4) {
-                        Image(systemName: "paintpalette.fill")
-                        Text("Run By Color")
-                    }
-                    .font(.system(size: 12))
-                    .padding(.horizontal, 8)
-                    .padding(.vertical, 4)
-                    .background(Color.purple.opacity(0.1))
-                    .cornerRadius(4)
-                }
-                .menuStyle(.borderlessButton)
-                
-                Button(action: addCell) {
-                    Image(systemName: "plus.circle.fill")
-                        .foregroundColor(.accentColor)
-                }
-                .buttonStyle(.plain)
-            }
             
             Divider()
                 .frame(height: 20)
@@ -420,25 +356,15 @@ struct PlaygroundView: View {
                 .padding(.horizontal, 8)
             }
             
-            // Run button
             // Run/Stop button
             Button(action: {
                 if isExecuting {
                     executionTask?.cancel()
                     autoRunTask?.cancel()
                     isExecuting = false
-                    
-                    // Also stop cells if in cell mode
-                    if isCellMode {
-                        for cell in cells { cell.isExecuting = false }
-                    }
                 } else {
-                    if isCellMode {
-                        runAllCells()
-                    } else {
-                        executionTask = Task {
-                            await runCode()
-                        }
+                    executionTask = Task {
+                        await runCode()
                     }
                 }
             }) {
@@ -2132,11 +2058,7 @@ struct PlaygroundView: View {
     }
     
     func handleCatalogueItem(code: String) {
-        if isCellMode {
-            cells.append(PlaygroundCellModel(code: code, colorTheme: .none))
-        } else {
-            self.code += "\n" + code
-        }
+        self.code += "\n" + code
     }
 
     /// Strips ANSI escape sequences from text
