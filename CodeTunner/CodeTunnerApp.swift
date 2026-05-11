@@ -36,6 +36,9 @@ struct CodeTunnerApp: App {
                         await performBackgroundStartup()
                     }
                 }
+                .onChange(of: appState.appTheme) { _ in
+                    setupWindow()
+                }
         }
         .windowStyle(.hiddenTitleBar)
         .windowToolbarStyle(.unified)
@@ -58,9 +61,9 @@ struct CodeTunnerApp: App {
             window.isMovableByWindowBackground = true
             
             // Dynamic transparency based on theme
-            let isExtraClear = appState.appTheme == .extraClear
-            window.backgroundColor = isExtraClear ? .clear : .windowBackgroundColor
-            window.isOpaque = !isExtraClear
+            let isTransparent = appState.appTheme == .extraClear || appState.appTheme == .transparent || appState.appTheme == .crystalClear || appState.appTheme == .obsidianGlass
+            window.backgroundColor = isTransparent ? .clear : .windowBackgroundColor
+            window.isOpaque = !isTransparent
             window.hasShadow = true
             
             // Optimization: Disable backing store for purely transparent windows if applicable

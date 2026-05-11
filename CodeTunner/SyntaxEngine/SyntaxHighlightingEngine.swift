@@ -853,7 +853,7 @@ public struct SyntaxHighlightedCodeView: NSViewRepresentable {
         
         // Set colors
         // Use the struct's isTransparent property (set by Notebooks/Cell mode) OR the theme name
-        let effectiveTransparent = self.isTransparent || themeName == "transparent" || themeName == "extraClear"
+        let effectiveTransparent = self.isTransparent || themeName == "transparent" || themeName == "extraClear" || themeName == "crystalClear" || themeName == "obsidianGlass"
         textView.backgroundColor = effectiveTransparent ? .clear : engine.themeManager.editorBackgroundColor
         textView.drawsBackground = !effectiveTransparent
         textView.insertionPointColor = engine.themeManager.editorForegroundColor
@@ -971,7 +971,7 @@ public struct SyntaxHighlightedCodeView: NSViewRepresentable {
         let activeThemeID = (!lowerTheme.isEmpty && lowerTheme != "system") ? themeName! : (isDark ? "dark" : "light")
         engine.themeManager.setActiveTheme(activeThemeID)
         
-        let effectiveTransparent = self.isTransparent || themeName == "transparent" || themeName == "extraClear"
+        let effectiveTransparent = self.isTransparent || themeName == "transparent" || themeName == "extraClear" || themeName == "crystalClear" || themeName == "obsidianGlass"
         textView.backgroundColor = effectiveTransparent ? .clear : engine.themeManager.editorBackgroundColor
         textView.drawsBackground = !effectiveTransparent
         scrollView.backgroundColor = effectiveTransparent ? .clear : engine.themeManager.editorBackgroundColor

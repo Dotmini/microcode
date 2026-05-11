@@ -285,6 +285,7 @@ class AIClient: ObservableObject {
     
     private func parseErrorMessage(_ error: NSError) -> String {
         switch error.code {
+        case 402: return "Payment required: Your backend server quota has expired or requires payment. Check API settings."
         case 429: return "Rate limited — please wait a moment and try again."
         case 401, 403: return "Invalid or expired API key. Check Settings."
         case 503, 500: return "AI service temporarily unavailable. Try again."
@@ -351,7 +352,10 @@ class AIClient: ObservableObject {
         }
         
         guard httpResponse.statusCode == 200 else {
-            throw NSError(domain: "AIClient", code: httpResponse.statusCode, userInfo: [NSLocalizedDescriptionKey: "Gemini API error (\(httpResponse.statusCode))"])
+            let code = httpResponse.statusCode
+            let customMsg = parseErrorMessage(NSError(domain: "AIClient", code: code, userInfo: nil))
+            let finalMsg = customMsg == "The operation couldn’t be completed. (AIClient error \(code).)" ? "Gemini API error (\(code))" : customMsg
+            throw NSError(domain: "AIClient", code: code, userInfo: [NSLocalizedDescriptionKey: finalMsg])
         }
         
         for try await line in bytes.lines {
@@ -419,7 +423,9 @@ class AIClient: ObservableObject {
         let (bytes, response) = try await URLSession.shared.bytes(for: request)
         guard let httpResponse = response as? HTTPURLResponse, httpResponse.statusCode == 200 else {
             let code = (response as? HTTPURLResponse)?.statusCode ?? -1
-            throw NSError(domain: "AIClient", code: code, userInfo: [NSLocalizedDescriptionKey: "OpenAI API error (\(code))"])
+            let customMsg = parseErrorMessage(NSError(domain: "AIClient", code: code, userInfo: nil))
+            let finalMsg = customMsg == "The operation couldn’t be completed. (AIClient error \(code).)" ? "OpenAI API error (\(code))" : customMsg
+            throw NSError(domain: "AIClient", code: code, userInfo: [NSLocalizedDescriptionKey: finalMsg])
         }
         
         // Buffer for streaming tool calls
@@ -510,7 +516,9 @@ class AIClient: ObservableObject {
         let (bytes, response) = try await URLSession.shared.bytes(for: request)
         guard let httpResponse = response as? HTTPURLResponse, httpResponse.statusCode == 200 else {
             let code = (response as? HTTPURLResponse)?.statusCode ?? -1
-            throw NSError(domain: "AIClient", code: code, userInfo: [NSLocalizedDescriptionKey: "Anthropic API error (\(code))"])
+            let customMsg = parseErrorMessage(NSError(domain: "AIClient", code: code, userInfo: nil))
+            let finalMsg = customMsg == "The operation couldn’t be completed. (AIClient error \(code).)" ? "Anthropic API error (\(code))" : customMsg
+            throw NSError(domain: "AIClient", code: code, userInfo: [NSLocalizedDescriptionKey: finalMsg])
         }
         
         var currentToolName = ""
