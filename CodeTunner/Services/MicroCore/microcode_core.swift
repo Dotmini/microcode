@@ -582,7 +582,7 @@ open class MicroCore:
      */
 public convenience init(config: AgentConfig)throws  {
     let pointer =
-        try rustCallWithError(FfiConverterTypeCoreError.lift) {
+        try rustCallWithError(FfiConverterTypeCoreError.lift as (RustBuffer) throws -> CoreError) {
     uniffi_microcode_core_fn_constructor_microcore_new(
         FfiConverterTypeAgentConfig.lower(config),$0
     )
@@ -605,7 +605,7 @@ public convenience init(config: AgentConfig)throws  {
      * Apply a search-and-replace edit to a file
      */
 open func applyEdit(filePath: String, searchBlock: String, replaceBlock: String)throws  -> EditResult {
-    return try  FfiConverterTypeEditResult.lift(try rustCallWithError(FfiConverterTypeCoreError.lift) {
+    return try  FfiConverterTypeEditResult.lift(try rustCallWithError(FfiConverterTypeCoreError.lift as (RustBuffer) throws -> CoreError) {
     uniffi_microcode_core_fn_method_microcore_apply_edit(self.uniffiClonePointer(),
         FfiConverterString.lower(filePath),
         FfiConverterString.lower(searchBlock),
@@ -617,7 +617,7 @@ open func applyEdit(filePath: String, searchBlock: String, replaceBlock: String)
     /**
      * Clear the vector database
      */
-open func clearIndex()throws  {try rustCallWithError(FfiConverterTypeCoreError.lift) {
+open func clearIndex()throws  {try rustCallWithError(FfiConverterTypeCoreError.lift as (RustBuffer) throws -> CoreError) {
     uniffi_microcode_core_fn_method_microcore_clear_index(self.uniffiClonePointer(),$0
     )
 }
@@ -627,7 +627,7 @@ open func clearIndex()throws  {try rustCallWithError(FfiConverterTypeCoreError.l
      * Execute a command and return output
      */
 open func executeCommand(cmd: String)throws  -> String {
-    return try  FfiConverterString.lift(try rustCallWithError(FfiConverterTypeCoreError.lift) {
+    return try  FfiConverterString.lift(try rustCallWithError(FfiConverterTypeCoreError.lift as (RustBuffer) throws -> CoreError) {
     uniffi_microcode_core_fn_method_microcore_execute_command(self.uniffiClonePointer(),
         FfiConverterString.lower(cmd),$0
     )
@@ -638,7 +638,7 @@ open func executeCommand(cmd: String)throws  -> String {
      * Get indexing statistics as JSON
      */
 open func getIndexStats()throws  -> String {
-    return try  FfiConverterString.lift(try rustCallWithError(FfiConverterTypeCoreError.lift) {
+    return try  FfiConverterString.lift(try rustCallWithError(FfiConverterTypeCoreError.lift as (RustBuffer) throws -> CoreError) {
     uniffi_microcode_core_fn_method_microcore_get_index_stats(self.uniffiClonePointer(),$0
     )
 })
@@ -648,7 +648,7 @@ open func getIndexStats()throws  -> String {
      * Index a project directory for semantic search
      */
 open func indexProject(path: String)throws  -> UInt32 {
-    return try  FfiConverterUInt32.lift(try rustCallWithError(FfiConverterTypeCoreError.lift) {
+    return try  FfiConverterUInt32.lift(try rustCallWithError(FfiConverterTypeCoreError.lift as (RustBuffer) throws -> CoreError) {
     uniffi_microcode_core_fn_method_microcore_index_project(self.uniffiClonePointer(),
         FfiConverterString.lower(path),$0
     )
@@ -659,7 +659,7 @@ open func indexProject(path: String)throws  -> UInt32 {
      * Read file contents
      */
 open func readFile(filePath: String)throws  -> String {
-    return try  FfiConverterString.lift(try rustCallWithError(FfiConverterTypeCoreError.lift) {
+    return try  FfiConverterString.lift(try rustCallWithError(FfiConverterTypeCoreError.lift as (RustBuffer) throws -> CoreError) {
     uniffi_microcode_core_fn_method_microcore_read_file(self.uniffiClonePointer(),
         FfiConverterString.lower(filePath),$0
     )
@@ -670,7 +670,7 @@ open func readFile(filePath: String)throws  -> String {
      * Perform semantic search on indexed codebase
      */
 open func semanticSearch(query: String, limit: UInt32)throws  -> [SearchResult] {
-    return try  FfiConverterSequenceTypeSearchResult.lift(try rustCallWithError(FfiConverterTypeCoreError.lift) {
+    return try  FfiConverterSequenceTypeSearchResult.lift(try rustCallWithError(FfiConverterTypeCoreError.lift as (RustBuffer) throws -> CoreError) {
     uniffi_microcode_core_fn_method_microcore_semantic_search(self.uniffiClonePointer(),
         FfiConverterString.lower(query),
         FfiConverterUInt32.lower(limit),$0
@@ -681,7 +681,7 @@ open func semanticSearch(query: String, limit: UInt32)throws  -> [SearchResult] 
     /**
      * Write file contents
      */
-open func writeFile(filePath: String, content: String)throws  {try rustCallWithError(FfiConverterTypeCoreError.lift) {
+open func writeFile(filePath: String, content: String)throws  {try rustCallWithError(FfiConverterTypeCoreError.lift as (RustBuffer) throws -> CoreError) {
     uniffi_microcode_core_fn_method_microcore_write_file(self.uniffiClonePointer(),
         FfiConverterString.lower(filePath),
         FfiConverterString.lower(content),$0
@@ -1212,7 +1212,7 @@ public func getKernelNetworkStatus() -> String {
 /**
  * Change the power profile mode directly without IPC overhead
  */
-public func setKernelPowerMode(mode: String)throws  {try rustCallWithError(FfiConverterTypeCoreError.lift) {
+public func setKernelPowerMode(mode: String)throws  {try rustCallWithError(FfiConverterTypeCoreError.lift as (RustBuffer) throws -> CoreError) {
     uniffi_microcode_core_fn_func_set_kernel_power_mode(
         FfiConverterString.lower(mode),$0
     )
