@@ -522,10 +522,10 @@ jobs:
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
         with:
-          name: "MicroCode v${{ needs.build.outputs.version }}"
+          name: "MicroCode v${{ needs.build-arch.outputs.version }}"
           body_path: release-body.md
           draft: false
-          prerelease: ${{ contains(needs.build.outputs.version, '-') }}
+          prerelease: ${{ contains(needs.build-arch.outputs.version, '-') }}
           files: release-assets/*
           fail_on_unmatched_files: false
           generate_release_notes: false
@@ -546,7 +546,7 @@ jobs:
       - name: Release summary
         run: |
           if [ "${{ needs.release.result }}" == "success" ]; then
-            echo "✅ MicroCode v${{ needs.build.outputs.version }} released successfully!"
+            echo "✅ MicroCode v${{ needs.build-arch.outputs.version }} released successfully!"
             echo "   URL: https://github.com/${{ github.repository }}/releases/latest"
           else
             echo "❌ Release failed. Check the logs."
