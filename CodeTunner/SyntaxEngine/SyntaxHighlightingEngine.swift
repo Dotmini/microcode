@@ -905,7 +905,9 @@ public struct SyntaxHighlightedCodeView: NSViewRepresentable {
             .foregroundColor: engine.themeManager.editorForegroundColor,
             .font: initialFont
         ]
-        let attrString = NSAttributedString(string: text, attributes: initialAttrs)
+        // Normalize newlines to prevent text storage mismatches
+        let normalizedText = text.replacingOccurrences(of: "\r\n", with: "\n")
+        let attrString = NSAttributedString(string: normalizedText, attributes: initialAttrs)
         textView.textStorage?.setAttributedString(attrString)
         
         // Initialize and apply highlighting AFTER setting text storage so engine gets normalized string (e.g. \r\n -> \n)
@@ -915,7 +917,7 @@ public struct SyntaxHighlightedCodeView: NSViewRepresentable {
         if let url = context.coordinator.parent.fileURL {
             Task.detached(priority: .utility) {
                 let lspTask = Task {
-                    await LSPManager.shared.documentOpened(uri: url.absoluteString, language: language, content: text)
+                    await LSPManager.shared.documentOpened(uri: url.absoluteString, language: language, content: normalizedText)
                 }
                 // 2-second timeout
                 let timeoutTask = Task {
@@ -949,9 +951,11 @@ public struct SyntaxHighlightedCodeView: NSViewRepresentable {
         // Critical: Update coordinator's parent to ensure Binding is fresh
         context.coordinator.parent = self
         
+        let normalizedText = text.replacingOccurrences(of: "\r\n", with: "\n")
+        
         // LOOP PROTECTION: Check if anything actually changed
         // This prevents infinite layout loops where updateNSView triggers a layout, which calls updateNSView again.
-        if context.coordinator.lastText == text &&
+        if context.coordinator.lastText == normalizedText &&
            context.coordinator.lastLanguage == language &&
            context.coordinator.lastThemeName == themeName &&
            context.coordinator.lastFontSize == fontSize &&
@@ -960,7 +964,7 @@ public struct SyntaxHighlightedCodeView: NSViewRepresentable {
         }
         
         // Update Cache
-        context.coordinator.lastText = text
+        context.coordinator.lastText = normalizedText
         context.coordinator.lastLanguage = language
         context.coordinator.lastThemeName = themeName
         context.coordinator.lastFontSize = fontSize
@@ -1036,16 +1040,16 @@ public struct SyntaxHighlightedCodeView: NSViewRepresentable {
         let languageChanged = engine.currentLanguage != language
         let themeChanged = context.coordinator.lastThemeName != themeName || context.coordinator.lastIsDark != isDark
         
-        if textView.string != text || languageChanged || themeChanged {
+        if textView.string != normalizedText || languageChanged || themeChanged {
             // Update the actual text view content if it changed
-            if textView.string != text {
+            if textView.string != normalizedText {
                 context.coordinator.isUpdating = true
                 // CRITICAL FIX: Ensure default color is applied during replacement to prevent black-text void
                 let fullRange = NSRange(location: 0, length: (textView.textStorage?.length ?? 0))
                 textView.textStorage?.beginEditing()
-                textView.textStorage?.replaceCharacters(in: fullRange, with: text)
+                textView.textStorage?.replaceCharacters(in: fullRange, with: normalizedText)
                 
-                let newRange = NSRange(location: 0, length: (text as NSString).length)
+                let newRange = NSRange(location: 0, length: (normalizedText as NSString).length)
                 let customFont = NSFont(name: fontName, size: fontSize) ?? NSFont.monospacedSystemFont(ofSize: fontSize, weight: .regular)
                 textView.textStorage?.addAttributes([
                     .foregroundColor: engine.themeManager.editorForegroundColor,
