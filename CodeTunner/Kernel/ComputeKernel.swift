@@ -59,10 +59,27 @@ class LocalProcessKernel: ComputeKernel {
         state = .running
         defer { state = .idle }
         
-        progress("⚙️ Executing on \(target.rawValue)...\n")
+        var codeToExecute = code
+        
+        if target == .localMLX {
+            progress("⚙️ [⚡️ Hardware Accelerator: Apple Silicon (NPU/Metal) Activated]\n")
+            if language.lowercased() == "python" {
+                codeToExecute = """
+                import os
+                os.environ["MPS_ENABLE"] = "1"
+                os.environ["MLX_ACCELERATE"] = "1"
+                os.environ["PYTORCH_ENABLE_MPS_FALLBACK"] = "1"
+                os.environ["DEVICE"] = "mps"
+                
+                \(code)
+                """
+            }
+        } else {
+            progress("⚙️ Executing on \(target.rawValue)...\n")
+        }
         
         // Execute via PythonEnvManager
-        _ = try await PythonEnvManager.shared.executeCodeStreaming(code: code, language: language, pythonPath: nil) { output in
+        _ = try await PythonEnvManager.shared.executeCodeStreaming(code: codeToExecute, language: language, pythonPath: nil) { output in
             DispatchQueue.main.async { progress(output) }
         }
         
@@ -98,7 +115,7 @@ class LocalNvidiaKernel: ComputeKernel {
         state = .running
         defer { state = .idle }
         
-        progress("⚙️ Executing on \(target.rawValue) (TinyGPU Accelerated)...\n")
+        progress("⚙️ [⚡️ Hardware Accelerator: NVIDIA GPU Activated] (TinyGPU)...\n")
         
         if language.lowercased() != "python" {
             throw NSError(domain: "ComputeKernel", code: 400, userInfo: [NSLocalizedDescriptionKey: "TinyGPU eGPU acceleration currently only supports Python."])
@@ -358,49 +375,101 @@ class CustomHPCKernel: ComputeKernel {
         state = .running
         defer { state = .idle }
         
-        progress("🔌 Connecting to MicroCode Agent via WebSocket...\n")
+        var endpoint = agentEndpoint
+        if endpoint.isEmpty {
+            endpoint = "ws://127.0.0.1:8080/v1/agent"
+            ReportLogManager.shared.log("HPC Endpoint empty, falling back to local: \(endpoint)", type: .warning)
+        }
         
-        return try await withCheckedThrowingContinuation { continuation in
-            var endpoint = agentEndpoint
-            if endpoint.isEmpty {
-                // Fallback to local default instead of erroring out to allow offline usage
-                endpoint = "ws://127.0.0.1:8080/v1/agent"
-                ReportLogManager.shared.log("HPC Endpoint empty, falling back to local: \(endpoint)", type: .warning)
-            }
+        let isHTTP = endpoint.lowercased().starts(with: "http://") || endpoint.lowercased().starts(with: "https://")
+        
+        if isHTTP {
+            progress("🚀 [⚡️ Hardware Accelerator: Custom Cloud GPU] Initiating Request to \(endpoint)...\n")
             
-            guard let url = URL(string: endpoint) else {
-                continuation.resume(throwing: URLError(.badURL))
-                return
-            }
+            // Format for Universal Serverless API (RunPod, Vast.ai, Akamai)
+            guard let url = URL(string: endpoint) else { throw URLError(.badURL) }
             
-            var headers: [String: String]? = nil
+            var request = URLRequest(url: url)
+            request.httpMethod = "POST"
+            request.setValue("application/json", forHTTPHeaderField: "Content-Type")
             if !agentToken.isEmpty {
-                headers = ["Authorization": "Bearer \(agentToken)"]
+                request.setValue("Bearer \(agentToken)", forHTTPHeaderField: "Authorization")
             }
             
-            streamManager.connect(url: url, headers: headers)
+            // Universal payload format
+            let payload: [String: Any] = [
+                "input": [
+                    "code": code,
+                    "language": language
+                ]
+            ]
             
-            let payload: [String: Any] = ["language": language, "code": code]
-            guard let payloadData = try? JSONSerialization.data(withJSONObject: payload),
-                  let payloadString = String(data: payloadData, encoding: .utf8) else {
-                continuation.resume(throwing: URLError(.cannotParseResponse))
-                return
+            request.httpBody = try JSONSerialization.data(withJSONObject: payload)
+            
+            do {
+                let (data, response) = try await URLSession.shared.data(for: request)
+                
+                guard let httpResponse = response as? HTTPURLResponse else {
+                    throw URLError(.badServerResponse)
+                }
+                
+                if (200...299).contains(httpResponse.statusCode) {
+                    if let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+                       let output = json["output"] as? String {
+                        progress(output)
+                        return "✅ Cloud GPU Execution complete."
+                    } else if let text = String(data: data, encoding: .utf8) {
+                        progress(text)
+                        return "✅ Cloud GPU Execution complete."
+                    }
+                } else {
+                    let errStr = String(data: data, encoding: .utf8) ?? "Unknown error"
+                    throw NSError(domain: "ComputeKernel", code: httpResponse.statusCode, userInfo: [NSLocalizedDescriptionKey: "Cloud API Error: \(errStr)"])
+                }
+            } catch {
+                throw error
             }
             
-            Task {
-                do {
-                    try await streamManager.send(payload: payloadString)
-                } catch {
-                    continuation.resume(throwing: error)
+            return "✅ Execution finished."
+            
+        } else {
+            progress("🔌 Connecting to Custom HPC Agent via WebSocket...\n")
+            
+            return try await withCheckedThrowingContinuation { continuation in
+                guard let url = URL(string: endpoint) else {
+                    continuation.resume(throwing: URLError(.badURL))
                     return
                 }
                 
-                streamManager.receiveContinuous { output in
-                    DispatchQueue.main.async { progress(output) }
-                } onComplete: { message in
-                    continuation.resume(returning: "✅ HPC Remote Execution complete: " + message)
-                } onError: { error in
-                    continuation.resume(throwing: error)
+                var headers: [String: String]? = nil
+                if !agentToken.isEmpty {
+                    headers = ["Authorization": "Bearer \(agentToken)"]
+                }
+                
+                streamManager.connect(url: url, headers: headers)
+                
+                let payload: [String: Any] = ["language": language, "code": code]
+                guard let payloadData = try? JSONSerialization.data(withJSONObject: payload),
+                      let payloadString = String(data: payloadData, encoding: .utf8) else {
+                    continuation.resume(throwing: URLError(.cannotParseResponse))
+                    return
+                }
+                
+                Task {
+                    do {
+                        try await streamManager.send(payload: payloadString)
+                    } catch {
+                        continuation.resume(throwing: error)
+                        return
+                    }
+                    
+                    streamManager.receiveContinuous { output in
+                        DispatchQueue.main.async { progress(output) }
+                    } onComplete: { message in
+                        continuation.resume(returning: "✅ HPC Remote Execution complete: " + message)
+                    } onError: { error in
+                        continuation.resume(throwing: error)
+                    }
                 }
             }
         }

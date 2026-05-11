@@ -174,7 +174,8 @@ enum AppTheme: String, CaseIterable {
     // Editor Colors
     var editorBackground: NSColor {
         switch self {
-        case .system: return .textBackgroundColor
+        case .system: 
+            return NSApp?.effectiveAppearance.name == .darkAqua ? NSColor(red: 0.118, green: 0.118, blue: 0.118, alpha: 1.0) : NSColor(white: 1.0, alpha: 1.0)
         case .light, .xcodeLight: return NSColor(red: 1.0, green: 1.0, blue: 1.0, alpha: 1.0)
         case .dark: return NSColor(red: 0.118, green: 0.118, blue: 0.118, alpha: 1.0) // #1E1E1E
         case .navy: return NSColor(red: 0.051, green: 0.106, blue: 0.165, alpha: 1.0) // #0D1B2A
@@ -217,7 +218,8 @@ enum AppTheme: String, CaseIterable {
     
     var editorText: NSColor {
         switch self {
-        case .system: return .labelColor
+        case .system: 
+            return NSApp?.effectiveAppearance.name == .darkAqua ? NSColor(red: 0.831, green: 0.831, blue: 0.831, alpha: 1.0) : NSColor(red: 0.0, green: 0.0, blue: 0.0, alpha: 1.0)
         case .light, .xcodeLight: return NSColor(red: 0.0, green: 0.0, blue: 0.0, alpha: 1.0)
         case .dark: return NSColor(red: 0.831, green: 0.831, blue: 0.831, alpha: 1.0) // #D4D4D4
         case .navy: return NSColor(red: 0.878, green: 0.882, blue: 0.867, alpha: 1.0) // #E0E1DD
@@ -242,7 +244,7 @@ enum AppTheme: String, CaseIterable {
         case .transparent: return .white
         case .extraClear: return .white
         case .xnuDark: return NSColor(red: 0.8, green: 0.8, blue: 0.8, alpha: 1.0) // #CCCCCC
-        case .microCodeTheme: return NSColor(white: 0.0, alpha: 1.0) // Pure Black
+        case .microCodeTheme: return NSColor(red: 0.1, green: 0.15, blue: 0.25, alpha: 1.0) // Deep Navy Text
         case .monokaiPro: return NSColor(red: 0.988, green: 0.988, blue: 0.941, alpha: 1.0) // #FCFCF0
         case .oneDarkPro: return NSColor(red: 0.675, green: 0.745, blue: 0.804, alpha: 1.0) // #ABB2BF
         case .nord: return NSColor(red: 0.847, green: 0.871, blue: 0.914, alpha: 1.0) // #D8DEE9
@@ -261,7 +263,8 @@ enum AppTheme: String, CaseIterable {
     // Syntax Highlighting Colors
     var keywordColor: NSColor {
         switch self {
-        case .system, .dark: return NSColor(red: 0.78, green: 0.37, blue: 0.83, alpha: 1.0)
+        case .system: return NSApp?.effectiveAppearance.name == .darkAqua ? AppTheme.dark.keywordColor : AppTheme.light.keywordColor
+        case .dark: return NSColor(red: 0.78, green: 0.37, blue: 0.83, alpha: 1.0)
         case .light: return NSColor(red: 0.608, green: 0.165, blue: 0.639, alpha: 1.0) // Purple
         case .navy: return NSColor(red: 0.0, green: 0.851, blue: 1.0, alpha: 1.0) // #00D9FF
         case .lightBlue: return NSColor(red: 0.486, green: 0.302, blue: 1.0, alpha: 1.0) // #7C4DFF
@@ -302,7 +305,8 @@ enum AppTheme: String, CaseIterable {
     
     var stringColor: NSColor {
         switch self {
-        case .system, .dark: return NSColor(red: 0.84, green: 0.45, blue: 0.35, alpha: 1.0)
+        case .system: return NSApp?.effectiveAppearance.name == .darkAqua ? AppTheme.dark.stringColor : AppTheme.light.stringColor
+        case .dark: return NSColor(red: 0.84, green: 0.45, blue: 0.35, alpha: 1.0)
         case .light: return NSColor(red: 0.761, green: 0.196, blue: 0.169, alpha: 1.0) // Red
         case .navy: return NSColor(red: 1.0, green: 0.718, blue: 0.012, alpha: 1.0) // #FFB703
         case .lightBlue: return NSColor(red: 0.827, green: 0.184, blue: 0.184, alpha: 1.0) // #D32F2F
@@ -343,7 +347,8 @@ enum AppTheme: String, CaseIterable {
     
     var commentColor: NSColor {
         switch self {
-        case .system, .dark: return NSColor(red: 0.45, green: 0.55, blue: 0.45, alpha: 1.0)
+        case .system: return NSApp?.effectiveAppearance.name == .darkAqua ? AppTheme.dark.commentColor : AppTheme.light.commentColor
+        case .dark: return NSColor(red: 0.45, green: 0.55, blue: 0.45, alpha: 1.0)
         case .light: return NSColor(red: 0.373, green: 0.514, blue: 0.349, alpha: 1.0) // Green-gray
         case .navy: return NSColor(red: 0.424, green: 0.459, blue: 0.490, alpha: 1.0) // #6C757D
         case .lightBlue: return NSColor(red: 0.333, green: 0.545, blue: 0.184, alpha: 1.0) // #558B2F
@@ -385,7 +390,8 @@ enum AppTheme: String, CaseIterable {
     
     var numberColor: NSColor {
         switch self {
-        case .system, .dark: return NSColor(red: 0.82, green: 0.68, blue: 0.36, alpha: 1.0)
+        case .system: return NSApp?.effectiveAppearance.name == .darkAqua ? AppTheme.dark.numberColor : AppTheme.light.numberColor
+        case .dark: return NSColor(red: 0.82, green: 0.68, blue: 0.36, alpha: 1.0)
         case .light: return NSColor(red: 0.071, green: 0.408, blue: 0.616, alpha: 1.0) // Blue
         case .navy: return NSColor(red: 0.549, green: 0.906, blue: 0.992, alpha: 1.0) // Light cyan
         case .lightBlue: return NSColor(red: 0.071, green: 0.408, blue: 0.616, alpha: 1.0)
@@ -426,10 +432,11 @@ enum AppTheme: String, CaseIterable {
     
     var typeColor: NSColor {
         switch self {
-        case .system, .dark: return NSColor(red: 0.35, green: 0.68, blue: 0.85, alpha: 1.0)
+        case .system: return NSApp?.effectiveAppearance.name == .darkAqua ? AppTheme.dark.typeColor : AppTheme.light.typeColor
+        case .dark: return NSColor(red: 0.35, green: 0.68, blue: 0.85, alpha: 1.0)
         case .light: return NSColor(red: 0.110, green: 0.404, blue: 0.576, alpha: 1.0) // Teal
         case .navy: return NSColor(red: 0.498, green: 0.859, blue: 0.702, alpha: 1.0) // Mint
-        case .lightBlue: return NSColor(red: 0.129, green: 0.588, blue: 0.953, alpha: 1.0) // #2196F3
+        case .lightBlue: return NSColor(red: 0.082, green: 0.396, blue: 0.753, alpha: 1.0) // #1565C0 (Darker Blue for better contrast)
         case .xcodeLight: return NSColor(red: 0.110, green: 0.404, blue: 0.576, alpha: 1.0) // Teal
         case .xcodeDark: return NSColor(red: 0.353, green: 0.812, blue: 0.945, alpha: 1.0) // Cyan
         case .vscodeDefault: return NSColor(red: 0.306, green: 0.788, blue: 0.690, alpha: 1.0) // #4EC9B0
@@ -450,7 +457,7 @@ enum AppTheme: String, CaseIterable {
         case .transparent: return NSColor(red: 1.0, green: 0.2, blue: 0.6, alpha: 1.0) // Hot Pink
         case .extraClear: return NSColor(red: 0.2, green: 0.9, blue: 0.4, alpha: 1.0) // Lime
         case .xnuDark: return NSColor(red: 0.31, green: 0.76, blue: 0.97, alpha: 1.0) // #4FC3F7 (Light Blue)
-        case .microCodeTheme: return NSColor(red: 0.22, green: 0.66, blue: 0.76, alpha: 1.0) // Apple Cyan/Teal
+        case .microCodeTheme: return NSColor(red: 0.05, green: 0.45, blue: 0.55, alpha: 1.0) // Deep Apple Teal
         case .monokaiPro: return NSColor(red: 0.412, green: 0.847, blue: 0.988, alpha: 1.0) // #69D9FC (Blue)
         case .oneDarkPro: return NSColor(red: 0.349, green: 0.718, blue: 0.773, alpha: 1.0) // #56B6C2 (Cyan)
         case .nord: return NSColor(red: 0.561, green: 0.737, blue: 0.733, alpha: 1.0) // #8FBCBB (Teal)
@@ -468,7 +475,8 @@ enum AppTheme: String, CaseIterable {
     
     var functionColor: NSColor {
         switch self {
-        case .system, .dark: return NSColor(red: 0.40, green: 0.72, blue: 0.65, alpha: 1.0)
+        case .system: return NSApp?.effectiveAppearance.name == .darkAqua ? AppTheme.dark.functionColor : AppTheme.light.functionColor
+        case .dark: return NSColor(red: 0.40, green: 0.72, blue: 0.65, alpha: 1.0)
         case .light: return NSColor(red: 0.067, green: 0.376, blue: 0.537, alpha: 1.0)
         case .navy: return NSColor(red: 0.984, green: 0.769, blue: 0.353, alpha: 1.0) // Gold
         case .lightBlue: return NSColor(red: 0.506, green: 0.298, blue: 0.757, alpha: 1.0) // Purple
@@ -514,7 +522,8 @@ enum AppTheme: String, CaseIterable {
     
     var selectionColor: NSColor {
         switch self {
-        case .system, .dark: return NSColor(red: 0.16, green: 0.24, blue: 0.36, alpha: 1.0) // #2A3D5D
+        case .system: return NSApp?.effectiveAppearance.name == .darkAqua ? AppTheme.dark.selectionColor : AppTheme.light.selectionColor
+        case .dark: return NSColor(red: 0.16, green: 0.24, blue: 0.36, alpha: 1.0) // #2A3D5D
         case .light: return NSColor(red: 1.0, green: 0.92, blue: 0.65, alpha: 1.0) // #FFEAA7
         case .navy: return NSColor(red: 0.15, green: 0.2, blue: 0.4, alpha: 1.0)
         case .lightBlue: return NSColor(red: 0.8, green: 0.9, blue: 1.0, alpha: 1.0)
@@ -556,7 +565,8 @@ enum AppTheme: String, CaseIterable {
     
     var lineHighlightColor: NSColor {
         switch self {
-        case .system, .dark: return NSColor(red: 0.07, green: 0.09, blue: 0.15, alpha: 1.0) // #111827
+        case .system: return NSApp?.effectiveAppearance.name == .darkAqua ? AppTheme.dark.lineHighlightColor : AppTheme.light.lineHighlightColor
+        case .dark: return NSColor(red: 0.07, green: 0.09, blue: 0.15, alpha: 1.0) // #111827
         case .light: return NSColor(red: 1.0, green: 0.96, blue: 0.8, alpha: 1.0) // #FFF4CC
         case .navy: return NSColor(red: 0.05, green: 0.08, blue: 0.2, alpha: 1.0)
         case .lightBlue: return NSColor(red: 0.9, green: 0.95, blue: 1.0, alpha: 1.0)

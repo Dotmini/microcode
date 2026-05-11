@@ -306,6 +306,11 @@ RustBuffer uniffi_microcode_core_fn_method_microcore_semantic_search(void*_Nonnu
 void uniffi_microcode_core_fn_method_microcore_write_file(void*_Nonnull ptr, RustBuffer file_path, RustBuffer content, RustCallStatus *_Nonnull out_status
 );
 #endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_MICROCODE_CORE_FN_FUNC_FETCH_GHOST_TEXT
+#define UNIFFI_FFIDEF_UNIFFI_MICROCODE_CORE_FN_FUNC_FETCH_GHOST_TEXT
+uint64_t uniffi_microcode_core_fn_func_fetch_ghost_text(RustBuffer endpoint, RustBuffer model, RustBuffer prefix, RustBuffer suffix
+);
+#endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_MICROCODE_CORE_FN_FUNC_GET_KERNEL_NETWORK_STATUS
 #define UNIFFI_FFIDEF_UNIFFI_MICROCODE_CORE_FN_FUNC_GET_KERNEL_NETWORK_STATUS
 RustBuffer uniffi_microcode_core_fn_func_get_kernel_network_status(RustCallStatus *_Nonnull out_status
@@ -601,6 +606,12 @@ void ffi_microcode_core_rust_future_free_void(uint64_t handle
 #ifndef UNIFFI_FFIDEF_FFI_MICROCODE_CORE_RUST_FUTURE_COMPLETE_VOID
 #define UNIFFI_FFIDEF_FFI_MICROCODE_CORE_RUST_FUTURE_COMPLETE_VOID
 void ffi_microcode_core_rust_future_complete_void(uint64_t handle, RustCallStatus *_Nonnull out_status
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_MICROCODE_CORE_CHECKSUM_FUNC_FETCH_GHOST_TEXT
+#define UNIFFI_FFIDEF_UNIFFI_MICROCODE_CORE_CHECKSUM_FUNC_FETCH_GHOST_TEXT
+uint16_t uniffi_microcode_core_checksum_func_fetch_ghost_text(void
+    
 );
 #endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_MICROCODE_CORE_CHECKSUM_FUNC_GET_KERNEL_NETWORK_STATUS

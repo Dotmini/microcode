@@ -4,8 +4,8 @@
 //
 //  Orchestrates multiple LSP client instances for different languages.
 //  Automatically starts the appropriate language server based on file type.
-//
-//  Copyright © 2025 SPU AI CLUB. All rights reserved.
+//  Tirawat Nantamas Founder and CEO of Dotmini Software.
+//  Copyright © 2025 Dotmini Software. All rights reserved.
 //
 
 import Foundation

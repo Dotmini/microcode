@@ -16,10 +16,10 @@ import SwiftUI
 
 enum ComputeTarget: String, CaseIterable, Identifiable, Codable {
     case localCPU = "Local CPU"
-    case localMLX = "Apple MLX (NPU)"
-    case localNvidia = "Nvidia GPU (Local)"
-    case cloudPremium = "Cloud Premium (A100/H100)"
-    case customHPC = "Custom HPC Server"
+    case localMLX = "Apple Silicon (NPU/Metal)"
+    case localNvidia = "Nvidia GPU (CUDA/eGPU)"
+    case cloudPremium = "Microrent Cloud (Serverless)"
+    case customHPC = "Custom Cloud GPU (RunPod/Vast.ai/Akamai)"
     
     var id: String { rawValue }
     

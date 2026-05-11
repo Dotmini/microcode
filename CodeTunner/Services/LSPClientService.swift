@@ -316,17 +316,25 @@ enum LanguageServer: String, CaseIterable {
     case typescriptServer = "typescript-language-server"
     case kotlin = "kotlin-language-server"
     case dart = "dart" // dart language-server
+    case jdtls = "jdtls" // Java
+    case csharp = "csharp-ls" // C# / .NET
+    case solargraph = "solargraph" // Ruby
+    case intelephense = "intelephense" // PHP
     
     var languageIds: [String] {
         switch self {
         case .rustAnalyzer: return ["rust", "rs"]
         case .pyright: return ["python", "py"]
-        case .sourcekitLSP: return ["swift"]
+        case .sourcekitLSP: return ["swift", "objective-c", "objc"]
         case .gopls: return ["go", "golang"]
-        case .clangd: return ["c", "cpp", "c++", "h", "hpp", "objc", "objective-c", "m", "mm"]
-        case .typescriptServer: return ["typescript", "javascript", "ts", "js", "tsx", "jsx", "html", "css", "json"] // VSCode servers often bundle widely
-        case .kotlin: return ["kotlin", "kt", "java"] // Kotlin LS often handles Java too
+        case .clangd: return ["c", "cpp", "c++", "h", "hpp", "m", "mm", "objective-c", "objective-cpp"]
+        case .typescriptServer: return ["typescript", "javascript", "ts", "js", "tsx", "jsx", "html", "css", "json"]
+        case .kotlin: return ["kotlin", "kt"]
         case .dart: return ["dart"]
+        case .jdtls: return ["java"]
+        case .csharp: return ["csharp", "cs", "dotnet"]
+        case .solargraph: return ["ruby", "rb"]
+        case .intelephense: return ["php"]
         }
     }
     

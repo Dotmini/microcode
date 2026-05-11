@@ -1,0 +1,4 @@
+module microcode_coreFFI {
+    header "microcode_coreFFI.h"
+    export *
+}

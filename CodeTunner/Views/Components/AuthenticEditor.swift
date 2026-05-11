@@ -59,6 +59,9 @@ struct AuthenticEditor: NSViewRepresentable {
         // Initial highlight
         context.coordinator.highlight(textView.textStorage, language: language)
         
+        // Initialize Ghost Text Manager
+        context.coordinator.ghostManager = GhostTextManager(textView: textView)
+        
         scrollView.documentView = textView
         
         // Update Coordinator with the text storage to observe changes if needed
@@ -108,6 +111,9 @@ struct AuthenticEditor: NSViewRepresentable {
         // The Brain (Native ObjC++)
         var languageCore: AuthenticLanguageCore?
         
+        // Ghost Text AI Autocomplete
+        var ghostManager: GhostTextManager?
+        
         // Performance: Debounce timer + dirty tracking
         private var highlightWorkItem: DispatchWorkItem?
         private var lastHighlightedText: String = ""
@@ -122,8 +128,26 @@ struct AuthenticEditor: NSViewRepresentable {
             self.languageCore = AuthenticLanguageCore(language: currentLanguage)
         }
         
+        // Handle Key Commands (Tab to accept ghost text)
+        public func textView(_ textView: NSTextView, doCommandBy commandSelector: Selector) -> Bool {
+            if commandSelector == #selector(NSResponder.insertTab(_:)) {
+                if let gm = ghostManager, gm.acceptSuggestion() {
+                    return true // Handled by Ghost Text
+                }
+            } else if commandSelector == #selector(NSResponder.cancelOperation(_:)) {
+                if let gm = ghostManager, !gm.ghostField.isHidden {
+                    gm.clear()
+                    return true // Clear ghost text on Esc
+                }
+            }
+            return false // Let standard behavior proceed
+        }
+        
         public func textDidChange(_ notification: Notification) {
             guard let textView = notification.object as? NSTextView else { return }
+            
+            // Clear ghost text if user typed something new
+            ghostManager?.clear()
             
             // 1. Update Binding (always immediate)
             parent.text = textView.string
@@ -139,6 +163,15 @@ struct AuthenticEditor: NSViewRepresentable {
             }
             highlightWorkItem = workItem
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.15, execute: workItem)
+            
+            // 4. Trigger AI Autocomplete Request
+            let cursorLoc = textView.selectedRange().location
+            let text = textView.string as NSString
+            if cursorLoc <= text.length {
+                let prefix = text.substring(to: cursorLoc)
+                let suffix = text.substring(from: cursorLoc)
+                AIAutocompleteService.shared.triggerAutocomplete(prefix: prefix, suffix: suffix, cursorLocation: cursorLoc, fileExtension: parent.language)
+            }
         }
         
         private func performHighlight(_ textView: NSTextView) {

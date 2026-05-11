@@ -152,7 +152,8 @@ let package = Package(
                 "Services/KeychainManager.swift",      // Keychain CRUD + Rust FFI Bridge
                 "Services/MCPServer.swift",            // MCP Protocol Server
                 "Services/LocalLLMService.swift",     // Local LLM Detection (LM Studio, Ollama)
-
+                "Services/AIAutocompleteService.swift", // Ghost Text AI Engine
+                
                 "Services/MicroCodeService.swift",    // AI Core Service Wrapper
                 "Kernel/ComputeKernel.swift",
                 "Views/Design/AIDesignPanel.swift",
@@ -167,6 +168,7 @@ let package = Package(
                 "Views/Components/SnowEffectView.swift",
                 "Views/Components/ThemePickerView.swift",
                 "Views/Components/AuthenticEditor.swift",
+                "Views/Components/AuthenticEditor+GhostText.swift",
                 "Views/Components/AuthenticFileTree.swift",
                 "Views/Components/AuthenticLogConsole.swift",
                 "Views/Components/AuthenticTerminal.swift",

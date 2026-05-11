@@ -770,11 +770,12 @@ public struct SyntaxHighlightedCodeView: NSViewRepresentable {
     public let fontWeight: Int // 0-5
     public let fileURL: URL?
     public let isScrollEnabled: Bool
+    public let isTransparent: Bool
     
     /// Local engine instance - MOVED TO COORDINATOR
     // private let engine = SyntaxHighlightingEngine()
     
-    public init(text: Binding<String>, language: String, fontSize: CGFloat = 13, isDark: Bool = true, themeName: String? = nil, fontName: String = "Menlo", fontWeight: Int = 2, fileURL: URL? = nil, isScrollEnabled: Bool = true) {
+    public init(text: Binding<String>, language: String, fontSize: CGFloat = 13, isDark: Bool = true, themeName: String? = nil, fontName: String = "Menlo", fontWeight: Int = 2, fileURL: URL? = nil, isScrollEnabled: Bool = true, isTransparent: Bool = false) {
         self._text = text
         self.language = language
         self.fontSize = fontSize
@@ -784,6 +785,7 @@ public struct SyntaxHighlightedCodeView: NSViewRepresentable {
         self.fontWeight = fontWeight
         self.fileURL = fileURL
         self.isScrollEnabled = isScrollEnabled
+        self.isTransparent = isTransparent
     }
     
     public func makeNSView(context: Context) -> NSScrollView {
@@ -850,9 +852,10 @@ public struct SyntaxHighlightedCodeView: NSViewRepresentable {
         textView.typingAttributes[.foregroundColor] = engine.themeManager.editorForegroundColor // FIX: Default to Theme Color (White)
         
         // Set colors
-        let isTransparent = themeName == "transparent" || themeName == "extraClear"
-        textView.backgroundColor = isTransparent ? .clear : engine.themeManager.editorBackgroundColor
-        textView.drawsBackground = !isTransparent
+        // Use the struct's isTransparent property (set by Notebooks/Cell mode) OR the theme name
+        let effectiveTransparent = self.isTransparent || themeName == "transparent" || themeName == "extraClear"
+        textView.backgroundColor = effectiveTransparent ? .clear : engine.themeManager.editorBackgroundColor
+        textView.drawsBackground = !effectiveTransparent
         textView.insertionPointColor = engine.themeManager.editorForegroundColor
         textView.textContainerInset = NSSize(width: 5, height: 8)
         
@@ -961,11 +964,11 @@ public struct SyntaxHighlightedCodeView: NSViewRepresentable {
         let activeThemeID = (!lowerTheme.isEmpty && lowerTheme != "system") ? themeName! : (isDark ? "dark" : "light")
         engine.themeManager.setActiveTheme(activeThemeID)
         
-        let isTransparent = themeName == "transparent" || themeName == "extraClear"
-        textView.backgroundColor = isTransparent ? .clear : engine.themeManager.editorBackgroundColor
-        textView.drawsBackground = !isTransparent
-        scrollView.backgroundColor = isTransparent ? .clear : engine.themeManager.editorBackgroundColor
-        scrollView.drawsBackground = !isTransparent
+        let effectiveTransparent = self.isTransparent || themeName == "transparent" || themeName == "extraClear"
+        textView.backgroundColor = effectiveTransparent ? .clear : engine.themeManager.editorBackgroundColor
+        textView.drawsBackground = !effectiveTransparent
+        scrollView.backgroundColor = effectiveTransparent ? .clear : engine.themeManager.editorBackgroundColor
+        scrollView.drawsBackground = !effectiveTransparent
         
         // Ensure explicit text color (fixes invisible text when opening project files)
         // Guard: only update if color actually changed to prevent layout loops
@@ -977,6 +980,10 @@ public struct SyntaxHighlightedCodeView: NSViewRepresentable {
         // The textColor is the fallback color for any text not covered by syntax tokens
         if textView.textColor != fgColor {
             textView.textColor = fgColor
+        }
+        // DEBUG: Force visible color if text color is clear
+        if textView.textColor == .clear {
+            textView.textColor = .red
         }
         // FIX: Ensure typingAttributes always have foreground color
         if textView.typingAttributes[.foregroundColor] == nil {
@@ -1020,8 +1027,9 @@ public struct SyntaxHighlightedCodeView: NSViewRepresentable {
         // Critical Fix: Also check if language changed, otherwise switching file types (e.g. .txt -> .swift) wouldn't update highlighting
         // We store the current language in the engine to compare
         let languageChanged = engine.currentLanguage != language
+        let themeChanged = context.coordinator.lastThemeName != themeName || context.coordinator.lastIsDark != isDark
         
-        if textView.string != text || languageChanged {
+        if textView.string != text || languageChanged || themeChanged {
             // Update the actual text view content if it changed
             if textView.string != text {
                 // Critical Fix: Disable Coordinator updates during full replacement

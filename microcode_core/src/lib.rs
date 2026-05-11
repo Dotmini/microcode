@@ -16,6 +16,7 @@ use tokio::sync::RwLock;
 
 mod fs_editor;
 mod rag_engine;
+mod llm_client;
 
 pub use fs_editor::FileEditor;
 pub use rag_engine::RagEngine;
