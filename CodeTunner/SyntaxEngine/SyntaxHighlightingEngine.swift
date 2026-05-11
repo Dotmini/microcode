@@ -898,8 +898,18 @@ public struct SyntaxHighlightedCodeView: NSViewRepresentable {
         scrollView.backgroundColor = isTransparent ? .clear : engine.themeManager.editorBackgroundColor
         scrollView.backgroundColor = isTransparent ? .clear : engine.themeManager.editorBackgroundColor
         
-        // Initialize and apply highlighting
-        engine.setDocument(text, language: language)
+        // FIX INVISIBLE TEXT: Never use textView.string = text (wipes all attributes → black text).
+        // Instead, set an attributed string with the theme foreground color baked in from the start.
+        let initialFont = textView.font ?? NSFont.monospacedSystemFont(ofSize: fontSize, weight: .regular)
+        let initialAttrs: [NSAttributedString.Key: Any] = [
+            .foregroundColor: engine.themeManager.editorForegroundColor,
+            .font: initialFont
+        ]
+        let attrString = NSAttributedString(string: text, attributes: initialAttrs)
+        textView.textStorage?.setAttributedString(attrString)
+        
+        // Initialize and apply highlighting AFTER setting text storage so engine gets normalized string (e.g. \r\n -> \n)
+        engine.setDocument(textView.string, language: language)
         
         // Notify LSP file opened (non-blocking with timeout)
         if let url = context.coordinator.parent.fileURL {
@@ -916,16 +926,6 @@ public struct SyntaxHighlightedCodeView: NSViewRepresentable {
                 timeoutTask.cancel()
             }
         }
-        
-        // FIX INVISIBLE TEXT: Never use textView.string = text (wipes all attributes → black text).
-        // Instead, set an attributed string with the theme foreground color baked in from the start.
-        let initialFont = textView.font ?? NSFont.monospacedSystemFont(ofSize: fontSize, weight: .regular)
-        let initialAttrs: [NSAttributedString.Key: Any] = [
-            .foregroundColor: engine.themeManager.editorForegroundColor,
-            .font: initialFont
-        ]
-        let attrString = NSAttributedString(string: text, attributes: initialAttrs)
-        textView.textStorage?.setAttributedString(attrString)
         
         if let textStorage = textView.textStorage {
             // Apply syntax highlighting on top (async, non-blocking)
@@ -1056,7 +1056,7 @@ public struct SyntaxHighlightedCodeView: NSViewRepresentable {
             }
             
             // Update document content in engine
-            engine.setDocument(text, language: language)
+            engine.setDocument(textView.string, language: language)
             
             // Apply highlighting via Debounce to prevent Main Thread congestion (e.g. Notebook open)
             context.coordinator.triggerDebouncedHighlight(for: textView)
