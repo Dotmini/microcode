@@ -917,11 +917,18 @@ public struct SyntaxHighlightedCodeView: NSViewRepresentable {
             }
         }
         
-        // Use asynchronous highlighting to prevent main-thread freeze during cell initialization
-        // We set the cached text first (fast) then apply attributes later
-        textView.string = text
+        // FIX INVISIBLE TEXT: Never use textView.string = text (wipes all attributes → black text).
+        // Instead, set an attributed string with the theme foreground color baked in from the start.
+        let initialFont = textView.font ?? NSFont.monospacedSystemFont(ofSize: fontSize, weight: .regular)
+        let initialAttrs: [NSAttributedString.Key: Any] = [
+            .foregroundColor: engine.themeManager.editorForegroundColor,
+            .font: initialFont
+        ]
+        let attrString = NSAttributedString(string: text, attributes: initialAttrs)
+        textView.textStorage?.setAttributedString(attrString)
+        
         if let textStorage = textView.textStorage {
-            // FIX: Guard against empty content — skip highlighting for empty files
+            // Apply syntax highlighting on top (async, non-blocking)
             if !text.isEmpty {
                 engine.applyHighlightingAsync(to: textStorage, fontSize: fontSize, font: textView.font)
             }
