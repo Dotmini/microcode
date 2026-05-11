@@ -422,17 +422,30 @@ EOF
     if [ "$DEV_MODE" = "false" ]; then
         echo "   💿 Creating DMG..."
         DMG_NAME="${VARIANT_NAME}.dmg"
-        hdiutil create -volname "${APP_NAME}" -srcfolder "${OUTPUT_FOLDER}" -ov -format UDZO "${OUTPUT_FOLDER}/${DMG_NAME}"
+        TEMP_DMG="${BUILD_ROOT}/${DMG_NAME}"
+        
+        # Remove any existing to prevent resource busy
+        rm -f "${TEMP_DMG}" "${OUTPUT_FOLDER}/${DMG_NAME}"
+        
+        hdiutil create -volname "${APP_NAME}" -srcfolder "${OUTPUT_FOLDER}" -ov -format UDZO "${TEMP_DMG}"
+        mv "${TEMP_DMG}" "${OUTPUT_FOLDER}/${DMG_NAME}"
         echo "      -> Created ${OUTPUT_FOLDER}/${DMG_NAME}"
 
         # 2.8 Create PKG
         echo "   📦 Creating PKG..."
         PKG_NAME="${VARIANT_NAME}.pkg"
+        TEMP_PKG="${BUILD_ROOT}/${PKG_NAME}"
+        
+        # Remove any existing
+        rm -f "${TEMP_PKG}" "${OUTPUT_FOLDER}/${PKG_NAME}"
+        
         pkgbuild --root "${APP_BUNDLE}" \
                  --identifier "${BUNDLE_ID}" \
                  --version "${VERSION}" \
                  --install-location "/Applications/${APP_NAME}.app" \
-                 "${OUTPUT_FOLDER}/${PKG_NAME}"
+                 "${TEMP_PKG}"
+                 
+        mv "${TEMP_PKG}" "${OUTPUT_FOLDER}/${PKG_NAME}"
         echo "      -> Created ${OUTPUT_FOLDER}/${PKG_NAME}"
     else
         echo "   ⏩ Dev Mode: Skipping DMG/PKG creation."
