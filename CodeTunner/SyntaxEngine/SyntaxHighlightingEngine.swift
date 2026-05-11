@@ -493,19 +493,31 @@ public final class SyntaxHighlightingEngine: @unchecked Sendable {
         // ASYNC PATH (Large Docs)
         // Use a detached task for background work, but keep reference for cancellation
         currentHighlightTask = Task.detached(priority: .userInitiated) { [weak self] in
-            guard let self = self else { return }
+            guard let self = self else {
+                await MainActor.run { completion?() }
+                return
+            }
             
             // Check cancellation before heavy work
-            if Task.isCancelled { return }
+            if Task.isCancelled {
+                await MainActor.run { completion?() }
+                return
+            }
             
             // 1. Re-lex dirty regions (this is the expensive part)
             let tokens = lexer.retokenizeDirtyRegions(in: content)
             
             // Check cancellation mid-work
-            if Task.isCancelled { return }
+            if Task.isCancelled {
+                await MainActor.run { completion?() }
+                return
+            }
             
             // 2. Apply attributes on the main thread
             await MainActor.run {
+                // ALWAYS call completion when we exit this closure to prevent isUpdating deadlocks
+                defer { completion?() }
+                
                 // Check cancellation right before applying
                 if Task.isCancelled { return }
                 
@@ -517,8 +529,6 @@ public final class SyntaxHighlightingEngine: @unchecked Sendable {
                 if isStillValid {
                     self.applyTokens(tokens, to: textStorage, fontSize: fontSize, font: font)
                 }
-                
-                completion?()
             }
         }
     }
@@ -1051,8 +1061,12 @@ public struct SyntaxHighlightedCodeView: NSViewRepresentable {
                 
                 let newRange = NSRange(location: 0, length: (normalizedText as NSString).length)
                 let customFont = NSFont(name: fontName, size: fontSize) ?? NSFont.monospacedSystemFont(ofSize: fontSize, weight: .regular)
+                
+                let fgColor = engine.themeManager.editorForegroundColor
+                print("DEBUG HIGHLIGHTER: Setting default color: \(fgColor.hexString) (isDark: \(isDark), theme: \(themeName ?? "nil"))")
+                
                 textView.textStorage?.addAttributes([
-                    .foregroundColor: engine.themeManager.editorForegroundColor,
+                    .foregroundColor: fgColor,
                     .font: customFont
                 ], range: newRange)
                 textView.textStorage?.endEditing()
