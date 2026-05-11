@@ -18,7 +18,7 @@ class BackendService {
 
     private init() {
         let config = URLSessionConfiguration.default
-        config.timeoutIntervalForRequest = 60
+        config.timeoutIntervalForRequest = 300 // Extended for long AI tasks
         config.timeoutIntervalForResource = 300
         self.session = URLSession(configuration: config)
     }

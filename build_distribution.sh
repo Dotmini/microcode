@@ -247,6 +247,41 @@ package_variant() {
     </dict>
     <key>NSHumanReadableCopyright</key>
     <string>Copyright © 2025 Dotmini Software. All rights reserved.</string>
+    <key>CFBundleDocumentTypes</key>
+    <array>
+        <dict>
+            <key>CFBundleTypeName</key>
+            <string>MicroCode Notebook</string>
+            <key>CFBundleTypeRole</key>
+            <string>Editor</string>
+            <key>LSHandlerRank</key>
+            <string>Owner</string>
+            <key>LSItemContentTypes</key>
+            <array>
+                <string>com.dotmini.microcode.mic</string>
+            </array>
+        </dict>
+    </array>
+    <key>UTExportedTypeDeclarations</key>
+    <array>
+        <dict>
+            <key>UTTypeIdentifier</key>
+            <string>com.dotmini.microcode.mic</string>
+            <key>UTTypeDescription</key>
+            <string>MicroCode Notebook</string>
+            <key>UTTypeConformsTo</key>
+            <array>
+                <string>public.data</string>
+            </array>
+            <key>UTTypeTagSpecification</key>
+            <dict>
+                <key>public.filename-extension</key>
+                <array>
+                    <string>mic</string>
+                </array>
+            </dict>
+        </dict>
+    </array>
 </dict>
 </plist>
 EOF

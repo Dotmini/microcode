@@ -20,7 +20,7 @@ impl OpenAIProvider {
         Self {
             api_key,
             client: reqwest::Client::builder()
-                .timeout(std::time::Duration::from_secs(120))
+                .timeout(std::time::Duration::from_secs(300))
                 .build()
                 .unwrap_or_default(),
             base_url: "https://api.openai.com/v1".to_string(),
@@ -32,7 +32,7 @@ impl OpenAIProvider {
         Self {
             api_key,
             client: reqwest::Client::builder()
-                .timeout(std::time::Duration::from_secs(120))
+                .timeout(std::time::Duration::from_secs(300))
                 .build()
                 .unwrap_or_default(),
             base_url,

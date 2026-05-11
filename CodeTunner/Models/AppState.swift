@@ -1228,6 +1228,7 @@ class AppState: ObservableObject {
         }
     }
 
+    @MainActor
     func openFolder() {
         let panel = NSOpenPanel()
         panel.allowsMultipleSelection = false

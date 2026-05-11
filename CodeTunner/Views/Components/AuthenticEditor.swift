@@ -39,9 +39,9 @@ struct AuthenticEditor: NSViewRepresentable {
         textView.isAutomaticTextReplacementEnabled = false
         textView.isAutomaticSpellingCorrectionEnabled = false
         textView.font = font
-        textView.backgroundColor = PlaygroundsColors.background
-        textView.textColor = PlaygroundsColors.text
-        textView.insertionPointColor = .white
+        textView.backgroundColor = ThemeManager.shared.editorBackgroundColor
+        textView.textColor = ThemeManager.shared.editorForegroundColor
+        textView.insertionPointColor = ThemeManager.shared.caretColor
         textView.selectedTextAttributes = [
             .backgroundColor: NSColor.selectedTextBackgroundColor,
             .foregroundColor: NSColor.white
@@ -226,7 +226,7 @@ struct AuthenticEditor: NSViewRepresentable {
             // Reset base for visible range only
             textStorage.removeAttribute(.foregroundColor, range: highlightRange)
             textStorage.addAttributes([
-                .foregroundColor: PlaygroundsColors.text,
+                .foregroundColor: ThemeManager.shared.editorForegroundColor,
                 .font: parent.font
             ], range: highlightRange)
             
@@ -287,21 +287,24 @@ struct AuthenticEditor: NSViewRepresentable {
         }
         
         private func colorForTokenType(_ type: AuthenticTokenType) -> NSColor {
+            let tm = ThemeManager.shared
             switch type {
-            case .keyword, .keywordControl, .keywordModifier: return PlaygroundsColors.keyword
-            case .keywordDeclaration: return PlaygroundsColors.keyword
-            case .string: return PlaygroundsColors.string
-            case .number: return PlaygroundsColors.number
-            case .comment: return PlaygroundsColors.comment
-            case .type: return PlaygroundsColors.type
-            case .function: return PlaygroundsColors.function
-            case .identifier: return PlaygroundsColors.text
-            case .operator: return PlaygroundsColors.text
-            case .punctuation: return PlaygroundsColors.text
-            case .preprocessor: return PlaygroundsColors.keyword 
-            case .URL: return PlaygroundsColors.string
-            case .unknown: return PlaygroundsColors.text
-            @unknown default: return PlaygroundsColors.text
+            case .keyword: return tm.color(for: .keyword)
+            case .keywordControl: return tm.color(for: .keywordControl)
+            case .keywordModifier: return tm.color(for: .keywordModifier)
+            case .keywordDeclaration: return tm.color(for: .keywordDeclaration)
+            case .string: return tm.color(for: .string)
+            case .number: return tm.color(for: .number)
+            case .comment: return tm.color(for: .comment)
+            case .type: return tm.color(for: .type)
+            case .function: return tm.color(for: .function)
+            case .identifier: return tm.color(for: .identifier)
+            case .operator: return tm.color(for: .operator)
+            case .punctuation: return tm.color(for: .punctuation)
+            case .preprocessor: return tm.color(for: .preprocessor)
+            case .URL: return tm.color(for: .string)
+            case .unknown: return tm.editorForegroundColor
+            @unknown default: return tm.editorForegroundColor
             }
         }
     }

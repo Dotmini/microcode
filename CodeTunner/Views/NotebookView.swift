@@ -297,6 +297,7 @@ final class NotebookCellModel: ObservableObject, Identifiable {
         case markdown = "Markdown"
         case raw = "Raw"
         case procedure = "Procedure"
+        case agent = "Agent"
     }
     
     init(type: CellType = .code, language: CellLanguage = .python, content: String = "") {
@@ -413,6 +414,8 @@ final class NotebookViewModel: ObservableObject {
         let content: String
         if type == .code {
             content = ""  // Will use language default content
+        } else if type == .agent {
+            content = "Use the shell tool to list files in the current directory."
         } else {
             content = "# Heading\n\nText here..."
         }
@@ -450,7 +453,7 @@ final class NotebookViewModel: ObservableObject {
     }
     
     func runCell(_ cell: NotebookCellModel, computeTarget: ComputeTarget = .localCPU) {
-        guard cell.type == .code || cell.type == .procedure else { return }
+        guard cell.type == .code || cell.type == .procedure || cell.type == .agent else { return }
         
         cell.isExecuting = true
         cell.clearOutput()
@@ -487,6 +490,11 @@ final class NotebookViewModel: ObservableObject {
             return
         }
         
+        if cell.type == .agent {
+            runAgentCell(cell)
+            return
+        }
+        
         if cell.type == .procedure {
             runProcedureCell(cell)
             return
@@ -520,6 +528,111 @@ final class NotebookViewModel: ObservableObject {
     private func runProcedureCell(_ cell: NotebookCellModel) {
         // Procedure cells always run as Python with generated code
         runPythonCell(cell)
+    }
+    
+    private func runAgentCell(_ cell: NotebookCellModel) {
+        let cellID = cell.id
+        let prompt = cell.content
+        let workingDir = workingDirectory.path
+        
+        // Find existing AgentToolBox instance or create a local scope one
+        let toolBox = AgentToolBox.shared
+        toolBox.workspaceRoot = workingDir
+        
+        let systemPrompt = """
+        You are a highly capable OS-Level Agent executing inside a MicroCode Notebook cell.
+        You have direct access to the user's local machine via tool calls.
+        Your current working directory is: \(workingDir)
+        
+        You can execute tools by using the following XML format:
+        <call:shell_command>{"command": "ls -la"}</call:shell_command>
+        <call:file_write>{"path": "test.txt", "content": "hello"}</call:file_write>
+        
+        Available Tools:
+        - shell_command: Run any bash command (arguments: command)
+        - file_write: Write a file (arguments: path, content)
+        - file_read: Read a file (arguments: path)
+        
+        Execute the user's instructions and output your findings or actions taken.
+        """
+        
+        // We capture the view model context to update UI
+        DispatchQueue.main.async {
+            cell.appendOutput("🤖 [Agent Booting] Initializing OS-Level execution...\n")
+        }
+        
+        let model = UserDefaults.standard.string(forKey: "aiModel") ?? "gemini-2.5-flash"
+        
+        AIClient.shared.sendMessage(
+            prompt: prompt,
+            systemPrompt: systemPrompt,
+            provider: .gemini,
+            model: model,
+            apiKey: "",
+            onToken: { token in
+                DispatchQueue.main.async {
+                    cell.appendOutput(token)
+                }
+            },
+            onComplete: { fullResponse in
+                // Extremely simple tool execution regex fallback
+                // If the response contains <call:shell_command>{"command": "..."}</call:shell_command>
+                let regex = try? NSRegularExpression(pattern: "<call:(shell_command|file_write|file_read)>\\s*\\{(.*?)\\}\\s*</call:\\1>", options: [.dotMatchesLineSeparators])
+                let nsString = fullResponse as NSString
+                
+                if let matches = regex?.matches(in: fullResponse, range: NSRange(location: 0, length: nsString.length)), !matches.isEmpty {
+                    DispatchQueue.main.async {
+                        cell.appendOutput("\n\n⚙️ [Agent Executing Tool]...\n")
+                    }
+                    
+                    for match in matches {
+                        let toolName = nsString.substring(with: match.range(at: 1))
+                        let argsString = "{" + nsString.substring(with: match.range(at: 2)) + "}"
+                        
+                        var args: [String: Any] = [:]
+                        if let data = argsString.data(using: .utf8),
+                           let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] {
+                            args = json
+                        } else {
+                            // Basic fallback if JSON parsing fails
+                            if toolName == "shell_command" {
+                                let cmdRegex = try? NSRegularExpression(pattern: "\"command\"\\s*:\\s*\"([^\"]+)\"")
+                                if let cmdMatch = cmdRegex?.firstMatch(in: argsString, range: NSRange(location: 0, length: argsString.utf16.count)) {
+                                    args["command"] = (argsString as NSString).substring(with: cmdMatch.range(at: 1))
+                                }
+                            }
+                        }
+                        
+                        // Execute Tool
+                        Task {
+                            let result = await toolBox.execute(toolName: toolName, args: args)
+                            DispatchQueue.main.async {
+                                cell.appendOutput("\n[Tool Output (\(toolName))]:\n\(result.output)\n")
+                                cell.isExecuting = false
+                                self.kernelStatus = "Idle"
+                                cell.executionCount = (cell.executionCount ?? 0) + 1
+                                self.totalExecutions += 1
+                            }
+                        }
+                        return // Wait for tool execution
+                    }
+                } else {
+                    DispatchQueue.main.async {
+                        cell.isExecuting = false
+                        self.kernelStatus = "Idle"
+                        cell.executionCount = (cell.executionCount ?? 0) + 1
+                        self.totalExecutions += 1
+                    }
+                }
+            },
+            onError: { error in
+                DispatchQueue.main.async {
+                    cell.appendOutput("\n❌ Agent Error: \(error)\n")
+                    cell.isExecuting = false
+                    self.kernelStatus = "Error"
+                }
+            }
+        )
     }
     
     private func runRustCell(_ cell: NotebookCellModel) {
@@ -1405,18 +1518,21 @@ final class NotebookViewModel: ObservableObject {
         
         let panel = NSSavePanel()
         panel.allowedContentTypes = [
+            UTType(filenameExtension: "mic") ?? .data,
             UTType(filenameExtension: "mcnb") ?? .json,
+            UTType(filenameExtension: "ipynb") ?? .json,
             .json
         ]
-        panel.nameFieldStringValue = "\(notebook.name).mcnb"
+        panel.nameFieldStringValue = "\(notebook.name).mic"
         panel.title = "Save Notebook"
-        panel.message = "Save as .mcnb (MicroCode native) or .ipynb (Jupyter compatible)"
         
         panel.begin { response in
             guard response == .OK, let url = panel.url else { return }
             
             if url.pathExtension == "ipynb" {
                 self.exportAsIPYNB(notebook: notebook, to: url)
+            } else if url.pathExtension == "mic" {
+                self.exportAsMic(notebook: notebook, to: url)
             } else {
                 self.saveAsMCNB(notebook: notebook, to: url)
             }
@@ -1484,6 +1600,11 @@ final class NotebookViewModel: ObservableObject {
     // MARK: - Load MicroCode Notebook (.mcnb)
     
     func loadNotebook(from url: URL) {
+        if url.pathExtension == "mic" {
+            loadFromMic(url: url)
+            return
+        }
+        
         do {
             let data = try Data(contentsOf: url)
             guard let dict = try JSONSerialization.jsonObject(with: data) as? [String: Any] else {
@@ -1671,7 +1792,44 @@ final class NotebookViewModel: ObservableObject {
             try data.write(to: url)
             print("✅ Exported as .ipynb to \(url.lastPathComponent)")
         } catch {
-            print("❌ Failed to export notebook: \(error)")
+            print("❌ Failed to export .ipynb: \(error)")
+        }
+    }
+    
+    // MARK: - .mic Format (MicroCode Notebook)
+    func exportAsMic(notebook: NotebookModel, to url: URL) {
+        do {
+            let micNotebook = MicNotebook(from: notebook)
+            let encoder = JSONEncoder()
+            let jsonData = try encoder.encode(micNotebook)
+            // LZFSE Compression
+            let compressedData = try (jsonData as NSData).compressed(using: .lzfse)
+            try compressedData.write(to: url)
+            print("✅ Exported as .mic to \(url.lastPathComponent)")
+        } catch {
+            print("❌ Failed to export .mic: \(error)")
+        }
+    }
+    
+    func loadFromMic(url: URL) {
+        do {
+            let compressedData = try Data(contentsOf: url)
+            // LZFSE Decompression
+            let decompressedData = try (compressedData as NSData).decompressed(using: .lzfse)
+            let decoder = JSONDecoder()
+            let micNotebook = try decoder.decode(MicNotebook.self, from: decompressedData as Data)
+            let notebook = micNotebook.toModel()
+            
+            DispatchQueue.main.async {
+                self.notebooks.append(notebook)
+                self.activeNotebookId = notebook.id
+                if let firstCell = notebook.cells.first {
+                    self.selectedCellId = firstCell.id
+                }
+            }
+            print("✅ Loaded .mic from \(url.lastPathComponent)")
+        } catch {
+            print("❌ Failed to load .mic: \(error)")
         }
     }
     
@@ -1909,14 +2067,13 @@ struct NotebookView: View {
     private func openNotebookFile() {
         let panel = NSOpenPanel()
         panel.allowedContentTypes = [
+            UTType(filenameExtension: "mic") ?? .data,
             UTType(filenameExtension: "mcnb") ?? .json,
+            UTType(filenameExtension: "ipynb") ?? .json,
             .json
         ]
         panel.allowsMultipleSelection = false
         panel.canChooseDirectories = false
-        panel.title = "Open Notebook"
-        panel.message = "Open .mcnb (MicroCode) or .ipynb (Jupyter) notebook"
-        
         if panel.runModal() == .OK, let url = panel.url {
             viewModel.loadNotebook(from: url)
         }
@@ -2699,7 +2856,7 @@ struct NotebookCellView: View {
                         .opacity(isHovering || isSelected || cell.isExecuting ? 1 : 0)
                 }
                 .buttonStyle(.plain)
-                .disabled(cell.type != .code)
+                .disabled(cell.type != .code && cell.type != .agent && cell.type != .procedure)
             }
             .frame(width: 50)
             .padding(.top, 12)
@@ -2914,6 +3071,18 @@ struct NotebookCellView: View {
                     .cornerRadius(4)
                 }
                 .buttonStyle(.plain)
+            } else if cell.type == .agent {
+                HStack(spacing: 4) {
+                    Image(systemName: "brain")
+                        .font(.system(size: 10))
+                    Text("OS-Level Agent")
+                        .font(.system(size: 9, weight: .medium))
+                }
+                .padding(.horizontal, 6)
+                .padding(.vertical, 2)
+                .background(Color.purple.opacity(0.2))
+                .foregroundColor(.purple)
+                .cornerRadius(4)
             }
             
             // Enhanced Color Picker
@@ -3086,6 +3255,7 @@ struct NotebookCellView: View {
         case .markdown: return .green
         case .raw: return .gray
         case .procedure: return .orange
+        case .agent: return .purple
         }
     }
 }
