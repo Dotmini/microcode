@@ -675,60 +675,19 @@ struct RefactorProWindow: View {
 
     private func performRefactor(with enhancedInstructions: String) {
         if !folderFiles.isEmpty && selectedMode == .migration {
-            generateBulkMigration() // Pass instructions TODO: Update Bulk too
+            generateBulkMigration()
             return
         }
 
         Task {
             do {
-                if isUltraMode {
-                    isProcessing = true
-                    // Use enhanced chat with planning
-                    let editorContext = ActiveEditorContext(
-                        active_file: appState.currentFile?.path,
-                        active_content: originalCode,
-                        cursor_line: 0,
-                        selected_text: nil,
-                        open_files: []
-                    )
-                    
-                    let request = AgentChatRequest(
-                        session_id: appState.agentSessionId ?? "default",
-                        message: enhancedInstructions, // Use enhanced instructions
-                        editor_context: editorContext,
-                        provider: appState.aiConfig.provider,
-                        model: appState.aiConfig.model,
-                        api_key: appState.aiConfig.apiKey,
-                        auto_execute: true
-                    )
-                    
-                    let response = try await BackendService.shared.agentEnhancedChat(request: request)
-                    
-                    await MainActor.run {
-                        if let plan = response.plan {
-                            self.currentPlan = plan
-                            self.selectedTab = 2 // Switch to plan view if a plan was created
-                        }
-                        self.agentResults = response.tool_results
-                        self.refactoredCode = response.content
-                        self.isProcessing = false
-                        generateReport() // Auto generate report
-                    }
-                } else {
-                    // Standard refactor
-                    let result = try await BackendService.shared.refactorCode(
-                        code: originalCode,
-                        instructions: enhancedInstructions, // Use enhanced instructions
-                        provider: appState.aiConfig.provider,
-                        model: appState.aiConfig.model,
-                        apiKey: appState.aiConfig.apiKey
-                    )
-                    
-                    await MainActor.run {
-                        self.refactoredCode = result
-                        self.isProcessing = false
-                        generateReport()
-                    }
+                // Call AI API directly — no dependency on local Rust backend
+                let result = try await callAIDirect(instructions: enhancedInstructions)
+                
+                await MainActor.run {
+                    self.refactoredCode = result
+                    self.isProcessing = false
+                    generateReport()
                 }
             } catch {
                 await MainActor.run {
@@ -737,6 +696,164 @@ struct RefactorProWindow: View {
                 }
             }
         }
+    }
+    
+    /// Call AI provider API directly (no backend dependency)
+    private func callAIDirect(instructions: String) async throws -> String {
+        let provider = appState.aiConfig.provider
+        let apiKey = appState.aiConfig.apiKey
+        let model = appState.aiConfig.model
+        
+        guard !apiKey.isEmpty else {
+            throw NSError(domain: "RefactorPro", code: 1, userInfo: [NSLocalizedDescriptionKey: "No API key configured for \(provider). Go to Settings → AI to add your key."])
+        }
+        
+        let modeLabel = selectedMode == .migration
+            ? "Migrate this \(sourceLanguage) code to \(targetLanguage)."
+            : "Refactor this \(sourceLanguage) code."
+        
+        let systemPrompt = """
+        You are an expert code refactoring and migration engine.
+        \(modeLabel)
+        Follow the user's instructions precisely.
+        Return ONLY the resulting code — no explanations, no markdown fences, no commentary.
+        """
+        
+        let userPrompt = """
+        Instructions: \(instructions)
+        
+        Source Code (\(sourceLanguage)):
+        \(originalCode)
+        """
+        
+        var request: URLRequest
+        var body: [String: Any]
+        
+        switch provider {
+        case "gemini":
+            let url = URL(string: "https://generativelanguage.googleapis.com/v1beta/models/\(model):generateContent?key=\(apiKey)")!
+            request = URLRequest(url: url)
+            body = [
+                "contents": [
+                    ["role": "user", "parts": [["text": systemPrompt]]],
+                    ["role": "model", "parts": [["text": "Understood. I will output only the migrated/refactored code."]]],
+                    ["role": "user", "parts": [["text": userPrompt]]]
+                ],
+                "generationConfig": [
+                    "temperature": 0.2,
+                    "maxOutputTokens": 8192
+                ]
+            ]
+        case "openai":
+            request = URLRequest(url: URL(string: "https://api.openai.com/v1/chat/completions")!)
+            request.setValue("Bearer \(apiKey)", forHTTPHeaderField: "Authorization")
+            body = [
+                "model": model,
+                "messages": [
+                    ["role": "system", "content": systemPrompt],
+                    ["role": "user", "content": userPrompt]
+                ],
+                "temperature": 0.2,
+                "max_tokens": 8192
+            ]
+        case "anthropic":
+            request = URLRequest(url: URL(string: "https://api.anthropic.com/v1/messages")!)
+            request.setValue(apiKey, forHTTPHeaderField: "x-api-key")
+            request.setValue("2023-06-01", forHTTPHeaderField: "anthropic-version")
+            body = [
+                "model": model,
+                "max_tokens": 8192,
+                "system": systemPrompt,
+                "messages": [["role": "user", "content": userPrompt]]
+            ]
+        case "deepseek":
+            request = URLRequest(url: URL(string: "https://api.deepseek.com/v1/chat/completions")!)
+            request.setValue("Bearer \(apiKey)", forHTTPHeaderField: "Authorization")
+            body = [
+                "model": model.isEmpty ? "deepseek-chat" : model,
+                "messages": [
+                    ["role": "system", "content": systemPrompt],
+                    ["role": "user", "content": userPrompt]
+                ],
+                "temperature": 0.2
+            ]
+        case "qwen":
+            request = URLRequest(url: URL(string: "https://dashscope.aliyuncs.com/compatible-mode/v1/chat/completions")!)
+            request.setValue("Bearer \(apiKey)", forHTTPHeaderField: "Authorization")
+            body = [
+                "model": model.isEmpty ? "qwen-plus" : model,
+                "messages": [
+                    ["role": "system", "content": systemPrompt],
+                    ["role": "user", "content": userPrompt]
+                ],
+                "temperature": 0.2
+            ]
+        case "grok":
+            request = URLRequest(url: URL(string: "https://api.x.ai/v1/chat/completions")!)
+            request.setValue("Bearer \(apiKey)", forHTTPHeaderField: "Authorization")
+            body = [
+                "model": model.isEmpty ? "grok-3-mini" : model,
+                "messages": [
+                    ["role": "system", "content": systemPrompt],
+                    ["role": "user", "content": userPrompt]
+                ],
+                "temperature": 0.2
+            ]
+        default:
+            // Default: OpenAI-compatible format (works for most providers)
+            request = URLRequest(url: URL(string: "https://api.openai.com/v1/chat/completions")!)
+            request.setValue("Bearer \(apiKey)", forHTTPHeaderField: "Authorization")
+            body = [
+                "model": model,
+                "messages": [
+                    ["role": "system", "content": systemPrompt],
+                    ["role": "user", "content": userPrompt]
+                ],
+                "temperature": 0.2
+            ]
+        }
+        
+        request.httpMethod = "POST"
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        request.httpBody = try JSONSerialization.data(withJSONObject: body)
+        request.timeoutInterval = 120
+        
+        let (data, _) = try await URLSession.shared.data(for: request)
+        let json = try JSONSerialization.jsonObject(with: data) as? [String: Any] ?? [:]
+        
+        // Parse response based on provider
+        switch provider {
+        case "gemini":
+            if let candidates = json["candidates"] as? [[String: Any]],
+               let content = candidates.first?["content"] as? [String: Any],
+               let parts = content["parts"] as? [[String: Any]],
+               let text = parts.first?["text"] as? String {
+                return cleanMarkdownCode(text)
+            }
+            // Check for error
+            if let error = json["error"] as? [String: Any],
+               let message = error["message"] as? String {
+                throw NSError(domain: "RefactorPro", code: 2, userInfo: [NSLocalizedDescriptionKey: "Gemini: \(message)"])
+            }
+        case "anthropic":
+            if let content = json["content"] as? [[String: Any]],
+               let text = content.first?["text"] as? String {
+                return cleanMarkdownCode(text)
+            }
+        default:
+            if let choices = json["choices"] as? [[String: Any]],
+               let message = choices.first?["message"] as? [String: Any],
+               let content = message["content"] as? String {
+                return cleanMarkdownCode(content)
+            }
+            // Check for error
+            if let error = json["error"] as? [String: Any],
+               let message = error["message"] as? String {
+                throw NSError(domain: "RefactorPro", code: 2, userInfo: [NSLocalizedDescriptionKey: "\(provider): \(message)"])
+            }
+        }
+        
+        throw NSError(domain: "RefactorPro", code: 3, userInfo: [NSLocalizedDescriptionKey: "Failed to parse AI response from \(provider)"])
     }
     
     private func generateBulkMigration() {
