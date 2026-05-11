@@ -50,6 +50,8 @@ let package = Package(
                 "Models/AppState.swift",
                 "Models/AnyCodable.swift",
                 "Models/CellModels.swift",
+                "Models/MicFormat.swift",
+                "Services/MicroCore/MicroCore.swift",
                 "Services/BackendService.swift",
                 "Services/TerminalService.swift",
                 "Services/SimulatorManager.swift",
