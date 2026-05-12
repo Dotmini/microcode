@@ -540,11 +540,15 @@ public final class SyntaxHighlightingEngine: @unchecked Sendable {
     private func applyTokens(_ tokens: [SyntaxToken], to textStorage: NSTextStorage, fontSize: CGFloat, font: NSFont?) {
         assert(Thread.isMainThread, "applyTokens must be called on the main thread")
         
+        let fgColor = themeManager.editorForegroundColor
+        let bgColor = themeManager.editorBackgroundColor
+        print("🎨 [SyntaxEngine] applyTokens: tokens=\(tokens.count), tsLen=\(textStorage.length), fg=\(fgColor.hexString), bg=\(bgColor.hexString), theme=\(themeManager.currentTheme.name)")
+        
         // Ensure default color is applied to the entire text before highlighting
         let fullRange = NSRange(location: 0, length: textStorage.length)
         if fullRange.length > 0 {
             textStorage.beginEditing()
-            textStorage.addAttribute(.foregroundColor, value: themeManager.editorForegroundColor, range: fullRange)
+            textStorage.addAttribute(.foregroundColor, value: fgColor, range: fullRange)
             textStorage.endEditing()
         }
         
@@ -911,8 +915,11 @@ public struct SyntaxHighlightedCodeView: NSViewRepresentable {
         // FIX INVISIBLE TEXT: Never use textView.string = text (wipes all attributes → black text).
         // Instead, set an attributed string with the theme foreground color baked in from the start.
         let initialFont = textView.font ?? NSFont.monospacedSystemFont(ofSize: fontSize, weight: .regular)
+        let fgInit = engine.themeManager.editorForegroundColor
+        let bgInit = engine.themeManager.editorBackgroundColor
+        print("🔧 [SyntaxEngine] makeNSView: lang=\(language), theme=\(themeName ?? "nil"), isDark=\(isDark), fg=\(fgInit.hexString), bg=\(bgInit.hexString), textLen=\(text.count)")
         let initialAttrs: [NSAttributedString.Key: Any] = [
-            .foregroundColor: engine.themeManager.editorForegroundColor,
+            .foregroundColor: fgInit,
             .font: initialFont
         ]
         // Normalize newlines to prevent text storage mismatches
@@ -965,13 +972,17 @@ public struct SyntaxHighlightedCodeView: NSViewRepresentable {
         
         // LOOP PROTECTION: Check if anything actually changed
         // This prevents infinite layout loops where updateNSView triggers a layout, which calls updateNSView again.
-        if context.coordinator.lastText == normalizedText &&
-           context.coordinator.lastLanguage == language &&
-           context.coordinator.lastThemeName == themeName &&
-           context.coordinator.lastFontSize == fontSize &&
-           context.coordinator.lastIsDark == isDark {
+        let textChanged = context.coordinator.lastText != normalizedText
+        let langChanged = context.coordinator.lastLanguage != language
+        let themeNameChanged = context.coordinator.lastThemeName != themeName
+        let fontChanged = context.coordinator.lastFontSize != fontSize
+        let darkChanged = context.coordinator.lastIsDark != isDark
+        
+        if !textChanged && !langChanged && !themeNameChanged && !fontChanged && !darkChanged {
             return
         }
+        
+        print("🔄 [SyntaxEngine] updateNSView: textChanged=\(textChanged), langChanged=\(langChanged), themeChanged=\(themeNameChanged), fontChanged=\(fontChanged), darkChanged=\(darkChanged), textLen=\(normalizedText.count), lang=\(language), theme=\(themeName ?? "nil")")
         
         // Update Cache
         context.coordinator.lastText = normalizedText
@@ -1048,9 +1059,12 @@ public struct SyntaxHighlightedCodeView: NSViewRepresentable {
         // Critical Fix: Also check if language changed, otherwise switching file types (e.g. .txt -> .swift) wouldn't update highlighting
         // We store the current language in the engine to compare
         let languageChanged = engine.currentLanguage != language
-        let themeChanged = context.coordinator.lastThemeName != themeName || context.coordinator.lastIsDark != isDark
+        // FIX: Use the pre-computed change flags instead of comparing against already-updated cache
+        let needsContentUpdate = textView.string != normalizedText || languageChanged || themeNameChanged || darkChanged
         
-        if textView.string != normalizedText || languageChanged || themeChanged {
+        print("📝 [SyntaxEngine] updateNSView decision: tvString!=normText=\(textView.string != normalizedText), langChanged=\(languageChanged), themeNameChanged=\(themeNameChanged), darkChanged=\(darkChanged), needsUpdate=\(needsContentUpdate)")
+        
+        if needsContentUpdate {
             // Update the actual text view content if it changed
             if textView.string != normalizedText {
                 context.coordinator.isUpdating = true
