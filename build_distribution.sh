@@ -427,7 +427,32 @@ EOF
         # Remove any existing to prevent resource busy
         rm -f "${TEMP_DMG}" "${OUTPUT_FOLDER}/${DMG_NAME}"
         
-        hdiutil create -volname "${APP_NAME}" -srcfolder "${OUTPUT_FOLDER}" -ov -format UDZO "${TEMP_DMG}"
+        # Robust DMG creation with retries (GitHub Actions can have flaky hdiutil/Spotlight contention)
+        MAX_RETRIES=3
+        RETRY_COUNT=0
+        SUCCESS=false
+        
+        while [ $RETRY_COUNT -lt $MAX_RETRIES ]; do
+            echo "      Attempting hdiutil create (Attempt $((RETRY_COUNT+1))/$MAX_RETRIES)..."
+            # Sync filesystem and wait briefly to let any background processes (like Spotlight) release the folder
+            sync
+            sleep 2
+            
+            if hdiutil create -volname "${APP_NAME}" -srcfolder "${OUTPUT_FOLDER}" -ov -format UDZO "${TEMP_DMG}"; then
+                SUCCESS=true
+                break
+            else
+                echo "      ⚠️  hdiutil create failed. Resource might be busy. Retrying..."
+                RETRY_COUNT=$((RETRY_COUNT+1))
+                sleep 3
+            fi
+        done
+        
+        if [ "$SUCCESS" = "false" ]; then
+            echo "      ❌ Error: Failed to create DMG after $MAX_RETRIES attempts due to busy resources."
+            exit 1
+        fi
+        
         mv "${TEMP_DMG}" "${OUTPUT_FOLDER}/${DMG_NAME}"
         echo "      -> Created ${OUTPUT_FOLDER}/${DMG_NAME}"
 
