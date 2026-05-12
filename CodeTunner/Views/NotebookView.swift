@@ -93,6 +93,8 @@ enum CellLanguage: String, CaseIterable, Identifiable {
     case go = "Go"
     case cpp = "C++"
     case objc = "Objective-C"
+    case java = "Java"
+    case csharp = "C#"
     case rmarkdown = "R Markdown"
     case latex = "LaTeX"
     
@@ -108,6 +110,8 @@ enum CellLanguage: String, CaseIterable, Identifiable {
         case .go: return "g.circle.fill"
         case .cpp: return "c.circle.fill"
         case .objc: return "apple.logo"
+        case .java: return "cup.and.saucer.fill"
+        case .csharp: return "number.circle.fill"
         case .rmarkdown: return "doc.richtext.fill"
         case .latex: return "function"
         }
@@ -123,6 +127,8 @@ enum CellLanguage: String, CaseIterable, Identifiable {
         case .go: return .mint
         case .cpp: return .blue
         case .objc: return .indigo
+        case .java: return .red
+        case .csharp: return .purple
         case .rmarkdown: return .teal
         case .latex: return .orange
         }
@@ -204,6 +210,22 @@ enum CellLanguage: String, CaseIterable, Identifiable {
                 return 0;
             }
             """
+        case .java:
+            return """
+            // Java Code
+            public class Main {
+                public static void main(String[] args) {
+                    System.out.println("Hello, Java!");
+                }
+            }
+            """
+        case .csharp:
+            return """
+            // C# Code
+            using System;
+            
+            Console.WriteLine("Hello, C#!");
+            """
         case .rmarkdown:
             return """
             ---
@@ -248,7 +270,7 @@ enum CellLanguage: String, CaseIterable, Identifiable {
     /// Whether this language is executable code
     var isExecutable: Bool {
         switch self {
-        case .python, .r, .julia, .sql, .rust, .go, .cpp, .objc: return true
+        case .python, .r, .julia, .sql, .rust, .go, .cpp, .objc, .java, .csharp: return true
         case .rmarkdown, .latex: return true  // Rendered via external tools
         }
     }
@@ -264,6 +286,8 @@ enum CellLanguage: String, CaseIterable, Identifiable {
         case .go: return "go"
         case .cpp: return "cpp"
         case .objc: return "m"
+        case .java: return "java"
+        case .csharp: return "cs"
         case .rmarkdown: return "Rmd"
         case .latex: return "tex"
         }
@@ -522,6 +546,13 @@ final class NotebookViewModel: ObservableObject {
             runCppCell(cell)
         case .objc:
             runObjcCell(cell)
+        case .java, .csharp:
+            Task { @MainActor in
+                cell.isExecuting = true
+                cell.output = ""
+                cell.appendOutput("❌ Local execution for \(cell.language.rawValue) is not supported natively. Please use 'Custom HPC Agent' to connect to a Jupyter Kernel.\n")
+                cell.isExecuting = false
+            }
         }
     }
     

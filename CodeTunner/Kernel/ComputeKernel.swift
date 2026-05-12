@@ -352,6 +352,7 @@ class CustomHPCKernel: ComputeKernel {
     }
     
     private var streamManager = WebSocketStreamManager()
+    private var activeJupyterKernel: JupyterKernel?
     
     func start() async throws {
         state = .starting
@@ -361,6 +362,10 @@ class CustomHPCKernel: ComputeKernel {
     func stop() async throws {
         state = .stopping
         streamManager.disconnect()
+        if let jupyter = activeJupyterKernel {
+            try? await jupyter.stop()
+            activeJupyterKernel = nil
+        }
         state = .idle
     }
     
@@ -368,6 +373,9 @@ class CustomHPCKernel: ComputeKernel {
         state = .stopping
         try? await streamManager.send(payload: "{\"type\":\"cancel\"}")
         streamManager.disconnect()
+        if let jupyter = activeJupyterKernel {
+            try? await jupyter.cancel()
+        }
         state = .idle
     }
     
@@ -385,6 +393,38 @@ class CustomHPCKernel: ComputeKernel {
         
         if isHTTP {
             progress("🚀 [⚡️ Hardware Accelerator: Custom Cloud GPU] Initiating Request to \(endpoint)...\n")
+            
+            // Auto-Detect Jupyter Server
+            var isJupyter = false
+            var jupyterCheckURLString = endpoint
+            if jupyterCheckURLString.hasSuffix("/") { jupyterCheckURLString.removeLast() }
+            if let checkURL = URL(string: "\(jupyterCheckURLString)/api") {
+                var checkReq = URLRequest(url: checkURL)
+                checkReq.httpMethod = "GET"
+                checkReq.timeoutInterval = 3.0
+                if !agentToken.isEmpty {
+                    checkReq.setValue("Token \(agentToken)", forHTTPHeaderField: "Authorization")
+                }
+                
+                if let (data, resp) = try? await URLSession.shared.data(for: checkReq),
+                   let httpResp = resp as? HTTPURLResponse {
+                    if httpResp.statusCode == 200,
+                       let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+                       json["version"] != nil {
+                        isJupyter = true
+                    } else if httpResp.statusCode == 403 {
+                        // 403 on /api usually means it IS Jupyter but needs a valid token.
+                        isJupyter = true
+                    }
+                }
+            }
+            
+            if isJupyter {
+                if activeJupyterKernel == nil {
+                    activeJupyterKernel = JupyterKernel(endpoint: endpoint, token: agentToken)
+                }
+                return try await activeJupyterKernel!.execute(code: code, language: language, progress: progress)
+            }
             
             // Format for Universal Serverless API (RunPod, Vast.ai, Akamai)
             guard let url = URL(string: endpoint) else { throw URLError(.badURL) }

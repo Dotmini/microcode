@@ -157,6 +157,8 @@ let package = Package(
                 
                 "Services/MicroCodeService.swift",    // AI Core Service Wrapper
                 "Kernel/ComputeKernel.swift",
+                "Kernel/JupyterClient.swift",
+                "Kernel/JupyterKernel.swift",
                 "Views/Design/AIDesignPanel.swift",
                 "Services/AIDesignEngine.swift",
                 "Services/BillingService.swift",
