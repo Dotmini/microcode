@@ -39,7 +39,7 @@ class KernelClient: ObservableObject {
     
     // Command: Panic (Simulated)
     func triggerPanic() {
-        print("🚨 Triggering direct Kernel Panic via FFI...")
+        print(" Triggering direct Kernel Panic via FFI...")
         triggerKernelPanic()
     }
 }
