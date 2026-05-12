@@ -17,6 +17,7 @@ final class LineNumberRulerView: NSRulerView {
     // MARK: - Properties
     
     private weak var textView: NSTextView?
+    private var themeManager: ThemeManager
     
     /// Gutter width (auto-calculated based on line count digits)
     private var gutterWidth: CGFloat = 40
@@ -32,17 +33,17 @@ final class LineNumberRulerView: NSRulerView {
     
     /// Line number text color
     private var lineNumberColor: NSColor {
-        return ThemeManager.shared.editorGutterTextColor
+        return themeManager.editorGutterTextColor
     }
     
     /// Current line highlight color
     private var currentLineColor: NSColor {
-        return ThemeManager.shared.editorForegroundColor.withAlphaComponent(0.85)
+        return themeManager.editorForegroundColor.withAlphaComponent(0.85)
     }
     
     /// Gutter background color
     private var gutterBackgroundColor: NSColor {
-        return ThemeManager.shared.editorGutterColor
+        return themeManager.editorGutterColor
     }
     
     /// Separator line color
@@ -52,8 +53,9 @@ final class LineNumberRulerView: NSRulerView {
     
     // MARK: - Init
     
-    init(textView: NSTextView, scrollView: NSScrollView) {
+    init(textView: NSTextView, scrollView: NSScrollView, themeManager: ThemeManager) {
         self.textView = textView
+        self.themeManager = themeManager
         super.init(scrollView: scrollView, orientation: .verticalRuler)
         
         self.clientView = textView

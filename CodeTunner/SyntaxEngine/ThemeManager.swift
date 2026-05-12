@@ -94,10 +94,10 @@ public struct TokenStyleConfig: Codable, Sendable {
 // MARK: - Theme Manager
 
 /// Manages loading and accessing color themes.
-/// Thread-safe singleton for global access.
+/// Thread-safe. Can be used as singleton (.shared) or per-instance for isolation.
 public final class ThemeManager: @unchecked Sendable {
     
-    /// Shared instance
+    /// Shared instance (for global UI like LineNumberRulerView)
     public static let shared = ThemeManager()
     
     /// Currently active theme
@@ -112,7 +112,9 @@ public final class ThemeManager: @unchecked Sendable {
     /// Style cache for current theme
     private var styleCache: [SyntaxTokenType: TokenStyle] = [:]
     
-    private init() {
+    /// Public initializer — creates an independent instance with all themes pre-registered.
+    /// Use this when you need isolated theme state (e.g., per-editor instances).
+    public init() {
         // Initialize with default dark theme
         self.activeTheme = ThemeManager.createDefaultDarkTheme()
         

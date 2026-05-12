@@ -158,9 +158,15 @@ public final class SyntaxHighlightingEngine: @unchecked Sendable {
     /// Shared instance for convenience
     public static let shared = SyntaxHighlightingEngine()
     
-    public init(themeManager: ThemeManager = .shared) {
-        self.themeManager = themeManager
+    public init(themeManager: ThemeManager? = nil) {
+        // CRITICAL FIX: Each engine gets its own ThemeManager instance by default.
+        // This prevents the singleton race condition where multiple views overwrite
+        // each others active theme, causing invisible text.
+        self.themeManager = themeManager ?? ThemeManager()
     }
+
+
+
     
     // MARK: - Language Registration
     
@@ -542,7 +548,6 @@ public final class SyntaxHighlightingEngine: @unchecked Sendable {
         
         let fgColor = themeManager.editorForegroundColor
         let bgColor = themeManager.editorBackgroundColor
-        print("🎨 [SyntaxEngine] applyTokens: tokens=\(tokens.count), tsLen=\(textStorage.length), fg=\(fgColor.hexString), bg=\(bgColor.hexString), theme=\(themeManager.currentTheme.name)")
         
         // Ensure default color is applied to the entire text before highlighting
         let fullRange = NSRange(location: 0, length: textStorage.length)
@@ -877,7 +882,7 @@ public struct SyntaxHighlightedCodeView: NSViewRepresentable {
         textView.textColor = engine.themeManager.editorForegroundColor
         
         // Line Numbers
-        let rulerView = LineNumberRulerView(textView: textView, scrollView: scrollView)
+        let rulerView = LineNumberRulerView(textView: textView, scrollView: scrollView, themeManager: engine.themeManager)
         scrollView.verticalRulerView = rulerView
         scrollView.hasVerticalRuler = true
         scrollView.rulersVisible = true
@@ -917,7 +922,6 @@ public struct SyntaxHighlightedCodeView: NSViewRepresentable {
         let initialFont = textView.font ?? NSFont.monospacedSystemFont(ofSize: fontSize, weight: .regular)
         let fgInit = engine.themeManager.editorForegroundColor
         let bgInit = engine.themeManager.editorBackgroundColor
-        print("🔧 [SyntaxEngine] makeNSView: lang=\(language), theme=\(themeName ?? "nil"), isDark=\(isDark), fg=\(fgInit.hexString), bg=\(bgInit.hexString), textLen=\(text.count)")
         let initialAttrs: [NSAttributedString.Key: Any] = [
             .foregroundColor: fgInit,
             .font: initialFont
@@ -968,7 +972,6 @@ public struct SyntaxHighlightedCodeView: NSViewRepresentable {
             if ts.length > 0 {
                 let appliedColor = ts.attribute(.foregroundColor, at: 0, effectiveRange: nil) as? NSColor
                 if appliedColor == nil {
-                    print("⚠️ [SyntaxEngine] SAFETY NET: No foreground color at position 0! Forcing \(fgColor.hexString)")
                     ts.beginEditing()
                     ts.addAttribute(.foregroundColor, value: fgColor, range: NSRange(location: 0, length: ts.length))
                     ts.endEditing()
@@ -987,8 +990,6 @@ public struct SyntaxHighlightedCodeView: NSViewRepresentable {
                 scrollView.backgroundColor = bgColor
                 scrollView.drawsBackground = true
             }
-            
-            print("✅ [SyntaxEngine] SAFETY NET verified: fg=\(fgColor.hexString), bg=\(bgColor.hexString), tsLen=\(ts.length), tvColor=\(tv.textColor?.hexString ?? "nil"), tvBg=\(tv.backgroundColor.hexString)")
         }
         
         return scrollView
@@ -1019,8 +1020,6 @@ public struct SyntaxHighlightedCodeView: NSViewRepresentable {
         if !textChanged && !langChanged && !themeNameChanged && !fontChanged && !darkChanged {
             return
         }
-        
-        print("🔄 [SyntaxEngine] updateNSView: textChanged=\(textChanged), langChanged=\(langChanged), themeChanged=\(themeNameChanged), fontChanged=\(fontChanged), darkChanged=\(darkChanged), textLen=\(normalizedText.count), lang=\(language), theme=\(themeName ?? "nil")")
         
         // Update Cache
         context.coordinator.lastText = normalizedText
@@ -1100,8 +1099,6 @@ public struct SyntaxHighlightedCodeView: NSViewRepresentable {
         // FIX: Use the pre-computed change flags instead of comparing against already-updated cache
         let needsContentUpdate = textView.string != normalizedText || languageChanged || themeNameChanged || darkChanged
         
-        print("📝 [SyntaxEngine] updateNSView decision: tvString!=normText=\(textView.string != normalizedText), langChanged=\(languageChanged), themeNameChanged=\(themeNameChanged), darkChanged=\(darkChanged), needsUpdate=\(needsContentUpdate)")
-        
         if needsContentUpdate {
             // Update the actual text view content if it changed
             if textView.string != normalizedText {
@@ -1115,7 +1112,6 @@ public struct SyntaxHighlightedCodeView: NSViewRepresentable {
                 let customFont = NSFont(name: fontName, size: fontSize) ?? NSFont.monospacedSystemFont(ofSize: fontSize, weight: .regular)
                 
                 let fgColor = engine.themeManager.editorForegroundColor
-                print("DEBUG HIGHLIGHTER: Setting default color: \(fgColor.hexString) (isDark: \(isDark), theme: \(themeName ?? "nil"))")
                 
                 textView.textStorage?.addAttributes([
                     .foregroundColor: fgColor,
