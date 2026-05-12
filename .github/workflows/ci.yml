@@ -161,7 +161,7 @@ jobs:
           - arch: arm64
             os: macos-14
           - arch: x86_64
-            os: macos-14
+            os: macos-13
 
     outputs:
       version: ${{ steps.version.outputs.version }}
