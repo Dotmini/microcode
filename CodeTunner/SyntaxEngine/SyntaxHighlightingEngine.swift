@@ -53,16 +53,16 @@ public final class SyntaxHighlightingEngine: @unchecked Sendable {
         register("go") { createGoLexer() }
         register("golang") { createGoLexer() }
         
-        // C-family (Native ObjC++ Engine)
-        register("c") { AuthenticLexerAdapter(languageId: "c") }
-        register("cpp") { AuthenticLexerAdapter(languageId: "cpp") }
-        register("c++") { AuthenticLexerAdapter(languageId: "cpp") }
-        register("h") { AuthenticLexerAdapter(languageId: "c") }
-        register("hpp") { AuthenticLexerAdapter(languageId: "cpp") }
-        register("objc") { AuthenticLexerAdapter(languageId: "objectivec") }
-        register("objective-c") { AuthenticLexerAdapter(languageId: "objectivec") }
-        register("m") { AuthenticLexerAdapter(languageId: "objectivec") }
-        register("mm") { AuthenticLexerAdapter(languageId: "objectivec") }
+        // C-family
+        register("c") { createSwiftLexer() } // Fallback
+        register("cpp") { createSwiftLexer() }
+        register("c++") { createSwiftLexer() }
+        register("h") { createSwiftLexer() }
+        register("hpp") { createSwiftLexer() }
+        register("objc") { createSwiftLexer() }
+        register("objective-c") { createSwiftLexer() }
+        register("m") { createSwiftLexer() }
+        register("mm") { createSwiftLexer() }
         
         // JVM languages (use Swift-like syntax)
         register("java") { createJavaLexer() } // Keep Swift lexer for Java for now
@@ -71,12 +71,12 @@ public final class SyntaxHighlightingEngine: @unchecked Sendable {
         register("scala") { createKotlinLexer() }
         register("groovy") { createJavaLexer() }
         
-        // Swift (Native ObjC++ Engine)
-        register("swift") { AuthenticLexerAdapter(languageId: "swift") }
+        // Swift
+        register("swift") { createSwiftLexer() }
         
-        // Scripting (Native ObjC++ Engine for Python)
-        register("py") { AuthenticLexerAdapter(languageId: "python") }
-        register("python") { AuthenticLexerAdapter(languageId: "python") }
+        // Scripting (Native ObjC++ Engine disabled for now due to pipeline/token issues, using Swift Lexer)
+        register("py") { createPythonLexer() }
+        register("python") { createPythonLexer() }
         
         // Ruby (Keep Swift lexer)
         register("rb") { createRubyLexer() }
@@ -89,10 +89,10 @@ public final class SyntaxHighlightingEngine: @unchecked Sendable {
         register("zsh") { createPythonLexer() }
         register("fish") { createPythonLexer() }
         
-        // Data Science (Native ObjC++ Engine)
-        register("r") { AuthenticLexerAdapter(languageId: "r") }
-        register("julia") { AuthenticLexerAdapter(languageId: "julia") }
-        register("jl") { AuthenticLexerAdapter(languageId: "julia") }
+        // Data Science (Fallback to Python/Swift)
+        register("r") { createPythonLexer() }
+        register("julia") { createPythonLexer() }
+        register("jl") { createPythonLexer() }
         
         register("sql") { createJavaScriptLexer() }
         register("graphql") { createJavaScriptLexer() }
@@ -549,11 +549,28 @@ public final class SyntaxHighlightingEngine: @unchecked Sendable {
         let fgColor = themeManager.editorForegroundColor
         let bgColor = themeManager.editorBackgroundColor
         
-        // Ensure default color is applied to the entire text before highlighting
+        // Ensure default color and paragraph style are applied to the entire text before highlighting
         let fullRange = NSRange(location: 0, length: textStorage.length)
         if fullRange.length > 0 {
+            let defaultFont = font ?? NSFont.monospacedSystemFont(ofSize: fontSize, weight: .regular)
+            
+            let paragraphStyle: NSMutableParagraphStyle
+            if let cached = cachedParagraphStyle, cachedFontSize == fontSize {
+                paragraphStyle = cached
+            } else {
+                let newStyle = NSMutableParagraphStyle()
+                newStyle.minimumLineHeight = defaultFont.pointSize * 1.2
+                newStyle.maximumLineHeight = defaultFont.pointSize * 1.2
+                cachedParagraphStyle = newStyle
+                cachedFontSize = fontSize
+                paragraphStyle = newStyle
+            }
+            
             textStorage.beginEditing()
-            textStorage.addAttribute(.foregroundColor, value: fgColor, range: fullRange)
+            textStorage.addAttributes([
+                .foregroundColor: fgColor,
+                .paragraphStyle: paragraphStyle
+            ], range: fullRange)
             textStorage.endEditing()
         }
         
@@ -593,76 +610,49 @@ public final class SyntaxHighlightingEngine: @unchecked Sendable {
     }
     
     private func applyTokensBatch(_ tokens: [SyntaxToken], to textStorage: NSTextStorage, defaultFont: NSFont, fontSize: CGFloat) {
-         // USE CACHED PARAGRAPH STYLE
-         // Creating a new one every time causes NSTextStorage to treat it as a change, triggering layout.
-         
-         let paragraphStyle: NSMutableParagraphStyle
-         
-         if let cached = cachedParagraphStyle, cachedFontSize == fontSize {
-             paragraphStyle = cached
-         } else {
-             let newStyle = NSMutableParagraphStyle()
-             newStyle.minimumLineHeight = defaultFont.pointSize * 1.2
-             newStyle.maximumLineHeight = defaultFont.pointSize * 1.2
-             
-             // Update cache
-             cachedParagraphStyle = newStyle
-             cachedFontSize = fontSize
-             paragraphStyle = newStyle
-         }
-
+         textStorage.beginEditing()
          
          for token in tokens {
-            let nsRange = token.range.nsRange
-            
-            // Validate range safety
-            guard nsRange.location >= 0,
-                  nsRange.location + nsRange.length <= textStorage.length else {
-                continue
-            }
-            
-            // Collect attributes into a single dictionary to minimize layout invalidations (1 call vs 5)
-            var attributes: [NSAttributedString.Key: Any] = [
-                .foregroundColor: themeManager.color(for: token.type),
-                .paragraphStyle: paragraphStyle,
-                .ligature: 0
-            ]
-            
-            // Apply font style (bold/italic)
-            let style = themeManager.style(for: token.type)
-            if style.isBold || style.isItalic {
-                var traits: NSFontDescriptor.SymbolicTraits = []
-                if style.isBold { traits.insert(.bold) }
-                if style.isItalic { traits.insert(.italic) }
-                
-                let descriptor = defaultFont.fontDescriptor.withSymbolicTraits(traits)
-                let styledFont = NSFont(descriptor: descriptor, size: fontSize) ?? defaultFont
-                attributes[.font] = styledFont
-            } else {
-                attributes[.font] = defaultFont
-            }
-            
-            if style.isUnderline {
-                attributes[.underlineStyle] = NSUnderlineStyle.single.rawValue
-            }
-            
-            // Optimization: Skip update if color matches (Prevent Flicker)
-            // BUT: For small files (New Files), we force update to ensure consistency and prevent "White Flash" if defaults are wrong.
-            // Check textStorage.length to detect small/new files.
-            let isSmallFile = textStorage.length < 1000
-            
-            if !isSmallFile && nsRange.length > 0 {
-                let existingColor = textStorage.attribute(.foregroundColor, at: nsRange.location, effectiveRange: nil) as? NSColor
-                let newColor = attributes[.foregroundColor] as? NSColor
-                
-                // If colors match, we assume other attributes match too (safe optimization for typing)
-                if let existing = existingColor, let new = newColor, existing == new {
-                    continue
-                }
-            }
-            
-            textStorage.addAttributes(attributes, range: nsRange)
-        }
+             let nsRange = token.range.nsRange
+             
+             // Ensure range is within bounds
+             if nsRange.location + nsRange.length <= textStorage.length {
+                 var attributes: [NSAttributedString.Key: Any] = [
+                     .foregroundColor: themeManager.color(for: token.type),
+                     .ligature: 0
+                 ]
+                 
+                 let style = themeManager.style(for: token.type)
+                 if style.isBold || style.isItalic {
+                     var traits: NSFontDescriptor.SymbolicTraits = []
+                     if style.isBold { traits.insert(.bold) }
+                     if style.isItalic { traits.insert(.italic) }
+                     
+                     let descriptor = defaultFont.fontDescriptor.withSymbolicTraits(traits)
+                     let styledFont = NSFont(descriptor: descriptor, size: fontSize) ?? defaultFont
+                     attributes[.font] = styledFont
+                 }
+                 
+                 if style.isUnderline {
+                     attributes[.underlineStyle] = NSUnderlineStyle.single.rawValue
+                 }
+                 
+                 // Optimization: Skip update if color matches (Prevent Flicker)
+                 // BUT: For small files (New Files), we force update to ensure consistency and prevent "White Flash" if defaults are wrong.
+                 if textStorage.length < 500 {
+                     textStorage.addAttributes(attributes, range: nsRange)
+                 } else {
+                     let currentAttrs = textStorage.attributes(at: nsRange.location, effectiveRange: nil)
+                     let currentColor = currentAttrs[.foregroundColor] as? NSColor
+                     let targetColor = attributes[.foregroundColor] as? NSColor
+                     
+                     if currentColor != targetColor {
+                         textStorage.addAttributes(attributes, range: nsRange)
+                     }
+                 }
+             }
+         }
+         textStorage.endEditing()
     }
 
     /// Synchronous version (use with caution on small snippets or background threads)
@@ -899,7 +889,7 @@ public struct SyntaxHighlightedCodeView: NSViewRepresentable {
         
         // FIX BLINK: Disable [.width] mask which fights with 'No Wrap' mode.
         // Use [.height] to fill vertically.
-        textView.autoresizingMask = [.width, .height]
+        textView.autoresizingMask = [.height]
         textView.isHorizontallyResizable = true
         textView.isVerticallyResizable = true
         
