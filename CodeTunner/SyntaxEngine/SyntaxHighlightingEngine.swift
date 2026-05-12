@@ -953,6 +953,44 @@ public struct SyntaxHighlightedCodeView: NSViewRepresentable {
             }
         }
         
+        // SAFETY NET: Verify text visibility after a brief delay
+        // This catches cases where layout or SwiftUI re-render clears our attributes
+        DispatchQueue.main.async { [weak coordinator = context.coordinator] in
+            guard let coordinator = coordinator, !coordinator.isInvalidated else { return }
+            guard let tv = scrollView.documentView as? NSTextView,
+                  let ts = tv.textStorage,
+                  let eng = coordinator.engine else { return }
+            
+            let fgColor = eng.themeManager.editorForegroundColor
+            let bgColor = eng.themeManager.editorBackgroundColor
+            
+            // Check if foreground color is actually applied
+            if ts.length > 0 {
+                let appliedColor = ts.attribute(.foregroundColor, at: 0, effectiveRange: nil) as? NSColor
+                if appliedColor == nil {
+                    print("⚠️ [SyntaxEngine] SAFETY NET: No foreground color at position 0! Forcing \(fgColor.hexString)")
+                    ts.beginEditing()
+                    ts.addAttribute(.foregroundColor, value: fgColor, range: NSRange(location: 0, length: ts.length))
+                    ts.endEditing()
+                }
+            }
+            
+            // Ensure textView properties are correct
+            tv.textColor = fgColor
+            tv.insertionPointColor = fgColor
+            
+            // Force background color
+            let effectiveTransparent = coordinator.parent.isTransparent || coordinator.parent.themeName == "transparent" || coordinator.parent.themeName == "extraClear" || coordinator.parent.themeName == "crystalClear" || coordinator.parent.themeName == "obsidianGlass"
+            if !effectiveTransparent {
+                tv.backgroundColor = bgColor
+                tv.drawsBackground = true
+                scrollView.backgroundColor = bgColor
+                scrollView.drawsBackground = true
+            }
+            
+            print("✅ [SyntaxEngine] SAFETY NET verified: fg=\(fgColor.hexString), bg=\(bgColor.hexString), tsLen=\(ts.length), tvColor=\(tv.textColor?.hexString ?? "nil"), tvBg=\(tv.backgroundColor.hexString)")
+        }
+        
         return scrollView
     }
     
