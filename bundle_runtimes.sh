@@ -206,14 +206,33 @@ bundle_java() {
     fi
     local cache="${CACHE_DIR}/java-${TARGET_ARCH}.tar.gz"
     download_cached "$url" "$cache"
-    
+
     local target="${RUNTIMES_ROOT}/java"
     rm -rf "$target" && mkdir -p "$target"
-    tar -xzf "$cache" -C "$target" --strip-components=1
-    
+
+    # Temurin macOS JRE tar structure:
+    #   jdk-21.0.5+11-jre/Contents/Home/bin/java  (macOS app bundle layout)
+    # We strip 1 component to get inside jdk-X/ dir, then find Contents/Home
+    local tmp_java="${CACHE_DIR}/java-tmp-${TARGET_ARCH}"
+    rm -rf "$tmp_java" && mkdir -p "$tmp_java"
+    tar -xzf "$cache" -C "$tmp_java" --strip-components=1
+
+    # Find the Home dir (Contents/Home on macOS, or root on Linux)
+    if [ -d "$tmp_java/Contents/Home" ]; then
+        # macOS bundle layout
+        cp -R "$tmp_java/Contents/Home/." "$target/"
+    elif [ -d "$tmp_java/bin" ]; then
+        # Flat layout (Linux-style)
+        cp -R "$tmp_java/." "$target/"
+    else
+        echo "      ⚠️  Unknown Java archive layout — copying as-is"
+        cp -R "$tmp_java/." "$target/"
+    fi
+    rm -rf "$tmp_java"
+
     # Remove unnecessary files
-    rm -rf "$target/man" "$target/legal"
-    echo "      ✅ $(${target}/bin/java -version 2>&1 | head -1 || echo 'JDK 21')"
+    rm -rf "$target/man" "$target/legal" "$target/demo" "$target/sample"
+    echo "      ✅ $("$target/bin/java" -version 2>&1 | head -1 || echo 'JDK 21')"
 }
 
 # ═══════════════════════════════════════════
