@@ -7,14 +7,13 @@
 
 use super::*;
 use crate::llm::McpContext;
-use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::sync::atomic::{AtomicU64, Ordering};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::process::{Child, Command};
 use tokio::sync::Mutex;
-use tracing::{info, warn, error};
+use tracing::info;
 
 // MARK: - MCP Client
 

@@ -27,8 +27,7 @@ pub struct ExecutionResult {
 #[derive(Debug, Clone, serde::Serialize)]
 pub enum StreamEvent {
     Output(String),
-    Error(String),
-    Exit(i32)
+    Error(String)
 }
 
 use tokio::process::Child;
@@ -205,7 +204,7 @@ pub async fn execute(code: &str, language: &str, node_path: Option<String>) -> R
 }
 
 /// Stop a running execution by ID
-pub async fn stop(execution_id: &str) -> Result<()> {
+pub async fn stop(_execution_id: &str) -> Result<()> {
     // In a production system, you would maintain a registry of running processes
     // and be able to kill them by ID
     Err(AppError::NotImplemented("stop execution".to_string()))
@@ -361,7 +360,7 @@ async fn execute_javascript(code: &str, node_path: Option<String>) -> Result<Exe
     })
 }
 
-async fn execute_typescript(code: &str, node_path: Option<String>) -> Result<ExecutionResult> {
+async fn execute_typescript(code: &str, _node_path: Option<String>) -> Result<ExecutionResult> {
     let temp_file = create_temp_file("ts", code).await?;
 
     let binary = find_executable("ts-node");

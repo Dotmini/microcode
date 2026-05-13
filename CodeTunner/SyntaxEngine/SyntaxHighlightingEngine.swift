@@ -656,8 +656,7 @@ public final class SyntaxHighlightingEngine: @unchecked Sendable {
     }
 
     /// Synchronous version (use with caution on small snippets or background threads)
-    @MainActor
-    public func applyHighlighting(to textStorage: NSTextStorage, fontSize: CGFloat, font: NSFont? = nil) {
+    nonisolated public func applyHighlighting(to textStorage: NSTextStorage, fontSize: CGFloat, font: NSFont? = nil) {
         lock.lock()
         let content = documentContent
         let lexer = activeLexer
@@ -666,13 +665,15 @@ public final class SyntaxHighlightingEngine: @unchecked Sendable {
         guard let lexer = lexer else { return }
         let tokens = lexer.retokenizeDirtyRegions(in: content)
         
-        // Since this is the sync version, we assume caller is managing thread safety or is on main thread.
-        // We use MainActor to be safe if called from main.
         if Thread.isMainThread {
-            applyTokens(tokens, to: textStorage, fontSize: fontSize, font: font)
+            MainActor.assumeIsolated {
+                self.applyTokens(tokens, to: textStorage, fontSize: fontSize, font: font)
+            }
         } else {
             DispatchQueue.main.sync {
-                applyTokens(tokens, to: textStorage, fontSize: fontSize, font: font)
+                MainActor.assumeIsolated {
+                    self.applyTokens(tokens, to: textStorage, fontSize: fontSize, font: font)
+                }
             }
         }
     }

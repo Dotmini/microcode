@@ -453,10 +453,7 @@ pub struct ExecRequest {
     pub command: String,
 }
 
-#[derive(Serialize)]
-pub struct ExecResponse {
-    pub output: String,
-}
+
 
 #[derive(Deserialize)]
 pub struct ListFilesRequest {
@@ -464,11 +461,7 @@ pub struct ListFilesRequest {
     pub path: String,
 }
 
-#[derive(Deserialize)]
-pub struct FileTransferRequest {
-    pub id: String,
-    pub path: String,
-}
+
 
 #[derive(Deserialize)]
 pub struct MkdirRequest {
@@ -544,7 +537,7 @@ pub async fn remote_list_files(
     let st = state.read().await;
     match st.remote_manager.list_files(&req.id, req.path).await {
         Ok(files) => Json(serde_json::json!({ "files": files })),
-        Err(e) => Json(serde_json::json!({ "files": [] })), // Return empty on error for now or handle better
+        Err(_e) => Json(serde_json::json!({ "files": [] })), // Return empty on error for now or handle better
     }
 }
 

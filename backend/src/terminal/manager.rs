@@ -84,9 +84,9 @@ impl TerminalManager {
         Ok(())
     }
     
-    pub fn write(&self, id: &str, data: &[u8]) -> Result<(), anyhow::Error> {
+    pub fn write(&self, id: &str, _data: &[u8]) -> Result<(), anyhow::Error> {
         let mut sessions = self.sessions.lock().unwrap();
-        if let Some(session) = sessions.get_mut(id) {
+        if let Some(_session) = sessions.get_mut(id) {
              // FIXME: portable-pty MasterPty trait object issues with writing/FD access.
              // Stubbing for now to allow build.
              // We need to find a way to write to session.pty_master.

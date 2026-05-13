@@ -2,7 +2,7 @@
 //!
 //! Provides static code analysis for multiple languages
 
-use crate::error::{AppError, Result};
+use crate::error::Result;
 use crate::models::{CodeAnalysis, CodeIssue, FunctionInfo, ClassInfo};
 
 /// Analyze code and return analysis results
