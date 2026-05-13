@@ -552,17 +552,32 @@ jobs:
           <sub>Built with ❤️ in Thailand 🇹🇭 by Dotmini Software</sub>
           HEREDOC
 
+      - name: Delete existing release if any
+        run: |
+          gh release delete "${{ github.ref_name }}" \
+            --repo ${{ github.repository }} \
+            --yes 2>/dev/null || true
+          echo "✅ Old release cleared (or none existed)"
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
       - name: Create GitHub Release
-        uses: softprops/action-gh-release@v2
-        with:
-          tag_name: ${{ github.ref_name }}
-          name: "MicroCode ${{ needs.build-arch.outputs.version }}"
-          body_path: release-body.md
-          draft: false
-          prerelease: ${{ contains(needs.build-arch.outputs.version, '-') || contains(github.ref_name, 'developer') || contains(github.ref_name, 'beta') || contains(github.ref_name, 'alpha') }}
-          files: release-assets/*
-          fail_on_unmatched_files: false
-          generate_release_notes: false
+        run: |
+          IS_PRE="false"
+          REF="${{ github.ref_name }}"
+          VERSION="${{ needs.build-arch.outputs.version }}"
+          if echo "$REF $VERSION" | grep -qiE 'developer|beta|alpha|-'; then
+            IS_PRE="true"
+          fi
+
+          gh release create "${{ github.ref_name }}" \
+            release-assets/* \
+            --repo ${{ github.repository }} \
+            --title "MicroCode ${VERSION}" \
+            --notes-file release-body.md \
+            --prerelease="$IS_PRE" \
+            --verify-tag
+          echo "✅ Release created: https://github.com/${{ github.repository }}/releases/tag/${{ github.ref_name }}"
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
