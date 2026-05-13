@@ -887,9 +887,8 @@ public struct SyntaxHighlightedCodeView: NSViewRepresentable {
             // But removing scrollers usually helps.
         }
         
-        // FIX BLINK: Disable [.width] mask which fights with 'No Wrap' mode.
-        // Use [.height] to fill vertically.
-        textView.autoresizingMask = [.height]
+        // Restore width mask to fix invisible text editor in Cell Mode
+        textView.autoresizingMask = [.width, .height]
         textView.isHorizontallyResizable = true
         textView.isVerticallyResizable = true
         
