@@ -160,6 +160,8 @@ jobs:
         include:
           - arch: arm64
             os: macos-14
+          - arch: x86_64
+            os: macos-13
 
     outputs:
       version: ${{ steps.version.outputs.version }}
@@ -273,12 +275,15 @@ jobs:
           retention-days: 1
           if-no-files-found: warn
 
-      - name: Collect DMG
+      - name: Collect DMG and PKG
         run: |
           mkdir -p build-output
           cp Dist/${{ matrix.arch }}/*.dmg build-output/ 2>/dev/null || true
+          cp Dist/${{ matrix.arch }}/*.pkg build-output/ 2>/dev/null || true
+          echo "📦 Collected artifacts:"
+          ls -lh build-output/
 
-      - name: Upload Full DMG
+      - name: Upload Full DMG+PKG
         uses: actions/upload-artifact@v4
         with:
           name: dist-${{ steps.version.outputs.version }}-${{ steps.version.outputs.short_sha }}-${{ matrix.arch }}
@@ -288,7 +293,6 @@ jobs:
 
   package-lite:
     name: "📦 Package Universal Lite"
-    if: false # Temporarily disabled since x86_64 is disabled
     needs: build-arch
     runs-on: macos-14
     timeout-minutes: 10
@@ -317,12 +321,15 @@ jobs:
       - name: "🏗️ Package Lite Universal DMG"
         run: ./build_distribution.sh --mode lite-only
 
-      - name: Collect DMG
+      - name: Collect Lite DMG and PKG
         run: |
           mkdir -p build-output
           cp Dist/Lite/*.dmg build-output/ 2>/dev/null || true
+          cp Dist/Lite/*.pkg build-output/ 2>/dev/null || true
+          echo "📦 Collected Lite artifacts:"
+          ls -lh build-output/
 
-      - name: Upload Lite DMG
+      - name: Upload Lite DMG+PKG
         uses: actions/upload-artifact@v4
         with:
           name: dist-${{ needs.build-arch.outputs.version }}-${{ needs.build-arch.outputs.short_sha }}-lite
@@ -444,7 +451,7 @@ jobs:
   release:
     name: "🚀 Release"
     if: startsWith(github.ref, 'refs/tags/v')
-    needs: [build-arch]
+    needs: [build-arch, package-lite]
     runs-on: ubuntu-latest
     timeout-minutes: 15
 
