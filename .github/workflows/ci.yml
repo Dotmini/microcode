@@ -202,6 +202,15 @@ jobs:
           toolchain: stable
           targets: ${{ matrix.arch == 'arm64' && 'aarch64-apple-darwin' || 'x86_64-apple-darwin' }}
 
+      - name: Ensure Rust toolchain is active
+        run: |
+          rustup install stable
+          rustup default stable
+          rustup target add ${{ matrix.arch == 'arm64' && 'aarch64-apple-darwin' || 'x86_64-apple-darwin' }}
+          echo "$HOME/.cargo/bin" >> $GITHUB_PATH
+          cargo --version
+          rustc --version
+
       - name: Cache Rust
         uses: Swatinem/rust-cache@v2
         with:
@@ -328,6 +337,14 @@ jobs:
         uses: dtolnay/rust-toolchain@stable
         with:
           toolchain: stable
+
+      - name: Ensure Rust toolchain is active
+        run: |
+          rustup install stable
+          rustup default stable
+          echo "$HOME/.cargo/bin" >> $GITHUB_PATH
+          cargo --version
+          rustc --version
 
       - name: Cache Rust
         uses: Swatinem/rust-cache@v2

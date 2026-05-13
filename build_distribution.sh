@@ -98,7 +98,6 @@ compile_arch() {
     fi
     
     cd backend
-    PATH="/usr/bin:/bin:/usr/sbin:/sbin:$PATH" 
     # Build Bin and Lib
     cargo build --release --target "${RUST_TARGET}" --bin codetunner-backend
     cargo build --release --target "${RUST_TARGET}" --lib
