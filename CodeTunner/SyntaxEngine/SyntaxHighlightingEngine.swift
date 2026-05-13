@@ -893,17 +893,22 @@ public struct SyntaxHighlightedCodeView: NSViewRepresentable {
             // But removing scrollers usually helps.
         }
         
-        // Restore width mask to fix invisible text editor in Cell Mode
+        // LAYOUT RECURSION FIX:
+        // widthTracksTextView=false + containerSize=.greatestFiniteMagnitude + isHorizontallyResizable=true
+        // causes NSScrollView to report INFINITE intrinsic content size to SwiftUI.
+        // SwiftUI then loops trying to resolve the size → NSPerformVisuallyAtomicChange recursion (10 levels) → crash.
+        //
+        // Solution: use a large-but-FINITE container width. The scroll view clips content anyway.
+        // isHorizontallyResizable=false prevents the text view from expanding its frame width,
+        // while widthTracksTextView=false still disables word-wrap by using a huge container width.
         textView.autoresizingMask = [.width, .height]
-        textView.isHorizontallyResizable = true
+        textView.isHorizontallyResizable = false  // CRITICAL: prevents infinite width reporting
         textView.isVerticallyResizable = true
-        
+
         textView.textContainer?.widthTracksTextView = false
-        textView.textContainer?.containerSize = NSSize(width: CGFloat.greatestFiniteMagnitude, height: CGFloat.greatestFiniteMagnitude)
-        
-        // FIX CRASH: scrollView.frame.width is ZERO at makeNSView time (before layout).
-        // Using a zero minSize causes AppKit NSView layout recursion (10 levels shown in crash log).
-        // We defer applying a proper minSize until the first layout pass via the safety-net async block.
+        // Use a large but FINITE width — scroll view clips it. Never use .greatestFiniteMagnitude here.
+        textView.textContainer?.containerSize = NSSize(width: 10_000_000, height: CGFloat.greatestFiniteMagnitude)
+
         textView.minSize = NSSize(width: 0, height: 0)
         textView.maxSize = NSSize(width: CGFloat.greatestFiniteMagnitude, height: CGFloat.greatestFiniteMagnitude)
         
@@ -989,7 +994,13 @@ public struct SyntaxHighlightedCodeView: NSViewRepresentable {
         
         return scrollView
     }
-    
+
+    /// Return nil so SwiftUI uses its own proposed size rather than querying
+    /// NSScrollView's intrinsic content size (which would be infinite and cause layout recursion).
+    public func sizeThatFits(_ proposal: ProposedViewSize, nsView: NSScrollView, context: Context) -> CGSize? {
+        return nil
+    }
+
     public func updateNSView(_ scrollView: NSScrollView, context: Context) {
         // Log to detect layout loops
         ReportLogManager.shared.log("updateNSView called", type: .debug)
