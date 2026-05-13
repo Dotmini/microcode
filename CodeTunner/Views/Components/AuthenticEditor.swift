@@ -108,9 +108,6 @@ struct AuthenticEditor: NSViewRepresentable {
         var parent: AuthenticEditor
         var currentLanguage: String
         
-        // The Brain (Native ObjC++)
-        var languageCore: AuthenticLanguageCore?
-        
         // Ghost Text AI Autocomplete
         var ghostManager: GhostTextManager?
         
@@ -123,9 +120,6 @@ struct AuthenticEditor: NSViewRepresentable {
             self.parent = parent
             self.currentLanguage = parent.language
             super.init()
-            
-            // Initialize Core
-            self.languageCore = AuthenticLanguageCore(language: currentLanguage)
         }
         
         // Handle Key Commands (Tab to accept ghost text)
@@ -191,70 +185,29 @@ struct AuthenticEditor: NSViewRepresentable {
         func highlight(_ textStorage: NSTextStorage?, language: String, textView: NSTextView? = nil) {
             guard let textStorage = textStorage else { return }
             
-            // Re-init core if language changed
-            if language != currentLanguage || languageCore == nil {
+            if language != currentLanguage {
                 currentLanguage = language
-                languageCore = AuthenticLanguageCore(language: language)
-                languageCore?.updateSource(textStorage.string)
             }
             
-            guard let core = languageCore else { return }
-            
-            // Ensure core is up to date
-            core.updateSource(textStorage.string)
-            
-            // Get Native Tokens
-            let tokens = core.tokens() ?? []
-            
-            // Calculate visible range for partial highlighting
-            let highlightRange: NSRange
-            if let tv = textView,
-               let clipView = tv.enclosingScrollView?.contentView {
-                let visibleRect = clipView.documentVisibleRect
-                // Add generous padding (2x visible height) for smooth scrolling
-                let paddedRect = visibleRect.insetBy(dx: 0, dy: -visibleRect.height)
-                let glyphRange = tv.layoutManager?.glyphRange(forBoundingRect: paddedRect, in: tv.textContainer!) ?? NSRange(location: 0, length: textStorage.length)
-                let charRange = tv.layoutManager?.characterRange(forGlyphRange: glyphRange, actualGlyphRange: nil) ?? NSRange(location: 0, length: textStorage.length)
-                highlightRange = charRange
-            } else {
-                highlightRange = NSRange(location: 0, length: textStorage.length)
-            }
-            
-            // Apply attributes only in visible range
-            textStorage.beginEditing()
-            
-            // Reset base for visible range only
-            textStorage.removeAttribute(.foregroundColor, range: highlightRange)
-            textStorage.addAttributes([
-                .foregroundColor: ThemeManager.shared.editorForegroundColor,
-                .font: parent.font
-            ], range: highlightRange)
-            
-            // Apply token colors (only those in visible range)
-            applyNativeTokens(tokens, to: textStorage, visibleRange: highlightRange)
+            let engine = SyntaxHighlightingEngine.shared
+            engine.setDocument(textStorage.string, language: currentLanguage)
+            engine.applyHighlighting(to: textStorage, fontSize: parent.font.pointSize, font: parent.font)
             
             // Apply Hex Colors only in visible range + only for small files (< 50KB)
             if textStorage.length < 50000 {
-                applyHexColorHighlighting(to: textStorage, inRange: highlightRange)
-            }
-            
-            textStorage.endEditing()
-        }
-        
-        private func applyNativeTokens(_ tokens: [AuthenticToken], to storage: NSTextStorage, visibleRange: NSRange) {
-            let strLen = storage.length
-            let visEnd = visibleRange.location + visibleRange.length
-            
-            for token in tokens {
-                let range = token.range
-                // Skip tokens outside visible range
-                if range.location + range.length < visibleRange.location { continue }
-                if range.location > visEnd { break } // tokens are ordered, can stop early
-                
-                if range.location + range.length <= strLen {
-                    let color = colorForTokenType(token.type)
-                    storage.addAttribute(.foregroundColor, value: color, range: range)
+                let highlightRange: NSRange
+                if let tv = textView, let clipView = tv.enclosingScrollView?.contentView {
+                    let visibleRect = clipView.documentVisibleRect
+                    let paddedRect = visibleRect.insetBy(dx: 0, dy: -visibleRect.height)
+                    let glyphRange = tv.layoutManager?.glyphRange(forBoundingRect: paddedRect, in: tv.textContainer!) ?? NSRange(location: 0, length: textStorage.length)
+                    highlightRange = tv.layoutManager?.characterRange(forGlyphRange: glyphRange, actualGlyphRange: nil) ?? NSRange(location: 0, length: textStorage.length)
+                } else {
+                    highlightRange = NSRange(location: 0, length: textStorage.length)
                 }
+                
+                textStorage.beginEditing()
+                applyHexColorHighlighting(to: textStorage, inRange: highlightRange)
+                textStorage.endEditing()
             }
         }
         
