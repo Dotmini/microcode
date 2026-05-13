@@ -108,6 +108,9 @@ struct AuthenticEditor: NSViewRepresentable {
         var parent: AuthenticEditor
         var currentLanguage: String
         
+        // Per-instance engine (NOT shared — sharing causes race conditions)
+        private let engine = SyntaxHighlightingEngine()
+        
         // Ghost Text AI Autocomplete
         var ghostManager: GhostTextManager?
         
@@ -189,17 +192,18 @@ struct AuthenticEditor: NSViewRepresentable {
                 currentLanguage = language
             }
             
-            let engine = SyntaxHighlightingEngine.shared
+            // Use per-instance engine to avoid shared-state race conditions
             engine.setDocument(textStorage.string, language: currentLanguage)
             engine.applyHighlighting(to: textStorage, fontSize: parent.font.pointSize, font: parent.font)
             
             // Apply Hex Colors only in visible range + only for small files (< 50KB)
             if textStorage.length < 50000 {
                 let highlightRange: NSRange
-                if let tv = textView, let clipView = tv.enclosingScrollView?.contentView {
+                if let tv = textView, let clipView = tv.enclosingScrollView?.contentView,
+                   let container = tv.textContainer {
                     let visibleRect = clipView.documentVisibleRect
                     let paddedRect = visibleRect.insetBy(dx: 0, dy: -visibleRect.height)
-                    let glyphRange = tv.layoutManager?.glyphRange(forBoundingRect: paddedRect, in: tv.textContainer!) ?? NSRange(location: 0, length: textStorage.length)
+                    let glyphRange = tv.layoutManager?.glyphRange(forBoundingRect: paddedRect, in: container) ?? NSRange(location: 0, length: textStorage.length)
                     highlightRange = tv.layoutManager?.characterRange(forGlyphRange: glyphRange, actualGlyphRange: nil) ?? NSRange(location: 0, length: textStorage.length)
                 } else {
                     highlightRange = NSRange(location: 0, length: textStorage.length)

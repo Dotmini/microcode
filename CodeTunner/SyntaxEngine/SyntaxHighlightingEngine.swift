@@ -610,7 +610,8 @@ public final class SyntaxHighlightingEngine: @unchecked Sendable {
     }
     
     private func applyTokensBatch(_ tokens: [SyntaxToken], to textStorage: NSTextStorage, defaultFont: NSFont, fontSize: CGFloat) {
-         textStorage.beginEditing()
+         // NOTE: Callers (applyTokens / applyHighlighting) are responsible for wrapping in beginEditing/endEditing.
+         // Do NOT call beginEditing/endEditing here to avoid double-nesting which triggers NSTextStorage assertions.
          
          for token in tokens {
              let nsRange = token.range.nsRange
@@ -652,7 +653,6 @@ public final class SyntaxHighlightingEngine: @unchecked Sendable {
                  }
              }
          }
-         textStorage.endEditing()
     }
 
     /// Synchronous version (use with caution on small snippets or background threads)
@@ -836,7 +836,12 @@ public struct SyntaxHighlightedCodeView: NSViewRepresentable {
         
         // Set theme
         let lowerTheme = themeName?.lowercased() ?? ""
-        let activeThemeID = (!lowerTheme.isEmpty && lowerTheme != "system") ? themeName! : (isDark ? "dark" : "light")
+        let activeThemeID: String
+        if !lowerTheme.isEmpty && lowerTheme != "system", let tn = themeName {
+            activeThemeID = tn
+        } else {
+            activeThemeID = isDark ? "dark" : "light"
+        }
         engine.themeManager.setActiveTheme(activeThemeID)
         
         
@@ -896,10 +901,10 @@ public struct SyntaxHighlightedCodeView: NSViewRepresentable {
         textView.textContainer?.widthTracksTextView = false
         textView.textContainer?.containerSize = NSSize(width: CGFloat.greatestFiniteMagnitude, height: CGFloat.greatestFiniteMagnitude)
         
-        // FIX INVISIBLE TEXT: Ensure initial width is large enough so it doesn't collapse to 0
-        let initialWidth = max(scrollView.frame.width, 800)
-        let initialHeight = max(scrollView.frame.height, 600)
-        textView.minSize = NSSize(width: initialWidth, height: initialHeight)
+        // FIX CRASH: scrollView.frame.width is ZERO at makeNSView time (before layout).
+        // Using a zero minSize causes AppKit NSView layout recursion (10 levels shown in crash log).
+        // We defer applying a proper minSize until the first layout pass via the safety-net async block.
+        textView.minSize = NSSize(width: 0, height: 0)
         textView.maxSize = NSSize(width: CGFloat.greatestFiniteMagnitude, height: CGFloat.greatestFiniteMagnitude)
         
         // Ensure Transparency is strictly enforced
@@ -1020,7 +1025,12 @@ public struct SyntaxHighlightedCodeView: NSViewRepresentable {
         
         // Update theme
         let lowerTheme = themeName?.lowercased() ?? ""
-        let activeThemeID = (!lowerTheme.isEmpty && lowerTheme != "system") ? themeName! : (isDark ? "dark" : "light")
+        let activeThemeID: String
+        if !lowerTheme.isEmpty && lowerTheme != "system", let tn = themeName {
+            activeThemeID = tn
+        } else {
+            activeThemeID = isDark ? "dark" : "light"
+        }
         engine.themeManager.setActiveTheme(activeThemeID)
         
         let effectiveTransparent = self.isTransparent || themeName == "transparent" || themeName == "extraClear" || themeName == "crystalClear" || themeName == "obsidianGlass"
