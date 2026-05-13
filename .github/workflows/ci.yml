@@ -8,7 +8,7 @@ name: "CI/CD"
 on:
   push:
     branches: [main, develop, "release/**"]
-    tags: ["v*.*.*"]
+    tags: ["v*"]
   pull_request:
     branches: [main]
   workflow_dispatch:
@@ -541,10 +541,11 @@ jobs:
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
         with:
-          name: "MicroCode v${{ needs.build-arch.outputs.version }}"
+          tag_name: ${{ github.ref_name }}
+          name: "MicroCode ${{ needs.build-arch.outputs.version }}"
           body_path: release-body.md
           draft: false
-          prerelease: ${{ contains(needs.build-arch.outputs.version, '-') }}
+          prerelease: ${{ contains(needs.build-arch.outputs.version, '-') || contains(github.ref_name, 'developer') || contains(github.ref_name, 'beta') || contains(github.ref_name, 'alpha') }}
           files: release-assets/*
           fail_on_unmatched_files: false
           generate_release_notes: false
