@@ -2,6 +2,12 @@
 set -e
 set -x
 
+# Ensure cargo/rustc are on PATH (critical for CI where subshells lose PATH)
+if [ -f "$HOME/.cargo/env" ]; then
+  source "$HOME/.cargo/env"
+fi
+export PATH="$HOME/.cargo/bin:$PATH"
+
 APP_NAME="MicroCode"
 BUNDLE_ID="com.dotmini.codetunner"
 VERSION="2.0.0 Developer"
