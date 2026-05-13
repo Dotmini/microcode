@@ -152,8 +152,8 @@ jobs:
   build-arch:
     name: "🔨 Build ${{ matrix.arch }}"
     needs: security
-    runs-on: ${{ matrix.os }}
-    timeout-minutes: 30
+    runs-on: macos-14
+    timeout-minutes: 45
     strategy:
       fail-fast: false
       matrix:
@@ -161,7 +161,7 @@ jobs:
           - arch: arm64
             os: macos-14
           - arch: x86_64
-            os: macos-13
+            os: macos-14
 
     outputs:
       version: ${{ steps.version.outputs.version }}
