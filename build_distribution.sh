@@ -459,16 +459,22 @@ EOF
         echo "   📦 Creating PKG..."
         PKG_NAME="${VARIANT_NAME}.pkg"
         TEMP_PKG="${BUILD_ROOT}/${PKG_NAME}"
-        
+
         # Remove any existing
         rm -f "${TEMP_PKG}" "${OUTPUT_FOLDER}/${PKG_NAME}"
-        
-        pkgbuild --root "${APP_BUNDLE}" \
+
+        # pkgbuild --root must point to a STAGING DIR that mirrors /Applications,
+        # NOT the .app bundle itself. The bundle goes inside the staging dir.
+        PKG_STAGE=$(mktemp -d)
+        cp -R "${APP_BUNDLE}" "${PKG_STAGE}/"
+
+        pkgbuild --root "${PKG_STAGE}" \
                  --identifier "${BUNDLE_ID}" \
                  --version "${VERSION}" \
-                 --install-location "/Applications/${APP_NAME}.app" \
+                 --install-location "/Applications" \
                  "${TEMP_PKG}"
-                 
+
+        rm -rf "${PKG_STAGE}"
         mv "${TEMP_PKG}" "${OUTPUT_FOLDER}/${PKG_NAME}"
         echo "      -> Created ${OUTPUT_FOLDER}/${PKG_NAME}"
     else
