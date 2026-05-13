@@ -196,20 +196,31 @@ jobs:
         run: |
           brew install protobuf 2>/dev/null || true
 
-      - name: Setup Rust
-        uses: dtolnay/rust-toolchain@stable
-        with:
-          toolchain: stable
-          targets: ${{ matrix.arch == 'arm64' && 'aarch64-apple-darwin' || 'x86_64-apple-darwin' }}
-
-      - name: Ensure Rust toolchain is active
+      - name: Install Rust toolchain
         run: |
-          rustup install stable
-          rustup default stable
-          rustup target add ${{ matrix.arch == 'arm64' && 'aarch64-apple-darwin' || 'x86_64-apple-darwin' }}
+          # Remove any conflicting rustup-init from Homebrew that shadows real cargo
+          brew unlink rustup 2>/dev/null || true
+          brew unlink rustup-init 2>/dev/null || true
+
+          # Install Rust via rustup.rs (the canonical way)
+          if ! command -v rustup &>/dev/null || ! ~/.cargo/bin/cargo --version &>/dev/null; then
+            curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain stable --no-modify-path
+          fi
+
+          # Source the cargo environment NOW for this step
+          source "$HOME/.cargo/env"
+
+          # Add to GITHUB_PATH so ALL subsequent steps see it first
           echo "$HOME/.cargo/bin" >> $GITHUB_PATH
-          cargo --version
-          rustc --version
+
+          # Add cross-compilation target
+          RUST_TARGET=${{ matrix.arch == 'arm64' && 'aarch64-apple-darwin' || 'x86_64-apple-darwin' }}
+          ~/.cargo/bin/rustup target add "$RUST_TARGET"
+
+          # Verify
+          ~/.cargo/bin/cargo --version
+          ~/.cargo/bin/rustc --version
+          echo "✅ Rust toolchain ready: $(~/.cargo/bin/cargo --version)"
 
       - name: Cache Rust
         uses: Swatinem/rust-cache@v2
@@ -245,6 +256,10 @@ jobs:
 
       - name: "🏗️ Build Full DMG (${{ matrix.arch }})"
         run: |
+          # Ensure cargo is on PATH (belt-and-suspenders)
+          source "$HOME/.cargo/env" 2>/dev/null || true
+          export PATH="$HOME/.cargo/bin:$PATH"
+          echo "cargo: $(which cargo) — $(cargo --version)"
           ./build_distribution.sh --arch ${{ matrix.arch }} --mode full
         env:
           CI: true
@@ -333,18 +348,17 @@ jobs:
         with:
           xcode-version: latest-stable
 
-      - name: Setup Rust
-        uses: dtolnay/rust-toolchain@stable
-        with:
-          toolchain: stable
-
-      - name: Ensure Rust toolchain is active
+      - name: Install Rust toolchain
         run: |
-          rustup install stable
-          rustup default stable
+          brew unlink rustup 2>/dev/null || true
+          brew unlink rustup-init 2>/dev/null || true
+          if ! ~/.cargo/bin/cargo --version &>/dev/null; then
+            curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain stable --no-modify-path
+          fi
+          source "$HOME/.cargo/env"
           echo "$HOME/.cargo/bin" >> $GITHUB_PATH
-          cargo --version
-          rustc --version
+          ~/.cargo/bin/cargo --version
+          ~/.cargo/bin/rustc --version
 
       - name: Cache Rust
         uses: Swatinem/rust-cache@v2
