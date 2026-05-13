@@ -797,201 +797,142 @@ public struct SyntaxHighlightedCodeView: NSViewRepresentable {
         self.isScrollEnabled = isScrollEnabled
         self.isTransparent = isTransparent
     }
-    
+
     public func makeNSView(context: Context) -> NSScrollView {
-        // Use Apple's factory method
+        // ─────────────────────────────────────────────────────────────────
+        // CRITICAL: makeNSView is called INSIDE a SwiftUI/AppKit layout pass.
+        // ANY call that triggers AppKit layout here (setting rulers, colors,
+        // attributed strings, textStorage delegates, etc.) causes a recursive
+        // NSView layout → NSPerformVisuallyAtomicChange recursion (10 levels)
+        // → SwiftUI calls makeNSView again → Swift precondition crash (brk #1).
+        //
+        // SOLUTION: Return a completely bare NSScrollView. Do ALL configuration
+        // in a DispatchQueue.main.async block so it runs AFTER the layout pass
+        // completes and the view is safely in the hierarchy.
+        // ─────────────────────────────────────────────────────────────────
+
         let scrollView = NSTextView.scrollableTextView()
         guard let textView = scrollView.documentView as? NSTextView else {
             return scrollView
         }
-        
+
+        // Only set the delegate here — this does NOT trigger layout.
         textView.delegate = context.coordinator
         textView.textStorage?.delegate = context.coordinator
-        
-        // Configure text view
-        textView.isRichText = true
-        textView.isEditable = true
-        textView.isSelectable = true
-        textView.allowsUndo = true
-        textView.usesFindBar = true
-        textView.importsGraphics = false
-        textView.usesFontPanel = false
-        
-        textView.isAutomaticQuoteSubstitutionEnabled = false
-        textView.isAutomaticDashSubstitutionEnabled = false
-        textView.isAutomaticTextReplacementEnabled = false
-        textView.isAutomaticSpellingCorrectionEnabled = false
-        
-        // IME-FIRST: Enable proper bi-directional text support (RTL for Hebrew/Arabic)
-        textView.baseWritingDirection = .natural // Auto-detect LTR/RTL based on content
-        
-        // IME-FIRST: Allow Input Method Editors to work correctly
-        // These settings ensure Thai/Japanese/Chinese keyboards function properly
-        textView.allowsDocumentBackgroundColorChange = false
-        textView.isAutomaticLinkDetectionEnabled = false
-        
-        // Initialize engine and assign to coordinator
+
+        // Initialize engine and assign to coordinator NOW (safe, no layout side-effects).
         let engine = SyntaxHighlightingEngine()
         context.coordinator.engine = engine
-        
-        // Set theme
-        let lowerTheme = themeName?.lowercased() ?? ""
-        let activeThemeID: String
-        if !lowerTheme.isEmpty && lowerTheme != "system", let tn = themeName {
-            activeThemeID = tn
-        } else {
-            activeThemeID = isDark ? "dark" : "light"
-        }
-        engine.themeManager.setActiveTheme(activeThemeID)
-        
-        
 
-        // Set Font
-        let fontWeightValue: NSFont.Weight
-        switch fontWeight {
-        case 0: fontWeightValue = .ultraLight
-        case 1: fontWeightValue = .light
-        case 2: fontWeightValue = .regular
-        case 3: fontWeightValue = .medium
-        case 4: fontWeightValue = .semibold
-        case 5: fontWeightValue = .bold
-        default: fontWeightValue = .regular
-        }
-        
-        let font = NSFont.monospacedSystemFont(ofSize: fontSize, weight: fontWeightValue)
-        let customFont = NSFont(name: fontName, size: fontSize) ?? font
-        textView.font = customFont
-        textView.typingAttributes[.font] = customFont
-        textView.typingAttributes[.font] = customFont
-        textView.typingAttributes[.ligature] = 0 // Disable ligatures
-        textView.typingAttributes[.foregroundColor] = engine.themeManager.editorForegroundColor // FIX: Default to Theme Color (White)
-        
-        // Set colors
-        // Use the struct's isTransparent property (set by Notebooks/Cell mode) OR the theme name
-        let effectiveTransparent = self.isTransparent || themeName == "transparent" || themeName == "extraClear" || themeName == "crystalClear" || themeName == "obsidianGlass"
-        textView.backgroundColor = effectiveTransparent ? .clear : engine.themeManager.editorBackgroundColor
-        textView.drawsBackground = !effectiveTransparent
-        textView.insertionPointColor = engine.themeManager.editorForegroundColor
-        textView.textContainerInset = NSSize(width: 5, height: 8)
-        
-        // Ensure default text color is set immediately in makeNSView
-        textView.textColor = engine.themeManager.editorForegroundColor
-        
-        // Line Numbers
-        let rulerView = LineNumberRulerView(textView: textView, scrollView: scrollView, themeManager: engine.themeManager)
-        scrollView.verticalRulerView = rulerView
-        scrollView.hasVerticalRuler = true
-        scrollView.rulersVisible = true
-        
-        scrollView.hasVerticalScroller = isScrollEnabled
-        scrollView.hasHorizontalScroller = isScrollEnabled
-        scrollView.autohidesScrollers = true
-        
-        if !isScrollEnabled {
-            scrollView.scrollsDynamically = false
-            // Disable elastic bounce if possible (not exposed directly on NSScrollView easily without subclass)
-            // But removing scrollers usually helps.
-        }
-        
-        // LAYOUT RECURSION FIX:
-        // widthTracksTextView=false + containerSize=.greatestFiniteMagnitude + isHorizontallyResizable=true
-        // causes NSScrollView to report INFINITE intrinsic content size to SwiftUI.
-        // SwiftUI then loops trying to resolve the size → NSPerformVisuallyAtomicChange recursion (10 levels) → crash.
-        //
-        // Solution: use a large-but-FINITE container width. The scroll view clips content anyway.
-        // isHorizontallyResizable=false prevents the text view from expanding its frame width,
-        // while widthTracksTextView=false still disables word-wrap by using a huge container width.
-        textView.autoresizingMask = [.width, .height]
-        textView.isHorizontallyResizable = false  // CRITICAL: prevents infinite width reporting
-        textView.isVerticallyResizable = true
-
-        textView.textContainer?.widthTracksTextView = false
-        // Use a large but FINITE width — scroll view clips it. Never use .greatestFiniteMagnitude here.
-        textView.textContainer?.containerSize = NSSize(width: 10_000_000, height: CGFloat.greatestFiniteMagnitude)
-
-        textView.minSize = NSSize(width: 0, height: 0)
-        textView.maxSize = NSSize(width: CGFloat.greatestFiniteMagnitude, height: CGFloat.greatestFiniteMagnitude)
-        
-        // Ensure Transparency is strictly enforced
-        scrollView.drawsBackground = !isTransparent
-        scrollView.backgroundColor = isTransparent ? .clear : engine.themeManager.editorBackgroundColor
-        scrollView.backgroundColor = isTransparent ? .clear : engine.themeManager.editorBackgroundColor
-        
-        // FIX INVISIBLE TEXT: Never use textView.string = text (wipes all attributes → black text).
-        // Instead, set an attributed string with the theme foreground color baked in from the start.
-        let initialFont = textView.font ?? NSFont.monospacedSystemFont(ofSize: fontSize, weight: .regular)
-        let fgInit = engine.themeManager.editorForegroundColor
-        let bgInit = engine.themeManager.editorBackgroundColor
-        let initialAttrs: [NSAttributedString.Key: Any] = [
-            .foregroundColor: fgInit,
-            .font: initialFont
-        ]
-        // Normalize newlines to prevent text storage mismatches
-        let normalizedText = text.replacingOccurrences(of: "\r\n", with: "\n")
-        let attrString = NSAttributedString(string: normalizedText, attributes: initialAttrs)
-        textView.textStorage?.setAttributedString(attrString)
-        
-        // Initialize and apply highlighting AFTER setting text storage so engine gets normalized string (e.g. \r\n -> \n)
-        engine.setDocument(textView.string, language: language)
-        
-        // Notify LSP file opened (non-blocking with timeout)
-        if let url = context.coordinator.parent.fileURL {
-            Task.detached(priority: .utility) {
-                let lspTask = Task {
-                    await LSPManager.shared.documentOpened(uri: url.absoluteString, language: language, content: normalizedText)
-                }
-                // 2-second timeout
-                let timeoutTask = Task {
-                    try? await Task.sleep(nanoseconds: 2_000_000_000)
-                    lspTask.cancel()
-                }
-                await lspTask.value
-                timeoutTask.cancel()
-            }
-        }
-        
-        if let textStorage = textView.textStorage {
-            // Apply syntax highlighting on top (async, non-blocking)
-            if !text.isEmpty {
-                engine.applyHighlightingAsync(to: textStorage, fontSize: fontSize, font: textView.font)
-            }
-        }
-        
-        // SAFETY NET: Verify text visibility after a brief delay
-        // This catches cases where layout or SwiftUI re-render clears our attributes
+        // Defer ALL layout-triggering setup to after the view is in the hierarchy.
         DispatchQueue.main.async { [weak coordinator = context.coordinator] in
             guard let coordinator = coordinator, !coordinator.isInvalidated else { return }
-            guard let tv = scrollView.documentView as? NSTextView,
-                  let ts = tv.textStorage,
-                  let eng = coordinator.engine else { return }
-            
-            let fgColor = eng.themeManager.editorForegroundColor
-            let bgColor = eng.themeManager.editorBackgroundColor
-            
-            // Check if foreground color is actually applied
-            if ts.length > 0 {
-                let appliedColor = ts.attribute(.foregroundColor, at: 0, effectiveRange: nil) as? NSColor
-                if appliedColor == nil {
-                    ts.beginEditing()
-                    ts.addAttribute(.foregroundColor, value: fgColor, range: NSRange(location: 0, length: ts.length))
-                    ts.endEditing()
+            guard let tv = scrollView.documentView as? NSTextView else { return }
+
+            // ── Text view behaviour ──────────────────────────────────────
+            tv.isRichText = true
+            tv.isEditable = true
+            tv.isSelectable = true
+            tv.allowsUndo = true
+            tv.usesFindBar = true
+            tv.importsGraphics = false
+            tv.usesFontPanel = false
+            tv.isAutomaticQuoteSubstitutionEnabled = false
+            tv.isAutomaticDashSubstitutionEnabled = false
+            tv.isAutomaticTextReplacementEnabled = false
+            tv.isAutomaticSpellingCorrectionEnabled = false
+            tv.isAutomaticLinkDetectionEnabled = false
+            tv.baseWritingDirection = .natural
+            tv.allowsDocumentBackgroundColorChange = false
+
+            // ── Theme ────────────────────────────────────────────────────
+            let lowerTheme = coordinator.parent.themeName?.lowercased() ?? ""
+            let activeThemeID: String
+            if !lowerTheme.isEmpty && lowerTheme != "system", let tn = coordinator.parent.themeName {
+                activeThemeID = tn
+            } else {
+                activeThemeID = coordinator.parent.isDark ? "dark" : "light"
+            }
+            engine.themeManager.setActiveTheme(activeThemeID)
+
+            // ── Font ─────────────────────────────────────────────────────
+            let fw = coordinator.parent.fontWeight
+            let fontWeightValue: NSFont.Weight
+            switch fw {
+            case 0: fontWeightValue = .ultraLight
+            case 1: fontWeightValue = .light
+            case 2: fontWeightValue = .regular
+            case 3: fontWeightValue = .medium
+            case 4: fontWeightValue = .semibold
+            case 5: fontWeightValue = .bold
+            default: fontWeightValue = .regular
+            }
+            let baseFont = NSFont.monospacedSystemFont(ofSize: coordinator.parent.fontSize, weight: fontWeightValue)
+            let customFont = NSFont(name: coordinator.parent.fontName, size: coordinator.parent.fontSize) ?? baseFont
+            tv.font = customFont
+            tv.typingAttributes[.font] = customFont
+            tv.typingAttributes[.ligature] = 0
+            tv.typingAttributes[.foregroundColor] = engine.themeManager.editorForegroundColor
+
+            // ── Colors ───────────────────────────────────────────────────
+            let tn = coordinator.parent.themeName
+            let effectiveTransparent = coordinator.parent.isTransparent
+                || tn == "transparent" || tn == "extraClear"
+                || tn == "crystalClear" || tn == "obsidianGlass"
+            let fgColor = engine.themeManager.editorForegroundColor
+            let bgColor = engine.themeManager.editorBackgroundColor
+            tv.backgroundColor      = effectiveTransparent ? .clear : bgColor
+            tv.drawsBackground      = !effectiveTransparent
+            tv.insertionPointColor  = fgColor
+            tv.textContainerInset   = NSSize(width: 5, height: 8)
+            tv.textColor            = fgColor
+            scrollView.drawsBackground  = !effectiveTransparent
+            scrollView.backgroundColor  = effectiveTransparent ? .clear : bgColor
+
+            // ── Layout: finite container width prevents infinite-size loop ──
+            tv.autoresizingMask = [.width, .height]
+            tv.isHorizontallyResizable = false
+            tv.isVerticallyResizable   = true
+            tv.textContainer?.widthTracksTextView = false
+            tv.textContainer?.containerSize = NSSize(width: 10_000_000,
+                                                     height: CGFloat.greatestFiniteMagnitude)
+            tv.minSize = NSSize(width: 0, height: 0)
+            tv.maxSize = NSSize(width: CGFloat.greatestFiniteMagnitude,
+                                height: CGFloat.greatestFiniteMagnitude)
+
+            // ── Line Numbers (safe to add after view is in hierarchy) ─────
+            let rulerView = LineNumberRulerView(textView: tv, scrollView: scrollView,
+                                               themeManager: engine.themeManager)
+            scrollView.verticalRulerView = rulerView
+            scrollView.hasVerticalRuler  = true
+            scrollView.rulersVisible     = true
+            scrollView.hasVerticalScroller   = coordinator.parent.isScrollEnabled
+            scrollView.hasHorizontalScroller = coordinator.parent.isScrollEnabled
+            scrollView.autohidesScrollers    = true
+
+            // ── Initial text content ─────────────────────────────────────
+            let normalizedText = coordinator.parent.text.replacingOccurrences(of: "\r\n", with: "\n")
+            let initAttrs: [NSAttributedString.Key: Any] = [.foregroundColor: fgColor, .font: customFont]
+            let attrString = NSAttributedString(string: normalizedText, attributes: initAttrs)
+            tv.textStorage?.setAttributedString(attrString)
+
+            // ── Engine: syntax highlighting ──────────────────────────────
+            let lang = coordinator.parent.language
+            engine.setDocument(tv.string, language: lang)
+            if let ts = tv.textStorage, !normalizedText.isEmpty {
+                engine.applyHighlightingAsync(to: ts, fontSize: coordinator.parent.fontSize, font: tv.font)
+            }
+
+            // ── LSP notification ─────────────────────────────────────────
+            if let url = coordinator.parent.fileURL {
+                Task.detached(priority: .utility) {
+                    await LSPManager.shared.documentOpened(uri: url.absoluteString,
+                                                          language: lang,
+                                                          content: normalizedText)
                 }
             }
-            
-            // Ensure textView properties are correct
-            tv.textColor = fgColor
-            tv.insertionPointColor = fgColor
-            
-            // Force background color
-            let effectiveTransparent = coordinator.parent.isTransparent || coordinator.parent.themeName == "transparent" || coordinator.parent.themeName == "extraClear" || coordinator.parent.themeName == "crystalClear" || coordinator.parent.themeName == "obsidianGlass"
-            if !effectiveTransparent {
-                tv.backgroundColor = bgColor
-                tv.drawsBackground = true
-                scrollView.backgroundColor = bgColor
-                scrollView.drawsBackground = true
-            }
         }
-        
+
         return scrollView
     }
 
