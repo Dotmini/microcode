@@ -4,9 +4,18 @@ set -x
 
 # Ensure cargo/rustc are on PATH (critical for CI where subshells lose PATH)
 if [ -f "$HOME/.cargo/env" ]; then
-  source "$HOME/.cargo/env"
+  source "$HOME/.cargo/env" 2>/dev/null || true
 fi
 export PATH="$HOME/.cargo/bin:$PATH"
+
+# Fallback: if cargo STILL not found, install it now
+if ! command -v cargo &>/dev/null; then
+  echo "⚠️  cargo not found — installing Rust toolchain..."
+  curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain stable 2>/dev/null
+  source "$HOME/.cargo/env" 2>/dev/null || true
+  export PATH="$HOME/.cargo/bin:$PATH"
+fi
+echo "🦀 Using: $(cargo --version 2>/dev/null || echo 'cargo not available')"
 
 APP_NAME="MicroCode"
 BUNDLE_ID="com.dotmini.codetunner"

@@ -257,11 +257,28 @@ jobs:
             runtimes-${{ matrix.arch }}-
 
       - name: "🏗️ Build Full DMG (${{ matrix.arch }})"
+        shell: bash -l {0}
         run: |
-          # Ensure cargo is on PATH (belt-and-suspenders)
+          # Debug: show where cargo is
+          echo "=== DEBUG: PATH check ==="
+          echo "PATH=$PATH"
+          echo "HOME=$HOME"
+          ls -la "$HOME/.cargo/bin/cargo" 2>/dev/null && echo "cargo binary exists" || echo "cargo binary NOT found at ~/.cargo/bin/cargo"
+          ls -la "$HOME/.cargo/env" 2>/dev/null && echo "cargo env exists" || echo "cargo env NOT found"
+          
+          # Source cargo env
           source "$HOME/.cargo/env" 2>/dev/null || true
           export PATH="$HOME/.cargo/bin:$PATH"
-          echo "cargo: $(which cargo) — $(cargo --version)"
+          
+          # If cargo still not found, re-install
+          if ! command -v cargo &>/dev/null; then
+            echo "⚠️ cargo not found, re-installing Rust..."
+            curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain stable
+            source "$HOME/.cargo/env"
+            export PATH="$HOME/.cargo/bin:$PATH"
+          fi
+          
+          echo "✅ cargo: $(which cargo) — $(cargo --version)"
           ./build_distribution.sh --arch ${{ matrix.arch }} --mode full
         env:
           CI: true
