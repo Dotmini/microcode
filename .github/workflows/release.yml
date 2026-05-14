@@ -66,69 +66,83 @@ jobs:
           echo "VERSION=${VERSION}" >> $GITHUB_ENV
           echo "version=${VERSION}" >> $GITHUB_OUTPUT
 
+      - name: Check Signing Secrets
+        env:
+          CERT: ${{ secrets.APPLE_CERTIFICATE_BASE64 }}
+        run: |
+          if [[ -n "$CERT" ]]; then
+            echo "SIGNING_AVAILABLE=true" >> $GITHUB_ENV
+            echo "✅ Apple Developer secrets found — will sign and notarize"
+          else
+            echo "SIGNING_AVAILABLE=false" >> $GITHUB_ENV
+            echo "⚠️  Apple Developer secrets NOT configured — falling back to ad-hoc signing"
+            echo "   Add these secrets to enable: APPLE_CERTIFICATE_BASE64, APPLE_CERTIFICATE_PASSWORD,"
+            echo "   APPLE_DEV_ID, APPLE_ID, APPLE_APP_PASSWORD, APPLE_TEAM_ID"
+          fi
+
       - name: Setup Apple Certificate
+        if: env.SIGNING_AVAILABLE == 'true'
         env:
           BUILD_CERTIFICATE_BASE64: ${{ secrets.APPLE_CERTIFICATE_BASE64 }}
           P12_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
-          KEYCHAIN_PASSWORD: ${{ secrets.GITHUB_TOKEN }}
+          KEYCHAIN_PASSWORD: ${{ github.run_id }}
         run: |
-          # Create variables
           CERTIFICATE_PATH=$RUNNER_TEMP/build_certificate.p12
           KEYCHAIN_PATH=$RUNNER_TEMP/app-signing.keychain-db
 
-          # Import certificate from secrets
           echo -n "$BUILD_CERTIFICATE_BASE64" | base64 --decode -o $CERTIFICATE_PATH
 
-          # Create temporary keychain
           security create-keychain -p "$KEYCHAIN_PASSWORD" $KEYCHAIN_PATH
           security set-keychain-settings -lut 21600 $KEYCHAIN_PATH
           security unlock-keychain -p "$KEYCHAIN_PASSWORD" $KEYCHAIN_PATH
 
-          # Import certificate to keychain
-          security import $CERTIFICATE_PATH -P "$P12_PASSWORD" -A -t cert -f pkcs12 -k $KEYCHAIN_PATH
-          security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k "$KEYCHAIN_PASSWORD" $KEYCHAIN_PATH
+          security import $CERTIFICATE_PATH \
+            -P "$P12_PASSWORD" -A -t cert -f pkcs12 -k $KEYCHAIN_PATH
 
-          # Add keychain to search list
+          security set-key-partition-list \
+            -S apple-tool:,apple:,codesign: -s -k "$KEYCHAIN_PASSWORD" $KEYCHAIN_PATH
+
           security list-keychain -d user -s $KEYCHAIN_PATH
+          echo "✅ Certificate imported successfully"
 
       - name: Build Application (ARM64 & Intel)
         run: |
           source "$HOME/.cargo/env"
-          chmod +x build_distribution.sh bundle_runtimes.sh sign_and_notarize.sh
+          chmod +x build_distribution.sh bundle_runtimes.sh sign_and_notarize.sh 2>/dev/null || true
           ./build_distribution.sh --mode full --version "${VERSION}"
           ./build_distribution.sh --mode lite-only --version "${VERSION}"
 
-      - name: Sign and Notarize Artifacts
+      - name: Sign and Notarize (Developer ID)
+        if: env.SIGNING_AVAILABLE == 'true'
         env:
           DEVELOPER_ID: ${{ secrets.APPLE_DEV_ID }}
           APPLE_ID: ${{ secrets.APPLE_ID }}
           APP_PASSWORD: ${{ secrets.APPLE_APP_PASSWORD }}
           TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
         run: |
-          # Array of variants to sign and notarize
           VARIANTS=("arm64" "x86_64" "Lite")
           NAMES=("Dotmini_CodeTunner_ARM64_Full" "Dotmini_CodeTunner_Intel_Full" "Dotmini_CodeTunner_Lite")
 
           for i in "${!VARIANTS[@]}"; do
             VARIANT="${VARIANTS[$i]}"
             NAME="${NAMES[$i]}"
-            
+
             echo "========================================"
-            echo "🚀 Signing and Notarizing: $NAME ($VARIANT)"
+            echo "🔐 Signing: $NAME ($VARIANT)"
             echo "========================================"
 
             if [ -d "Dist/${VARIANT}/CodeTunner.app" ]; then
-                export APP_PATH="$(pwd)/Dist/${VARIANT}/CodeTunner.app"
+              export APP_PATH="$(pwd)/Dist/${VARIANT}/CodeTunner.app"
             elif [ -d "Dist/${VARIANT}/codetunner.app" ]; then
-                export APP_PATH="$(pwd)/Dist/${VARIANT}/codetunner.app"
+              export APP_PATH="$(pwd)/Dist/${VARIANT}/codetunner.app"
             else
-                echo "❌ APP not found for variant $VARIANT"
-                exit 1
+              echo "❌ .app not found in Dist/${VARIANT}/"
+              ls Dist/${VARIANT}/ 2>/dev/null || true
+              exit 1
             fi
 
             export DMG_PATH="$(pwd)/Dist/${VARIANT}/${NAME}.dmg"
             export PKG_PATH="$(pwd)/Dist/${VARIANT}/${NAME}.pkg"
-            export VERSION="${VERSION}"
 
             ./sign_and_notarize.sh all
           done
@@ -140,27 +154,38 @@ jobs:
           echo "" >> SHA256SUMS.txt
           find Dist -type f \( -name "*.dmg" -o -name "*.pkg" \) | sort | while read f; do
             filename=$(basename "$f")
-            shasum -a 256 "$f" | awk '{print $1 "  " "'"$filename"'"}' >> SHA256SUMS.txt
+            shasum -a 256 "$f" | awk -v fn="$filename" '{print $1 "  " fn}' >> SHA256SUMS.txt
           done
+          echo "📋 Checksums:"
+          cat SHA256SUMS.txt
 
       - name: Collect Release Assets
         run: |
           mkdir -p release-assets
           find Dist -type f \( -name "*.dmg" -o -name "*.pkg" \) -exec cp {} release-assets/ \;
           cp SHA256SUMS.txt release-assets/
+          echo "📦 Release assets:"
+          ls -lh release-assets/
 
       - name: Generate Changelog
-        id: changelog
         run: |
           PREV_TAG=$(git describe --tags --abbrev=0 HEAD^ 2>/dev/null || echo "")
           if [ -n "$PREV_TAG" ]; then
             CHANGES=$(git log --pretty=format:"- %s (%h)" "${PREV_TAG}..HEAD" | head -50)
           else
-            CHANGES=$(git log --pretty=format:"- %s (%h)" -50)
+            CHANGES=$(git log --pretty=format:"- %s (%h)" | head -30)
+          fi
+
+          if [ "$SIGNING_AVAILABLE" = "true" ]; then
+            SIGN_NOTE="✅ **Developer ID Signed & Notarized** — trusted by macOS Gatekeeper"
+          else
+            SIGN_NOTE="⚠️ **Ad-hoc Signed** — you may need to right-click → Open on first launch"
           fi
 
           cat > release-body.md << HEREDOC
           ## CodeTunner v${VERSION}
+
+          ${SIGN_NOTE}
 
           ### 📥 Downloads
           | Platform | DMG | PKG |
@@ -173,26 +198,27 @@ jobs:
           - macOS 13.0 (Ventura) or later
 
           ### 📋 Changes
-          $CHANGES
+          ${CHANGES}
 
           ### 🔐 Verify Download
           \`\`\`bash
           shasum -a 256 -c SHA256SUMS.txt
           \`\`\`
+
+          ---
+          <sub>Built with ❤️ in Thailand 🇹🇭 by Dotmini Software</sub>
           HEREDOC
 
       - name: Create GitHub Release
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          # Delete if exists
-          gh release delete "v${VERSION}" --repo ${{ github.repository }} --yes 2>/dev/null || true
-          
-          # Create new release
-          gh release create "v${VERSION}" \
+          TAG="v${VERSION}"
+          gh release delete "$TAG" --repo ${{ github.repository }} --yes 2>/dev/null || true
+
+          gh release create "$TAG" \
             release-assets/* \
             --repo ${{ github.repository }} \
             --title "CodeTunner v${VERSION}" \
-            --notes-file release-body.md \
-            --target ${{ github.sha }}
-          echo "✅ Release created!"
+            --notes-file release-body.md
+          echo "✅ Release published: https://github.com/${{ github.repository }}/releases/tag/$TAG"
