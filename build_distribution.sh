@@ -17,7 +17,7 @@ if ! command -v cargo &>/dev/null; then
 fi
 echo "🦀 Using: $(cargo --version 2>/dev/null || echo 'cargo not available')"
 
-APP_NAME="MicroCode"
+APP_NAME="CodeTunner"
 BUNDLE_ID="com.dotmini.codetunner"
 VERSION="2.0.0 Developer"
 
@@ -212,7 +212,7 @@ compile_arch() {
 
 # Function to package an app bundle
 package_variant() {
-    VARIANT_NAME=$1      # e.g., "MicroCode_ARM64_Full" or "MicroCode_Lite"
+    VARIANT_NAME=$1      # e.g., "CodeTunner_ARM64_Full" or "CodeTunner_Lite"
     SOURCE_ARCH=$2       # e.g., "arm64", "x86_64", or "universal"
     INCLUDE_RUNTIMES=$3  # "true" or "false"
     OUTPUT_FOLDER=$4     # e.g., "Dist/arm64" or "Dist/Lite"
@@ -265,7 +265,7 @@ package_variant() {
     <array>
         <dict>
             <key>CFBundleTypeName</key>
-            <string>MicroCode Notebook</string>
+            <string>CodeTunner Notebook</string>
             <key>CFBundleTypeRole</key>
             <string>Editor</string>
             <key>LSHandlerRank</key>
@@ -282,7 +282,7 @@ package_variant() {
             <key>UTTypeIdentifier</key>
             <string>com.dotmini.microcode.mic</string>
             <key>UTTypeDescription</key>
-            <string>MicroCode Notebook</string>
+            <string>CodeTunner Notebook</string>
             <key>UTTypeConformsTo</key>
             <array>
                 <string>public.data</string>
@@ -502,10 +502,10 @@ if [ "$DEV_MODE" = "true" ]; then
     HOST_ARCH=$(uname -m)
     if [ "$HOST_ARCH" = "arm64" ]; then
         compile_arch "arm64"
-        package_variant "microcode" "arm64" "false" "Dist/Dev"
+        package_variant "codetunner" "arm64" "false" "Dist/Dev"
     elif [ "$HOST_ARCH" = "x86_64" ]; then
         compile_arch "x86_64"
-        package_variant "microcode" "x86_64" "false" "Dist/Dev"
+        package_variant "codetunner" "x86_64" "false" "Dist/Dev"
     else
         echo "❌ Unsupported architecture: $HOST_ARCH"
         exit 1
@@ -514,22 +514,22 @@ if [ "$DEV_MODE" = "true" ]; then
     echo "========================================"
     echo "✅ Dev Build Complete!"
     echo "========================================"
-    echo "Artifact: Dist/Dev/microcode.app"
+    echo "Artifact: Dist/Dev/codetunner.app"
     exit 0
 fi
 
 if [ "$TARGET_MODE" = "full" ]; then
     if [ "$TARGET_ARCH" = "arm64" ]; then
         compile_arch "arm64"
-        package_variant "Dotmini_MicroCode_ARM64_Full" "arm64" "true" "Dist/arm64"
+        package_variant "Dotmini_CodeTunner_ARM64_Full" "arm64" "true" "Dist/arm64"
     elif [ "$TARGET_ARCH" = "x86_64" ]; then
         compile_arch "x86_64"
-        package_variant "Dotmini_MicroCode_Intel_Full" "x86_64" "true" "Dist/x86_64"
+        package_variant "Dotmini_CodeTunner_Intel_Full" "x86_64" "true" "Dist/x86_64"
     else
         compile_arch "arm64"
         compile_arch "x86_64"
-        package_variant "Dotmini_MicroCode_ARM64_Full" "arm64" "true" "Dist/arm64"
-        package_variant "Dotmini_MicroCode_Intel_Full" "x86_64" "true" "Dist/x86_64"
+        package_variant "Dotmini_CodeTunner_ARM64_Full" "arm64" "true" "Dist/arm64"
+        package_variant "Dotmini_CodeTunner_Intel_Full" "x86_64" "true" "Dist/x86_64"
     fi
 elif [ "$TARGET_MODE" = "lite-only" ]; then
     # Assumes arm64 and x86_64 are already compiled and placed in .build_dist/
@@ -552,7 +552,7 @@ elif [ "$TARGET_MODE" = "lite-only" ]; then
                 echo "   → Created universal ${DYLIB_NAME}"
             fi
         done
-        package_variant "Dotmini_MicroCode_Lite" "universal" "false" "Dist/Lite"
+        package_variant "Dotmini_CodeTunner_Lite" "universal" "false" "Dist/Lite"
     else
         echo "❌ Cannot build Lite: Missing arm64 or x86_64 compiled binaries in ${BUILD_ROOT}"
         exit 1
@@ -592,22 +592,22 @@ else
     done
 
     # Target 1: ARM64 Full
-    package_variant "Dotmini_MicroCode_ARM64_Full" "arm64" "true" "Dist/arm64"
+    package_variant "Dotmini_CodeTunner_ARM64_Full" "arm64" "true" "Dist/arm64"
 
     # Target 2: Intel Full
-    package_variant "Dotmini_MicroCode_Intel_Full" "x86_64" "true" "Dist/x86_64"
+    package_variant "Dotmini_CodeTunner_Intel_Full" "x86_64" "true" "Dist/x86_64"
 
     # Target 3: Lite Universal
-    package_variant "Dotmini_MicroCode_Lite" "universal" "false" "Dist/Lite"
+    package_variant "Dotmini_CodeTunner_Lite" "universal" "false" "Dist/Lite"
 
     echo "========================================"
     echo "🎉 3-Version Build Cycle Complete!"
     echo "   Version: ${VERSION}"
     echo "========================================"
     echo "Artifacts:"
-    echo "1. Dist/arm64/Dotmini_MicroCode_ARM64_Full.dmg"
-    echo "2. Dist/x86_64/Dotmini_MicroCode_Intel_Full.dmg"
-    echo "3. Dist/Lite/Dotmini_MicroCode_Lite.dmg (< 50MB)"
+    echo "1. Dist/arm64/Dotmini_CodeTunner_ARM64_Full.dmg"
+    echo "2. Dist/x86_64/Dotmini_CodeTunner_Intel_Full.dmg"
+    echo "3. Dist/Lite/Dotmini_CodeTunner_Lite.dmg (< 50MB)"
 fi
 
 # ==============================================================================

@@ -18,11 +18,11 @@ set -e
 # Configuration
 APP_NAME="CodeTunner"
 BUNDLE_ID="com.dotmini.codetunner"
-VERSION="2.0.0 Developer"
+VERSION="${VERSION:-2.0.0 Developer}"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-APP_PATH="$SCRIPT_DIR/Dist/$APP_NAME.app"
-DMG_PATH="$SCRIPT_DIR/Dist/$APP_NAME-$VERSION.dmg"
-PKG_PATH="$SCRIPT_DIR/Dist/$APP_NAME-$VERSION.pkg"
+APP_PATH="${APP_PATH:-$SCRIPT_DIR/Dist/$APP_NAME.app}"
+DMG_PATH="${DMG_PATH:-$SCRIPT_DIR/Dist/$APP_NAME-$VERSION.dmg}"
+PKG_PATH="${PKG_PATH:-$SCRIPT_DIR/Dist/$APP_NAME-$VERSION.pkg}"
 ENTITLEMENTS="$SCRIPT_DIR/entitlements.plist"
 
 # Colors
@@ -183,7 +183,7 @@ create_dmg() {
         --window-pos 200 120 \
         --window-size 600 400 \
         --icon-size 100 \
-        --icon "$APP_NAME.app" 150 190 \
+        --icon "$(basename "$APP_PATH")" 150 190 \
         --app-drop-link 450 190 \
         "$DMG_PATH" \
         "$APP_PATH" 2>/dev/null || \
