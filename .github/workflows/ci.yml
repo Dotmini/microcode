@@ -487,21 +487,25 @@ jobs:
       - name: Generate release checksums
         run: |
           VERSION="${{ needs.build-arch.outputs.version }}"
-          echo "# MicroCode v${VERSION} — SHA256 Checksums" > SHA256SUMS.txt
+          echo "# CodeTunner v${VERSION} — SHA256 Checksums" > SHA256SUMS.txt
           echo "# Generated: $(date -u +%Y-%m-%dT%H:%M:%SZ)" >> SHA256SUMS.txt
           echo "" >> SHA256SUMS.txt
-          # Only checksum actual MicroCode release artifacts (not dependency test fixtures)
-          find artifacts/ -maxdepth 2 -type f \( -name "*microcode_*" -o -name "*MicroCode_*" \) \( -name "*.dmg" -o -name "*.pkg" \) | sort | while read f; do
+          # Match all CodeTunner/Dotmini release artifacts
+          find artifacts/ -maxdepth 2 -type f \
+            \( -name "*CodeTunner*" -o -name "*codetunner*" -o -name "*MicroCode_*" -o -name "*microcode_*" \) \
+            \( -name "*.dmg" -o -name "*.pkg" \) | sort | while read f; do
             sha256sum "$f" >> SHA256SUMS.txt
           done
+          echo "📋 Checksums:"
           cat SHA256SUMS.txt
 
       - name: Collect release assets
         run: |
           mkdir -p release-assets
-          # Only copy actual MicroCode artifacts — NOT random .zip test fixtures from dependencies
-          find artifacts/ -maxdepth 2 -type f -name "*microcode_*" \( -name "*.dmg" -o -name "*.pkg" \) -exec cp {} release-assets/ \;
-          find artifacts/ -maxdepth 2 -type f -name "*MicroCode_*" \( -name "*.dmg" -o -name "*.pkg" \) -exec cp {} release-assets/ \;
+          # Collect all CodeTunner/Dotmini DMG and PKG artifacts
+          find artifacts/ -maxdepth 2 -type f \
+            \( -name "*CodeTunner*" -o -name "*codetunner*" -o -name "*MicroCode_*" -o -name "*microcode_*" \) \
+            \( -name "*.dmg" -o -name "*.pkg" \) -exec cp {} release-assets/ \;
           cp SHA256SUMS.txt release-assets/ 2>/dev/null || true
           echo "📦 Release assets:"
           ls -lh release-assets/
@@ -523,7 +527,7 @@ jobs:
           fi
 
           cat > release-body.md << 'HEREDOC'
-          ## MicroCode v${{ needs.build-arch.outputs.version }}
+          ## CodeTunner v${{ needs.build-arch.outputs.version }}
 
           **Build:** ${{ needs.build-arch.outputs.build_number }} | **License:** MPL v1.0
 
@@ -532,6 +536,7 @@ jobs:
           |----------|-----|-----|
           | **Apple Silicon (ARM64)** | ✅ | ✅ |
           | **Intel (x86_64)** | ✅ | ✅ |
+          | **Universal Lite** | ✅ | ✅ |
 
           ### ⚙️ Requirements
           - macOS 13.0 (Ventura) or later
@@ -597,7 +602,7 @@ jobs:
           gh release create "${{ github.ref_name }}" \
             release-assets/* \
             --repo ${{ github.repository }} \
-            --title "MicroCode ${VERSION}" \
+            --title "CodeTunner ${VERSION}" \
             --notes-file release-body.md \
             --prerelease="$IS_PRE" \
             --verify-tag
