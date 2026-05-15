@@ -755,8 +755,15 @@ public final class SyntaxHighlightingEngine: @unchecked Sendable {
 
 import SwiftUI
 
-/// SwiftUI view that displays syntax-highlighted code.
-/// Uses the SyntaxHighlightingEngine for tokenization and styling.
+// Custom NSScrollView to prevent SwiftUI from attempting to size the scroll view
+// based on the length of the code inside the NSTextView. This definitively breaks
+// the AppKit layout recursion loop (_FlexFrameLayout) that causes EXC_BREAKPOINT.
+class NoIntrinsicScrollView: NSScrollView {
+    override var intrinsicContentSize: NSSize {
+        return NSView.noIntrinsicMetric
+    }
+}
+
 public struct SyntaxHighlightedCodeView: NSViewRepresentable {
     @Binding public var text: String
     public let language: String
@@ -798,10 +805,13 @@ public struct SyntaxHighlightedCodeView: NSViewRepresentable {
         // completes and the view is safely in the hierarchy.
         // ─────────────────────────────────────────────────────────────────
 
-        let scrollView = NSTextView.scrollableTextView()
-        guard let textView = scrollView.documentView as? NSTextView else {
-            return scrollView
-        }
+        let scrollView = NoIntrinsicScrollView()
+        let textView = NSTextView(frame: NSRect(x: 0, y: 0, width: 1000, height: 1000))
+        
+        scrollView.documentView = textView
+        scrollView.hasVerticalScroller = true
+        scrollView.hasHorizontalScroller = true
+        scrollView.autohidesScrollers = true
 
         // Only set the delegate here — this does NOT trigger layout.
         textView.delegate = context.coordinator
