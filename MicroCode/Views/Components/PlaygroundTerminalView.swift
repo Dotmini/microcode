@@ -14,6 +14,11 @@ struct PlaygroundTerminalView: NSViewRepresentable {
     @Binding var fontSize: CGFloat
     var theme: AppTheme
     
+    @available(macOS 13.0, *)
+    func sizeThatFits(_ proposal: ProposedViewSize, nsView: TerminalView, context: Context) -> CGSize? {
+        return proposal.replacingUnspecifiedDimensions()
+    }
+    
     func makeNSView(context: Context) -> TerminalView {
         let terminal = TerminalView(frame: .zero)
         terminal.font = NSFont.monospacedSystemFont(ofSize: fontSize, weight: .regular)

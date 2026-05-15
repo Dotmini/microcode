@@ -792,6 +792,14 @@ public struct SyntaxHighlightedCodeView: NSViewRepresentable {
         self.isTransparent = isTransparent
     }
 
+    @available(macOS 13.0, *)
+    public func sizeThatFits(_ proposal: ProposedViewSize, nsView: NSScrollView, context: Context) -> CGSize? {
+        // CRITICAL FIX: By explicitly returning the proposed size, we PREVENT SwiftUI 
+        // from ever querying the intrinsicContentSize of the NSScrollView.
+        // This definitively kills the _FlexFrameLayout recursion crash.
+        return proposal.replacingUnspecifiedDimensions()
+    }
+
     public func makeNSView(context: Context) -> NSScrollView {
         // ─────────────────────────────────────────────────────────────────
         // CRITICAL: makeNSView is called INSIDE a SwiftUI/AppKit layout pass.
@@ -820,7 +828,7 @@ public struct SyntaxHighlightedCodeView: NSViewRepresentable {
         // Initialize engine and assign to coordinator NOW (safe, no layout side-effects).
         let engine = SyntaxHighlightingEngine()
         context.coordinator.engine = engine
-
+        
         // Defer ALL layout-triggering setup to after the view is in the hierarchy.
         DispatchQueue.main.async { [weak coordinator = context.coordinator] in
             guard let coordinator = coordinator, !coordinator.isInvalidated else { return }
