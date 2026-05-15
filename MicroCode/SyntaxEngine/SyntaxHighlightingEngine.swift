@@ -760,7 +760,7 @@ import SwiftUI
 // the AppKit layout recursion loop (_FlexFrameLayout) that causes EXC_BREAKPOINT.
 class NoIntrinsicScrollView: NSScrollView {
     override var intrinsicContentSize: NSSize {
-        return NSView.noIntrinsicMetric
+        return NSSize(width: NSView.noIntrinsicMetric, height: NSView.noIntrinsicMetric)
     }
 }
 
