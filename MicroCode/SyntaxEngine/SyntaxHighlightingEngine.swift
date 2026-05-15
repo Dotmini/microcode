@@ -902,7 +902,9 @@ public struct SyntaxHighlightedCodeView: NSViewRepresentable {
                 tv.textContainer?.widthTracksTextView = true
                 tv.textContainer?.containerSize = NSSize(width: scrollView.contentSize.width, height: CGFloat.greatestFiniteMagnitude)
             } else {
-                tv.autoresizingMask = [.width, .height]
+                // FIX: Prevent AppKit _NSViewLayout recursion loop by allowing horizontal
+                // scaling without forcing the text view to match the scroll view's height.
+                tv.autoresizingMask = [.width]
                 tv.isHorizontallyResizable = true
                 tv.textContainer?.widthTracksTextView = false
                 tv.textContainer?.containerSize = NSSize(width: CGFloat.greatestFiniteMagnitude, height: CGFloat.greatestFiniteMagnitude)
@@ -996,85 +998,62 @@ public struct SyntaxHighlightedCodeView: NSViewRepresentable {
         context.coordinator.lastIsTransparent = isTransparent  // FIX: update transparent cache
         
         // Update theme
-        let lowerTheme = themeName?.lowercased() ?? ""
-        let activeThemeID: String
-        if !lowerTheme.isEmpty && lowerTheme != "system", let tn = themeName {
-            activeThemeID = tn
-        } else {
-            activeThemeID = isDark ? "dark" : "light"
-        }
-        engine.themeManager.setActiveTheme(activeThemeID)
-        
-        let effectiveTransparent = self.isTransparent || themeName == "transparent" || themeName == "extraClear" || themeName == "crystalClear" || themeName == "obsidianGlass"
-        let newBgColor: NSColor = effectiveTransparent ? .clear : engine.themeManager.editorBackgroundColor
-        let newDrawsBg = !effectiveTransparent
+        if themeNameChanged || darkChanged || transparentChanged {
+            let lowerTheme = themeName?.lowercased() ?? ""
+            let activeThemeID: String
+            if !lowerTheme.isEmpty && lowerTheme != "system", let tn = themeName {
+                activeThemeID = tn
+            } else {
+                activeThemeID = isDark ? "dark" : "light"
+            }
+            engine.themeManager.setActiveTheme(activeThemeID)
+            
+            let effectiveTransparent = self.isTransparent || themeName == "transparent" || themeName == "extraClear" || themeName == "crystalClear" || themeName == "obsidianGlass"
+            let newBgColor: NSColor = effectiveTransparent ? .clear : engine.themeManager.editorBackgroundColor
+            let newDrawsBg = !effectiveTransparent
 
-        // ── CRASH FIX: Guard ALL layout-triggering setters with equality checks ──
-        // Setting backgroundColor / drawsBackground unconditionally causes
-        // NSPerformVisuallyAtomicChange to recurse 10 levels → brk #1 crash.
-        if !textView.backgroundColor.isEqual(newBgColor) {
             textView.backgroundColor = newBgColor
-        }
-        if textView.drawsBackground != newDrawsBg {
             textView.drawsBackground = newDrawsBg
-        }
-        if !scrollView.backgroundColor.isEqual(newBgColor) {
             scrollView.backgroundColor = newBgColor
-        }
-        if scrollView.drawsBackground != newDrawsBg {
             scrollView.drawsBackground = newDrawsBg
-        }
 
-        // Ensure explicit text color (fixes invisible text when opening project files)
-        let fgColor = engine.themeManager.editorForegroundColor
-        if textView.insertionPointColor != fgColor {
+            // Ensure explicit text color (fixes invisible text when opening project files)
+            let fgColor = engine.themeManager.editorForegroundColor
             textView.insertionPointColor = fgColor
-        }
-        // FIX: Guard textColor — setting it triggers layout and causes recursion.
-        if !(textView.textColor ?? .black).isEqual(fgColor) {
             textView.textColor = fgColor
-        }
-        if textView.typingAttributes[.foregroundColor] as? NSColor != fgColor {
             textView.typingAttributes[.foregroundColor] = fgColor
-        }
-        if textView.typingAttributes[.ligature] as? Int != 0 {
-            textView.typingAttributes[.ligature] = 0
-        }
 
-        // Selection color
-        let selectionColor = engine.themeManager.selectionColor
-        if (textView.selectedTextAttributes[.backgroundColor] as? NSColor) != selectionColor {
+            // Selection color
+            let selectionColor = engine.themeManager.selectionColor
             textView.selectedTextAttributes = [.backgroundColor: selectionColor]
         }
         
+        let fgColor = engine.themeManager.editorForegroundColor
+        
         // Update Font
-        let fontWeightValue: NSFont.Weight
-        switch fontWeight {
-        case 0: fontWeightValue = .ultraLight
-        case 1: fontWeightValue = .light
-        case 2: fontWeightValue = .regular
-        case 3: fontWeightValue = .medium
-        case 4: fontWeightValue = .semibold
-        case 5: fontWeightValue = .bold
-        default: fontWeightValue = .regular
-        }
-        
-        let font = NSFont.monospacedSystemFont(ofSize: fontSize, weight: fontWeightValue)
-        let customFont = NSFont(name: fontName, size: fontSize) ?? font
-        
-        if textView.font != customFont {
+        let customFont: NSFont
+        if fontChanged {
+            let fontWeightValue: NSFont.Weight
+            switch fontWeight {
+            case 0: fontWeightValue = .ultraLight
+            case 1: fontWeightValue = .light
+            case 2: fontWeightValue = .regular
+            case 3: fontWeightValue = .medium
+            case 4: fontWeightValue = .semibold
+            case 5: fontWeightValue = .bold
+            default: fontWeightValue = .regular
+            }
+            
+            let font = NSFont.monospacedSystemFont(ofSize: fontSize, weight: fontWeightValue)
+            customFont = NSFont(name: fontName, size: fontSize) ?? font
+            
             textView.font = customFont
-        }
-        // Always sync typingAttributes font so new characters inherit the right face
-        if textView.typingAttributes[.font] as? NSFont != customFont {
             textView.typingAttributes[.font] = customFont
+        } else {
+            customFont = textView.font ?? NSFont.monospacedSystemFont(ofSize: fontSize, weight: .regular)
         }
-        if textView.typingAttributes[.foregroundColor] as? NSColor != fgColor {
-            textView.typingAttributes[.foregroundColor] = fgColor
-        }
-        if textView.typingAttributes[.ligature] as? Int != 0 {
-            textView.typingAttributes[.ligature] = 0
-        }
+        
+        textView.typingAttributes[.ligature] = 0
         
         // Check if text or language changed
         // Critical Fix: Also check if language changed, otherwise switching file types (e.g. .txt -> .swift) wouldn't update highlighting
