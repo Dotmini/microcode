@@ -910,6 +910,16 @@ public struct SyntaxHighlightedCodeView: NSViewRepresentable {
             scrollView.autohidesScrollers    = true
             scrollView.scrollerStyle         = .overlay // FIX: Prevent layout loops when scrollers hide/show
 
+            // CRITICAL FIX: Prevent SwiftUI _FlexFrameLayout infinite recursion loop.
+            // By setting these priorities to .defaultLow, we force NSScrollView to ALWAYS
+            // accept the size SwiftUI proposes, rather than fighting SwiftUI by reporting
+            // an intrinsic content size based on the text length.
+            scrollView.setContentHuggingPriority(.defaultLow, for: .horizontal)
+            scrollView.setContentHuggingPriority(.defaultLow, for: .vertical)
+            scrollView.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+            scrollView.setContentCompressionResistancePriority(.defaultLow, for: .vertical)
+
+
             // ── Mark view as ready — updateNSView handles text content ───
             // CRITICAL: Do NOT call setAttributedString here.
             // updateNSView already set the text content (it runs before this block).
@@ -1052,18 +1062,19 @@ public struct SyntaxHighlightedCodeView: NSViewRepresentable {
             // Update the actual text view content if it changed
             if textView.string != normalizedText {
                 context.coordinator.isUpdating = true
-                let fullRange = NSRange(location: 0, length: (textView.textStorage?.length ?? 0))
                 let newCustomFont = NSFont(name: fontName, size: fontSize) ?? NSFont.monospacedSystemFont(ofSize: fontSize, weight: .regular)
-                textView.textStorage?.beginEditing()
-                textView.textStorage?.replaceCharacters(in: fullRange, with: normalizedText)
+                
                 let newRange = NSRange(location: 0, length: (normalizedText as NSString).length)
                 if newRange.length > 0 {
-                    textView.textStorage?.addAttributes([
+                    let attrString = NSMutableAttributedString(string: normalizedText)
+                    attrString.addAttributes([
                         .foregroundColor: fgColor,
                         .font: newCustomFont
                     ], range: newRange)
+                    textView.textStorage?.setAttributedString(attrString)
+                } else {
+                    textView.textStorage?.setAttributedString(NSAttributedString(string: ""))
                 }
-                textView.textStorage?.endEditing()
                 context.coordinator.isUpdating = false
             }
             
