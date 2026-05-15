@@ -612,15 +612,22 @@ class LSPClientService: ObservableObject {
         let id = nextRequestId()
         let request = JSONRPCRequest(id: id, method: method, params: params)
         
-        let requestData = try encoder.encode(request)
-        try sendMessage(requestData)
+        let requestData = try await Task.detached(priority: .userInitiated) {
+            let encoder = JSONEncoder()
+            return try encoder.encode(request)
+        }.value
+        
+        try await sendMessage(requestData)
         
         // Wait for response
         let responseData = try await withCheckedThrowingContinuation { continuation in
             pendingRequests[id] = continuation
         }
         
-        let response = try decoder.decode(JSONRPCResponse<R>.self, from: responseData)
+        let response = try await Task.detached(priority: .userInitiated) {
+            let decoder = JSONDecoder()
+            return try decoder.decode(JSONRPCResponse<R>.self, from: responseData)
+        }.value
         
         if let error = response.error {
             throw LSPError.serverError(error.code, error.message)
@@ -635,11 +642,16 @@ class LSPClientService: ObservableObject {
     
     private func sendNotification<P: Codable>(method: String, params: P) async throws {
         let notification = JSONRPCNotification(method: method, params: params)
-        let data = try encoder.encode(notification)
-        try sendMessage(data)
+        
+        let data = try await Task.detached(priority: .userInitiated) {
+            let encoder = JSONEncoder()
+            return try encoder.encode(notification)
+        }.value
+        
+        try await sendMessage(data)
     }
     
-    private func sendMessage(_ data: Data) throws {
+    private func sendMessage(_ data: Data) async throws {
         guard let stdin = stdin else {
             throw LSPError.notConnected
         }
@@ -650,8 +662,12 @@ class LSPClientService: ObservableObject {
         }
         
         let fileHandle = stdin.fileHandleForWriting
-        try fileHandle.write(contentsOf: headerData)
-        try fileHandle.write(contentsOf: data)
+        
+        // Perform I/O on a background thread to avoid blocking the Main Actor
+        try await Task.detached(priority: .userInitiated) {
+            try fileHandle.write(contentsOf: headerData)
+            try fileHandle.write(contentsOf: data)
+        }.value
     }
     
     private func nextRequestId() -> Int {
