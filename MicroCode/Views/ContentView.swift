@@ -1156,6 +1156,7 @@ struct CodeEditor: View {
                 themeName: appState.appTheme.rawValue,
                 fileURL: URL(fileURLWithPath: file.path)
             )
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
         }
         .onAppear { text = file.content }
         .onChange(of: file.id) { _ in text = file.content }
