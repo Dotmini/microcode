@@ -981,139 +981,148 @@ public struct SyntaxHighlightedCodeView: NSViewRepresentable {
 
 
     public func updateNSView(_ scrollView: NSScrollView, context: Context) {
-        // Log to detect layout loops
-        ReportLogManager.shared.log("updateNSView called", type: .debug)
-
         guard let textView = scrollView.documentView as? NSTextView,
               textView.textStorage != nil else { return }
-        
-        guard let engine = context.coordinator.engine else { return }
-        
-        // Critical: Update coordinator's parent to ensure Binding is fresh
+        guard context.coordinator.engine != nil else { return }
+
         context.coordinator.parent = self
-        context.coordinator.configureTextGeometry(for: textView, in: scrollView)
-        
+
         let normalizedText = text.replacingOccurrences(of: "\r\n", with: "\n")
-        
-        // LOOP PROTECTION: Check if anything actually changed
-        // This prevents infinite layout loops where updateNSView triggers a layout, which calls updateNSView again.
+
+        // LOOP PROTECTION: only proceed if something actually changed. This is
+        // cheap and has no side effects, so it is safe to run synchronously
+        // inside SwiftUI's layout/sizeThatFits pass.
         let textChanged = context.coordinator.lastText != normalizedText
         let langChanged = context.coordinator.lastLanguage != language
         let themeNameChanged = context.coordinator.lastThemeName != themeName
         let fontChanged = context.coordinator.lastFontSize != fontSize
         let darkChanged = context.coordinator.lastIsDark != isDark
-        let transparentChanged = context.coordinator.lastIsTransparent != isTransparent  // FIX: include transparent mode
-        
+        let transparentChanged = context.coordinator.lastIsTransparent != isTransparent
+
         if !textChanged && !langChanged && !themeNameChanged && !fontChanged && !darkChanged && !transparentChanged {
             return
         }
-        
-        // Update Cache
+
         context.coordinator.lastText = normalizedText
         context.coordinator.lastLanguage = language
         context.coordinator.lastThemeName = themeName
         context.coordinator.lastFontSize = fontSize
         context.coordinator.lastIsDark = isDark
-        context.coordinator.lastIsTransparent = isTransparent  // FIX: update transparent cache
-        
-        // Update theme
-        if themeNameChanged || darkChanged || transparentChanged {
-            let lowerTheme = themeName?.lowercased() ?? ""
-            let activeThemeID: String
-            if !lowerTheme.isEmpty && lowerTheme != "system", let tn = themeName {
-                activeThemeID = tn
-            } else {
-                activeThemeID = isDark ? "dark" : "light"
+        context.coordinator.lastIsTransparent = isTransparent
+
+        // ─────────────────────────────────────────────────────────────────
+        // CRITICAL: SwiftUI invokes updateNSView *inside* its
+        // _FlexFrameLayout.sizeThatFits measurement pass (see crash stack:
+        // _FlexFrameLayout.sizeThatFits → PlatformViewChild.updateValue →
+        // performExternalUpdate → updateViewProvider → updateNSView).
+        // Mutating the text storage, running the lexer, changing colors/fonts
+        // or resizing the document view *synchronously* here re-enters the
+        // SwiftUI layout + AttributeGraph and trips a Swift runtime trap
+        // (brk #1) — the immediate crash when opening Playground / Cell mode,
+        // and the "black editor" in the simpler main-editor layout.
+        //
+        // Defer ALL view/engine mutation to the next runloop tick so it runs
+        // OUTSIDE the layout pass. Call sites give the view a definite frame
+        // (.frame(...)) so deferring content has no effect on sizing.
+        // ─────────────────────────────────────────────────────────────────
+        let lang = language
+        let themeNameLocal = themeName
+        let isDarkLocal = isDark
+        let isTransparentLocal = isTransparent
+        let fontNameLocal = fontName
+        let fontWeightLocal = fontWeight
+        let fontSizeLocal = fontSize
+
+        DispatchQueue.main.async { [weak coordinator = context.coordinator] in
+            guard let coordinator = coordinator, !coordinator.isInvalidated else { return }
+            guard let engine = coordinator.engine else { return }
+            guard let textView = scrollView.documentView as? NSTextView,
+                  textView.textStorage != nil else { return }
+
+            coordinator.configureTextGeometry(for: textView, in: scrollView)
+
+            // Theme
+            if themeNameChanged || darkChanged || transparentChanged {
+                let lowerTheme = themeNameLocal?.lowercased() ?? ""
+                let activeThemeID: String
+                if !lowerTheme.isEmpty && lowerTheme != "system", let tn = themeNameLocal {
+                    activeThemeID = tn
+                } else {
+                    activeThemeID = isDarkLocal ? "dark" : "light"
+                }
+                engine.themeManager.setActiveTheme(activeThemeID)
+
+                let effectiveTransparent = isTransparentLocal
+                    || themeNameLocal == "transparent" || themeNameLocal == "extraClear"
+                    || themeNameLocal == "crystalClear" || themeNameLocal == "obsidianGlass"
+                let newBgColor: NSColor = effectiveTransparent ? .clear : engine.themeManager.editorBackgroundColor
+                let newDrawsBg = !effectiveTransparent
+
+                textView.backgroundColor = newBgColor
+                textView.drawsBackground = newDrawsBg
+                scrollView.backgroundColor = newBgColor
+                scrollView.drawsBackground = newDrawsBg
+
+                let fg = engine.themeManager.editorForegroundColor
+                textView.insertionPointColor = fg
+                textView.textColor = fg
+                textView.typingAttributes[.foregroundColor] = fg
+                textView.selectedTextAttributes = [.backgroundColor: engine.themeManager.selectionColor]
             }
-            engine.themeManager.setActiveTheme(activeThemeID)
-            
-            let effectiveTransparent = self.isTransparent || themeName == "transparent" || themeName == "extraClear" || themeName == "crystalClear" || themeName == "obsidianGlass"
-            let newBgColor: NSColor = effectiveTransparent ? .clear : engine.themeManager.editorBackgroundColor
-            let newDrawsBg = !effectiveTransparent
 
-            textView.backgroundColor = newBgColor
-            textView.drawsBackground = newDrawsBg
-            scrollView.backgroundColor = newBgColor
-            scrollView.drawsBackground = newDrawsBg
-
-            // Ensure explicit text color (fixes invisible text when opening project files)
             let fgColor = engine.themeManager.editorForegroundColor
-            textView.insertionPointColor = fgColor
-            textView.textColor = fgColor
-            textView.typingAttributes[.foregroundColor] = fgColor
 
-            // Selection color
-            let selectionColor = engine.themeManager.selectionColor
-            textView.selectedTextAttributes = [.backgroundColor: selectionColor]
-        }
-        
-        let fgColor = engine.themeManager.editorForegroundColor
-        
-        // Update Font
-        let customFont: NSFont
-        if fontChanged {
-            let fontWeightValue: NSFont.Weight
-            switch fontWeight {
-            case 0: fontWeightValue = .ultraLight
-            case 1: fontWeightValue = .light
-            case 2: fontWeightValue = .regular
-            case 3: fontWeightValue = .medium
-            case 4: fontWeightValue = .semibold
-            case 5: fontWeightValue = .bold
-            default: fontWeightValue = .regular
+            // Font
+            let customFont: NSFont
+            if fontChanged {
+                let fontWeightValue: NSFont.Weight
+                switch fontWeightLocal {
+                case 0: fontWeightValue = .ultraLight
+                case 1: fontWeightValue = .light
+                case 2: fontWeightValue = .regular
+                case 3: fontWeightValue = .medium
+                case 4: fontWeightValue = .semibold
+                case 5: fontWeightValue = .bold
+                default: fontWeightValue = .regular
+                }
+                let baseFont = NSFont.monospacedSystemFont(ofSize: fontSizeLocal, weight: fontWeightValue)
+                customFont = NSFont(name: fontNameLocal, size: fontSizeLocal) ?? baseFont
+                textView.font = customFont
+                textView.typingAttributes[.font] = customFont
+            } else {
+                customFont = textView.font ?? NSFont.monospacedSystemFont(ofSize: fontSizeLocal, weight: .regular)
             }
-            
-            let font = NSFont.monospacedSystemFont(ofSize: fontSize, weight: fontWeightValue)
-            customFont = NSFont(name: fontName, size: fontSize) ?? font
-            
-            textView.font = customFont
-            textView.typingAttributes[.font] = customFont
-        } else {
-            customFont = textView.font ?? NSFont.monospacedSystemFont(ofSize: fontSize, weight: .regular)
-        }
-        
-        textView.typingAttributes[.ligature] = 0
-        
-        // Check if text or language changed
-        // Critical Fix: Also check if language changed, otherwise switching file types (e.g. .txt -> .swift) wouldn't update highlighting
-        // We store the current language in the engine to compare
-        let languageChanged = engine.currentLanguage != language
-        // FIX: Use the pre-computed change flags instead of comparing against already-updated cache
-        let needsContentUpdate = textView.string != normalizedText || languageChanged || themeNameChanged || darkChanged || fontChanged || transparentChanged
-        
-        if needsContentUpdate {
-            // Update the actual text view content if it changed
+            textView.typingAttributes[.ligature] = 0
+
+            let languageChanged = engine.currentLanguage != lang
+            let needsContentUpdate = textView.string != normalizedText || languageChanged
+                || themeNameChanged || darkChanged || fontChanged || transparentChanged
+            guard needsContentUpdate else { return }
+
             if textView.string != normalizedText {
-                context.coordinator.isUpdating = true
-                let newCustomFont = NSFont(name: fontName, size: fontSize) ?? NSFont.monospacedSystemFont(ofSize: fontSize, weight: .regular)
-                
+                coordinator.isUpdating = true
                 let newRange = NSRange(location: 0, length: (normalizedText as NSString).length)
                 if newRange.length > 0 {
                     let attrString = NSMutableAttributedString(string: normalizedText)
                     attrString.addAttributes([
                         .foregroundColor: fgColor,
-                        .font: newCustomFont,
+                        .font: customFont,
                         .ligature: 0
                     ], range: newRange)
                     textView.textStorage?.setAttributedString(attrString)
                 } else {
                     textView.textStorage?.setAttributedString(NSAttributedString(string: ""))
                 }
-                context.coordinator.isUpdating = false
+                coordinator.isUpdating = false
             }
-            
-            // Update document content in engine
-            engine.setDocument(textView.string, language: language)
-            
-            // For the very first render (view not yet fully configured), apply
-            // highlighting immediately instead of relying solely on the 150ms timer.
-            // This prevents a blank/black flash while the debounce timer is pending.
+
+            engine.setDocument(textView.string, language: lang)
+
             if let ts = textView.textStorage, ts.length > 0 {
-                engine.applyHighlightingAsync(to: ts, fontSize: fontSize, font: textView.font)
+                engine.applyHighlightingAsync(to: ts, fontSize: fontSizeLocal, font: textView.font)
             }
-            
-            // Also schedule the debounced highlight to pick up any rapid subsequent changes
-            context.coordinator.triggerDebouncedHighlight(for: textView)
+
+            coordinator.triggerDebouncedHighlight(for: textView)
         }
     }
     
