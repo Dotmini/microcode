@@ -48,9 +48,9 @@ pub async fn index_workspace(
         // Initialize if needed
         let mut guard = smart_tier_arc.lock().await;
         if guard.is_none() {
-             // Create default DB in .codetunner/vectors
+             // Create default DB in .microcode/vectors
              let home = dirs::home_dir().unwrap_or_default();
-             let db_path = home.join(".codetunner/vectors");
+             let db_path = home.join(".microcode/vectors");
              if let Ok(path_str) = db_path.to_str().ok_or("Invalid path") {
                  if let Ok(engine) = crate::ai_engine::smart_tier::SmartTierEngine::new(path_str).await {
                      *guard = Some(engine);

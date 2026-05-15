@@ -1,4 +1,4 @@
-//! Error handling for CodeTunner Backend
+//! Error handling for MicroCode Backend
 
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};

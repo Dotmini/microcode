@@ -17,8 +17,8 @@ if ! command -v cargo &>/dev/null; then
 fi
 echo "🦀 Using: $(cargo --version 2>/dev/null || echo 'cargo not available')"
 
-APP_NAME="CodeTunner"
-BUNDLE_ID="com.dotmini.codetunner"
+APP_NAME="MicroCode"
+BUNDLE_ID="com.dotmini.microcode"
 VERSION="2.0.0 Developer"
 
 # Directories
@@ -114,7 +114,7 @@ compile_arch() {
     
     cd backend
     # Build Bin and Lib
-    cargo build --release --target "${RUST_TARGET}" --bin codetunner-backend
+    cargo build --release --target "${RUST_TARGET}" --bin microcode-backend
     cargo build --release --target "${RUST_TARGET}" --lib
     RUST_CONFIG="release"
     cd ..
@@ -143,9 +143,9 @@ compile_arch() {
             --no-format
             
         # Move generated files to correct locations
-        # 1. Swift file -> CodeTunner source
-        mkdir -p ../CodeTunner/Services/MicroCore
-        cp build/gen_swift/microcode_core.swift ../CodeTunner/Services/MicroCore/MicroCore.swift
+        # 1. Swift file -> MicroCode source
+        mkdir -p ../MicroCode/Services/MicroCore
+        cp build/gen_swift/microcode_core.swift ../MicroCode/Services/MicroCore/MicroCore.swift
         
         # 2. C Headers/Modulemap -> MicrocodeCoreSupport
         cp build/gen_swift/microcode_coreFFI.h ../MicrocodeCoreSupport/include/
@@ -159,29 +159,29 @@ compile_arch() {
     echo "   🔨 Compiling Swift App..."
     
     # Common flags
-    LINK_FLAGS="-Xlinker -L${RUST_LIB_PATH} -Xlinker -lcodetunner_embedded -Xlinker -L${MICROCORE_LIB_PATH} -Xlinker -lmicrocode_core -Xswiftc -strict-concurrency=minimal"
+    LINK_FLAGS="-Xlinker -L${RUST_LIB_PATH} -Xlinker -lmicrocode_embedded -Xlinker -L${MICROCORE_LIB_PATH} -Xlinker -lmicrocode_core -Xswiftc -strict-concurrency=minimal"
     
     if [ "$DEV_MODE" = "true" ]; then
-        swift build -c release --product CodeTunner --arch "${ARCH}" ${LINK_FLAGS}
+        swift build -c release --product MicroCode --arch "${ARCH}" ${LINK_FLAGS}
         SWIFT_CONFIG="release"
     else
-        swift build -c release --product CodeTunner --arch "${ARCH}" ${LINK_FLAGS}
+        swift build -c release --product MicroCode --arch "${ARCH}" ${LINK_FLAGS}
         SWIFT_CONFIG="release"
     fi
     
     # Copy Swift Binary
-    cp ".build/${ARCH}-apple-macosx/${SWIFT_CONFIG}/CodeTunner" "${ARCH_BUILD_DIR}/CodeTunner"
+    cp ".build/${ARCH}-apple-macosx/${SWIFT_CONFIG}/MicroCode" "${ARCH_BUILD_DIR}/MicroCode"
     
     # Copy Rust Binary
-    cp "backend/target/${RUST_TARGET}/${RUST_CONFIG}/codetunner-backend" "${ARCH_BUILD_DIR}/codetunner-backend"
+    cp "backend/target/${RUST_TARGET}/${RUST_CONFIG}/microcode-backend" "${ARCH_BUILD_DIR}/microcode-backend"
     
     # Copy Rust dylibs (CRITICAL: must be same arch)
     echo "   📦 Copying Rust dylibs for ${ARCH}..."
-    if [ -f "${RUST_LIB_PATH}/libcodetunner_embedded.dylib" ]; then
-        cp "${RUST_LIB_PATH}/libcodetunner_embedded.dylib" "${ARCH_BUILD_DIR}/"
-        echo "      → libcodetunner_embedded.dylib (${ARCH})"
+    if [ -f "${RUST_LIB_PATH}/libmicrocode_embedded.dylib" ]; then
+        cp "${RUST_LIB_PATH}/libmicrocode_embedded.dylib" "${ARCH_BUILD_DIR}/"
+        echo "      → libmicrocode_embedded.dylib (${ARCH})"
     else
-        echo "      ⚠️  libcodetunner_embedded.dylib not found at ${RUST_LIB_PATH}"
+        echo "      ⚠️  libmicrocode_embedded.dylib not found at ${RUST_LIB_PATH}"
     fi
     if [ -f "${MICROCORE_LIB_PATH}/libmicrocode_core.dylib" ]; then
         cp "${MICROCORE_LIB_PATH}/libmicrocode_core.dylib" "${ARCH_BUILD_DIR}/"
@@ -196,9 +196,9 @@ compile_arch() {
         cd ../MicroCodeCLI
         swift build -c release --arch "${ARCH}" || true
         if [ -f ".build/${ARCH}-apple-macosx/release/MicroCodeCLI" ]; then
-            cp ".build/${ARCH}-apple-macosx/release/MicroCodeCLI" "../codetunner-native/${ARCH_BUILD_DIR}/microcode-cli"
+            cp ".build/${ARCH}-apple-macosx/release/MicroCodeCLI" "../microcode-native/${ARCH_BUILD_DIR}/microcode-cli"
         fi
-        cd ../codetunner-native
+        cd ../microcode-native
     else
         echo "   ⏩ MicroCode CLI not found, skipping..."
     fi
@@ -212,7 +212,7 @@ compile_arch() {
 
 # Function to package an app bundle
 package_variant() {
-    VARIANT_NAME=$1      # e.g., "CodeTunner_ARM64_Full" or "CodeTunner_Lite"
+    VARIANT_NAME=$1      # e.g., "MicroCode_ARM64_Full" or "MicroCode_Lite"
     SOURCE_ARCH=$2       # e.g., "arm64", "x86_64", or "universal"
     INCLUDE_RUNTIMES=$3  # "true" or "false"
     OUTPUT_FOLDER=$4     # e.g., "Dist/arm64" or "Dist/Lite"
@@ -237,7 +237,7 @@ package_variant() {
 <plist version="1.0">
 <dict>
     <key>CFBundleExecutable</key>
-    <string>CodeTunner</string>
+    <string>MicroCode</string>
     <key>CFBundleIdentifier</key>
     <string>${BUNDLE_ID}</string>
     <key>CFBundleName</key>
@@ -265,7 +265,7 @@ package_variant() {
     <array>
         <dict>
             <key>CFBundleTypeName</key>
-            <string>CodeTunner Notebook</string>
+            <string>MicroCode Notebook</string>
             <key>CFBundleTypeRole</key>
             <string>Editor</string>
             <key>LSHandlerRank</key>
@@ -282,7 +282,7 @@ package_variant() {
             <key>UTTypeIdentifier</key>
             <string>com.dotmini.microcode.mic</string>
             <key>UTTypeDescription</key>
-            <string>CodeTunner Notebook</string>
+            <string>MicroCode Notebook</string>
             <key>UTTypeConformsTo</key>
             <array>
                 <string>public.data</string>
@@ -302,11 +302,11 @@ EOF
 
     # 2.3 Copy Binaries
     echo "   ⚙️  Copying Binaries from ${SOURCE_ARCH}..."
-    cp "${BUILD_ROOT}/${SOURCE_ARCH}/CodeTunner" "${APP_BUNDLE}/Contents/MacOS/"
-    chmod +x "${APP_BUNDLE}/Contents/MacOS/CodeTunner"
+    cp "${BUILD_ROOT}/${SOURCE_ARCH}/MicroCode" "${APP_BUNDLE}/Contents/MacOS/"
+    chmod +x "${APP_BUNDLE}/Contents/MacOS/MicroCode"
     
-    cp "${BUILD_ROOT}/${SOURCE_ARCH}/codetunner-backend" "${APP_BUNDLE}/Contents/MacOS/"
-    chmod +x "${APP_BUNDLE}/Contents/MacOS/codetunner-backend"
+    cp "${BUILD_ROOT}/${SOURCE_ARCH}/microcode-backend" "${APP_BUNDLE}/Contents/MacOS/"
+    chmod +x "${APP_BUNDLE}/Contents/MacOS/microcode-backend"
     
     if [ -f "${BUILD_ROOT}/${SOURCE_ARCH}/microcode-cli" ]; then
         cp "${BUILD_ROOT}/${SOURCE_ARCH}/microcode-cli" "${APP_BUNDLE}/Contents/MacOS/"
@@ -319,7 +319,7 @@ EOF
     mkdir -p "${FRAMEWORKS_DIR}"
     
     # Copy dylibs from the CORRECT arch-specific build dir
-    for DYLIB_NAME in libcodetunner_embedded.dylib libmicrocode_core.dylib; do
+    for DYLIB_NAME in libmicrocode_embedded.dylib libmicrocode_core.dylib; do
         DYLIB_PATH="${BUILD_ROOT}/${SOURCE_ARCH}/${DYLIB_NAME}"
         
         if [ -f "${DYLIB_PATH}" ]; then
@@ -337,7 +337,7 @@ EOF
                 "${FRAMEWORKS_DIR}/${DYLIB_NAME}"
             
             # Fix the main binary's reference to this dylib
-            OLD_NAMES=$(otool -L "${APP_BUNDLE}/Contents/MacOS/CodeTunner" | \
+            OLD_NAMES=$(otool -L "${APP_BUNDLE}/Contents/MacOS/MicroCode" | \
                 grep "${DYLIB_NAME}" | awk '{print $1}' | sort | uniq)
             
             for OLD_NAME in $OLD_NAMES; do
@@ -346,7 +346,7 @@ EOF
                     echo "              → @executable_path/../Frameworks/${DYLIB_NAME}"
                     install_name_tool -change "${OLD_NAME}" \
                         "@executable_path/../Frameworks/${DYLIB_NAME}" \
-                        "${APP_BUNDLE}/Contents/MacOS/CodeTunner"
+                        "${APP_BUNDLE}/Contents/MacOS/MicroCode"
                 fi
             done
         else
@@ -359,14 +359,14 @@ EOF
     
     # Verify architecture and paths
     echo "   🔍 Verifying dylib references..."
-    echo "   Binary arch: $(lipo -archs "${APP_BUNDLE}/Contents/MacOS/CodeTunner" 2>/dev/null)"
-    for DYLIB_NAME in libcodetunner_embedded.dylib libmicrocode_core.dylib; do
+    echo "   Binary arch: $(lipo -archs "${APP_BUNDLE}/Contents/MacOS/MicroCode" 2>/dev/null)"
+    for DYLIB_NAME in libmicrocode_embedded.dylib libmicrocode_core.dylib; do
         if [ -f "${FRAMEWORKS_DIR}/${DYLIB_NAME}" ]; then
             echo "   ${DYLIB_NAME} arch: $(lipo -archs "${FRAMEWORKS_DIR}/${DYLIB_NAME}" 2>/dev/null)"
         fi
     done
     
-    BROKEN=$(otool -L "${APP_BUNDLE}/Contents/MacOS/CodeTunner" | grep -E "/Users/|/home/" | grep -v "rpath" || true)
+    BROKEN=$(otool -L "${APP_BUNDLE}/Contents/MacOS/MicroCode" | grep -E "/Users/|/home/" | grep -v "rpath" || true)
     if [ -n "${BROKEN}" ]; then
         echo "   ❌ WARNING: Found absolute dylib paths:"
         echo "${BROKEN}"
@@ -376,8 +376,8 @@ EOF
 
     # CRITICAL: Strip binaries to reduce size (from 200MB+ to ~30-50MB)
     echo "   ✂️  Stripping debug symbols..."
-    strip -u -r "${APP_BUNDLE}/Contents/MacOS/CodeTunner"
-    strip -u -r "${APP_BUNDLE}/Contents/MacOS/codetunner-backend"
+    strip -u -r "${APP_BUNDLE}/Contents/MacOS/MicroCode"
+    strip -u -r "${APP_BUNDLE}/Contents/MacOS/microcode-backend"
     if [ -f "${APP_BUNDLE}/Contents/MacOS/microcode-cli" ]; then
         strip -u -r "${APP_BUNDLE}/Contents/MacOS/microcode-cli"
     fi
@@ -421,11 +421,11 @@ EOF
     fi
 
     # 2.5a Icon
-    if [ -f "codetunnerxround.icns" ]; then
+    if [ -f "microcodexround.icns" ]; then
         echo "   🎨 Copying Icon..."
-        cp "codetunnerxround.icns" "${APP_BUNDLE}/Contents/Resources/AppIcon.icns"
+        cp "microcodexround.icns" "${APP_BUNDLE}/Contents/Resources/AppIcon.icns"
     else
-        echo "   ⚠️  Warning: codetunnerxround.icns not found!"
+        echo "   ⚠️  Warning: microcodexround.icns not found!"
     fi
 
     # 2.6 Signing
@@ -502,10 +502,10 @@ if [ "$DEV_MODE" = "true" ]; then
     HOST_ARCH=$(uname -m)
     if [ "$HOST_ARCH" = "arm64" ]; then
         compile_arch "arm64"
-        package_variant "codetunner" "arm64" "false" "Dist/Dev"
+        package_variant "microcode" "arm64" "false" "Dist/Dev"
     elif [ "$HOST_ARCH" = "x86_64" ]; then
         compile_arch "x86_64"
-        package_variant "codetunner" "x86_64" "false" "Dist/Dev"
+        package_variant "microcode" "x86_64" "false" "Dist/Dev"
     else
         echo "❌ Unsupported architecture: $HOST_ARCH"
         exit 1
@@ -514,22 +514,22 @@ if [ "$DEV_MODE" = "true" ]; then
     echo "========================================"
     echo "✅ Dev Build Complete!"
     echo "========================================"
-    echo "Artifact: Dist/Dev/codetunner.app"
+    echo "Artifact: Dist/Dev/microcode.app"
     exit 0
 fi
 
 if [ "$TARGET_MODE" = "full" ]; then
     if [ "$TARGET_ARCH" = "arm64" ]; then
         compile_arch "arm64"
-        package_variant "Dotmini_CodeTunner_ARM64_Full" "arm64" "true" "Dist/arm64"
+        package_variant "Dotmini_MicroCode_ARM64_Full" "arm64" "true" "Dist/arm64"
     elif [ "$TARGET_ARCH" = "x86_64" ]; then
         compile_arch "x86_64"
-        package_variant "Dotmini_CodeTunner_Intel_Full" "x86_64" "true" "Dist/x86_64"
+        package_variant "Dotmini_MicroCode_Intel_Full" "x86_64" "true" "Dist/x86_64"
     else
         compile_arch "arm64"
         compile_arch "x86_64"
-        package_variant "Dotmini_CodeTunner_ARM64_Full" "arm64" "true" "Dist/arm64"
-        package_variant "Dotmini_CodeTunner_Intel_Full" "x86_64" "true" "Dist/x86_64"
+        package_variant "Dotmini_MicroCode_ARM64_Full" "arm64" "true" "Dist/arm64"
+        package_variant "Dotmini_MicroCode_Intel_Full" "x86_64" "true" "Dist/x86_64"
     fi
 elif [ "$TARGET_MODE" = "lite-only" ]; then
     # Assumes arm64 and x86_64 are already compiled and placed in .build_dist/
@@ -539,12 +539,12 @@ elif [ "$TARGET_MODE" = "lite-only" ]; then
     UNIVERSAL_BUILD_DIR="${BUILD_ROOT}/universal"
     mkdir -p "${UNIVERSAL_BUILD_DIR}"
 
-    if [ -f "${BUILD_ROOT}/arm64/CodeTunner" ] && [ -f "${BUILD_ROOT}/x86_64/CodeTunner" ]; then
-        lipo -create "${BUILD_ROOT}/arm64/CodeTunner" "${BUILD_ROOT}/x86_64/CodeTunner" -output "${UNIVERSAL_BUILD_DIR}/CodeTunner"
-        lipo -create "${BUILD_ROOT}/arm64/codetunner-backend" "${BUILD_ROOT}/x86_64/codetunner-backend" -output "${UNIVERSAL_BUILD_DIR}/codetunner-backend"
+    if [ -f "${BUILD_ROOT}/arm64/MicroCode" ] && [ -f "${BUILD_ROOT}/x86_64/MicroCode" ]; then
+        lipo -create "${BUILD_ROOT}/arm64/MicroCode" "${BUILD_ROOT}/x86_64/MicroCode" -output "${UNIVERSAL_BUILD_DIR}/MicroCode"
+        lipo -create "${BUILD_ROOT}/arm64/microcode-backend" "${BUILD_ROOT}/x86_64/microcode-backend" -output "${UNIVERSAL_BUILD_DIR}/microcode-backend"
 
         # Universal dylibs
-        for DYLIB_NAME in libcodetunner_embedded.dylib libmicrocode_core.dylib; do
+        for DYLIB_NAME in libmicrocode_embedded.dylib libmicrocode_core.dylib; do
             ARM64_DYLIB="${BUILD_ROOT}/arm64/${DYLIB_NAME}"
             X86_DYLIB="${BUILD_ROOT}/x86_64/${DYLIB_NAME}"
             if [ -f "${ARM64_DYLIB}" ] && [ -f "${X86_DYLIB}" ]; then
@@ -552,7 +552,7 @@ elif [ "$TARGET_MODE" = "lite-only" ]; then
                 echo "   → Created universal ${DYLIB_NAME}"
             fi
         done
-        package_variant "Dotmini_CodeTunner_Lite" "universal" "false" "Dist/Lite"
+        package_variant "Dotmini_MicroCode_Lite" "universal" "false" "Dist/Lite"
     else
         echo "❌ Cannot build Lite: Missing arm64 or x86_64 compiled binaries in ${BUILD_ROOT}"
         exit 1
@@ -569,11 +569,11 @@ else
     UNIVERSAL_BUILD_DIR="${BUILD_ROOT}/universal"
     mkdir -p "${UNIVERSAL_BUILD_DIR}"
 
-    lipo -create "${BUILD_ROOT}/arm64/CodeTunner" "${BUILD_ROOT}/x86_64/CodeTunner" -output "${UNIVERSAL_BUILD_DIR}/CodeTunner"
-    lipo -create "${BUILD_ROOT}/arm64/codetunner-backend" "${BUILD_ROOT}/x86_64/codetunner-backend" -output "${UNIVERSAL_BUILD_DIR}/codetunner-backend"
+    lipo -create "${BUILD_ROOT}/arm64/MicroCode" "${BUILD_ROOT}/x86_64/MicroCode" -output "${UNIVERSAL_BUILD_DIR}/MicroCode"
+    lipo -create "${BUILD_ROOT}/arm64/microcode-backend" "${BUILD_ROOT}/x86_64/microcode-backend" -output "${UNIVERSAL_BUILD_DIR}/microcode-backend"
 
     # Universal dylibs (CRITICAL: without these, the app crashes at launch)
-    for DYLIB_NAME in libcodetunner_embedded.dylib libmicrocode_core.dylib; do
+    for DYLIB_NAME in libmicrocode_embedded.dylib libmicrocode_core.dylib; do
         ARM64_DYLIB="${BUILD_ROOT}/arm64/${DYLIB_NAME}"
         X86_DYLIB="${BUILD_ROOT}/x86_64/${DYLIB_NAME}"
         
@@ -592,22 +592,22 @@ else
     done
 
     # Target 1: ARM64 Full
-    package_variant "Dotmini_CodeTunner_ARM64_Full" "arm64" "true" "Dist/arm64"
+    package_variant "Dotmini_MicroCode_ARM64_Full" "arm64" "true" "Dist/arm64"
 
     # Target 2: Intel Full
-    package_variant "Dotmini_CodeTunner_Intel_Full" "x86_64" "true" "Dist/x86_64"
+    package_variant "Dotmini_MicroCode_Intel_Full" "x86_64" "true" "Dist/x86_64"
 
     # Target 3: Lite Universal
-    package_variant "Dotmini_CodeTunner_Lite" "universal" "false" "Dist/Lite"
+    package_variant "Dotmini_MicroCode_Lite" "universal" "false" "Dist/Lite"
 
     echo "========================================"
     echo "🎉 3-Version Build Cycle Complete!"
     echo "   Version: ${VERSION}"
     echo "========================================"
     echo "Artifacts:"
-    echo "1. Dist/arm64/Dotmini_CodeTunner_ARM64_Full.dmg"
-    echo "2. Dist/x86_64/Dotmini_CodeTunner_Intel_Full.dmg"
-    echo "3. Dist/Lite/Dotmini_CodeTunner_Lite.dmg (< 50MB)"
+    echo "1. Dist/arm64/Dotmini_MicroCode_ARM64_Full.dmg"
+    echo "2. Dist/x86_64/Dotmini_MicroCode_Intel_Full.dmg"
+    echo "3. Dist/Lite/Dotmini_MicroCode_Lite.dmg (< 50MB)"
 fi
 
 # ==============================================================================

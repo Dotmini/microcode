@@ -2,40 +2,40 @@
 import PackageDescription
 
 let package = Package(
-    name: "CodeTunner",
+    name: "MicroCode",
     defaultLocalization: "en",
     platforms: [
         .macOS(.v13)
     ],
     products: [
-        .executable(name: "CodeTunner", targets: ["CodeTunner"]),
-        .library(name: "CodeTunnerCore", targets: ["CodeTunnerCore"])
+        .executable(name: "MicroCode", targets: ["MicroCode"]),
+        .library(name: "MicroCodeCore", targets: ["MicroCodeCore"])
     ],
     dependencies: [
         .package(url: "https://github.com/migueldeicaza/SwiftTerm.git", from: "1.0.0")
     ],
     targets: [
         .target(
-            name: "CodeTunnerSupport",
+            name: "MicroCodeSupport",
             dependencies: [],
-            path: "CodeTunnerSupport",
+            path: "MicroCodeSupport",
             publicHeadersPath: "include"
         ),
         .target(
-            name: "CodeTunnerKernel",
+            name: "MicroCodeKernel",
             dependencies: [],
-            path: "CodeTunnerKernel",
+            path: "MicroCodeKernel",
             publicHeadersPath: "include"
         ),
         .target(
-            name: "CodeTunnerCore",
+            name: "MicroCodeCore",
             dependencies: ["MicrocodeCoreSupport"],
-            path: "CodeTunnerCore/Sources"
+            path: "MicroCodeCore/Sources"
         ),
         .executableTarget(
-            name: "CodeTunner",
-            dependencies: ["CodeTunnerSupport", "CodeTunnerKernel", "SwiftTerm", "MicrocodeCoreSupport", "CodeTunnerCore"],
-            path: "CodeTunner",
+            name: "MicroCode",
+            dependencies: ["MicroCodeSupport", "MicroCodeKernel", "SwiftTerm", "MicrocodeCoreSupport", "MicroCodeCore"],
+            path: "MicroCode",
             exclude: [
                 "Views/Design/DesignModeView.swift",
                 "Views/Design/DesignLayersPanel.swift",
@@ -44,7 +44,7 @@ let package = Package(
                 "Views/Design/DesignRulerView.swift"
             ],
             sources: [
-                "CodeTunnerApp.swift",
+                "MicroCodeApp.swift",
                 "Managers/ReportLogManager.swift",
                 "Managers/PDFGenerator.swift",
                 "Models/AppState.swift",

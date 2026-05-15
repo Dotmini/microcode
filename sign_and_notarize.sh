@@ -1,5 +1,5 @@
 #!/bin/bash
-# CodeTunner - Code Signing and Notarization Script
+# MicroCode - Code Signing and Notarization Script
 # For distributing to other users safely
 #
 # Requirements:
@@ -16,8 +16,8 @@
 set -e
 
 # Configuration
-APP_NAME="CodeTunner"
-BUNDLE_ID="com.dotmini.codetunner"
+APP_NAME="MicroCode"
+BUNDLE_ID="com.dotmini.microcode"
 VERSION="${VERSION:-2.0.0 Developer}"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 APP_PATH="${APP_PATH:-$SCRIPT_DIR/Dist/$APP_NAME.app}"
@@ -33,7 +33,7 @@ BLUE='\033[0;34m'
 NC='\033[0m' # No Color
 
 echo -e "${BLUE}╔════════════════════════════════════════════════════════════╗${NC}"
-echo -e "${BLUE}║       CodeTunner - Signing & Notarization Tool            ║${NC}"
+echo -e "${BLUE}║       MicroCode - Signing & Notarization Tool            ║${NC}"
 echo -e "${BLUE}╚════════════════════════════════════════════════════════════╝${NC}"
 echo ""
 

@@ -465,7 +465,7 @@ async fn export_coreml(model: &TrainedModel, output_path: &str) -> Result<String
             "input": [{"name": "image", "type": "image", "shape": [224, 224, 3]}],
             "output": [{"name": "classLabel", "type": "string"}],
             "metadata": {
-                "author": "CodeTunner AI Trainer",
+                "author": "MicroCode AI Trainer",
                 "shortDescription": model.name,
                 "version": "1.0"
             }
@@ -505,7 +505,7 @@ async fn export_mlpackage(model: &TrainedModel, output_path: &str) -> Result<Str
         "fileFormatVersion": "1.0.0",
         "itemInfoEntries": {
             "com.apple.CoreML/model.mlmodel": {
-                "author": "CodeTunner",
+                "author": "MicroCode",
                 "description": model.name
             }
         }

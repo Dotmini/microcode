@@ -5,13 +5,13 @@ members = [
 ]
 
 [package]
-name = "codetunner-backend"
+name = "microcode-backend"
 version = "2.0.0"
 edition = "2021"
 authors = ["SPU AI CLUB"]
 
 [lib]
-name = "codetunner_embedded"
+name = "microcode_embedded"
 path = "src/lib.rs"
 crate-type = ["staticlib", "cdylib"]
 
@@ -156,7 +156,7 @@ strip = true
 debug = false
 
 [[bin]]
-name = "codetunner-backend"
+name = "microcode-backend"
 path = "src/main.rs"
 
 [[bin]]

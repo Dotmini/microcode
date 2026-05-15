@@ -65,7 +65,7 @@ impl PreviewHost {
     /// Create a new PreviewHost
     pub fn new() -> Self {
         let output_dir = std::env::temp_dir()
-            .join("codetunner_live_preview")
+            .join("microcode_live_preview")
             .to_string_lossy()
             .to_string();
 

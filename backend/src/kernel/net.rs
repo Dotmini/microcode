@@ -1,6 +1,6 @@
 //
 //  kernel/net.rs
-//  CodeTunner Kernel
+//  MicroCode Kernel
 //
 //  Network Manager
 //  Monitors connectivity and optimizes throughput

@@ -1,6 +1,6 @@
 //
 //  kernel/safety.rs
-//  CodeTunner Kernel
+//  MicroCode Kernel
 //
 //  Anti-Crash Watchdog & Panic Handler
 //  Ensures the kernel stays alive even if subsystems fail.

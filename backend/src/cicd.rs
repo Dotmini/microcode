@@ -102,7 +102,7 @@ impl GitHubClient {
 
     fn headers(&self, token: &str) -> HeaderMap {
         let mut headers = HeaderMap::new();
-        headers.insert(USER_AGENT, HeaderValue::from_static("CodeTunner-Backend"));
+        headers.insert(USER_AGENT, HeaderValue::from_static("MicroCode-Backend"));
         headers.insert(ACCEPT, HeaderValue::from_static("application/vnd.github.v3+json"));
         if let Ok(auth_val) = HeaderValue::from_str(&format!("Bearer {}", token)) {
             headers.insert(AUTHORIZATION, auth_val);

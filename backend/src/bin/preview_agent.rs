@@ -234,12 +234,12 @@ impl PreviewAgent {
 }
 
 fn main() {
-    println!("🔥 CodeTunner Preview Agent v1.0");
+    println!("🔥 MicroCode Preview Agent v1.0");
     println!("   Hot Reload Engine for SwiftUI Preview");
     println!();
     
     let socket_path = std::env::var("PREVIEW_SOCKET")
-        .unwrap_or_else(|_| "/tmp/codetunner_preview.sock".to_string());
+        .unwrap_or_else(|_| "/tmp/microcode_preview.sock".to_string());
     
     let mut agent = PreviewAgent::new(&socket_path);
     

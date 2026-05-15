@@ -1,4 +1,4 @@
-//! Application state management for CodeTunner Backend
+//! Application state management for MicroCode Backend
 
 use crate::models::AIConfig;
 use std::collections::HashMap;

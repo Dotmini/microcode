@@ -1,4 +1,4 @@
-//! Data models for CodeTunner Backend
+//! Data models for MicroCode Backend
 //!
 //! Request and response types for the API
 

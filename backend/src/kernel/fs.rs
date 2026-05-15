@@ -1,6 +1,6 @@
 //
 //  kernel/fs.rs
-//  CodeTunner Kernel
+//  MicroCode Kernel
 //
 //  Secure File System abstraction
 //  Supports atomic writes and integrity checks

@@ -61,7 +61,7 @@ pub struct SourceMapping {
 
 /// Socket path for IPC
 pub fn get_socket_path() -> PathBuf {
-    std::env::temp_dir().join("codetunner_live_preview.sock")
+    std::env::temp_dir().join("microcode_live_preview.sock")
 }
 
 /// Preview IPC Server

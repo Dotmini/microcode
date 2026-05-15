@@ -18,10 +18,10 @@ while [[ $# -gt 0 ]]; do
 done
 
 # 1. Build Swift (assuming Rust is built or handled separately/before)
-# We assume Rust lib is at backend/target/debug/libcodetunner_embedded.a
+# We assume Rust lib is at backend/target/debug/libmicrocode_embedded.a
 echo "🏗️ Building Swift frontend..."
 swift build -c debug \
-    -Xlinker -Lbackend/target/debug -Xlinker -lcodetunner_embedded \
+    -Xlinker -Lbackend/target/debug -Xlinker -lmicrocode_embedded \
     -Xlinker -Lmicrocode_core/target/aarch64-apple-darwin/release -Xlinker -lmicrocode_core
 
 # 2. Create Bundle
@@ -33,11 +33,11 @@ mkdir -p "$BUNDLE_NAME/Contents/Resources"
 
 # 3. Copy Binary
 # Note: Path might vary depending on swift version/platform, usually arm64-apple-macosx
-BINARY_PATH=".build/arm64-apple-macosx/debug/CodeTunner"
+BINARY_PATH=".build/arm64-apple-macosx/debug/MicroCode"
 if [ ! -f "$BINARY_PATH" ]; then
     echo "Error: Binary not found at $BINARY_PATH"
     # Try finding it
-    BINARY_PATH=$(find .build -name CodeTunner -type f | grep debug | head -n 1)
+    BINARY_PATH=$(find .build -name MicroCode -type f | grep debug | head -n 1)
     if [ -z "$BINARY_PATH" ]; then
         echo "Critial Error: Could not locate compiled binary."
         exit 1
@@ -54,7 +54,7 @@ cat > "$BUNDLE_NAME/Contents/Info.plist" <<EOF
 <plist version="1.0">
 <dict>
     <key>CFBundleExecutable</key>
-    <string>CodeTunner</string>
+    <string>MicroCode</string>
     <key>CFBundleIdentifier</key>
     <string>com.aipreneur.MicroCode</string>
     <key>CFBundleName</key>

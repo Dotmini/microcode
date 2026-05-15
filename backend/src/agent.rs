@@ -1,6 +1,6 @@
 // AI Agent Core Module
 // Production-level AI Agent with file system access and context understanding
-// Unique Rust-native implementation for CodeTunner IDE
+// Unique Rust-native implementation for MicroCode IDE
 
 use crate::error::{AppError, Result};
 use crate::models::AIConfig;

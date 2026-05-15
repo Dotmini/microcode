@@ -378,7 +378,7 @@ except Exception as e:
     async fn execute_line(&mut self, node: &ScenarioNode, input: &serde_json::Value) -> Result<serde_json::Value> {
         let config = &node.config;
         let message_type = config.line_message_type.as_deref().unwrap_or("push");
-        let message = self.interpolate(config.line_message.clone(), input).unwrap_or_else(|| "Hello from CodeTunner!".to_string());
+        let message = self.interpolate(config.line_message.clone(), input).unwrap_or_else(|| "Hello from MicroCode!".to_string());
         
         self.log(&format!("💬 LINE {} message", message_type));
         
@@ -529,7 +529,7 @@ except Exception as e:
         let chat_id = config.telegram_chat_id.as_ref()
             .ok_or_else(|| AppError::BadRequest("Telegram chat ID not configured".into()))?;
         
-        let message = self.interpolate(config.telegram_message.clone(), input).unwrap_or_else(|| "Hello from CodeTunner!".to_string());
+        let message = self.interpolate(config.telegram_message.clone(), input).unwrap_or_else(|| "Hello from MicroCode!".to_string());
         let image_url = self.interpolate(config.telegram_image_url.clone(), input);
         let parse_mode = config.telegram_parse_mode.as_deref();
         

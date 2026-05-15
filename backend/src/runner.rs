@@ -473,7 +473,7 @@ async fn execute_d(code: &str) -> Result<ExecutionResult> {
 
 async fn execute_rust(code: &str) -> Result<ExecutionResult> {
     // Create a temporary Rust project
-    let temp_dir = std::env::temp_dir().join(format!("codetunner_rust_{}", uuid::Uuid::new_v4()));
+    let temp_dir = std::env::temp_dir().join(format!("microcode_rust_{}", uuid::Uuid::new_v4()));
     tokio::fs::create_dir_all(&temp_dir)
         .await
         .map_err(|e| AppError::ExecutionError(format!("Failed to create temp dir: {}", e)))?;
@@ -1061,7 +1061,7 @@ async fn execute_objc(code: &str) -> Result<ExecutionResult> {
 
 async fn create_temp_file(extension: &str, content: &str) -> Result<String> {
     let temp_dir = std::env::temp_dir();
-    let filename = format!("codetunner_{}_{}.{}", uuid::Uuid::new_v4(), chrono::Utc::now().timestamp(), extension);
+    let filename = format!("microcode_{}_{}.{}", uuid::Uuid::new_v4(), chrono::Utc::now().timestamp(), extension);
     let temp_file = temp_dir.join(filename);
 
     tokio::fs::write(&temp_file, content)
@@ -1306,7 +1306,7 @@ async fn execute_java(code: &str) -> Result<ExecutionResult> {
         "Main"
     };
     
-    let temp_dir = std::env::temp_dir().join(format!("codetunner_java_{}", uuid::Uuid::new_v4()));
+    let temp_dir = std::env::temp_dir().join(format!("microcode_java_{}", uuid::Uuid::new_v4()));
     tokio::fs::create_dir_all(&temp_dir).await
         .map_err(|e| AppError::ExecutionError(format!("Failed to create temp dir: {}", e)))?;
 

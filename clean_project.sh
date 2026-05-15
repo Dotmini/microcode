@@ -17,7 +17,7 @@ cd "$(dirname "$0")/PreviewAgent" && cargo clean
 
 echo "--------------------------------------------------------"
 echo "Cleaning Xcode DerivedData..."
-rm -rf ~/Library/Developer/Xcode/DerivedData/CodeTunner*
+rm -rf ~/Library/Developer/Xcode/DerivedData/MicroCode*
 
 echo "--------------------------------------------------------"
 echo "✅ Cleanup Complete! You have recovered gigabytes of free space."

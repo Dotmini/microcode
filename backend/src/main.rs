@@ -1,6 +1,6 @@
-//! CodeTunner Backend
+//! MicroCode Backend
 //!
-//! A Rust-based backend server for the CodeTunner IDE
+//! A Rust-based backend server for the MicroCode IDE
 //! Provides AI integration, code analysis, and file operations
 
 use axum::{
@@ -69,7 +69,7 @@ async fn main() -> Result<()> {
     // Load environment variables
     dotenv::dotenv().ok();
 
-    info!("Starting CodeTunner Backend v2.0.0");
+    info!("Starting MicroCode Backend v2.0.0");
 
     // Initialize terminal manager
     let terminal_manager = Arc::new(crate::terminal::TerminalManager::new());
@@ -334,7 +334,7 @@ async fn handle_socket(
     // Send welcome message
     let welcome = serde_json::json!({
         "type": "connected",
-        "message": "Connected to CodeTunner Backend"
+        "message": "Connected to MicroCode Backend"
     });
 
     if socket
@@ -1375,7 +1375,7 @@ mod handlers {
         use std::process::Command;
         
         // Check if already running
-        let socket_path = "/tmp/codetunner_preview.sock";
+        let socket_path = "/tmp/microcode_preview.sock";
         if std::path::Path::new(socket_path).exists() {
             return Json(serde_json::json!({
                 "success": true,
@@ -1411,7 +1411,7 @@ mod handlers {
         use std::os::unix::net::UnixStream;
         use std::io::Write;
         
-        let socket_path = "/tmp/codetunner_preview.sock";
+        let socket_path = "/tmp/microcode_preview.sock";
         
         // Send shutdown message
         if let Ok(mut stream) = UnixStream::connect(socket_path) {
@@ -1529,7 +1529,7 @@ mod handlers {
     /// Get hot reload engine version info
     pub async fn hotreload_version() -> impl IntoResponse {
         Json(serde_json::json!({
-            "engine": "CodeTunner Hot Reload",
+            "engine": "MicroCode Hot Reload",
             "version": "1.0.0",
             "features": [
                 "thunk_table",

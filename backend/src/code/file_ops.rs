@@ -282,7 +282,7 @@ mod tests {
     #[tokio::test]
     async fn test_file_operations() {
         let temp_dir = std::env::temp_dir();
-        let test_file = temp_dir.join("codetunner_test.txt");
+        let test_file = temp_dir.join("microcode_test.txt");
         let test_path = test_file.to_str().unwrap();
 
         // Write file
@@ -299,7 +299,7 @@ mod tests {
 
         // Get metadata
         let metadata = get_metadata(test_path).await.unwrap();
-        assert_eq!(metadata.name, "codetunner_test.txt");
+        assert_eq!(metadata.name, "microcode_test.txt");
         assert!(!metadata.is_directory);
 
         // Delete file

@@ -1,6 +1,6 @@
 #!/bin/bash
 
-# CodeTunner Build Script
+# MicroCode Build Script
 # Builds both Rust backend and SwiftUI frontend
 
 set -e
@@ -13,15 +13,15 @@ NC='\033[0m' # No Color
 
 echo -e "${GREEN}╔═══════════════════════════════════════════════════════════════════════════════╗${NC}"
 echo -e "${GREEN}║                                                                               ║${NC}"
-echo -e "${GREEN}║                              CodeTunner Build Script                          ║${NC}"
+echo -e "${GREEN}║                              MicroCode Build Script                          ║${NC}"
 echo -e "${GREEN}║                              By SPU AI CLUB                                   ║${NC}"
 echo -e "${GREEN}║                                                                               ║${NC}"
 echo -e "${GREEN}╚═══════════════════════════════════════════════════════════════════════════════╝${NC}"
 echo ""
 
 # Check if we're in the right directory
-if [ ! -d "backend" ] || [ ! -d "CodeTunner" ]; then
-    echo -e "${RED}Error: This script must be run from the codetunner-native directory${NC}"
+if [ ! -d "backend" ] || [ ! -d "MicroCode" ]; then
+    echo -e "${RED}Error: This script must be run from the microcode-native directory${NC}"
     exit 1
 fi
 
@@ -110,11 +110,11 @@ if [ "$FRONTEND_ONLY" = false ]; then
     if [ "$BUILD_TYPE" = "release" ]; then
         echo -e "${YELLOW}Building backend in release mode...${NC}"
         cargo build --release
-        BACKEND_PATH="target/release/codetunner-backend"
+        BACKEND_PATH="target/release/microcode-backend"
     else
         echo -e "${YELLOW}Building backend in debug mode...${NC}"
         cargo build
-        BACKEND_PATH="target/debug/codetunner-backend"
+        BACKEND_PATH="target/debug/microcode-backend"
     fi
 
     if [ $? -eq 0 ]; then
@@ -150,17 +150,17 @@ if [ "$BACKEND_ONLY" = false ]; then
     fi
 
     # Check if project file exists
-    if [ -f "CodeTunner.xcodeproj/project.pbxproj" ]; then
+    if [ -f "MicroCode.xcodeproj/project.pbxproj" ]; then
         if [ "$CLEAN" = true ]; then
             echo -e "${YELLOW}Cleaning frontend...${NC}"
-            xcodebuild clean -project CodeTunner.xcodeproj -scheme CodeTunner
+            xcodebuild clean -project MicroCode.xcodeproj -scheme MicroCode
         fi
     
         echo -e "${YELLOW}Building frontend...${NC}"
         if [ "$BUILD_TYPE" = "release" ]; then
-            xcodebuild -project CodeTunner.xcodeproj -scheme CodeTunner -configuration Release
+            xcodebuild -project MicroCode.xcodeproj -scheme MicroCode -configuration Release
         else
-            xcodebuild -project CodeTunner.xcodeproj -scheme CodeTunner -configuration Debug
+            xcodebuild -project MicroCode.xcodeproj -scheme MicroCode -configuration Debug
         fi
     
         if [ $? -eq 0 ]; then
@@ -200,10 +200,10 @@ if [ "$BACKEND_ONLY" = false ]; then
         echo "1. Open Xcode"
         echo "2. File → New → Project"
         echo "3. Choose macOS → App"
-        echo "4. Name: CodeTunner"
+        echo "4. Name: MicroCode"
         echo "5. Interface: SwiftUI"
         echo "6. Language: Swift"
-        echo "7. Add the files from the CodeTunner directory"
+        echo "7. Add the files from the MicroCode directory"
         echo ""
         exit 0
     fi

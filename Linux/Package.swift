@@ -2,18 +2,18 @@
 import PackageDescription
 
 let package = Package(
-    name: "CodeTunnerLinux",
+    name: "MicroCodeLinux",
     platforms: [
         .macOS(.v13) // Just to align with root package when testing locally
     ],
     dependencies: [
-        .package(name: "CodeTunner", path: "../")
+        .package(name: "MicroCode", path: "../")
     ],
     targets: [
         .executableTarget(
-            name: "CodeTunnerLinux",
+            name: "MicroCodeLinux",
             dependencies: [
-                .product(name: "CodeTunnerCore", package: "CodeTunner")
+                .product(name: "MicroCodeCore", package: "MicroCode")
             ]
         ),
     ]

@@ -355,14 +355,14 @@ impl AutoUpdater {
         use std::process::Command;
         
         // Save to temp file
-        let temp_path = "/tmp/codetunner_update.zip";
+        let temp_path = "/tmp/microcode_update.zip";
         let mut file = std::fs::File::create(temp_path)
             .map_err(|e| AppError::InternalError(e.to_string()))?;
         file.write_all(data)
             .map_err(|e| AppError::InternalError(e.to_string()))?;
         
         // Unzip
-        let extract_path = "/tmp/codetunner_update";
+        let extract_path = "/tmp/microcode_update";
         Command::new("unzip")
             .args(["-o", temp_path, "-d", extract_path])
             .output()

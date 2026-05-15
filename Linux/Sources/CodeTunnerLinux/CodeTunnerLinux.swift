@@ -1,9 +1,9 @@
-import CodeTunnerCore
+import MicroCodeCore
 
 @main
-struct CodeTunnerLinux {
+struct MicroCodeLinux {
     static func main() {
-        print("Starting CodeTunner on Linux...")
+        print("Starting MicroCode on Linux...")
         let bridge = BackendBridge()
         let result = bridge.startEngine()
         print(result)

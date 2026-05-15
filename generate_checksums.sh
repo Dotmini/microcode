@@ -12,8 +12,8 @@ echo "======================================="
 rm -f "$CHECKSUM_FILE"
 echo "📁 Generating checksums..."
 
-find CodeTunner -name "*.swift" -type f | sort | while read f; do shasum -a 256 "$f" >> "$CHECKSUM_FILE"; done
-find CodeTunnerSupport \( -name "*.mm" -o -name "*.m" -o -name "*.h" \) -type f 2>/dev/null | sort | while read f; do shasum -a 256 "$f" >> "$CHECKSUM_FILE"; done
+find MicroCode -name "*.swift" -type f | sort | while read f; do shasum -a 256 "$f" >> "$CHECKSUM_FILE"; done
+find MicroCodeSupport \( -name "*.mm" -o -name "*.m" -o -name "*.h" \) -type f 2>/dev/null | sort | while read f; do shasum -a 256 "$f" >> "$CHECKSUM_FILE"; done
 find backend/src -name "*.rs" -type f 2>/dev/null | sort | while read f; do shasum -a 256 "$f" >> "$CHECKSUM_FILE"; done
 find extension-host/src -name "*.rs" -type f 2>/dev/null | sort | while read f; do shasum -a 256 "$f" >> "$CHECKSUM_FILE"; done
 find vscode-compat-host/src \( -name "*.ts" -o -name "*.js" \) -type f 2>/dev/null | sort | while read f; do shasum -a 256 "$f" >> "$CHECKSUM_FILE"; done

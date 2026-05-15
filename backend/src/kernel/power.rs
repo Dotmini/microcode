@@ -1,6 +1,6 @@
 //
 //  kernel/power.rs
-//  CodeTunner Kernel
+//  MicroCode Kernel
 //
 //  Power Efficiency Optimizer
 //  Optimized for Apple Silicon (M-Series)

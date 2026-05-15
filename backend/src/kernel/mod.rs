@@ -1,8 +1,8 @@
 //
 //  kernel/mod.rs
-//  CodeTunner Kernel
+//  MicroCode Kernel
 //
-//  The central nervous system of CodeTunner.
+//  The central nervous system of MicroCode.
 //  Coordinates FS, Network, Power, and Safety subsystems.
 //
 
@@ -24,7 +24,7 @@ pub struct Kernel {
 
 impl Kernel {
     pub async fn new() -> Self {
-        println!("🦀 Booting CodeTunner Kernel...");
+        println!("🦀 Booting MicroCode Kernel...");
 
         let safety = Arc::new(safety::AntiCrash::new());
         let power = Arc::new(power::PowerOptimizer::new());
