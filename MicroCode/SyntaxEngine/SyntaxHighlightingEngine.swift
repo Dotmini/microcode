@@ -552,27 +552,11 @@ public final class SyntaxHighlightingEngine: @unchecked Sendable {
         let fgColor = themeManager.editorForegroundColor
         let bgColor = themeManager.editorBackgroundColor
         
-        // Ensure default color and paragraph style are applied to the entire text before highlighting
         let fullRange = NSRange(location: 0, length: textStorage.length)
         if fullRange.length > 0 {
-            let defaultFont = font ?? NSFont.monospacedSystemFont(ofSize: fontSize, weight: .regular)
-            
-            let paragraphStyle: NSMutableParagraphStyle
-            if let cached = cachedParagraphStyle, cachedFontSize == fontSize {
-                paragraphStyle = cached
-            } else {
-                let newStyle = NSMutableParagraphStyle()
-                newStyle.minimumLineHeight = defaultFont.pointSize * 1.2
-                newStyle.maximumLineHeight = defaultFont.pointSize * 1.2
-                cachedParagraphStyle = newStyle
-                cachedFontSize = fontSize
-                paragraphStyle = newStyle
-            }
-            
             textStorage.beginEditing()
             textStorage.addAttributes([
-                .foregroundColor: fgColor,
-                .paragraphStyle: paragraphStyle
+                .foregroundColor: fgColor
             ], range: fullRange)
             textStorage.endEditing()
         }
@@ -900,11 +884,12 @@ public struct SyntaxHighlightedCodeView: NSViewRepresentable {
                 tv.autoresizingMask = [.width]
                 tv.isHorizontallyResizable = false
                 tv.textContainer?.widthTracksTextView = true
-                tv.textContainer?.containerSize = NSSize(width: scrollView.contentSize.width, height: CGFloat.greatestFiniteMagnitude)
+                tv.textContainer?.containerSize = NSSize(width: 0, height: CGFloat.greatestFiniteMagnitude)
             } else {
                 // FIX: Prevent AppKit _NSViewLayout recursion loop by allowing horizontal
-                // scaling without forcing the text view to match the scroll view's height.
-                tv.autoresizingMask = [.width]
+                // scaling without forcing the text view to match the scroll view's size.
+                // Using an empty mask [] ensures the NSTextView can grow independently.
+                tv.autoresizingMask = []
                 tv.isHorizontallyResizable = true
                 tv.textContainer?.widthTracksTextView = false
                 tv.textContainer?.containerSize = NSSize(width: CGFloat.greatestFiniteMagnitude, height: CGFloat.greatestFiniteMagnitude)
