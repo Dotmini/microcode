@@ -908,6 +908,7 @@ public struct SyntaxHighlightedCodeView: NSViewRepresentable {
             scrollView.hasVerticalScroller   = coordinator.parent.isScrollEnabled
             scrollView.hasHorizontalScroller = coordinator.parent.isScrollEnabled
             scrollView.autohidesScrollers    = true
+            scrollView.scrollerStyle         = .overlay // FIX: Prevent layout loops when scrollers hide/show
 
             // ── Mark view as ready — updateNSView handles text content ───
             // CRITICAL: Do NOT call setAttributedString here.
