@@ -295,7 +295,6 @@ public final class SyntaxHighlightingEngine: @unchecked Sendable {
     public func processEdit(range: NSRange, changeInLength: Int, newContent: String) {
         lock.lock()
         let oldContent = documentContent
-        let version = currentVersion
         lock.unlock()
 
         // 0. BOUNDS CHECK: Verify range is valid for oldContent
@@ -362,7 +361,7 @@ public final class SyntaxHighlightingEngine: @unchecked Sendable {
             
             // 2. Insert offsets for added lines
             var addedOffsets: [Int] = []
-            var currentAddedOffset = range.location
+            let currentAddedOffset = range.location
             let nsAdded = addedText as NSString
             var index = 0
             let length = nsAdded.length
