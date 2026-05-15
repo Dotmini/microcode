@@ -985,8 +985,9 @@ public struct SyntaxHighlightedCodeView: NSViewRepresentable {
         let themeNameChanged = context.coordinator.lastThemeName != themeName
         let fontChanged = context.coordinator.lastFontSize != fontSize
         let darkChanged = context.coordinator.lastIsDark != isDark
+        let transparentChanged = context.coordinator.lastIsTransparent != isTransparent  // FIX: include transparent mode
         
-        if !textChanged && !langChanged && !themeNameChanged && !fontChanged && !darkChanged {
+        if !textChanged && !langChanged && !themeNameChanged && !fontChanged && !darkChanged && !transparentChanged {
             return
         }
         
@@ -996,6 +997,7 @@ public struct SyntaxHighlightedCodeView: NSViewRepresentable {
         context.coordinator.lastThemeName = themeName
         context.coordinator.lastFontSize = fontSize
         context.coordinator.lastIsDark = isDark
+        context.coordinator.lastIsTransparent = isTransparent  // FIX: update transparent cache
         
         // Update theme
         let lowerTheme = themeName?.lowercased() ?? ""
@@ -1008,24 +1010,37 @@ public struct SyntaxHighlightedCodeView: NSViewRepresentable {
         engine.themeManager.setActiveTheme(activeThemeID)
         
         let effectiveTransparent = self.isTransparent || themeName == "transparent" || themeName == "extraClear" || themeName == "crystalClear" || themeName == "obsidianGlass"
-        textView.backgroundColor = effectiveTransparent ? .clear : engine.themeManager.editorBackgroundColor
-        textView.drawsBackground = !effectiveTransparent
-        scrollView.backgroundColor = effectiveTransparent ? .clear : engine.themeManager.editorBackgroundColor
-        scrollView.drawsBackground = !effectiveTransparent
-        
+        let newBgColor: NSColor = effectiveTransparent ? .clear : engine.themeManager.editorBackgroundColor
+        let newDrawsBg = !effectiveTransparent
+
+        // ── CRASH FIX: Guard ALL layout-triggering setters with equality checks ──
+        // Setting backgroundColor / drawsBackground unconditionally causes
+        // NSPerformVisuallyAtomicChange to recurse 10 levels → brk #1 crash.
+        if !textView.backgroundColor.isEqual(newBgColor) {
+            textView.backgroundColor = newBgColor
+        }
+        if textView.drawsBackground != newDrawsBg {
+            textView.drawsBackground = newDrawsBg
+        }
+        if !scrollView.backgroundColor.isEqual(newBgColor) {
+            scrollView.backgroundColor = newBgColor
+        }
+        if scrollView.drawsBackground != newDrawsBg {
+            scrollView.drawsBackground = newDrawsBg
+        }
+
         // Ensure explicit text color (fixes invisible text when opening project files)
-        // Guard: only update if color actually changed to prevent layout loops
         let fgColor = engine.themeManager.editorForegroundColor
         if textView.insertionPointColor != fgColor {
             textView.insertionPointColor = fgColor
         }
-        // ALWAYS force-set textColor & typingAttributes — never rely on system defaults.
-        // In macOS light mode the default textColor is black; if the theme sets a dark
-        // background this makes the editor look blank.  Unconditional assignment is safe.
-        textView.textColor = fgColor
+        // FIX: Guard textColor — setting it triggers layout and causes recursion.
+        if !(textView.textColor ?? .black).isEqual(fgColor) {
+            textView.textColor = fgColor
+        }
         textView.typingAttributes[.foregroundColor] = fgColor
         textView.typingAttributes[.ligature] = 0
-        
+
         // Selection color
         let selectionColor = engine.themeManager.selectionColor
         if (textView.selectedTextAttributes[.backgroundColor] as? NSColor) != selectionColor {
@@ -1116,6 +1131,7 @@ public struct SyntaxHighlightedCodeView: NSViewRepresentable {
         var lastThemeName: String?
         var lastFontSize: CGFloat = 0
         var lastIsDark: Bool = false
+        var lastIsTransparent: Bool = false  // FIX: track transparent mode
         var lastFileURL: URL? = nil // Added fileURL to cache
         
         init(_ parent: SyntaxHighlightedCodeView) {
