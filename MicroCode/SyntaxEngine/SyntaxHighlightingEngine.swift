@@ -959,11 +959,6 @@ public struct SyntaxHighlightedCodeView: NSViewRepresentable {
         return scrollView
     }
 
-    /// Return the proposed size directly to prevent SwiftUI from querying
-    /// NSScrollView's intrinsic content size, which breaks the infinite layout loop.
-    public func sizeThatFits(_ proposal: ProposedViewSize, nsView: NSScrollView, context: Context) -> CGSize? {
-        return proposal.replacingUnspecifiedDimensions()
-    }
 
     public func updateNSView(_ scrollView: NSScrollView, context: Context) {
         // Log to detect layout loops
@@ -1127,7 +1122,7 @@ public struct SyntaxHighlightedCodeView: NSViewRepresentable {
     }
     
     @MainActor
-    public class Coordinator: NSObject, NSTextViewDelegate, NSTextStorageDelegate {
+    public class Coordinator: NSObject, NSTextViewDelegate, @preconcurrency NSTextStorageDelegate {
         var parent: SyntaxHighlightedCodeView
         var highlightTimer: Timer?
         var isUpdating = false
