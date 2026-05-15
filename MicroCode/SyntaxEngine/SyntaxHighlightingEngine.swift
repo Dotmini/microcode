@@ -761,34 +761,16 @@ import SwiftUI
 // based on the length of the code inside the NSTextView. This definitively breaks
 // the AppKit layout recursion loop (_FlexFrameLayout) that causes EXC_BREAKPOINT.
 class NoIntrinsicScrollView: NSScrollView {
+    // Returning noIntrinsicMetric prevents the scroll view from bubbling the
+    // text view's content size up to SwiftUI, which is what triggered the
+    // _FlexFrameLayout recursion crash. We deliberately do NOT override
+    // layout() to stomp the document view's frame: AppKit already keeps the
+    // NSTextView sized correctly via isVerticallyResizable + autoresizingMask.
+    // The previous manual frame override fought the layout manager and left
+    // glyphs laid out (so the gutter ruler still drew line numbers) while the
+    // text view itself rendered nothing — the "black screen" regression.
     override var intrinsicContentSize: NSSize {
         return NSSize(width: NSView.noIntrinsicMetric, height: NSView.noIntrinsicMetric)
-    }
-
-    override func layout() {
-        super.layout()
-        resizeTextDocumentView()
-    }
-
-    private func resizeTextDocumentView() {
-        guard let textView = documentView as? NSTextView else { return }
-
-        let visibleSize = contentView.bounds.size
-        let targetWidth = max(1, visibleSize.width)
-        let targetHeight = max(1, visibleSize.height)
-
-        var frame = textView.frame
-        if textView.isHorizontallyResizable {
-            frame.size.width = max(frame.size.width, targetWidth)
-        } else {
-            frame.size.width = targetWidth
-        }
-        frame.size.height = max(frame.size.height, targetHeight)
-
-        if abs(frame.width - textView.frame.width) > 0.5 ||
-            abs(frame.height - textView.frame.height) > 0.5 {
-            textView.frame = frame
-        }
     }
 }
 
@@ -1163,37 +1145,39 @@ public struct SyntaxHighlightedCodeView: NSViewRepresentable {
         }
 
         func configureTextGeometry(for textView: NSTextView, in scrollView: NSScrollView) {
-            let visibleSize = scrollView.contentView.bounds.size
-            let targetWidth = max(1, visibleSize.width)
-            let targetHeight = max(1, visibleSize.height)
-            let wrapText = !parent.isScrollEnabled
+            // Canonical, stable "wrapping" NSTextView-in-NSScrollView setup.
+            // We always wrap to the scroll view's width instead of toggling
+            // isHorizontallyResizable. Mixing isHorizontallyResizable = true
+            // with autoresizingMask = [.width] and an infinite-width container
+            // (the previous non-wrap path) made the text view's drawable area
+            // collapse — glyphs were laid out but never drawn (black screen),
+            // and fed size oscillation into SwiftUI's _FlexFrameLayout
+            // (immediate crash inside Playground/Notebook).
+            let contentSize = scrollView.contentSize
+            let targetWidth = max(1, contentSize.width)
+            let targetHeight = max(1, contentSize.height)
 
             textView.isVerticallyResizable = true
+            textView.isHorizontallyResizable = false
+            textView.autoresizingMask = [.width]
             textView.minSize = NSSize(width: 0, height: targetHeight)
             textView.maxSize = NSSize(width: CGFloat.greatestFiniteMagnitude,
                                       height: CGFloat.greatestFiniteMagnitude)
 
-            if wrapText {
-                textView.autoresizingMask = [.width]
-                textView.isHorizontallyResizable = false
-                textView.textContainer?.widthTracksTextView = true
-                textView.textContainer?.containerSize = NSSize(width: targetWidth,
-                                                               height: CGFloat.greatestFiniteMagnitude)
-            } else {
-                textView.autoresizingMask = [.width]
-                textView.isHorizontallyResizable = true
-                textView.textContainer?.widthTracksTextView = false
-                textView.textContainer?.containerSize = NSSize(width: CGFloat.greatestFiniteMagnitude,
-                                                               height: CGFloat.greatestFiniteMagnitude)
+            if let container = textView.textContainer {
+                container.widthTracksTextView = true
+                container.containerSize = NSSize(width: targetWidth,
+                                                 height: CGFloat.greatestFiniteMagnitude)
             }
 
-            var frame = textView.frame
-            frame.size.width = max(frame.width, targetWidth)
-            frame.size.height = max(frame.height, targetHeight)
-
-            if abs(frame.width - textView.frame.width) > 0.5 ||
-                abs(frame.height - textView.frame.height) > 0.5 {
-                textView.frame = frame
+            // Make the document view fill the scroll view's width so text is
+            // immediately visible. Height only ever grows (the layout manager
+            // owns the real height once glyphs are laid out).
+            let newWidth = targetWidth
+            let newHeight = max(textView.frame.height, targetHeight)
+            if abs(textView.frame.width - newWidth) > 0.5 ||
+                abs(textView.frame.height - newHeight) > 0.5 {
+                textView.setFrameSize(NSSize(width: newWidth, height: newHeight))
             }
         }
         
