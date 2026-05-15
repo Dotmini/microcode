@@ -803,23 +803,34 @@ public struct SyntaxHighlightedCodeView: NSViewRepresentable {
     public func makeNSView(context: Context) -> NSScrollView {
         // ─────────────────────────────────────────────────────────────────
         // CRITICAL: makeNSView is called INSIDE a SwiftUI/AppKit layout pass.
-        // ANY call that triggers AppKit layout here (setting rulers, colors,
-        // attributed strings, textStorage delegates, etc.) causes a recursive
-        // NSView layout → NSPerformVisuallyAtomicChange recursion (10 levels)
-        // → SwiftUI calls makeNSView again → Swift precondition crash (brk #1).
-        //
-        // SOLUTION: Return a completely bare NSScrollView. Do ALL configuration
-        // in a DispatchQueue.main.async block so it runs AFTER the layout pass
-        // completes and the view is safely in the hierarchy.
         // ─────────────────────────────────────────────────────────────────
 
+        // Custom ScrollView to prevent intrinsic size bubbling
         let scrollView = NoIntrinsicScrollView()
-        let textView = NSTextView(frame: NSRect(x: 0, y: 0, width: 1000, height: 1000))
-        
-        scrollView.documentView = textView
         scrollView.hasVerticalScroller = true
         scrollView.hasHorizontalScroller = true
         scrollView.autohidesScrollers = true
+        scrollView.borderType = .noBorder
+        
+        let contentSize = scrollView.contentSize
+        
+        // Properly initialize TextKit 1 Stack (Required for rendering)
+        let textStorage = NSTextStorage()
+        let layoutManager = NSLayoutManager()
+        textStorage.addLayoutManager(layoutManager)
+        
+        let textContainer = NSTextContainer(containerSize: NSSize(width: contentSize.width, height: CGFloat.greatestFiniteMagnitude))
+        textContainer.widthTracksTextView = true
+        layoutManager.addTextContainer(textContainer)
+        
+        let textView = NSTextView(frame: NSRect(x: 0, y: 0, width: contentSize.width, height: contentSize.height), textContainer: textContainer)
+        textView.minSize = NSSize(width: 0, height: 0)
+        textView.maxSize = NSSize(width: CGFloat.greatestFiniteMagnitude, height: CGFloat.greatestFiniteMagnitude)
+        textView.isVerticallyResizable = true
+        textView.isHorizontallyResizable = false
+        textView.autoresizingMask = [.width]
+        
+        scrollView.documentView = textView
 
         // Only set the delegate here — this does NOT trigger layout.
         textView.delegate = context.coordinator
