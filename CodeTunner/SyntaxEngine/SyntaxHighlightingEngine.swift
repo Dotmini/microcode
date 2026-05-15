@@ -155,6 +155,10 @@ public final class SyntaxHighlightingEngine: @unchecked Sendable {
     /// Lock for thread safety
     private let lock = NSLock()
     
+    /// Whether the initial view setup has completed
+    /// (set to true after the makeNSView async block fires)
+    internal var isViewReady: Bool = false
+    
     /// Shared instance for convenience
     public static let shared = SyntaxHighlightingEngine()
     
@@ -185,7 +189,6 @@ public final class SyntaxHighlightingEngine: @unchecked Sendable {
         return Array(Self.lexerFactories.keys).sorted()
     }
     
-
 
     // MARK: - Document Management
     
@@ -889,13 +892,21 @@ public struct SyntaxHighlightedCodeView: NSViewRepresentable {
             scrollView.drawsBackground  = !effectiveTransparent
             scrollView.backgroundColor  = effectiveTransparent ? .clear : bgColor
 
-            // ── Layout: finite container width prevents infinite-size loop ──
+            // ── Layout ───────────────────────────────────────────────────
+            // For cell/embedded views (isScrollEnabled=false): use widthTracksTextView=true
+            // so text wraps at the view boundary and is always visible.
+            // For full editors (isScrollEnabled=true): keep a very wide container so
+            // long lines can scroll horizontally without wrapping.
+            let wrapText = !coordinator.parent.isScrollEnabled
             tv.autoresizingMask = [.width, .height]
             tv.isHorizontallyResizable = false
             tv.isVerticallyResizable   = true
-            tv.textContainer?.widthTracksTextView = false
-            tv.textContainer?.containerSize = NSSize(width: 10_000_000,
-                                                     height: CGFloat.greatestFiniteMagnitude)
+            tv.textContainer?.widthTracksTextView = wrapText
+            if !wrapText {
+                // Wide container for horizontal scrolling in full editors
+                tv.textContainer?.containerSize = NSSize(width: CGFloat.greatestFiniteMagnitude,
+                                                         height: CGFloat.greatestFiniteMagnitude)
+            }
             tv.minSize = NSSize(width: 0, height: 0)
             tv.maxSize = NSSize(width: CGFloat.greatestFiniteMagnitude,
                                 height: CGFloat.greatestFiniteMagnitude)
@@ -910,25 +921,36 @@ public struct SyntaxHighlightedCodeView: NSViewRepresentable {
             scrollView.hasHorizontalScroller = coordinator.parent.isScrollEnabled
             scrollView.autohidesScrollers    = true
 
-            // ── Initial text content ─────────────────────────────────────
-            let normalizedText = coordinator.parent.text.replacingOccurrences(of: "\r\n", with: "\n")
-            let initAttrs: [NSAttributedString.Key: Any] = [.foregroundColor: fgColor, .font: customFont]
-            let attrString = NSAttributedString(string: normalizedText, attributes: initAttrs)
-            tv.textStorage?.setAttributedString(attrString)
+            // ── Mark view as ready — updateNSView handles text content ───
+            // CRITICAL: Do NOT call setAttributedString here.
+            // updateNSView already set the text content (it runs before this block).
+            // Calling setAttributedString here would RESET highlighted attributes to plain
+            // and create a race condition with the debounce timer in updateNSView.
+            coordinator.engine?.isViewReady = true
 
-            // ── Engine: syntax highlighting ──────────────────────────────
+            // ── Force a re-highlight now that colors/theme are configured ──
+            // This corrects any placeholder colors applied by updateNSView before
+            // the theme was set (the engine was ready but theme not yet applied).
             let lang = coordinator.parent.language
-            engine.setDocument(tv.string, language: lang)
-            if let ts = tv.textStorage, !normalizedText.isEmpty {
+            if let ts = tv.textStorage, ts.length > 0 {
+                // Ensure engine has the correct document + theme
+                engine.setDocument(ts.string, language: lang)
+                // Apply correct foreground to all text first (baseline)
+                let fullRange = NSRange(location: 0, length: ts.length)
+                ts.beginEditing()
+                ts.addAttributes([.foregroundColor: fgColor, .font: customFont], range: fullRange)
+                ts.endEditing()
+                // Then apply proper token colours
                 engine.applyHighlightingAsync(to: ts, fontSize: coordinator.parent.fontSize, font: tv.font)
             }
 
             // ── LSP notification ─────────────────────────────────────────
             if let url = coordinator.parent.fileURL {
+                let content = tv.textStorage?.string ?? ""
                 Task.detached(priority: .utility) {
                     await LSPManager.shared.documentOpened(uri: url.absoluteString,
                                                           language: lang,
-                                                          content: normalizedText)
+                                                          content: content)
                 }
             }
         }
@@ -997,24 +1019,16 @@ public struct SyntaxHighlightedCodeView: NSViewRepresentable {
         if textView.insertionPointColor != fgColor {
             textView.insertionPointColor = fgColor
         }
-        // FIX DIM TEXT: Always ensure textColor is set on theme/language changes
-        // The textColor is the fallback color for any text not covered by syntax tokens
-        if textView.textColor != fgColor {
-            textView.textColor = fgColor
-        }
-        // DEBUG: Force visible color if text color is clear
-        if textView.textColor == .clear {
-            textView.textColor = .red
-        }
-        // FIX: Ensure typingAttributes always have foreground color
-        if textView.typingAttributes[.foregroundColor] == nil {
-            textView.typingAttributes[.foregroundColor] = fgColor
-        }
+        // ALWAYS force-set textColor & typingAttributes — never rely on system defaults.
+        // In macOS light mode the default textColor is black; if the theme sets a dark
+        // background this makes the editor look blank.  Unconditional assignment is safe.
+        textView.textColor = fgColor
+        textView.typingAttributes[.foregroundColor] = fgColor
+        textView.typingAttributes[.ligature] = 0
         
         // Selection color
         let selectionColor = engine.themeManager.selectionColor
-        let currentSelColor = textView.selectedTextAttributes[.backgroundColor] as? NSColor
-        if currentSelColor != selectionColor {
+        if (textView.selectedTextAttributes[.backgroundColor] as? NSColor) != selectionColor {
             textView.selectedTextAttributes = [.backgroundColor: selectionColor]
         }
         
@@ -1035,14 +1049,11 @@ public struct SyntaxHighlightedCodeView: NSViewRepresentable {
         
         if textView.font != customFont {
             textView.font = customFont
-            textView.typingAttributes[.font] = customFont
-            textView.typingAttributes[.ligature] = 0
-            textView.typingAttributes[.foregroundColor] = fgColor
         }
-        
-        if textView.typingAttributes[.ligature] == nil {
-            textView.typingAttributes[.ligature] = 0
-        }
+        // Always sync typingAttributes font so new characters inherit the right face
+        textView.typingAttributes[.font] = customFont
+        textView.typingAttributes[.foregroundColor] = fgColor
+        textView.typingAttributes[.ligature] = 0
         
         // Check if text or language changed
         // Critical Fix: Also check if language changed, otherwise switching file types (e.g. .txt -> .swift) wouldn't update highlighting
@@ -1055,20 +1066,17 @@ public struct SyntaxHighlightedCodeView: NSViewRepresentable {
             // Update the actual text view content if it changed
             if textView.string != normalizedText {
                 context.coordinator.isUpdating = true
-                // CRITICAL FIX: Ensure default color is applied during replacement to prevent black-text void
                 let fullRange = NSRange(location: 0, length: (textView.textStorage?.length ?? 0))
+                let newCustomFont = NSFont(name: fontName, size: fontSize) ?? NSFont.monospacedSystemFont(ofSize: fontSize, weight: .regular)
                 textView.textStorage?.beginEditing()
                 textView.textStorage?.replaceCharacters(in: fullRange, with: normalizedText)
-                
                 let newRange = NSRange(location: 0, length: (normalizedText as NSString).length)
-                let customFont = NSFont(name: fontName, size: fontSize) ?? NSFont.monospacedSystemFont(ofSize: fontSize, weight: .regular)
-                
-                let fgColor = engine.themeManager.editorForegroundColor
-                
-                textView.textStorage?.addAttributes([
-                    .foregroundColor: fgColor,
-                    .font: customFont
-                ], range: newRange)
+                if newRange.length > 0 {
+                    textView.textStorage?.addAttributes([
+                        .foregroundColor: fgColor,
+                        .font: newCustomFont
+                    ], range: newRange)
+                }
                 textView.textStorage?.endEditing()
                 context.coordinator.isUpdating = false
             }
@@ -1076,7 +1084,14 @@ public struct SyntaxHighlightedCodeView: NSViewRepresentable {
             // Update document content in engine
             engine.setDocument(textView.string, language: language)
             
-            // Apply highlighting via Debounce to prevent Main Thread congestion (e.g. Notebook open)
+            // For the very first render (view not yet fully configured), apply
+            // highlighting immediately instead of relying solely on the 150ms timer.
+            // This prevents a blank/black flash while the debounce timer is pending.
+            if let ts = textView.textStorage, ts.length > 0 {
+                engine.applyHighlightingAsync(to: ts, fontSize: fontSize, font: textView.font)
+            }
+            
+            // Also schedule the debounced highlight to pick up any rapid subsequent changes
             context.coordinator.triggerDebouncedHighlight(for: textView)
         }
     }

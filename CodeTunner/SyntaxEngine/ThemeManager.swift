@@ -143,15 +143,34 @@ public final class ThemeManager: @unchecked Sendable {
         return activeTheme
     }
     
-    /// Set the active theme by name
+    /// Set the active theme by name.
+    /// "system" is resolved to "dark" or "light" based on the current macOS appearance.
+    /// If the theme is not in the cache a safe fallback is used so text is always visible.
     public func setActiveTheme(_ themeName: String) {
         lock.lock()
         defer { lock.unlock() }
         
-        if let theme = themeCache[themeName] {
+        // Resolve "system" pseudo-theme to an actual theme id
+        let resolvedName: String
+        if themeName.lowercased() == "system" {
+            // Check effective appearance outside the lock — NSApp is main-thread safe
+            let isDarkMode = (NSApp?.effectiveAppearance.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua)
+            resolvedName = isDarkMode ? "dark" : "light"
+        } else {
+            resolvedName = themeName
+        }
+        
+        if let theme = themeCache[resolvedName] {
             activeTheme = theme
             rebuildStyleCache()
+        } else if let fallback = themeCache["dark"] ?? themeCache["default-dark"] ?? themeCache.values.first {
+            // Safety fallback: always apply SOME theme — prevents invisible text when
+            // an unrecognised theme id is passed (e.g. a custom or future theme).
+            activeTheme = fallback
+            rebuildStyleCache()
         }
+        // If even the fallback is missing the default-dark set in init() stays active,
+        // which always has a valid light foreground on dark background.
     }
     
     /// Load a theme from JSON data

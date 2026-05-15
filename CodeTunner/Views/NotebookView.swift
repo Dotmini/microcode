@@ -2914,9 +2914,8 @@ struct NotebookCellView: View {
                         let lineHeight: CGFloat = 20  // line height for 13pt monospaced font
                         let calculatedHeight = CGFloat(lineCount) * lineHeight + 16  // +16 for padding
                         
-                        let cellIsDark = NSColor(cell.backgroundColor).isDarkColor
-                        let effectiveTheme = cellIsDark == appState.appTheme.isDark ? appState.appTheme.rawValue : (cellIsDark ? "dark" : "light")
-                        
+                        // Use appTheme rawValue directly — ThemeManager.setActiveTheme resolves
+                        // "system" to dark/light automatically based on macOS appearance.
                         SyntaxHighlightedCodeView(
                             text: Binding(
                                 get: { cell.content },
@@ -2924,14 +2923,15 @@ struct NotebookCellView: View {
                             ),
                             language: cell.language.rawValue.lowercased(),
                             fontSize: appState.cellFontSize,
-                            isDark: cellIsDark,
-                            themeName: effectiveTheme,
+                            isDark: appState.appTheme.isDark,
+                            themeName: appState.appTheme.rawValue,
                             fontName: appState.cellFontName,
                             fontWeight: appState.cellFontWeight
                         )
                         .frame(height: max(50, min(calculatedHeight, 500)))
                         .cornerRadius(4)
                         .padding(4)
+
                     }
                     
                     // Output Section
