@@ -1,3 +1,28 @@
+## Support the Project
+
+MicroCode is built and maintained solo. If this project saves you time or inspires your work, consider supporting continued development.
+
+### 🇹🇭 PromptPay / Bank Transfer
+
+| | |
+|---|---|
+| **Bank** | Krungthai Bank (กรุงไทย) |
+| **Account** | 460-0-70494-0 |
+| **Name** | นายถิรวัฒน์ นันตมาศ |
+
+> 📎 PromptPay QR — *coming soon*
+
+### 💖 GitHub Sponsors
+
+If you prefer recurring support or want to appear in the sponsors list:
+
+[![Sponsor on GitHub](https://img.shields.io/badge/Sponsor-GitHub_Sponsors-EA4AAA?style=flat-square&logo=github-sponsors&logoColor=white)](https://github.com/sponsors/Dotmini)
+
+Every contribution — small or large — directly funds development time, Apple Developer certificates, and infrastructure.
+
+---
+
+
 <p align="center">
   <img src="MicroCOdeDoogleIcon.png" alt="MicroCode" width="420" />
 </p>
