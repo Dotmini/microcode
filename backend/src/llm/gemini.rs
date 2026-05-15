@@ -4,10 +4,10 @@
 //!
 //! Copyright © 2025 SPU AI CLUB — Dotmini Software
 
+use super::{ChatMessage, LlmError, LlmProvider, McpContext};
 use async_trait::async_trait;
 use futures::Stream;
 use std::pin::Pin;
-use super::{LlmProvider, LlmError, ChatMessage, McpContext};
 
 pub struct GeminiProvider {
     api_key: String,
@@ -28,7 +28,9 @@ impl GeminiProvider {
 
 #[async_trait]
 impl LlmProvider for GeminiProvider {
-    fn name(&self) -> &str { "Gemini" }
+    fn name(&self) -> &str {
+        "Gemini"
+    }
 
     async fn stream_completion(
         &self,
@@ -48,7 +50,9 @@ impl LlmProvider for GeminiProvider {
         // Build Gemini contents format
         let mut contents: Vec<serde_json::Value> = Vec::new();
         for msg in messages {
-            if msg.role == "system" { continue; }
+            if msg.role == "system" {
+                continue;
+            }
             let role = if msg.role == "user" { "user" } else { "model" };
             contents.push(serde_json::json!({
                 "role": role,
@@ -72,7 +76,8 @@ impl LlmProvider for GeminiProvider {
             model, self.api_key
         );
 
-        let response = self.client
+        let response = self
+            .client
             .post(&url)
             .header("content-type", "application/json")
             .json(&body)
@@ -84,9 +89,14 @@ impl LlmProvider for GeminiProvider {
             let status = response.status().as_u16();
             let text = response.text().await.unwrap_or_default();
             if status == 429 {
-                return Err(LlmError::RateLimited { retry_after_ms: 5000 });
+                return Err(LlmError::RateLimited {
+                    retry_after_ms: 5000,
+                });
             }
-            return Err(LlmError::Api { code: status, message: text });
+            return Err(LlmError::Api {
+                code: status,
+                message: text,
+            });
         }
 
         let byte_stream = response.bytes_stream();
@@ -99,11 +109,11 @@ impl LlmProvider for GeminiProvider {
                 match chunk {
                     Ok(bytes) => {
                         buffer.push_str(&String::from_utf8_lossy(&bytes));
-                        
+
                         while let Some(pos) = buffer.find("\n\n") {
                             let event_str = buffer[..pos].to_string();
                             buffer = buffer[pos + 2..].to_string();
-                            
+
                             for line in event_str.lines() {
                                 if line.starts_with("data: ") {
                                     let data = &line[6..];

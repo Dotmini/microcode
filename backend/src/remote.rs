@@ -1,18 +1,21 @@
+use crate::state::AppState;
+use async_trait::async_trait;
 use axum::{
-    extract::{State, Json, WebSocketUpgrade, ws::{WebSocket, Message}},
+    extract::{
+        ws::{Message, WebSocket},
+        Json, State, WebSocketUpgrade,
+    },
     response::IntoResponse,
 };
+use futures::{SinkExt, StreamExt};
 use russh::*;
 use russh_keys::*;
 use russh_sftp::client::SftpSession;
-use std::sync::Arc;
-use tokio::sync::{Mutex, RwLock};
-use std::collections::HashMap;
 use serde::{Deserialize, Serialize};
-use crate::state::AppState;
-use async_trait::async_trait;
-use futures::{StreamExt, SinkExt};
+use std::collections::HashMap;
+use std::sync::Arc;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::sync::{Mutex, RwLock};
 
 // Models
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -36,8 +39,8 @@ pub struct SshSession {
 impl std::fmt::Debug for SshSession {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("SshSession")
-         .field("has_sftp", &self.sftp.is_some())
-         .finish()
+            .field("has_sftp", &self.sftp.is_some())
+            .finish()
     }
 }
 
@@ -78,18 +81,21 @@ impl RemoteConnectionManager {
     pub async fn connect(&self, config: RemoteConnectionConfig) -> Result<(), String> {
         // Protocol Router
         if config.connection_type == "ftp" || config.connection_type == "ftps" {
-            return self.ftp_manager.connect(
-                &config.id,
-                &config.host,
-                config.port,
-                &config.username,
-                config.password.as_deref().unwrap_or(""),
-                config.connection_type == "ftps"
-            ).await;
+            return self
+                .ftp_manager
+                .connect(
+                    &config.id,
+                    &config.host,
+                    config.port,
+                    &config.username,
+                    config.password.as_deref().unwrap_or(""),
+                    config.connection_type == "ftps",
+                )
+                .await;
         }
 
         let mut ssh_config = client::Config::default();
-        
+
         // Compatibility: Enable a wide range of algorithms to support older and newer servers
         // This solves "No common key algorithm" errors.
         ssh_config.preferred = Preferred {
@@ -123,63 +129,71 @@ impl RemoteConnectionManager {
         // Stability: Add KeepAlive to prevent timeouts
         ssh_config.keepalive_interval = Some(std::time::Duration::from_secs(10));
 
-
         let config_arc = Arc::new(ssh_config);
         let sh = Client {};
-        
+
         // Increase initial connection timeout slightly to account for slow handshakes
         let mut session = match tokio::time::timeout(
             tokio::time::Duration::from_secs(45),
-            client::connect(config_arc, (config.host.as_str(), config.port), sh)
-        ).await {
+            client::connect(config_arc, (config.host.as_str(), config.port), sh),
+        )
+        .await
+        {
             Ok(res) => res.map_err(|e| format!("Connection failed: {}", e))?,
             Err(_) => return Err("Connection timed out (45s)".to_string()),
         };
 
         let auth_res = if let Some(key_path) = config.key_path {
             let expanded_path = Self::expand_tilde(&key_path);
-            
+
             // Check if file exists
             if !std::path::Path::new(&expanded_path).exists() {
                 return Err(format!("SSH Key not found: {}", expanded_path));
             }
 
-            let key_pair = load_secret_key(&expanded_path, None).map_err(|e| {
-                format!("Failed to load SSH Key ({}): {}", expanded_path, e)
-            })?;
-            
-            session.authenticate_publickey(config.username, Arc::new(key_pair)).await
+            let key_pair = load_secret_key(&expanded_path, None)
+                .map_err(|e| format!("Failed to load SSH Key ({}): {}", expanded_path, e))?;
+
+            session
+                .authenticate_publickey(config.username, Arc::new(key_pair))
+                .await
         } else if let Some(password) = config.password {
-            session.authenticate_password(config.username, password).await
+            session
+                .authenticate_password(config.username, password)
+                .await
         } else {
             return Err("No auth credentials provided".to_string());
         };
 
         if auth_res.map_err(|e| e.to_string())? {
-             // Init SFTP
-             let sftp = if let Ok(channel) = session.channel_open_session().await {
-                 if channel.request_subsystem(true, "sftp").await.is_ok() {
-                     SftpSession::new(channel.into_stream()).await.ok()
-                 } else {
-                     None
-                 }
-             } else {
-                 None
-             };
-             
-             let ssh_session = SshSession {
-                 session: Arc::new(session), // Wrap in Arc
-                 sftp,
-             };
-             
-             let id = if config.id.is_empty() { "default".to_string() } else { config.id };
-             self.sessions.lock().await.insert(id, ssh_session);
-             Ok(())
+            // Init SFTP
+            let sftp = if let Ok(channel) = session.channel_open_session().await {
+                if channel.request_subsystem(true, "sftp").await.is_ok() {
+                    SftpSession::new(channel.into_stream()).await.ok()
+                } else {
+                    None
+                }
+            } else {
+                None
+            };
+
+            let ssh_session = SshSession {
+                session: Arc::new(session), // Wrap in Arc
+                sftp,
+            };
+
+            let id = if config.id.is_empty() {
+                "default".to_string()
+            } else {
+                config.id
+            };
+            self.sessions.lock().await.insert(id, ssh_session);
+            Ok(())
         } else {
             Err("Authentication failed".to_string())
         }
     }
-    
+
     // Interactive Shell via WebSocket
     pub async fn start_shell(&self, id: &str, mut ws: WebSocket) {
         let mut session = {
@@ -187,7 +201,9 @@ impl RemoteConnectionManager {
             if let Some(s) = sessions.get(id) {
                 s.session.clone()
             } else {
-                let _ = ws.send(Message::Text("Session not found".to_string())).await;
+                let _ = ws
+                    .send(Message::Text("Session not found".to_string()))
+                    .await;
                 return;
             }
         };
@@ -195,22 +211,27 @@ impl RemoteConnectionManager {
         match session.channel_open_session().await {
             Ok(mut channel) => {
                 // Request PTY for interactive shell
-                let pty_res: Result<(), russh::Error> = channel.request_pty(true, "xterm", 80, 24, 0, 0, &[]).await;
+                let pty_res: Result<(), russh::Error> =
+                    channel.request_pty(true, "xterm", 80, 24, 0, 0, &[]).await;
                 if let Err(e) = pty_res {
-                    let _ = ws.send(Message::Text(format!("Failed to request PTY: {}", e))).await;
+                    let _ = ws
+                        .send(Message::Text(format!("Failed to request PTY: {}", e)))
+                        .await;
                     return;
                 }
 
                 if let Err(e) = channel.request_shell(true).await {
-                     let _ = ws.send(Message::Text(format!("Failed to request shell: {}", e))).await;
-                     return;
+                    let _ = ws
+                        .send(Message::Text(format!("Failed to request shell: {}", e)))
+                        .await;
+                    return;
                 }
 
                 let mut ws_sender = ws;
                 // Split WebSocket? No, axum WebSocket is Stream + Sink.
                 // We need to split it to handle read/write concurrently.
                 let (mut ws_tx, mut ws_rx) = ws_sender.split();
-                
+
                 // Read from SSH Channel -> Send to WebSocket
                 let mut channel_stream = channel.into_stream();
                 let (mut ssh_read, mut ssh_write) = tokio::io::split(channel_stream);
@@ -222,7 +243,11 @@ impl RemoteConnectionManager {
                         match ssh_read.read(&mut buf).await {
                             Ok(0) => break, // EOF
                             Ok(n) => {
-                                if ws_tx.send(Message::Binary(buf[..n].to_vec())).await.is_err() {
+                                if ws_tx
+                                    .send(Message::Binary(buf[..n].to_vec()))
+                                    .await
+                                    .is_err()
+                                {
                                     break;
                                 }
                             }
@@ -234,27 +259,33 @@ impl RemoteConnectionManager {
                 // Task 2: WebSocket -> SSH
                 let ws_to_ssh = tokio::spawn(async move {
                     while let Some(Ok(msg)) = ws_rx.next().await {
-                         match msg {
-                             Message::Text(text) => {
-                                 // Handle special resize command: "RESIZE:cols:rows"
-                                 if text.starts_with("RESIZE:") {
-                                     // In a real implementation, we'd parse this and call channel.request_pty_size
-                                 }
-                                 if let Err(_) = ssh_write.write_all(text.as_bytes()).await { break; }
-                             },
-                             Message::Binary(data) => {
-                                 if let Err(_) = ssh_write.write_all(&data).await { break; }
-                             },
-                             Message::Close(_) => break,
-                             _ => {}
-                         }
+                        match msg {
+                            Message::Text(text) => {
+                                // Handle special resize command: "RESIZE:cols:rows"
+                                if text.starts_with("RESIZE:") {
+                                    // In a real implementation, we'd parse this and call channel.request_pty_size
+                                }
+                                if let Err(_) = ssh_write.write_all(text.as_bytes()).await {
+                                    break;
+                                }
+                            }
+                            Message::Binary(data) => {
+                                if let Err(_) = ssh_write.write_all(&data).await {
+                                    break;
+                                }
+                            }
+                            Message::Close(_) => break,
+                            _ => {}
+                        }
                     }
                 });
 
                 let _ = tokio::join!(ssh_to_ws, ws_to_ssh);
             }
             Err(e) => {
-                let _ = ws.send(Message::Text(format!("Failed to open channel: {}", e))).await;
+                let _ = ws
+                    .send(Message::Text(format!("Failed to open channel: {}", e)))
+                    .await;
             }
         }
     }
@@ -262,17 +293,24 @@ impl RemoteConnectionManager {
     pub async fn execute_command(&self, id: &str, command: String) -> Result<String, String> {
         let mut sessions = self.sessions.lock().await;
         if let Some(ssh_session) = sessions.get_mut(id) {
-            let mut channel = ssh_session.session.channel_open_session().await.map_err(|e| e.to_string())?;
-            channel.exec(true, command).await.map_err(|e| e.to_string())?;
-            
+            let mut channel = ssh_session
+                .session
+                .channel_open_session()
+                .await
+                .map_err(|e| e.to_string())?;
+            channel
+                .exec(true, command)
+                .await
+                .map_err(|e| e.to_string())?;
+
             let mut output = String::new();
             while let Some(msg) = channel.wait().await {
-                 match msg {
-                     russh::ChannelMsg::Data { ref data } => {
-                         output.push_str(&String::from_utf8_lossy(data));
-                     }
-                     _ => {}
-                 }
+                match msg {
+                    russh::ChannelMsg::Data { ref data } => {
+                        output.push_str(&String::from_utf8_lossy(data));
+                    }
+                    _ => {}
+                }
             }
             Ok(output)
         } else {
@@ -281,7 +319,11 @@ impl RemoteConnectionManager {
     }
 
     // Unified List Files (routes to SFTP or FTP)
-    pub async fn list_files(&self, id: &str, path: String) -> Result<Vec<crate::models::FileInfo>, String> {
+    pub async fn list_files(
+        &self,
+        id: &str,
+        path: String,
+    ) -> Result<Vec<crate::models::FileInfo>, String> {
         // Try FTP first if ID matches an FTP session
         if let Ok(files) = self.ftp_manager.list_files(id, &path).await {
             return Ok(files);
@@ -292,21 +334,27 @@ impl RemoteConnectionManager {
             if let Some(sftp) = &ssh_session.sftp {
                 let mut readdir = sftp.read_dir(&path).await.map_err(|e| e.to_string())?;
                 let mut files = Vec::new();
-                
+
                 while let Some(entry) = readdir.next() {
-                     let name = entry.file_name();
-                     let stat = entry.metadata(); 
-                     
-                     files.push(crate::models::FileInfo {
-                         name: name.clone(),
-                         path: format!("{}/{}", path.trim_end_matches('/'), name),
-                         is_directory: stat.is_dir(),
-                         extension: std::path::Path::new(&name).extension().map(|s| s.to_string_lossy().to_string()),
-                         modified: Some(chrono::DateTime::from_timestamp(stat.mtime.unwrap_or(0) as i64, 0).unwrap_or_default().to_rfc3339()),
-                         size: stat.size.unwrap_or(0),
-                     });
+                    let name = entry.file_name();
+                    let stat = entry.metadata();
+
+                    files.push(crate::models::FileInfo {
+                        name: name.clone(),
+                        path: format!("{}/{}", path.trim_end_matches('/'), name),
+                        is_directory: stat.is_dir(),
+                        extension: std::path::Path::new(&name)
+                            .extension()
+                            .map(|s| s.to_string_lossy().to_string()),
+                        modified: Some(
+                            chrono::DateTime::from_timestamp(stat.mtime.unwrap_or(0) as i64, 0)
+                                .unwrap_or_default()
+                                .to_rfc3339(),
+                        ),
+                        size: stat.size.unwrap_or(0),
+                    });
                 }
-                
+
                 Ok(files)
             } else {
                 Err("SFTP not initialized".to_string())
@@ -315,24 +363,33 @@ impl RemoteConnectionManager {
             Err("Session not found".to_string())
         }
     }
-    
+
     // Unified Upload (routes to SFTP or FTP)
-    pub async fn upload_file(&self, id: &str, remote_path: String, content: Vec<u8>) -> Result<(), String> {
-        if let Ok(_) = self.ftp_manager.upload_file(id, &remote_path, &content).await {
+    pub async fn upload_file(
+        &self,
+        id: &str,
+        remote_path: String,
+        content: Vec<u8>,
+    ) -> Result<(), String> {
+        if let Ok(_) = self
+            .ftp_manager
+            .upload_file(id, &remote_path, &content)
+            .await
+        {
             return Ok(());
         }
-        
+
         let sessions = self.sessions.lock().await;
         if let Some(ssh_session) = sessions.get(id) {
-             if let Some(sftp) = &ssh_session.sftp {
-                 let mut file = sftp.create(&remote_path).await.map_err(|e| e.to_string())?;
-                 file.write_all(&content).await.map_err(|e| e.to_string())?;
-                 Ok(())
-             } else {
-                 Err("SFTP not initialized".to_string())
-             }
+            if let Some(sftp) = &ssh_session.sftp {
+                let mut file = sftp.create(&remote_path).await.map_err(|e| e.to_string())?;
+                file.write_all(&content).await.map_err(|e| e.to_string())?;
+                Ok(())
+            } else {
+                Err("SFTP not initialized".to_string())
+            }
         } else {
-             Err("Session not found".to_string())
+            Err("Session not found".to_string())
         }
     }
 
@@ -344,16 +401,18 @@ impl RemoteConnectionManager {
 
         let sessions = self.sessions.lock().await;
         if let Some(ssh_session) = sessions.get(id) {
-             if let Some(sftp) = &ssh_session.sftp {
-                 let mut file = sftp.open(&remote_path).await.map_err(|e| e.to_string())?;
-                 let mut content = Vec::new();
-                 file.read_to_end(&mut content).await.map_err(|e| e.to_string())?;
-                 Ok(content)
-             } else {
-                 Err("SFTP not initialized".to_string())
-             }
+            if let Some(sftp) = &ssh_session.sftp {
+                let mut file = sftp.open(&remote_path).await.map_err(|e| e.to_string())?;
+                let mut content = Vec::new();
+                file.read_to_end(&mut content)
+                    .await
+                    .map_err(|e| e.to_string())?;
+                Ok(content)
+            } else {
+                Err("SFTP not initialized".to_string())
+            }
         } else {
-             Err("Session not found".to_string())
+            Err("Session not found".to_string())
         }
     }
 
@@ -403,7 +462,12 @@ impl RemoteConnectionManager {
         }
     }
 
-    pub async fn rename(&self, id: &str, source: String, destination: String) -> Result<(), String> {
+    pub async fn rename(
+        &self,
+        id: &str,
+        source: String,
+        destination: String,
+    ) -> Result<(), String> {
         if let Ok(_) = self.ftp_manager.rename(id, &source, &destination).await {
             return Ok(());
         }
@@ -411,7 +475,9 @@ impl RemoteConnectionManager {
         let sessions = self.sessions.lock().await;
         if let Some(ssh_session) = sessions.get(id) {
             if let Some(sftp) = &ssh_session.sftp {
-                sftp.rename(&source, &destination).await.map_err(|e| e.to_string())?;
+                sftp.rename(&source, &destination)
+                    .await
+                    .map_err(|e| e.to_string())?;
                 Ok(())
             } else {
                 Err("SFTP not initialized".to_string())
@@ -424,7 +490,7 @@ impl RemoteConnectionManager {
     pub async fn ping_host(host: &str, port: u16) -> bool {
         use tokio::net::TcpStream;
         use tokio::time::{timeout, Duration};
-        
+
         let addr = format!("{}:{}", host, port);
         match timeout(Duration::from_secs(2), TcpStream::connect(&addr)).await {
             Ok(Ok(_)) => true,
@@ -453,15 +519,11 @@ pub struct ExecRequest {
     pub command: String,
 }
 
-
-
 #[derive(Deserialize)]
 pub struct ListFilesRequest {
     pub id: String,
     pub path: String,
 }
-
-
 
 #[derive(Deserialize)]
 pub struct MkdirRequest {
@@ -495,8 +557,16 @@ pub async fn remote_connect(
         port: req.port,
         username: req.username,
         auth_type: req.auth_type,
-        password: if req.password.is_empty() { None } else { Some(req.password) },
-        key_path: if req.key_path.is_empty() { None } else { Some(req.key_path) },
+        password: if req.password.is_empty() {
+            None
+        } else {
+            Some(req.password)
+        },
+        key_path: if req.key_path.is_empty() {
+            None
+        } else {
+            Some(req.key_path)
+        },
         connection_type: req.connection_type.unwrap_or_else(|| "ssh".to_string()),
     };
 
@@ -513,7 +583,7 @@ pub async fn remote_shell_ws(
     State(state): State<Arc<RwLock<AppState>>>,
 ) -> impl IntoResponse {
     let manager = state.read().await.remote_manager.clone();
-    
+
     ws.on_upgrade(move |socket| async move {
         manager.start_shell(&id, socket).await;
     })
@@ -524,7 +594,11 @@ pub async fn remote_exec(
     Json(req): Json<ExecRequest>,
 ) -> impl IntoResponse {
     let st = state.read().await;
-    match st.remote_manager.execute_command(&req.id, req.command).await {
+    match st
+        .remote_manager
+        .execute_command(&req.id, req.command)
+        .await
+    {
         Ok(output) => Json(serde_json::json!({ "output": output })),
         Err(e) => Json(serde_json::json!({ "output": format!("Error: {}", e) })),
     }
@@ -553,17 +627,23 @@ pub async fn remote_upload(
     State(state): State<Arc<RwLock<AppState>>>,
     Json(req): Json<UploadRequest>,
 ) -> impl IntoResponse {
-    use base64::{Engine as _, engine::general_purpose};
-    
+    use base64::{engine::general_purpose, Engine as _};
+
     let content = match general_purpose::STANDARD.decode(&req.content_base64) {
         Ok(c) => c,
-        Err(_) => return Json(serde_json::json!({ "success": false, "message": "Invalid base64" })),
+        Err(_) => {
+            return Json(serde_json::json!({ "success": false, "message": "Invalid base64" }))
+        }
     };
-    
+
     let st = state.read().await;
-    match st.remote_manager.upload_file(&req.id, req.path, content).await {
-         Ok(_) => Json(serde_json::json!({ "success": true })),
-         Err(e) => Json(serde_json::json!({ "success": false, "message": e })),
+    match st
+        .remote_manager
+        .upload_file(&req.id, req.path, content)
+        .await
+    {
+        Ok(_) => Json(serde_json::json!({ "success": true })),
+        Err(e) => Json(serde_json::json!({ "success": false, "message": e })),
     }
 }
 
@@ -579,9 +659,7 @@ pub struct PingRequest {
     pub port: u16,
 }
 
-pub async fn remote_ping(
-    Json(req): Json<PingRequest>,
-) -> impl IntoResponse {
+pub async fn remote_ping(Json(req): Json<PingRequest>) -> impl IntoResponse {
     let success = RemoteConnectionManager::ping_host(&req.host, req.port).await;
     Json(serde_json::json!({ "success": success }))
 }
@@ -590,15 +668,15 @@ pub async fn remote_download(
     State(state): State<Arc<RwLock<AppState>>>,
     Json(req): Json<DownloadRequest>,
 ) -> impl IntoResponse {
-    use base64::{Engine as _, engine::general_purpose};
-    
+    use base64::{engine::general_purpose, Engine as _};
+
     let st = state.read().await;
     match st.remote_manager.download_file(&req.id, req.path).await {
-         Ok(content) => {
-             let b64 = general_purpose::STANDARD.encode(&content);
-             Json(serde_json::json!({ "success": true, "content": b64 }))
-         },
-         Err(e) => Json(serde_json::json!({ "success": false, "message": e })),
+        Ok(content) => {
+            let b64 = general_purpose::STANDARD.encode(&content);
+            Json(serde_json::json!({ "success": true, "content": b64 }))
+        }
+        Err(e) => Json(serde_json::json!({ "success": false, "message": e })),
     }
 }
 
@@ -618,7 +696,11 @@ pub async fn remote_remove(
     Json(req): Json<RemoveRequest>,
 ) -> impl IntoResponse {
     let st = state.read().await;
-    match st.remote_manager.remove(&req.id, req.path, req.is_directory).await {
+    match st
+        .remote_manager
+        .remove(&req.id, req.path, req.is_directory)
+        .await
+    {
         Ok(_) => Json(serde_json::json!({ "success": true })),
         Err(e) => Json(serde_json::json!({ "success": false, "message": e })),
     }
@@ -629,7 +711,11 @@ pub async fn remote_rename(
     Json(req): Json<RenameRequest>,
 ) -> impl IntoResponse {
     let st = state.read().await;
-    match st.remote_manager.rename(&req.id, req.source, req.destination).await {
+    match st
+        .remote_manager
+        .rename(&req.id, req.source, req.destination)
+        .await
+    {
         Ok(_) => Json(serde_json::json!({ "success": true })),
         Err(e) => Json(serde_json::json!({ "success": false, "message": e })),
     }

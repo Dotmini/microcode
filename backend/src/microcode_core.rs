@@ -123,9 +123,14 @@ pub struct LlmInitResult {
 /// Initialize an LLM client with provider and token from Swift Keychain
 /// Swift calls this after retrieving the key from Keychain
 #[uniffi::export]
-pub fn init_llm_client(provider: LlmProviderType, token: String) -> Result<LlmInitResult, CoreError> {
+pub fn init_llm_client(
+    provider: LlmProviderType,
+    token: String,
+) -> Result<LlmInitResult, CoreError> {
     if token.is_empty() {
-        return Err(CoreError::Io { msg: "Token is empty".to_string() });
+        return Err(CoreError::Io {
+            msg: "Token is empty".to_string(),
+        });
     }
 
     let provider_name = match provider {
@@ -138,18 +143,17 @@ pub fn init_llm_client(provider: LlmProviderType, token: String) -> Result<LlmIn
     };
 
     // Store in environment for backend HTTP server to pick up
-    std::env::set_var(
-        &format!("{}_API_KEY", provider_name.to_uppercase()),
-        &token
-    );
+    std::env::set_var(&format!("{}_API_KEY", provider_name.to_uppercase()), &token);
 
     Ok(LlmInitResult {
         success: true,
         provider: provider_name.to_string(),
-        message: format!("{} client initialized with key {}...{}", 
+        message: format!(
+            "{} client initialized with key {}...{}",
             provider_name,
             &token[..token.len().min(4)],
-            &token[token.len().saturating_sub(4)..]),
+            &token[token.len().saturating_sub(4)..]
+        ),
     })
 }
 
@@ -169,22 +173,15 @@ pub fn get_provider_models(provider: LlmProviderType) -> Vec<String> {
             "claude-3-5-sonnet-20241022".to_string(),
             "claude-3-5-haiku-20241022".to_string(),
         ],
-        LlmProviderType::DeepSeek => vec![
-            "deepseek-chat".to_string(),
-            "deepseek-reasoner".to_string(),
-        ],
+        LlmProviderType::DeepSeek => {
+            vec!["deepseek-chat".to_string(), "deepseek-reasoner".to_string()]
+        }
         LlmProviderType::Gemini => vec![
             "gemini-2.5-flash".to_string(),
             "gemini-2.5-pro".to_string(),
             "gemini-2.0-flash".to_string(),
         ],
-        LlmProviderType::Grok => vec![
-            "grok-3".to_string(),
-            "grok-3-mini".to_string(),
-        ],
-        LlmProviderType::Codex => vec![
-            "codex-mini-latest".to_string(),
-            "o4-mini".to_string(),
-        ],
+        LlmProviderType::Grok => vec!["grok-3".to_string(), "grok-3-mini".to_string()],
+        LlmProviderType::Codex => vec!["codex-mini-latest".to_string(), "o4-mini".to_string()],
     }
 }

@@ -39,16 +39,18 @@ impl DataFrameManager {
         }
 
         let extension = path.extension().and_then(|s| s.to_str()).unwrap_or("");
-        
+
         let df = match extension {
             "csv" => CsvReader::from_path(path)
                 .map_err(|e| AppError::DataFrameError(e.to_string()))?
                 .has_header(true)
                 .finish()
                 .map_err(|e| AppError::DataFrameError(e.to_string()))?,
-            "parquet" => ParquetReader::new(std::fs::File::open(path).map_err(|e| AppError::IoError(e))?)
-                .finish()
-                .map_err(|e| AppError::DataFrameError(e.to_string()))?,
+            "parquet" => {
+                ParquetReader::new(std::fs::File::open(path).map_err(|e| AppError::IoError(e))?)
+                    .finish()
+                    .map_err(|e| AppError::DataFrameError(e.to_string()))?
+            }
             "json" => JsonReader::new(std::fs::File::open(path).map_err(|e| AppError::IoError(e))?)
                 .finish()
                 .map_err(|e| AppError::DataFrameError(e.to_string()))?,
@@ -62,39 +64,44 @@ impl DataFrameManager {
 
     pub fn get_slice(&self, id: &str, offset: i64, limit: usize) -> Result<serde_json::Value> {
         let dfs = self.dfs.lock().unwrap();
-        let df = dfs.get(id).ok_or_else(|| AppError::NotFound("DataFrame not found".to_string()))?;
-        
+        let df = dfs
+            .get(id)
+            .ok_or_else(|| AppError::NotFound("DataFrame not found".to_string()))?;
+
         let sliced = df.slice(offset, limit);
-        
+
         // Convert to JSON
-        let json_str = serde_json::to_string(&sliced).map_err(|e| AppError::DataFrameError(e.to_string()))?;
-        // Polars serializes to a string, or we can use JsonWriter. 
+        let json_str =
+            serde_json::to_string(&sliced).map_err(|e| AppError::DataFrameError(e.to_string()))?;
+        // Polars serializes to a string, or we can use JsonWriter.
         // Actually, DataFrame struct doesn't impl Serialize directly in a way we might want for API.
         // Let's use write_json to memory.
-        
+
         let mut buf = Vec::new();
         JsonWriter::new(&mut buf)
             .with_json_format(JsonFormat::Json)
             .finish(&mut sliced.clone())
             .map_err(|e| AppError::DataFrameError(e.to_string()))?;
-            
+
         let json_val: serde_json::Value = serde_json::from_slice(&buf)
             .map_err(|e| AppError::SerializationError(e.to_string()))?;
-            
+
         Ok(json_val)
     }
 
     pub fn get_schema(&self, id: &str) -> Result<HashMap<String, String>> {
         let dfs = self.dfs.lock().unwrap();
-        let df = dfs.get(id).ok_or_else(|| AppError::NotFound("DataFrame not found".to_string()))?;
-        
+        let df = dfs
+            .get(id)
+            .ok_or_else(|| AppError::NotFound("DataFrame not found".to_string()))?;
+
         let schema = df.schema();
         let mut result = HashMap::new();
-        
+
         for (name, dtype) in schema.iter() {
             result.insert(name.to_string(), dtype.to_string());
         }
-        
+
         Ok(result)
     }
 }

@@ -9,7 +9,7 @@ use std::os::raw::c_char;
 use std::sync::{LazyLock, RwLock};
 
 /// Global thunk table - maps function names to current implementation addresses
-pub static THUNK_TABLE: LazyLock<RwLock<ThunkTable>> = 
+pub static THUNK_TABLE: LazyLock<RwLock<ThunkTable>> =
     LazyLock::new(|| RwLock::new(ThunkTable::new()));
 
 /// Thread-safe function pointer table

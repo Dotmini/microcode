@@ -15,7 +15,7 @@ impl Document {
             version: 0,
         }
     }
-    
+
     pub fn new_with_text(uri: String, text: &str) -> Self {
         Self {
             uri,
@@ -30,14 +30,14 @@ impl Document {
             // For MVP assuming start/end are valid char indices or byte indices depending on protocol
             let start_char = rope.byte_to_char(start);
             let end_char = rope.byte_to_char(end);
-            
+
             if start_char <= rope.len_chars() && end_char <= rope.len_chars() {
-                 rope.remove(start_char..end_char);
-                 rope.insert(start_char, text);
+                rope.remove(start_char..end_char);
+                rope.insert(start_char, text);
             }
         }
     }
-    
+
     pub fn get_text(&self) -> String {
         if let Ok(rope) = self.content.read() {
             return String::from(&rope);

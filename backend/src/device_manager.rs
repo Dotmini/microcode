@@ -22,9 +22,15 @@ pub extern "C" fn mc_on_device_connected(vid: u16, pid: u16, port: *const c_char
     };
 
     if is_espressif_related {
-        println!("[DeviceManager] Detected ESP32-related device: VID={:04X} PID={:04X} Port={}", vid, pid, port_str);
+        println!(
+            "[DeviceManager] Detected ESP32-related device: VID={:04X} PID={:04X} Port={}",
+            vid, pid, port_str
+        );
         // In a real app, we would broadcast this event to the frontend via IPC/Callback
     } else {
-        println!("[DeviceManager] Ignored device: VID={:04X} PID={:04X}", vid, pid);
+        println!(
+            "[DeviceManager] Ignored device: VID={:04X} PID={:04X}",
+            vid, pid
+        );
     }
 }

@@ -4,11 +4,12 @@
 
 use crate::error::{AppError, Result};
 use crate::models::HighlightToken;
+use lazy_static::lazy_static;
+use std::borrow::Cow;
 use syntect::easy::HighlightLines;
 use syntect::highlighting::{Style, ThemeSet};
 use syntect::parsing::SyntaxSet;
 use syntect::util::LinesWithEndings;
-use lazy_static::lazy_static;
 
 lazy_static! {
     static ref SYNTAX_SET: SyntaxSet = SyntaxSet::load_defaults_newlines();
@@ -27,10 +28,12 @@ pub async fn highlight(code: &str, language: &str) -> Result<Vec<HighlightToken>
     let ps = &SYNTAX_SET;
     let ts = &THEME_SET;
 
+    let language = normalize_language(language);
+
     // Find syntax definition
     let syntax = ps
-        .find_syntax_by_extension(language)
-        .or_else(|| ps.find_syntax_by_name(language))
+        .find_syntax_by_extension(language.as_ref())
+        .or_else(|| ps.find_syntax_by_name(language.as_ref()))
         .or_else(|| Some(ps.find_syntax_plain_text()));
 
     let syntax = syntax.ok_or_else(|| {
@@ -39,13 +42,17 @@ pub async fn highlight(code: &str, language: &str) -> Result<Vec<HighlightToken>
 
     // Use a default theme
     // Check if the requested theme exists, otherwise fallback
-    let theme = ts.themes.get("base16-ocean.dark")
+    let theme = ts
+        .themes
+        .get("base16-ocean.dark")
         .or_else(|| ts.themes.values().next()) // Fallback to any available
         .ok_or_else(|| AppError::HighlightError("No themes available".to_string()))?;
 
     let mut highlighter = HighlightLines::new(syntax, theme);
     let mut tokens = Vec::new();
-    let mut byte_offset = 0;
+    // AppKit uses UTF-16 based NSRange offsets. Returning byte offsets corrupts
+    // ranges for non-ASCII source and can crash clients when they apply tokens.
+    let mut utf16_offset = 0;
 
     for line in LinesWithEndings::from(code) {
         let ranges = highlighter
@@ -54,8 +61,8 @@ pub async fn highlight(code: &str, language: &str) -> Result<Vec<HighlightToken>
 
         for (style, text) in ranges {
             let token_type = style_to_token_type(style);
-            let start = byte_offset;
-            let end = byte_offset + text.len();
+            let start = utf16_offset;
+            let end = utf16_offset + text.encode_utf16().count();
 
             tokens.push(HighlightToken {
                 text: text.to_string(),
@@ -64,11 +71,26 @@ pub async fn highlight(code: &str, language: &str) -> Result<Vec<HighlightToken>
                 end,
             });
 
-            byte_offset = end;
+            utf16_offset = end;
         }
     }
 
     Ok(tokens)
+}
+
+fn normalize_language(language: &str) -> Cow<'_, str> {
+    let trimmed = language.trim();
+    match trimmed.to_ascii_lowercase().as_str() {
+        "objective-c++" | "objc++" => Cow::Borrowed("mm"),
+        "objective-c" | "objc" => Cow::Borrowed("m"),
+        "c++" => Cow::Borrowed("cpp"),
+        "javascript" => Cow::Borrowed("js"),
+        "typescript" => Cow::Borrowed("ts"),
+        "python" => Cow::Borrowed("py"),
+        "shell" => Cow::Borrowed("sh"),
+        "markdown" => Cow::Borrowed("md"),
+        _ => Cow::Borrowed(trimmed),
+    }
 }
 
 /// Convert syntect Style to a token type string
@@ -99,7 +121,8 @@ pub fn get_available_themes() -> Vec<String> {
 
 /// Get available languages
 pub fn get_available_languages() -> Vec<String> {
-    SYNTAX_SET.syntaxes()
+    SYNTAX_SET
+        .syntaxes()
         .iter()
         .map(|s| s.name.clone())
         .collect()
@@ -125,6 +148,15 @@ mod tests {
         assert!(result.is_ok());
         let tokens = result.unwrap();
         assert!(!tokens.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_highlight_offsets_are_utf16() {
+        let code = "print('สวัสดี')\nlet x = 1";
+        let tokens = highlight(code, "python").await.unwrap();
+        let last = tokens.last().unwrap();
+        assert!(last.end <= code.encode_utf16().count());
+        assert!(last.end > code.len() / 2);
     }
 
     #[test]

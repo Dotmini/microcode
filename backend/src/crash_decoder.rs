@@ -1,6 +1,6 @@
+use regex::Regex;
 use std::ffi::{CStr, CString};
 use std::os::raw::{c_char, c_void};
-use regex::Regex;
 
 #[repr(C)]
 pub struct CrashReport {
@@ -24,12 +24,12 @@ pub extern "C" fn mc_decode_serial_line(line: *const c_char) -> *mut CrashReport
     // Example: "Guru Meditation Error: Core  1 panic'ed (LoadProhibited). Exception was unhandled."
     // Captures the part after "Error: " until the dot.
     let re = Regex::new(r"Guru Meditation Error:\s*(.*?)(\.|$)").unwrap();
-    
+
     if let Some(caps) = re.captures(&line_str) {
         let exception_msg = caps.get(1).map_or("", |m| m.as_str());
-        
+
         // Placeholder PC Address as it's often in subsequent lines
-        let pc_address = "0x00000000"; 
+        let pc_address = "0x00000000";
 
         let c_exception = CString::new(exception_msg).unwrap();
         let c_pc = CString::new(pc_address).unwrap();
@@ -47,7 +47,9 @@ pub extern "C" fn mc_decode_serial_line(line: *const c_char) -> *mut CrashReport
 
 #[no_mangle]
 pub extern "C" fn mc_free_crash_report(report: *mut CrashReport) {
-    if report.is_null() { return; }
+    if report.is_null() {
+        return;
+    }
     unsafe {
         let report = Box::from_raw(report);
         // Re-take ownership of CStrings to free them

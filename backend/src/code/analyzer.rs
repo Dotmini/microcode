@@ -3,7 +3,7 @@
 //! Provides static code analysis for multiple languages
 
 use crate::error::Result;
-use crate::models::{CodeAnalysis, CodeIssue, FunctionInfo, ClassInfo};
+use crate::models::{ClassInfo, CodeAnalysis, CodeIssue, FunctionInfo};
 
 /// Analyze code and return analysis results
 pub async fn analyze(code: &str, language: &str) -> Result<CodeAnalysis> {
@@ -107,7 +107,8 @@ async fn analyze_javascript(code: &str) -> Result<CodeAnalysis> {
         // Find function definitions
         if trimmed.starts_with("function ")
             || trimmed.contains("=> ")
-            || trimmed.contains("async function") {
+            || trimmed.contains("async function")
+        {
             if let Some(func_name) = extract_js_function_name(trimmed) {
                 functions.push(FunctionInfo {
                     name: func_name,
@@ -233,7 +234,8 @@ async fn analyze_swift(code: &str) -> Result<CodeAnalysis> {
         // Find class/struct definitions
         if trimmed.starts_with("class ")
             || trimmed.starts_with("struct ")
-            || trimmed.starts_with("enum ") {
+            || trimmed.starts_with("enum ")
+        {
             if let Some(name) = extract_swift_type_name(trimmed) {
                 classes.push(ClassInfo {
                     name,
@@ -369,7 +371,14 @@ fn extract_swift_return_type(line: &str) -> Option<String> {
 fn extract_swift_type_name(line: &str) -> Option<String> {
     let parts: Vec<&str> = line.split_whitespace().collect();
     if parts.len() >= 2 {
-        let name = parts[1].split(':').next()?.split('{').next()?.split('<').next()?.trim();
+        let name = parts[1]
+            .split(':')
+            .next()?
+            .split('{')
+            .next()?
+            .split('<')
+            .next()?
+            .trim();
         return Some(name.to_string());
     }
     None

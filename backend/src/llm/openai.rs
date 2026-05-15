@@ -4,10 +4,10 @@
 //!
 //! Copyright © 2025 SPU AI CLUB — Dotmini Software
 
+use super::{ChatMessage, LlmError, LlmProvider, McpContext};
 use async_trait::async_trait;
 use futures::Stream;
 use std::pin::Pin;
-use super::{LlmProvider, LlmError, ChatMessage, McpContext};
 
 pub struct OpenAIProvider {
     api_key: String,
@@ -42,7 +42,9 @@ impl OpenAIProvider {
 
 #[async_trait]
 impl LlmProvider for OpenAIProvider {
-    fn name(&self) -> &str { "OpenAI" }
+    fn name(&self) -> &str {
+        "OpenAI"
+    }
 
     async fn stream_completion(
         &self,
@@ -60,11 +62,11 @@ impl LlmProvider for OpenAIProvider {
         };
 
         // Build OpenAI messages format
-        let mut api_messages = vec![
-            serde_json::json!({"role": "system", "content": full_system})
-        ];
+        let mut api_messages = vec![serde_json::json!({"role": "system", "content": full_system})];
         for msg in messages {
-            if msg.role == "system" { continue; }
+            if msg.role == "system" {
+                continue;
+            }
             api_messages.push(serde_json::json!({
                 "role": msg.role,
                 "content": msg.content
@@ -81,7 +83,8 @@ impl LlmProvider for OpenAIProvider {
 
         let url = format!("{}/chat/completions", self.base_url);
 
-        let response = self.client
+        let response = self
+            .client
             .post(&url)
             .header("Authorization", format!("Bearer {}", self.api_key))
             .header("content-type", "application/json")
@@ -94,9 +97,14 @@ impl LlmProvider for OpenAIProvider {
             let status = response.status().as_u16();
             let text = response.text().await.unwrap_or_default();
             if status == 429 {
-                return Err(LlmError::RateLimited { retry_after_ms: 5000 });
+                return Err(LlmError::RateLimited {
+                    retry_after_ms: 5000,
+                });
             }
-            return Err(LlmError::Api { code: status, message: text });
+            return Err(LlmError::Api {
+                code: status,
+                message: text,
+            });
         }
 
         let byte_stream = response.bytes_stream();
@@ -109,19 +117,19 @@ impl LlmProvider for OpenAIProvider {
                 match chunk {
                     Ok(bytes) => {
                         buffer.push_str(&String::from_utf8_lossy(&bytes));
-                        
+
                         // Process SSE lines
                         while let Some(pos) = buffer.find("\n") {
                             let line = buffer[..pos].to_string();
                             buffer = buffer[pos + 1..].to_string();
-                            
+
                             let line = line.trim();
                             if line.is_empty() { continue; }
-                            
+
                             if line.starts_with("data: ") {
                                 let data = &line[6..];
                                 if data == "[DONE]" { break; }
-                                
+
                                 if let Ok(json) = serde_json::from_str::<serde_json::Value>(data) {
                                     if let Some(choices) = json["choices"].as_array() {
                                         for choice in choices {
@@ -147,7 +155,8 @@ impl LlmProvider for OpenAIProvider {
 
     async fn validate_key(&self) -> Result<bool, LlmError> {
         let url = format!("{}/models", self.base_url);
-        let response = self.client
+        let response = self
+            .client
             .get(&url)
             .header("Authorization", format!("Bearer {}", self.api_key))
             .send()

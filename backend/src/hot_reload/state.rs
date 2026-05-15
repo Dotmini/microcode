@@ -8,7 +8,7 @@ use std::collections::HashMap;
 use std::sync::{LazyLock, RwLock};
 
 /// Global state registry - variables register here to be preserved
-pub static STATE_REGISTRY: LazyLock<RwLock<HashMap<String, StateEntry>>> = 
+pub static STATE_REGISTRY: LazyLock<RwLock<HashMap<String, StateEntry>>> =
     LazyLock::new(|| RwLock::new(HashMap::new()));
 
 /// A registered state entry
@@ -114,9 +114,7 @@ pub unsafe extern "C" fn state_register(
         return;
     }
 
-    let name = std::ffi::CStr::from_ptr(name)
-        .to_string_lossy()
-        .to_string();
+    let name = std::ffi::CStr::from_ptr(name).to_string_lossy().to_string();
     let type_name = std::ffi::CStr::from_ptr(type_name)
         .to_string_lossy()
         .to_string();
@@ -137,9 +135,7 @@ pub unsafe extern "C" fn state_get(
         return 0;
     }
 
-    let name = std::ffi::CStr::from_ptr(name)
-        .to_string_lossy()
-        .to_string();
+    let name = std::ffi::CStr::from_ptr(name).to_string_lossy().to_string();
 
     if let Some(data) = get_state(&name) {
         let copy_len = data.len().min(buffer_len);

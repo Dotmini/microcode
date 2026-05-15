@@ -151,7 +151,9 @@ pub struct HighlightCodeRequest {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct HighlightToken {
     pub text: String,
+    #[serde(rename = "tokenType")]
     pub token_type: String,
+    /// UTF-16 offsets so AppKit/Swift NSRange consumers can apply tokens safely.
     pub start: usize,
     pub end: usize,
 }

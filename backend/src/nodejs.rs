@@ -21,7 +21,7 @@ impl NodeManager {
     /// List all available Node.js versions from NVM and system
     pub async fn list_versions() -> Vec<NodeVersion> {
         let mut versions = Vec::new();
-        
+
         // 1. Check System Node
         if let Ok(path) = which::which("node") {
             if let Ok(output) = std::process::Command::new(&path).arg("--version").output() {
@@ -59,57 +59,59 @@ impl NodeManager {
                 }
             }
         }
-        
+
         // Sort versions (naive string sort for now, semver sort preferred later)
         versions.sort_by(|a, b| b.version.cmp(&a.version));
-        
+
         versions
     }
-    
+
     /// Resolve path for a specific version string
     pub async fn resolve_path(version: &str) -> Option<String> {
         // Direct path check
         if Path::new(version).exists() {
             return Some(version.to_string());
         }
-        
+
         // Check list
         let versions = Self::list_versions().await;
-        versions.into_iter()
+        versions
+            .into_iter()
             .find(|v| v.version == version)
             .map(|v| v.path)
     }
 }
 
 // API Handlers
-use axum::{extract::{State, Json}, response::IntoResponse};
+use crate::state::AppState;
+use axum::{
+    extract::{Json, State},
+    response::IntoResponse,
+};
 use std::sync::Arc;
 use tokio::sync::RwLock;
-use crate::state::AppState;
 
 #[derive(Serialize)]
 pub struct ListVersionsResponse {
     versions: Vec<NodeVersion>,
 }
 
-pub async fn list_versions(
-    State(state): State<Arc<RwLock<AppState>>>,
-) -> impl IntoResponse {
+pub async fn list_versions(State(state): State<Arc<RwLock<AppState>>>) -> impl IntoResponse {
     let mut versions = NodeManager::list_versions().await;
-    
+
     // Mark current
     let st = state.read().await;
     {
         let settings = st.node_settings.read().await;
         if let Some(selected) = &settings.selected_version {
-             for v in &mut versions {
-                 if &v.version == selected {
-                     v.is_current = true;
-                 }
-             }
-         }
+            for v in &mut versions {
+                if &v.version == selected {
+                    v.is_current = true;
+                }
+            }
+        }
     }
-    
+
     Json(ListVersionsResponse { versions })
 }
 

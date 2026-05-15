@@ -1,9 +1,9 @@
 // AI Agent Indexer - Tree-sitter based semantic chunking
 
-use std::path::Path;
-use tree_sitter::{Parser, Language, Node};
 use crate::error::{AppError, Result};
 use serde::{Deserialize, Serialize};
+use std::path::Path;
+use tree_sitter::{Language, Node, Parser};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CodeChunk {
@@ -27,9 +27,7 @@ impl Indexer {
     }
 
     pub fn chunk_file(&mut self, path: &Path, content: &str) -> Result<Vec<CodeChunk>> {
-        let extension = path.extension()
-            .and_then(|e| e.to_str())
-            .unwrap_or("");
+        let extension = path.extension().and_then(|e| e.to_str()).unwrap_or("");
 
         let language = match extension {
             "py" => Some(tree_sitter_python::language()),
@@ -39,15 +37,18 @@ impl Indexer {
         };
 
         if let Some(lang) = language {
-            self.parser.set_language(lang)
-                .map_err(|e| AppError::InternalError(format!("Failed to set TS language: {}", e)))?;
-            
-            let tree = self.parser.parse(content, None)
+            self.parser.set_language(lang).map_err(|e| {
+                AppError::InternalError(format!("Failed to set TS language: {}", e))
+            })?;
+
+            let tree = self
+                .parser
+                .parse(content, None)
                 .ok_or_else(|| AppError::InternalError("Failed to parse code".to_string()))?;
-            
+
             let mut chunks = Vec::new();
             self.extract_chunks(path, content, tree.root_node(), &mut chunks);
-            
+
             // If no semantic chunks found, fallback to line-based chunking
             if chunks.is_empty() {
                 chunks.push(CodeChunk {
@@ -59,7 +60,7 @@ impl Indexer {
                     symbol_kind: "module".to_string(),
                 });
             }
-            
+
             Ok(chunks)
         } else {
             // Non-supported language: just treat as one big chunk or skip
@@ -76,7 +77,7 @@ impl Indexer {
 
     fn extract_chunks(&self, path: &Path, content: &str, node: Node, chunks: &mut Vec<CodeChunk>) {
         let kind = node.kind();
-        
+
         let should_chunk = match kind {
             "function_definition" | "decorated_definition" | "class_definition" => true, // Python
             "function_item" | "struct_item" | "enum_item" | "impl_item" | "trait_item" => true, // Rust
@@ -88,9 +89,10 @@ impl Indexer {
             let start = node.start_position().row + 1;
             let end = node.end_position().row + 1;
             let chunk_content = &content[node.byte_range()];
-            
+
             // Try to find identifier
-            let name = node.child_by_field_name("name")
+            let name = node
+                .child_by_field_name("name")
                 .map(|n| &content[n.byte_range()])
                 .map(|s| s.to_string());
 

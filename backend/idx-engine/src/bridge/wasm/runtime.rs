@@ -1,4 +1,4 @@
-use wasmtime::{Engine, Linker, Config};
+use wasmtime::{Config, Engine, Linker};
 use wasmtime_wasi::WasiCtx;
 
 pub struct WasmHost {
@@ -11,10 +11,10 @@ impl WasmHost {
         let mut config = Config::new();
         config.async_support(true);
         let engine = Engine::new(&config)?;
-        
+
         let linker = Linker::new(&engine);
         // wasi setup placeholder
-        
+
         Ok(Self { engine, linker })
     }
 }

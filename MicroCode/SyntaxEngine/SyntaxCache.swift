@@ -459,18 +459,14 @@ public final class IncrementalLexer: @unchecked Sendable {
             currentState = prevEntry.endState
         }
         
-        // Calculate starting offset (Optimized)
+        // Calculate starting offset from the actual line lengths. Using the last
+        // token offset from the previous cached line is incorrect when that line
+        // ends in whitespace, because whitespace tokens are intentionally skipped.
         var currentOffset = 0
-        if startLine > 0, let prevEntry = cache.entry(forLine: startLine - 1), let lastToken = prevEntry.tokens.last {
-             // Use cached offset from previous line if available (O(1))
-             currentOffset = lastToken.range.endOffset
-        } else {
-             // Fallback to O(N) scan only if cache missing (rare inside stable doc)
-             for i in 0..<startLine {
-                 if i < lines.count {
-                     currentOffset += lines[i].utf16.count + 1 // +1 for newline
-                 }
-             }
+        if startLine > 0 {
+            for i in 0..<startLine where i < lines.count {
+                currentOffset += lines[i].utf16.count + 1
+            }
         }
         
         // SyntaxTokenize lines until the end state stabilizes

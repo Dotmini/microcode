@@ -1,9 +1,12 @@
-use crate::error::Result;
-use crate::models::{AIRefactorUltraRequest, AIRefactorUltraResponse, FileContent, AIConfig};
 use crate::ai;
+use crate::error::Result;
+use crate::models::{AIConfig, AIRefactorUltraRequest, AIRefactorUltraResponse, FileContent};
 use std::path::Path;
 
-pub async fn refactor_folder(req: AIRefactorUltraRequest, config: &AIConfig) -> Result<AIRefactorUltraResponse> {
+pub async fn refactor_folder(
+    req: AIRefactorUltraRequest,
+    config: &AIConfig,
+) -> Result<AIRefactorUltraResponse> {
     let mut refactored_files = Vec::new();
     let mut report_summary = String::from("Folder migration summary:\n");
 
@@ -16,7 +19,7 @@ pub async fn refactor_folder(req: AIRefactorUltraRequest, config: &AIConfig) -> 
         );
 
         let refactored_code = ai::refactor(&file.content, &instructions, config).await?;
-        
+
         refactored_files.push(FileContent {
             path: file.path.clone(),
             content: refactored_code,

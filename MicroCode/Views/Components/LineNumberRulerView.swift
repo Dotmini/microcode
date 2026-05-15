@@ -130,87 +130,66 @@ final class LineNumberRulerView: NSRulerView {
     // MARK: - Drawing
     
     override func drawHashMarksAndLabels(in rect: NSRect) {
+        drawBackground(in: rect)
+
         guard let textView = textView,
               let layoutManager = textView.layoutManager,
               let textContainer = textView.textContainer else { return }
-        
+
         let content = textView.string
         let visibleRect = scrollView?.contentView.bounds ?? textView.visibleRect
-        
-        // Draw gutter background
-        gutterBackgroundColor.setFill()
-        rect.fill()
-        
-        // Draw separator line
-        separatorColor.setStroke()
-        let separatorPath = NSBezierPath()
-        separatorPath.move(to: NSPoint(x: bounds.maxX - 0.5, y: rect.minY))
-        separatorPath.line(to: NSPoint(x: bounds.maxX - 0.5, y: rect.maxY))
-        separatorPath.lineWidth = 0.5
-        separatorPath.stroke()
-        
-        // Calculate visible line range
-        let glyphRange = layoutManager.glyphRange(forBoundingRect: visibleRect, in: textContainer)
-        let charRange = layoutManager.characterRange(forGlyphRange: glyphRange, actualGlyphRange: nil)
-        
-        // Get current line number (for highlighting)
-        let selectedRange = textView.selectedRange()
-        let currentLineNumber = lineNumber(for: selectedRange.location, in: content)
-        
-        // Attributes for line numbers
-        let normalAttributes: [NSAttributedString.Key: Any] = [
-            .font: lineNumberFont,
-            .foregroundColor: lineNumberColor
-        ]
-        
-        let currentLineAttributes: [NSAttributedString.Key: Any] = [
-            .font: NSFont.monospacedDigitSystemFont(ofSize: lineNumberFont.pointSize, weight: .medium),
-            .foregroundColor: currentLineColor
-        ]
-        
-        // Iterate through visible lines
-        let nsString = content as NSString
-        var lineIndex = lineNumber(for: charRange.location, in: content)
-        
-        var index = charRange.location
-        while index <= min(charRange.location + charRange.length, nsString.length) {
-            // Find the line range for this index
-            let lineRange = nsString.lineRange(for: NSRange(location: index, length: 0))
-            
-            // Get the glyph range for this line
-            let lineGlyphRange = layoutManager.glyphRange(forCharacterRange: lineRange, actualCharacterRange: nil)
-            
-            // Get the bounding rect for the first glyph in this line
-            let lineRect = layoutManager.lineFragmentRect(forGlyphAt: lineGlyphRange.location, effectiveRange: nil)
-            
-            // Adjust for text container inset using actual origin
-            let yPositionInTextView = lineRect.origin.y + textView.textContainerOrigin.y
-            
-            // Convert to ruler coordinates
-            let yPosition = yPositionInTextView - visibleRect.origin.y
-            
-            // Draw line number
-            let lineNumberString = "\(lineIndex)"
-            let isCurrentLine = lineIndex == currentLineNumber
-            let attributes = isCurrentLine ? currentLineAttributes : normalAttributes
-            
-            let attrString = NSAttributedString(string: lineNumberString, attributes: attributes)
-            let stringSize = attrString.size()
-            
-            // Right-align with padding
-            let x = gutterWidth - stringSize.width - 10
-            let y = yPosition + (lineRect.height - stringSize.height) / 2
-            
-            attrString.draw(at: NSPoint(x: x, y: y))
-            
-            // Move to next line
-            lineIndex += 1
-            
-            // Safety: prevent infinite loop (NSString.lineRange can return the range of the last line when index is at the end of the string)
-            let nextIndex = NSMaxRange(lineRange)
-            if index == nextIndex { break }
-            index = nextIndex
+        let currentLineNumber = lineNumber(for: textView.selectedRange().location, in: content)
+        let normalAttributes = lineNumberAttributes(isCurrentLine: false)
+        let currentLineAttributes = lineNumberAttributes(isCurrentLine: true)
+
+        if content.isEmpty {
+            drawLineNumber(
+                1,
+                y: textView.textContainerOrigin.y - visibleRect.origin.y,
+                lineHeight: defaultLineHeight(for: textView),
+                attributes: currentLineNumber == 1 ? currentLineAttributes : normalAttributes
+            )
+            return
         }
+
+        layoutManager.ensureLayout(for: textContainer)
+
+        let glyphCount = layoutManager.numberOfGlyphs
+        guard glyphCount > 0 else {
+            drawLineNumber(
+                1,
+                y: textView.textContainerOrigin.y - visibleRect.origin.y,
+                lineHeight: defaultLineHeight(for: textView),
+                attributes: currentLineNumber == 1 ? currentLineAttributes : normalAttributes
+            )
+            return
+        }
+
+        let glyphRange = layoutManager.glyphRange(forBoundingRect: visibleRect, in: textContainer)
+        guard glyphRange.location < glyphCount else { return }
+
+        var drawnLines = Set<Int>()
+        layoutManager.enumerateLineFragments(forGlyphRange: glyphRange) { _, usedRect, _, lineGlyphRange, _ in
+            guard lineGlyphRange.location < glyphCount else { return }
+
+            let charIndex = layoutManager.characterIndexForGlyph(at: lineGlyphRange.location)
+            let line = self.lineNumber(for: charIndex, in: content)
+            guard drawnLines.insert(line).inserted else { return }
+
+            let yPosition = usedRect.origin.y + textView.textContainerOrigin.y - visibleRect.origin.y
+            let attributes = line == currentLineNumber ? currentLineAttributes : normalAttributes
+            self.drawLineNumber(line, y: yPosition, lineHeight: usedRect.height, attributes: attributes)
+        }
+
+        drawTrailingEmptyLineIfNeeded(
+            content: content,
+            layoutManager: layoutManager,
+            textView: textView,
+            visibleRect: visibleRect,
+            currentLineNumber: currentLineNumber,
+            normalAttributes: normalAttributes,
+            currentLineAttributes: currentLineAttributes
+        )
     }
     
     // MARK: - Helpers
@@ -233,5 +212,67 @@ final class LineNumberRulerView: NSRulerView {
             }
         }
         return count
+    }
+
+    private func drawBackground(in rect: NSRect) {
+        gutterBackgroundColor.setFill()
+        rect.fill()
+
+        separatorColor.setStroke()
+        let separatorPath = NSBezierPath()
+        separatorPath.move(to: NSPoint(x: bounds.maxX - 0.5, y: rect.minY))
+        separatorPath.line(to: NSPoint(x: bounds.maxX - 0.5, y: rect.maxY))
+        separatorPath.lineWidth = 0.5
+        separatorPath.stroke()
+    }
+
+    private func lineNumberAttributes(isCurrentLine: Bool) -> [NSAttributedString.Key: Any] {
+        [
+            .font: isCurrentLine
+                ? NSFont.monospacedDigitSystemFont(ofSize: lineNumberFont.pointSize, weight: .medium)
+                : lineNumberFont,
+            .foregroundColor: isCurrentLine ? currentLineColor : lineNumberColor
+        ]
+    }
+
+    private func drawLineNumber(_ lineNumber: Int, y: CGFloat, lineHeight: CGFloat, attributes: [NSAttributedString.Key: Any]) {
+        let attrString = NSAttributedString(string: "\(lineNumber)", attributes: attributes)
+        let stringSize = attrString.size()
+        let x = gutterWidth - stringSize.width - 10
+        let adjustedY = y + (lineHeight - stringSize.height) / 2
+        attrString.draw(at: NSPoint(x: x, y: adjustedY))
+    }
+
+    private func drawTrailingEmptyLineIfNeeded(
+        content: String,
+        layoutManager: NSLayoutManager,
+        textView: NSTextView,
+        visibleRect: NSRect,
+        currentLineNumber: Int,
+        normalAttributes: [NSAttributedString.Key: Any],
+        currentLineAttributes: [NSAttributedString.Key: Any]
+    ) {
+        guard content.hasSuffix("\n") else { return }
+
+        let line = content.components(separatedBy: "\n").count
+        let extraRect = layoutManager.extraLineFragmentRect
+        let lineHeight = defaultLineHeight(for: textView)
+        let yPosition: CGFloat
+
+        if !extraRect.isEmpty {
+            yPosition = extraRect.origin.y + textView.textContainerOrigin.y - visibleRect.origin.y
+        } else {
+            yPosition = textView.textContainerOrigin.y + CGFloat(line - 1) * lineHeight - visibleRect.origin.y
+        }
+
+        guard yPosition + lineHeight >= 0 && yPosition <= visibleRect.height else { return }
+
+        let attributes = line == currentLineNumber ? currentLineAttributes : normalAttributes
+        drawLineNumber(line, y: yPosition, lineHeight: lineHeight, attributes: attributes)
+    }
+
+    private func defaultLineHeight(for textView: NSTextView) -> CGFloat {
+        guard let font = textView.font else { return 16 }
+        return textView.layoutManager?.defaultLineHeight(for: font) ?? max(16, font.boundingRectForFont.height)
     }
 }

@@ -121,9 +121,8 @@ impl IPCClient {
     }
 
     pub fn send(&mut self, msg: &IPCMessage) -> std::io::Result<()> {
-        let json = serde_json::to_string(msg).map_err(|e| {
-            std::io::Error::new(std::io::ErrorKind::InvalidData, e.to_string())
-        })?;
+        let json = serde_json::to_string(msg)
+            .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e.to_string()))?;
 
         let len = json.len() as u32;
         self.stream.write_all(&len.to_le_bytes())?;
@@ -141,9 +140,8 @@ impl IPCClient {
         let mut buf = vec![0u8; len];
         self.stream.read_exact(&mut buf)?;
 
-        serde_json::from_slice(&buf).map_err(|e| {
-            std::io::Error::new(std::io::ErrorKind::InvalidData, e.to_string())
-        })
+        serde_json::from_slice(&buf)
+            .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e.to_string()))
     }
 }
 
@@ -158,9 +156,8 @@ impl IPCConnection {
     }
 
     pub fn send(&mut self, msg: &IPCMessage) -> std::io::Result<()> {
-        let json = serde_json::to_string(msg).map_err(|e| {
-            std::io::Error::new(std::io::ErrorKind::InvalidData, e.to_string())
-        })?;
+        let json = serde_json::to_string(msg)
+            .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e.to_string()))?;
 
         let len = json.len() as u32;
         self.stream.write_all(&len.to_le_bytes())?;
@@ -178,9 +175,8 @@ impl IPCConnection {
         let mut buf = vec![0u8; len];
         self.stream.read_exact(&mut buf)?;
 
-        serde_json::from_slice(&buf).map_err(|e| {
-            std::io::Error::new(std::io::ErrorKind::InvalidData, e.to_string())
-        })
+        serde_json::from_slice(&buf)
+            .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e.to_string()))
     }
 
     /// Set read timeout
@@ -201,7 +197,7 @@ pub struct SharedMemoryBuffer {
 impl SharedMemoryBuffer {
     pub fn create(name: &str, size: usize) -> std::io::Result<Self> {
         use std::fs::OpenOptions;
-        
+
         let path = format!("/tmp/{}.shm", name);
         let file = OpenOptions::new()
             .read(true)

@@ -70,7 +70,11 @@ impl McpClient {
         // Discover tools and resources
         self.discover().await?;
 
-        info!("MCP: Connected. Tools: {}, Resources: {}", self.tools.len(), self.resources.len());
+        info!(
+            "MCP: Connected. Tools: {}, Resources: {}",
+            self.tools.len(),
+            self.resources.len()
+        );
         Ok(())
     }
 
@@ -100,7 +104,8 @@ impl McpClient {
         // List tools
         if let Ok(response) = self.send_request("tools/list", None).await {
             if let Some(tools) = response["tools"].as_array() {
-                self.tools = tools.iter()
+                self.tools = tools
+                    .iter()
                     .filter_map(|t| serde_json::from_value::<McpTool>(t.clone()).ok())
                     .collect();
             }
@@ -109,7 +114,8 @@ impl McpClient {
         // List resources
         if let Ok(response) = self.send_request("resources/list", None).await {
             if let Some(resources) = response["resources"].as_array() {
-                self.resources = resources.iter()
+                self.resources = resources
+                    .iter()
                     .filter_map(|r| serde_json::from_value::<McpResourceInfo>(r.clone()).ok())
                     .collect();
             }
@@ -135,7 +141,11 @@ impl McpClient {
     }
 
     /// Call an MCP tool
-    pub async fn call_tool(&self, name: &str, arguments: serde_json::Value) -> Result<String, String> {
+    pub async fn call_tool(
+        &self,
+        name: &str,
+        arguments: serde_json::Value,
+    ) -> Result<String, String> {
         let params = serde_json::json!({
             "name": name,
             "arguments": arguments
@@ -144,9 +154,7 @@ impl McpClient {
         let response = self.send_request("tools/call", Some(params)).await?;
 
         if let Some(content) = response["content"].as_array() {
-            let texts: Vec<&str> = content.iter()
-                .filter_map(|c| c["text"].as_str())
-                .collect();
+            let texts: Vec<&str> = content.iter().filter_map(|c| c["text"].as_str()).collect();
             return Ok(texts.join("\n"));
         }
 
@@ -190,7 +198,10 @@ impl McpClient {
         }
 
         // Read workspace project structure
-        if let Ok(tree) = self.call_tool("list_files", serde_json::json!({"path": "."})).await {
+        if let Ok(tree) = self
+            .call_tool("list_files", serde_json::json!({"path": "."}))
+            .await
+        {
             ctx.resources.push(crate::llm::McpResource {
                 uri: "workspace://project-tree".to_string(),
                 content: tree,
@@ -204,7 +215,11 @@ impl McpClient {
     // MARK: - Transport Layer
 
     /// Send a JSON-RPC request and wait for response
-    async fn send_request(&self, method: &str, params: Option<serde_json::Value>) -> Result<serde_json::Value, String> {
+    async fn send_request(
+        &self,
+        method: &str,
+        params: Option<serde_json::Value>,
+    ) -> Result<serde_json::Value, String> {
         let id = self.request_id.fetch_add(1, Ordering::SeqCst);
 
         let request = JsonRpcRequest {
@@ -214,17 +229,22 @@ impl McpClient {
             params,
         };
 
-        let msg = serde_json::to_string(&request)
-            .map_err(|e| format!("Serialize error: {}", e))?;
+        let msg = serde_json::to_string(&request).map_err(|e| format!("Serialize error: {}", e))?;
 
         // Write to stdin
         if let Some(stdin_mutex) = &self.stdin {
             let mut stdin = stdin_mutex.lock().await;
-            stdin.write_all(msg.as_bytes()).await
+            stdin
+                .write_all(msg.as_bytes())
+                .await
                 .map_err(|e| format!("Write error: {}", e))?;
-            stdin.write_all(b"\n").await
+            stdin
+                .write_all(b"\n")
+                .await
                 .map_err(|e| format!("Write newline error: {}", e))?;
-            stdin.flush().await
+            stdin
+                .flush()
+                .await
                 .map_err(|e| format!("Flush error: {}", e))?;
         } else {
             return Err("No stdin connection".to_string());
@@ -238,8 +258,13 @@ impl McpClient {
             let timeout = tokio::time::Duration::from_secs(30);
             match tokio::time::timeout(timeout, lines.next_line()).await {
                 Ok(Ok(Some(line))) => {
-                    let response: JsonRpcResponse = serde_json::from_str(&line)
-                        .map_err(|e| format!("Parse error: {} (line: {})", e, &line[..line.len().min(200)]))?;
+                    let response: JsonRpcResponse = serde_json::from_str(&line).map_err(|e| {
+                        format!(
+                            "Parse error: {} (line: {})",
+                            e,
+                            &line[..line.len().min(200)]
+                        )
+                    })?;
 
                     if let Some(error) = response.error {
                         return Err(format!("MCP error {}: {}", error.code, error.message));
@@ -257,23 +282,32 @@ impl McpClient {
     }
 
     /// Send a JSON-RPC notification (no id, no response)
-    async fn send_notification(&self, method: &str, params: Option<serde_json::Value>) -> Result<(), String> {
+    async fn send_notification(
+        &self,
+        method: &str,
+        params: Option<serde_json::Value>,
+    ) -> Result<(), String> {
         let notif = serde_json::json!({
             "jsonrpc": "2.0",
             "method": method,
             "params": params.unwrap_or(serde_json::Value::Null)
         });
 
-        let msg = serde_json::to_string(&notif)
-            .map_err(|e| format!("Serialize error: {}", e))?;
+        let msg = serde_json::to_string(&notif).map_err(|e| format!("Serialize error: {}", e))?;
 
         if let Some(stdin_mutex) = &self.stdin {
             let mut stdin = stdin_mutex.lock().await;
-            stdin.write_all(msg.as_bytes()).await
+            stdin
+                .write_all(msg.as_bytes())
+                .await
                 .map_err(|e| format!("Write error: {}", e))?;
-            stdin.write_all(b"\n").await
+            stdin
+                .write_all(b"\n")
+                .await
                 .map_err(|e| format!("Write newline error: {}", e))?;
-            stdin.flush().await
+            stdin
+                .flush()
+                .await
                 .map_err(|e| format!("Flush error: {}", e))?;
         }
 
@@ -316,7 +350,9 @@ impl ContextInjector {
     }
 
     pub fn with_client(client: McpClient) -> Self {
-        Self { mcp_client: Some(client) }
+        Self {
+            mcp_client: Some(client),
+        }
     }
 
     /// Build enriched context for LLM prompt

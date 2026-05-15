@@ -5,10 +5,10 @@
 //!
 //! Copyright © 2025 SPU AI CLUB — Dotmini Software
 
+use super::{ChatMessage, LlmError, LlmProvider, McpContext};
 use async_trait::async_trait;
 use futures::Stream;
 use std::pin::Pin;
-use super::{LlmProvider, LlmError, ChatMessage, McpContext};
 
 pub struct AnthropicProvider {
     api_key: String,
@@ -29,7 +29,9 @@ impl AnthropicProvider {
 
 #[async_trait]
 impl LlmProvider for AnthropicProvider {
-    fn name(&self) -> &str { "Anthropic" }
+    fn name(&self) -> &str {
+        "Anthropic"
+    }
 
     async fn stream_completion(
         &self,
@@ -48,12 +50,15 @@ impl LlmProvider for AnthropicProvider {
         };
 
         // Build Anthropic messages (filter out system role)
-        let api_messages: Vec<serde_json::Value> = messages.iter()
+        let api_messages: Vec<serde_json::Value> = messages
+            .iter()
             .filter(|m| m.role != "system")
-            .map(|m| serde_json::json!({
-                "role": if m.role == "user" { "user" } else { "assistant" },
-                "content": m.content
-            }))
+            .map(|m| {
+                serde_json::json!({
+                    "role": if m.role == "user" { "user" } else { "assistant" },
+                    "content": m.content
+                })
+            })
             .collect();
 
         let body = serde_json::json!({
@@ -64,7 +69,8 @@ impl LlmProvider for AnthropicProvider {
             "stream": true
         });
 
-        let response = self.client
+        let response = self
+            .client
             .post("https://api.anthropic.com/v1/messages")
             .header("x-api-key", &self.api_key)
             .header("anthropic-version", "2023-06-01")
@@ -78,9 +84,14 @@ impl LlmProvider for AnthropicProvider {
             let status = response.status().as_u16();
             let text = response.text().await.unwrap_or_default();
             if status == 429 {
-                return Err(LlmError::RateLimited { retry_after_ms: 5000 });
+                return Err(LlmError::RateLimited {
+                    retry_after_ms: 5000,
+                });
             }
-            return Err(LlmError::Api { code: status, message: text });
+            return Err(LlmError::Api {
+                code: status,
+                message: text,
+            });
         }
 
         // Parse Anthropic SSE stream
@@ -94,18 +105,18 @@ impl LlmProvider for AnthropicProvider {
                 match chunk {
                     Ok(bytes) => {
                         buffer.push_str(&String::from_utf8_lossy(&bytes));
-                        
+
                         // Process complete SSE events
                         while let Some(pos) = buffer.find("\n\n") {
                             let event_str = buffer[..pos].to_string();
                             buffer = buffer[pos + 2..].to_string();
-                            
+
                             // Parse event type and data
                             for line in event_str.lines() {
                                 if line.starts_with("data: ") {
                                     let data = &line[6..];
                                     if data == "[DONE]" { break; }
-                                    
+
                                     if let Ok(json) = serde_json::from_str::<serde_json::Value>(data) {
                                         // content_block_delta
                                         if json["type"] == "content_block_delta" {
@@ -141,7 +152,8 @@ impl LlmProvider for AnthropicProvider {
             "messages": [{"role": "user", "content": "hi"}]
         });
 
-        let response = self.client
+        let response = self
+            .client
             .post("https://api.anthropic.com/v1/messages")
             .header("x-api-key", &self.api_key)
             .header("anthropic-version", "2023-06-01")

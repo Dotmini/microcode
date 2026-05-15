@@ -1,4 +1,4 @@
-use portable_pty::{CommandBuilder, NativePtySystem, PtySize, PtySystem, MasterPty};
+use portable_pty::{CommandBuilder, MasterPty, NativePtySystem, PtySize, PtySystem};
 use std::collections::HashMap;
 use std::io::Write;
 use std::sync::{Arc, Mutex};
@@ -33,7 +33,7 @@ impl TerminalManager {
 
     pub fn create_session(&self, cols: u16, rows: u16) -> Result<String, anyhow::Error> {
         let pty_system = NativePtySystem::default();
-        
+
         let size = PtySize {
             rows,
             cols,
@@ -45,16 +45,18 @@ impl TerminalManager {
         let pair = pty_system.openpty(size)?;
 
         let mut child = pair.slave.spawn_command(cmd)?;
-        
+
         // Clone for background thread
         let mut reader = pair.master.try_clone_reader()?;
         let (tx, _) = broadcast::channel(100);
         let tx_clone = tx.clone();
-        
+
         std::thread::spawn(move || {
             let mut buf = [0u8; 1024];
             while let Ok(n) = reader.read(&mut buf) {
-                if n == 0 { break; }
+                if n == 0 {
+                    break;
+                }
                 let _ = tx_clone.send(buf[..n].to_vec());
             }
             let _ = child.wait();
@@ -70,7 +72,7 @@ impl TerminalManager {
         self.sessions.lock().unwrap().insert(id.clone(), session);
         Ok(id)
     }
-    
+
     pub fn resize(&self, id: &str, cols: u16, rows: u16) -> Result<(), anyhow::Error> {
         let mut sessions = self.sessions.lock().unwrap();
         if let Some(session) = sessions.get_mut(id) {
@@ -83,22 +85,22 @@ impl TerminalManager {
         }
         Ok(())
     }
-    
+
     pub fn write(&self, id: &str, _data: &[u8]) -> Result<(), anyhow::Error> {
         let mut sessions = self.sessions.lock().unwrap();
         if let Some(_session) = sessions.get_mut(id) {
-             // FIXME: portable-pty MasterPty trait object issues with writing/FD access.
-             // Stubbing for now to allow build.
-             // We need to find a way to write to session.pty_master.
-             #[cfg(unix)]
-             {
-                 // use std::os::unix::io::{RawFd, AsRawFd};
-                 // ...
-             }
+            // FIXME: portable-pty MasterPty trait object issues with writing/FD access.
+            // Stubbing for now to allow build.
+            // We need to find a way to write to session.pty_master.
+            #[cfg(unix)]
+            {
+                // use std::os::unix::io::{RawFd, AsRawFd};
+                // ...
+            }
         }
         Ok(())
     }
-    
+
     pub fn subscribe(&self, id: &str) -> Option<broadcast::Receiver<Vec<u8>>> {
         let sessions = self.sessions.lock().unwrap();
         sessions.get(id).map(|s| s.tx.subscribe())
