@@ -20,7 +20,7 @@ pub struct AppState {
 
     /// Configuration settings
     pub config: Arc<RwLock<AppConfig>>,
-    
+
     /// Remote Connections Manager
     pub remote_manager: crate::remote::RemoteConnectionManager,
 
@@ -29,17 +29,17 @@ pub struct AppState {
 
     /// Fast Tier Hybrid AI Engine
     pub fast_tier: Arc<tokio::sync::Mutex<Option<crate::ai_engine::fast_tier::FastTierEngine>>>,
-    
+
     /// Smart Tier (Vector Store)
     pub smart_tier: Arc<tokio::sync::Mutex<Option<crate::ai_engine::smart_tier::SmartTierEngine>>>,
-    
+
     /// AI Agent RAG Engine
     pub rag_engine: Arc<tokio::sync::Mutex<Option<crate::rag::RagEngine>>>,
-    
+
     /// DataFrames Manager
     pub data_frames: crate::data::dataframe::DataFrameManager,
     pub terminal_manager: std::sync::Arc<crate::terminal::TerminalManager>,
-    
+
     /// Pipeline Engine (Local CI/CD)
     pub pipeline_engine: crate::pipeline::PipelineEngine,
 }

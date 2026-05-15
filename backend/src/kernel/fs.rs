@@ -27,6 +27,6 @@ impl FileSystem {
         fs::rename(temp_path, path).await?;
         Ok(())
     }
-    
+
     // Future: Virtual File System (VFS) for extensions
 }

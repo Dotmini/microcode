@@ -1,6 +1,6 @@
+use crate::core::buffer::Document;
 use std::collections::HashMap;
 use std::sync::{Arc, RwLock};
-use crate::core::buffer::Document;
 
 pub struct AppState {
     pub documents: Arc<RwLock<HashMap<String, Document>>>,

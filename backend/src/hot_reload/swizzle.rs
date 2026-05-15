@@ -63,7 +63,12 @@ impl Swizzler {
         let page_start = (target_addr & !(self.page_size - 1)) as *mut c_void;
 
         // Make memory writable
-        if mprotect(page_start, self.page_size, PROT_READ | PROT_WRITE | PROT_EXEC) != 0 {
+        if mprotect(
+            page_start,
+            self.page_size,
+            PROT_READ | PROT_WRITE | PROT_EXEC,
+        ) != 0
+        {
             return Err(SwizzleError::MprotectFailed);
         }
 
@@ -72,11 +77,7 @@ impl Swizzler {
 
         // Record for restoration
         let mut old_bytes = vec![0u8; std::mem::size_of::<*const c_void>()];
-        ptr::copy_nonoverlapping(
-            target as *const u8,
-            old_bytes.as_mut_ptr(),
-            old_bytes.len(),
-        );
+        ptr::copy_nonoverlapping(target as *const u8, old_bytes.as_mut_ptr(), old_bytes.len());
         self.patches.push(PatchRecord {
             address: target as *mut u8,
             original_bytes: old_bytes,
@@ -111,7 +112,12 @@ impl Swizzler {
         let page_start = ((target_fn as usize) & !(self.page_size - 1)) as *mut c_void;
 
         // Make writable (may span two pages)
-        if mprotect(page_start, self.page_size * 2, PROT_READ | PROT_WRITE | PROT_EXEC) != 0 {
+        if mprotect(
+            page_start,
+            self.page_size * 2,
+            PROT_READ | PROT_WRITE | PROT_EXEC,
+        ) != 0
+        {
             return Err(SwizzleError::MprotectFailed);
         }
 
@@ -155,7 +161,12 @@ impl Swizzler {
 
         let page_start = ((target_fn as usize) & !(self.page_size - 1)) as *mut c_void;
 
-        if mprotect(page_start, self.page_size * 2, PROT_READ | PROT_WRITE | PROT_EXEC) != 0 {
+        if mprotect(
+            page_start,
+            self.page_size * 2,
+            PROT_READ | PROT_WRITE | PROT_EXEC,
+        ) != 0
+        {
             return Err(SwizzleError::MprotectFailed);
         }
 
@@ -194,15 +205,16 @@ impl Swizzler {
         for patch in self.patches.drain(..) {
             let page_start = ((patch.address as usize) & !(self.page_size - 1)) as *mut c_void;
 
-            if mprotect(page_start, self.page_size * 2, PROT_READ | PROT_WRITE | PROT_EXEC) != 0 {
+            if mprotect(
+                page_start,
+                self.page_size * 2,
+                PROT_READ | PROT_WRITE | PROT_EXEC,
+            ) != 0
+            {
                 return Err(SwizzleError::MprotectFailed);
             }
 
-            ptr::copy_nonoverlapping(
-                patch.original_bytes.as_ptr(),
-                patch.address,
-                patch.size,
-            );
+            ptr::copy_nonoverlapping(patch.original_bytes.as_ptr(), patch.address, patch.size);
 
             mprotect(page_start, self.page_size * 2, PROT_READ | PROT_EXEC);
         }

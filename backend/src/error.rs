@@ -12,7 +12,7 @@ pub type Result<T> = std::result::Result<T, AppError>;
 pub enum AppError {
     // IO errors
     IoError(std::io::Error),
-    IOError(String),  // String-based IO error for agent
+    IOError(String), // String-based IO error for agent
 
     // File system errors
     FileNotFound(String),
@@ -49,7 +49,7 @@ pub enum AppError {
     InternalError(String),
     BadRequest(String),
     NotImplemented(String),
-    
+
     // Agent-specific errors
     ValidationError(String),
     NotFound(String),

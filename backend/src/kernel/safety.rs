@@ -22,17 +22,17 @@ impl AntiCrash {
 
     pub fn start_watchdog(&self) {
         let heartbeat = self.last_heartbeat.clone();
-        
+
         tokio::spawn(async move {
             loop {
                 // Monitor system health
                 tokio::time::sleep(Duration::from_secs(1)).await;
-                
+
                 // Example: Check memory usage, CPU spikes, or deadlocks
                 // If critical resource low -> Trigger GC or specific subsystem restart
             }
         });
-        
+
         // Register generic panic hook
         std::panic::set_hook(Box::new(|info| {
             println!("🚨 KERNEL PANIC: {:?}", info);
@@ -42,6 +42,6 @@ impl AntiCrash {
 
     pub fn pulse(&self) {
         // Subsystems call this to indicate they are alive
-        // *self.last_heartbeat.lock().unwrap() = SystemTime::now(); 
+        // *self.last_heartbeat.lock().unwrap() = SystemTime::now();
     }
 }

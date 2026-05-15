@@ -90,7 +90,7 @@ impl PreviewHost {
     /// Compile source code to a dynamic library
     pub fn compile(&self, source_code: &str, language: &str) -> Result<String> {
         let version = VERSION_COUNTER.fetch_add(1, Ordering::SeqCst);
-        
+
         let output_path = Path::new(&self.output_dir);
         if !output_path.exists() {
             std::fs::create_dir_all(output_path).ok();
@@ -100,20 +100,27 @@ impl PreviewHost {
             "swift" => {
                 // Write source to file
                 let source_path = output_path.join(format!("preview_v{}.swift", version));
-                std::fs::write(&source_path, source_code)
-                    .map_err(|e| AppError::ExecutionError(format!("Failed to write source: {}", e)))?;
-                
+                std::fs::write(&source_path, source_code).map_err(|e| {
+                    AppError::ExecutionError(format!("Failed to write source: {}", e))
+                })?;
+
                 // Use v2 builder
                 use crate::preview_v2::builder::{compile_swift_to_dylib, BuildResult};
-                
+
                 match compile_swift_to_dylib(&source_path, output_path) {
                     BuildResult::Success(dylib_path) => {
                         Ok(dylib_path.to_string_lossy().to_string())
-                    },
+                    }
                     BuildResult::Failure(errors) => {
                         // Format errors into string
-                        let error_msg = errors.iter()
-                            .map(|e| format!("{}:{}:{}: {} - {}", e.file, e.line, e.column, e.severity, e.message))
+                        let error_msg = errors
+                            .iter()
+                            .map(|e| {
+                                format!(
+                                    "{}:{}:{}: {} - {}",
+                                    e.file, e.line, e.column, e.severity, e.message
+                                )
+                            })
                             .collect::<Vec<_>>()
                             .join("\n");
                         Err(AppError::CompilationError(error_msg))
@@ -124,20 +131,22 @@ impl PreviewHost {
                 // Keep legacy rust support for now
                 let source_path = output_path.join(format!("preview_v{}.rs", version));
                 let dylib_path = output_path.join(format!("preview_v{}.dylib", version)); // macOS assumption
-                
-                std::fs::write(&source_path, source_code)
-                    .map_err(|e| AppError::ExecutionError(format!("Failed to write source: {}", e)))?;
-                    
+
+                std::fs::write(&source_path, source_code).map_err(|e| {
+                    AppError::ExecutionError(format!("Failed to write source: {}", e))
+                })?;
+
                 let output = Command::new("rustc")
                     .args([
                         "--crate-type=cdylib",
                         "-O",
                         &source_path.to_string_lossy(),
-                        "-o", &dylib_path.to_string_lossy()
+                        "-o",
+                        &dylib_path.to_string_lossy(),
                     ])
                     .output()
                     .map_err(|e| AppError::ExecutionError(format!("Failed to run rustc: {}", e)))?;
-                    
+
                 if output.status.success() {
                     Ok(dylib_path.to_string_lossy().to_string())
                 } else {
@@ -145,7 +154,10 @@ impl PreviewHost {
                     Err(AppError::CompilationError(stderr))
                 }
             }
-            _ => Err(AppError::ExecutionError(format!("Unsupported language: {}", language)))
+            _ => Err(AppError::ExecutionError(format!(
+                "Unsupported language: {}",
+                language
+            ))),
         }
     }
 
@@ -169,7 +181,8 @@ impl PreviewHost {
                 CStr::from_ptr(err_ptr).to_string_lossy().to_string()
             };
             return Err(AppError::ExecutionError(format!(
-                "Failed to load library: {}", err_msg
+                "Failed to load library: {}",
+                err_msg
             )));
         }
 
@@ -180,7 +193,7 @@ impl PreviewHost {
         if func_ptr.is_null() {
             dlclose(handle);
             return Err(AppError::ExecutionError(
-                "Symbol 'preview_render' not found. Export with @_cdecl(\"preview_render\")".into()
+                "Symbol 'preview_render' not found. Export with @_cdecl(\"preview_render\")".into(),
             ));
         }
 
@@ -268,7 +281,7 @@ impl PreviewHost {
     /// Clean up all temporary files
     pub fn cleanup(&mut self) {
         self.unload();
-        
+
         // Remove entire output directory
         std::fs::remove_dir_all(&self.output_dir).ok();
     }

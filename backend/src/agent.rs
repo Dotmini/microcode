@@ -4,17 +4,17 @@
 
 use crate::error::{AppError, Result};
 use crate::models::AIConfig;
+use async_stream::stream;
+use chrono::{DateTime, Utc};
+use futures::stream::{self, BoxStream, StreamExt};
+use once_cell::sync::Lazy;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, RwLock as StdRwLock};
-use tokio::sync::RwLock as TokioRwLock;
 use tokio::fs;
-use once_cell::sync::Lazy;
-use chrono::{DateTime, Utc};
-use futures::stream::{self, BoxStream, StreamExt};
-use async_stream::stream; // Requires adding to Cargo.toml if not present, but checked and added earlier.
-// Actually I added async-stream to backend/Cargo.toml in step 6112.
+use tokio::sync::RwLock as TokioRwLock; // Requires adding to Cargo.toml if not present, but checked and added earlier.
+                                        // Actually I added async-stream to backend/Cargo.toml in step 6112.
 
 // Streaming Event Definition
 // Streaming Event Definition
@@ -22,8 +22,16 @@ use async_stream::stream; // Requires adding to Cargo.toml if not present, but c
 #[serde(tag = "type", content = "data")]
 pub enum AgentStreamEvent {
     Token(String),
-    ToolStart { name: String, id: String },
-    ToolEnd { id: String, success: bool, output: String, error: Option<String> },
+    ToolStart {
+        name: String,
+        id: String,
+    },
+    ToolEnd {
+        id: String,
+        success: bool,
+        output: String,
+        error: Option<String>,
+    },
     PendingChange(PendingChange),
     Error(String),
     Done,
@@ -277,7 +285,7 @@ pub struct ChatRequest {
     pub provider: Option<String>,
     pub model: Option<String>,
     pub api_key: Option<String>,
-    pub auto_execute: bool,  // Auto-execute tools or ask for confirmation
+    pub auto_execute: bool, // Auto-execute tools or ask for confirmation
 }
 
 /// Chat response with structured output
@@ -292,8 +300,6 @@ pub struct ChatResponse {
     pub suggestions: Vec<String>,
     pub plan: Option<ExecutionPlan>,
 }
-
-
 
 /// Execution plan for multi-step tasks
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -537,7 +543,7 @@ pub fn get_available_tools() -> Vec<ToolDefinition> {
 pub fn create_session(workspace_path: &str) -> Result<String> {
     let session_id = uuid::Uuid::new_v4().to_string();
     let path = PathBuf::from(workspace_path);
-    
+
     let session = AgentSession {
         id: session_id.clone(),
         workspace_path: path.clone(),
@@ -557,10 +563,10 @@ pub fn create_session(workspace_path: &str) -> Result<String> {
         updated_at: Utc::now(),
         current_plan: None,
     };
-    
+
     let mut sessions = AGENT_SESSIONS.write().unwrap();
     sessions.insert(session_id.clone(), session);
-    
+
     Ok(session_id)
 }
 
@@ -588,25 +594,26 @@ pub async fn build_context(workspace_path: &Path, max_depth: usize) -> Result<Pr
         dependencies: vec![],
         git_status: get_git_status(workspace_path).await.ok(),
     };
-    
+
     let mut indexer = crate::indexer::Indexer::new();
-    
+
     // Index files and extract symbols
     let (files, symbols) = index_files(workspace_path, max_depth, &mut indexer).await?;
     context.files = files;
     context.symbols = symbols;
-    
+
     // Get recent files (last 20 modified)
-    
+
     // Get recent files (last 20 modified)
     let mut sorted_files = context.files.clone();
     sorted_files.sort_by(|a, b| b.modified.cmp(&a.modified));
-    context.recent_files = sorted_files.iter()
+    context.recent_files = sorted_files
+        .iter()
         .filter(|f| !f.is_directory)
         .take(20)
         .map(|f| f.path.clone())
         .collect();
-    
+
     Ok(context)
 }
 
@@ -623,17 +630,21 @@ async fn detect_project_type(path: &Path) -> String {
         ("pom.xml", "java"),
         ("build.gradle", "java"),
     ];
-    
+
     for (file, project_type) in indicators {
         if path.join(file).exists() {
             return project_type.to_string();
         }
     }
-    
+
     "unknown".to_string()
 }
 
-pub async fn index_files(root: &Path, max_depth: usize, indexer: &mut crate::indexer::Indexer) -> Result<(Vec<FileInfo>, Vec<Symbol>)> {
+pub async fn index_files(
+    root: &Path,
+    max_depth: usize,
+    indexer: &mut crate::indexer::Indexer,
+) -> Result<(Vec<FileInfo>, Vec<Symbol>)> {
     let mut files = vec![];
     let mut symbols = vec![];
     index_files_recursive(root, root, &mut files, &mut symbols, 0, max_depth, indexer).await?;
@@ -653,46 +664,56 @@ async fn index_files_recursive(
     if depth > max_depth {
         return Ok(());
     }
-    
-    let mut entries = fs::read_dir(current).await
+
+    let mut entries = fs::read_dir(current)
+        .await
         .map_err(|e| AppError::IOError(e.to_string()))?;
-    
-    while let Some(entry) = entries.next_entry().await
-        .map_err(|e| AppError::IOError(e.to_string()))? {
+
+    while let Some(entry) = entries
+        .next_entry()
+        .await
+        .map_err(|e| AppError::IOError(e.to_string()))?
+    {
         let path = entry.path();
-        let name = path.file_name()
+        let name = path
+            .file_name()
             .map(|n| n.to_string_lossy().to_string())
             .unwrap_or_default();
-        
+
         // Skip hidden files and common ignore patterns to reduce CPU/Disk load
-        if name.starts_with('.') || 
-           name == "node_modules" || 
-           name == "target" ||
-           name == "build" ||
-           name == "dist" ||
-           name == "Dist" ||
-           name == ".build" ||
-           name == ".build_dist" ||
-           name == ".swiftpm" ||
-           name == ".git" ||
-           name == "Pods" ||
-           name == "DerivedData" ||
-           name == "__pycache__" {
+        if name.starts_with('.')
+            || name == "node_modules"
+            || name == "target"
+            || name == "build"
+            || name == "dist"
+            || name == "Dist"
+            || name == ".build"
+            || name == ".build_dist"
+            || name == ".swiftpm"
+            || name == ".git"
+            || name == "Pods"
+            || name == "DerivedData"
+            || name == "__pycache__"
+        {
             continue;
         }
-        
-        let metadata = entry.metadata().await
+
+        let metadata = entry
+            .metadata()
+            .await
             .map_err(|e| AppError::IOError(e.to_string()))?;
-        
-        let relative_path = path.strip_prefix(root)
+
+        let relative_path = path
+            .strip_prefix(root)
             .unwrap_or(&path)
             .to_string_lossy()
             .to_string();
-        
-        let modified = metadata.modified()
+
+        let modified = metadata
+            .modified()
             .map(|t| DateTime::<Utc>::from(t))
             .unwrap_or_else(|_| Utc::now());
-        
+
         files.push(FileInfo {
             path: path.clone(),
             relative_path,
@@ -701,14 +722,15 @@ async fn index_files_recursive(
             extension: path.extension().map(|e| e.to_string_lossy().to_string()),
             modified,
         });
-        
+
         if metadata.is_dir() {
-            index_files_recursive(root, &path, files, symbols, depth + 1, max_depth, indexer).await?;
+            index_files_recursive(root, &path, files, symbols, depth + 1, max_depth, indexer)
+                .await?;
         } else {
             // Extract symbols from code files
             // THROTTLING: Give some breathing room to the OS and other tasks
             tokio::task::yield_now().await;
-            
+
             if let Ok(content) = fs::read_to_string(&path).await {
                 if let Ok(chunks) = indexer.chunk_file(&path, &content) {
                     for chunk in chunks {
@@ -716,7 +738,9 @@ async fn index_files_recursive(
                             symbols.push(Symbol {
                                 name,
                                 kind: match chunk.symbol_kind.as_str() {
-                                    "function_definition" | "function_item" | "function_declaration" => SymbolKind::Function,
+                                    "function_definition"
+                                    | "function_item"
+                                    | "function_declaration" => SymbolKind::Function,
                                     "class_definition" | "class_declaration" => SymbolKind::Class,
                                     "struct_item" => SymbolKind::Struct,
                                     "enum_item" => SymbolKind::Enum,
@@ -725,7 +749,9 @@ async fn index_files_recursive(
                                 },
                                 file_path: path.clone(),
                                 line: chunk.start_line,
-                                signature: Some(chunk.content.lines().next().unwrap_or("").to_string()),
+                                signature: Some(
+                                    chunk.content.lines().next().unwrap_or("").to_string(),
+                                ),
                             });
                         }
                     }
@@ -733,7 +759,7 @@ async fn index_files_recursive(
             }
         }
     }
-    
+
     Ok(())
 }
 
@@ -742,7 +768,7 @@ async fn get_git_status(path: &Path) -> Result<GitStatus> {
     if !git_dir.exists() {
         return Err(AppError::IOError("Not a git repository".to_string()));
     }
-    
+
     // Get current branch
     let branch = tokio::process::Command::new("git")
         .args(["branch", "--show-current"])
@@ -751,7 +777,7 @@ async fn get_git_status(path: &Path) -> Result<GitStatus> {
         .await
         .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
         .unwrap_or_else(|_| "unknown".to_string());
-    
+
     // Get status
     let status_output = tokio::process::Command::new("git")
         .args(["status", "--porcelain"])
@@ -759,14 +785,16 @@ async fn get_git_status(path: &Path) -> Result<GitStatus> {
         .output()
         .await
         .map_err(|e| AppError::IOError(e.to_string()))?;
-    
+
     let status_str = String::from_utf8_lossy(&status_output.stdout);
     let mut modified = vec![];
     let mut staged = vec![];
     let mut untracked = vec![];
-    
+
     for line in status_str.lines() {
-        if line.len() < 3 { continue; }
+        if line.len() < 3 {
+            continue;
+        }
         let file = line[3..].to_string();
         match &line[0..2] {
             "M " | "A " | "D " | "R " => staged.push(file),
@@ -775,7 +803,7 @@ async fn get_git_status(path: &Path) -> Result<GitStatus> {
             _ => {}
         }
     }
-    
+
     Ok(GitStatus {
         branch,
         modified_files: modified,
@@ -796,9 +824,9 @@ pub async fn execute_tool(
 ) -> Result<ToolResult> {
     let session = get_session(session_id)
         .ok_or_else(|| AppError::NotFound("Session not found".to_string()))?;
-    
+
     let workspace = &session.workspace_path;
-    
+
     let result = match tool_name {
         "read_file" => tool_read_file(workspace, arguments).await,
         "write_file" => tool_write_file(session_id, workspace, arguments).await,
@@ -820,9 +848,9 @@ pub async fn execute_tool(
         "create_project" => tool_create_project(session_id, workspace, arguments).await,
         _ => Err(AppError::NotFound(format!("Unknown tool: {}", tool_name))),
     };
-    
+
     let tool_call_id = uuid::Uuid::new_v4().to_string();
-    
+
     match result {
         Ok(output) => Ok(ToolResult {
             tool_call_id,
@@ -844,12 +872,13 @@ pub async fn execute_tool(
 // ==========================================
 
 async fn tool_read_file(workspace: &Path, args: &serde_json::Value) -> Result<String> {
-    let path_str = args["path"].as_str()
+    let path_str = args["path"]
+        .as_str()
         .ok_or_else(|| AppError::ValidationError("path is required".to_string()))?;
-    
+
     let full_path = resolve_path(workspace, path_str);
     validate_path_in_workspace(workspace, &full_path)?;
-    
+
     // Guard: reject files over 10MB to prevent OOM
     const MAX_FILE_SIZE: u64 = 10 * 1024 * 1024; // 10MB
     if let Ok(metadata) = tokio::fs::metadata(&full_path).await {
@@ -861,123 +890,173 @@ async fn tool_read_file(workspace: &Path, args: &serde_json::Value) -> Result<St
             )));
         }
     }
-    
-    let content = fs::read_to_string(&full_path).await
+
+    let content = fs::read_to_string(&full_path)
+        .await
         .map_err(|e| AppError::IOError(format!("Failed to read file: {}", e)))?;
-    
+
     Ok(content)
 }
 
-async fn tool_write_file(session_id: &str, workspace: &Path, args: &serde_json::Value) -> Result<String> {
-    let path_str = args["path"].as_str()
+async fn tool_write_file(
+    session_id: &str,
+    workspace: &Path,
+    args: &serde_json::Value,
+) -> Result<String> {
+    let path_str = args["path"]
+        .as_str()
         .ok_or_else(|| AppError::ValidationError("path is required".to_string()))?;
-    let content = args["content"].as_str()
+    let content = args["content"]
+        .as_str()
         .ok_or_else(|| AppError::ValidationError("content is required".to_string()))?;
-    
+
     let full_path = resolve_path(workspace, path_str);
     validate_path_in_workspace(workspace, &full_path)?;
-    
+
     // Store old content for undo
     let old_content = fs::read_to_string(&full_path).await.ok();
-    
+
     // Create parent directories
     if let Some(parent) = full_path.parent() {
-        fs::create_dir_all(parent).await
+        fs::create_dir_all(parent)
+            .await
             .map_err(|e| AppError::IOError(e.to_string()))?;
     }
-    
+
     // Write file
-    fs::write(&full_path, content).await
+    fs::write(&full_path, content)
+        .await
         .map_err(|e| AppError::IOError(format!("Failed to write file: {}", e)))?;
-    
+
     // Log operation for undo
-    log_file_operation(session_id, OperationType::CreateFile, &full_path, old_content, Some(content.to_string()));
-    
-    Ok(format!("Successfully wrote {} bytes to {}", content.len(), path_str))
+    log_file_operation(
+        session_id,
+        OperationType::CreateFile,
+        &full_path,
+        old_content,
+        Some(content.to_string()),
+    );
+
+    Ok(format!(
+        "Successfully wrote {} bytes to {}",
+        content.len(),
+        path_str
+    ))
 }
 
-async fn tool_edit_file(session_id: &str, workspace: &Path, args: &serde_json::Value) -> Result<String> {
-    let path_str = args["path"].as_str()
+async fn tool_edit_file(
+    session_id: &str,
+    workspace: &Path,
+    args: &serde_json::Value,
+) -> Result<String> {
+    let path_str = args["path"]
+        .as_str()
         .ok_or_else(|| AppError::ValidationError("path is required".to_string()))?;
-    let search = args["search"].as_str()
+    let search = args["search"]
+        .as_str()
         .ok_or_else(|| AppError::ValidationError("search is required".to_string()))?;
-    let replace = args["replace"].as_str()
+    let replace = args["replace"]
+        .as_str()
         .ok_or_else(|| AppError::ValidationError("replace is required".to_string()))?;
-    
+
     let full_path = resolve_path(workspace, path_str);
     validate_path_in_workspace(workspace, &full_path)?;
-    
-    let old_content = fs::read_to_string(&full_path).await
+
+    let old_content = fs::read_to_string(&full_path)
+        .await
         .map_err(|e| AppError::IOError(format!("Failed to read file: {}", e)))?;
-    
+
     if !old_content.contains(search) {
-        return Err(AppError::ValidationError("Search text not found in file".to_string()));
+        return Err(AppError::ValidationError(
+            "Search text not found in file".to_string(),
+        ));
     }
-    
+
     let new_content = old_content.replace(search, replace);
-    
-    fs::write(&full_path, &new_content).await
+
+    fs::write(&full_path, &new_content)
+        .await
         .map_err(|e| AppError::IOError(format!("Failed to write file: {}", e)))?;
-    
-    log_file_operation(session_id, OperationType::ModifyFile, &full_path, Some(old_content), Some(new_content));
-    
+
+    log_file_operation(
+        session_id,
+        OperationType::ModifyFile,
+        &full_path,
+        Some(old_content),
+        Some(new_content),
+    );
+
     Ok(format!("Successfully edited {}", path_str))
 }
 
-async fn tool_delete_file(session_id: &str, workspace: &Path, args: &serde_json::Value) -> Result<String> {
-    let path_str = args["path"].as_str()
+async fn tool_delete_file(
+    session_id: &str,
+    workspace: &Path,
+    args: &serde_json::Value,
+) -> Result<String> {
+    let path_str = args["path"]
+        .as_str()
         .ok_or_else(|| AppError::ValidationError("path is required".to_string()))?;
-    
+
     let full_path = resolve_path(workspace, path_str);
     validate_path_in_workspace(workspace, &full_path)?;
-    
+
     let old_content = fs::read_to_string(&full_path).await.ok();
-    
-    fs::remove_file(&full_path).await
+
+    fs::remove_file(&full_path)
+        .await
         .map_err(|e| AppError::IOError(format!("Failed to delete file: {}", e)))?;
-    
-    log_file_operation(session_id, OperationType::DeleteFile, &full_path, old_content, None);
-    
+
+    log_file_operation(
+        session_id,
+        OperationType::DeleteFile,
+        &full_path,
+        old_content,
+        None,
+    );
+
     Ok(format!("Successfully deleted {}", path_str))
 }
 
 async fn tool_list_directory(workspace: &Path, args: &serde_json::Value) -> Result<String> {
     let path_str = args["path"].as_str().unwrap_or(".");
     let recursive = args["recursive"].as_bool().unwrap_or(false);
-    
+
     let full_path = resolve_path(workspace, path_str);
     validate_path_in_workspace(workspace, &full_path)?;
-    
+
     let max_depth = if recursive { 5 } else { 1 };
     let mut indexer = crate::indexer::Indexer::new();
     let (files, _) = index_files(&full_path, max_depth, &mut indexer).await?;
-    
-    let output: Vec<String> = files.iter()
+
+    let output: Vec<String> = files
+        .iter()
         .map(|f| {
             let icon = if f.is_directory { "📁" } else { "📄" };
             format!("{} {}", icon, f.relative_path)
         })
         .collect();
-    
+
     Ok(output.join("\n"))
 }
 
 async fn tool_search_code(workspace: &Path, args: &serde_json::Value) -> Result<String> {
-    let query = args["query"].as_str()
+    let query = args["query"]
+        .as_str()
         .ok_or_else(|| AppError::ValidationError("query is required".to_string()))?;
     let file_pattern = args["file_pattern"].as_str();
-    
+
     // Use ripgrep if available, otherwise fall back to manual search
     let mut cmd = tokio::process::Command::new("rg");
     cmd.args(["--line-number", "--no-heading", query])
         .current_dir(workspace);
-    
+
     if let Some(pattern) = file_pattern {
         cmd.args(["-g", pattern]);
     }
-    
+
     let output = cmd.output().await;
-    
+
     match output {
         Ok(o) if o.status.success() => {
             let result = String::from_utf8_lossy(&o.stdout);
@@ -989,24 +1068,29 @@ async fn tool_search_code(workspace: &Path, args: &serde_json::Value) -> Result<
                 Ok(lines.join("\n"))
             }
         }
-        _ => Ok("No matches found".to_string())
+        _ => Ok("No matches found".to_string()),
     }
 }
 
-async fn tool_create_task(session_id: &str, workspace: &Path, args: &serde_json::Value) -> Result<String> {
-    let title = args["title"].as_str()
+async fn tool_create_task(
+    session_id: &str,
+    workspace: &Path,
+    args: &serde_json::Value,
+) -> Result<String> {
+    let title = args["title"]
+        .as_str()
         .ok_or_else(|| AppError::ValidationError("title is required".to_string()))?;
     let description = args["description"].as_str().unwrap_or("");
     let priority_str = args["priority"].as_str().unwrap_or("medium");
     let add_to_todo = args["add_to_todo"].as_bool().unwrap_or(true);
-    
+
     let priority = match priority_str {
         "low" => TaskPriority::Low,
         "high" => TaskPriority::High,
         "critical" => TaskPriority::Critical,
         _ => TaskPriority::Medium,
     };
-    
+
     let task = Task {
         id: uuid::Uuid::new_v4().to_string(),
         title: title.to_string(),
@@ -1016,55 +1100,76 @@ async fn tool_create_task(session_id: &str, workspace: &Path, args: &serde_json:
         created_at: Utc::now(),
         completed_at: None,
     };
-    
+
     // Add to session
     if let Some(mut session) = get_session(session_id) {
         session.tasks.push(task.clone());
         update_session(session);
     }
-    
+
     // Add to todo.md if requested
     if add_to_todo {
         let todo_path = workspace.join("todo.md");
-        let mut content = fs::read_to_string(&todo_path).await.unwrap_or_else(|_| "# TODO\n\n".to_string());
-        
+        let mut content = fs::read_to_string(&todo_path)
+            .await
+            .unwrap_or_else(|_| "# TODO\n\n".to_string());
+
         let priority_marker = match priority_str {
             "critical" => "🔴",
             "high" => "🟠",
             "low" => "🟢",
             _ => "🟡",
         };
-        
-        let task_line = format!("- [ ] {} {} {}\n", priority_marker, title,
-            if description.is_empty() { "".to_string() } else { format!("- {}", description) });
-        
+
+        let task_line = format!(
+            "- [ ] {} {} {}\n",
+            priority_marker,
+            title,
+            if description.is_empty() {
+                "".to_string()
+            } else {
+                format!("- {}", description)
+            }
+        );
+
         content.push_str(&task_line);
-        
-        fs::write(&todo_path, content).await
+
+        fs::write(&todo_path, content)
+            .await
             .map_err(|e| AppError::IOError(e.to_string()))?;
     }
-    
+
     Ok(format!("Created task: {}", title))
 }
 
-async fn tool_create_project(session_id: &str, workspace: &Path, args: &serde_json::Value) -> Result<String> {
-    let name = args["name"].as_str()
+async fn tool_create_project(
+    session_id: &str,
+    workspace: &Path,
+    args: &serde_json::Value,
+) -> Result<String> {
+    let name = args["name"]
+        .as_str()
         .ok_or_else(|| AppError::ValidationError("name is required".to_string()))?;
-    let proj_type = args["type"].as_str()
+    let proj_type = args["type"]
+        .as_str()
         .ok_or_else(|| AppError::ValidationError("type is required".to_string()))?;
     let path_str = args["path"].as_str().unwrap_or(name);
-    
+
     let full_path = resolve_path(workspace, path_str);
-    
+
     // Check if exists
     if full_path.exists() {
-        return Err(AppError::ValidationError(format!("Path already exists: {}", full_path.display())));
+        return Err(AppError::ValidationError(format!(
+            "Path already exists: {}",
+            full_path.display()
+        )));
     }
-    
+
     // Create directory
-    fs::create_dir_all(&full_path).await
+    fs::create_dir_all(&full_path)
+        .await
         .map_err(|e| AppError::IOError(e.to_string()))?;
-        
+
     let mut created_files = Vec::new();
 
     match proj_type {
@@ -1077,7 +1182,7 @@ async fn tool_create_project(session_id: &str, workspace: &Path, args: &serde_js
                 .map_err(|e| AppError::IOError(e.to_string()))?;
             created_files.push("Cargo.toml");
             created_files.push("src/main.rs");
-        },
+        }
         "swift" => {
             tokio::process::Command::new("swift")
                 .args(["package", "init", "--type", "executable", "--name", name])
@@ -1087,7 +1192,7 @@ async fn tool_create_project(session_id: &str, workspace: &Path, args: &serde_js
                 .map_err(|e| AppError::IOError(e.to_string()))?;
             created_files.push("Package.swift");
             created_files.push("Sources/main.swift");
-        },
+        }
         "node" => {
             tokio::process::Command::new("npm")
                 .args(["init", "-y"])
@@ -1095,43 +1200,63 @@ async fn tool_create_project(session_id: &str, workspace: &Path, args: &serde_js
                 .output()
                 .await
                 .map_err(|e| AppError::IOError(e.to_string()))?;
-            
+
             // Create index.js
-            fs::write(full_path.join("index.js"), "console.log('Hello, World!');").await
+            fs::write(full_path.join("index.js"), "console.log('Hello, World!');")
+                .await
                 .map_err(|e| AppError::IOError(e.to_string()))?;
-                
+
             created_files.push("package.json");
             created_files.push("index.js");
-        },
+        }
         "python" => {
-            fs::write(full_path.join("main.py"), "def main():\n    print('Hello, World!')\n\nif __name__ == '__main__':\n    main()").await
-                .map_err(|e| AppError::IOError(e.to_string()))?;
-            fs::write(full_path.join("requirements.txt"), "").await
+            fs::write(
+                full_path.join("main.py"),
+                "def main():\n    print('Hello, World!')\n\nif __name__ == '__main__':\n    main()",
+            )
+            .await
+            .map_err(|e| AppError::IOError(e.to_string()))?;
+            fs::write(full_path.join("requirements.txt"), "")
+                .await
                 .map_err(|e| AppError::IOError(e.to_string()))?;
             created_files.push("main.py");
             created_files.push("requirements.txt");
-        },
+        }
         "web" => {
             fs::write(full_path.join("index.html"), "<!DOCTYPE html>\n<html>\n<body>\n    <h1>Hello World</h1>\n    <script src=\"script.js\"></script>\n</body>\n</html>").await
                 .map_err(|e| AppError::IOError(e.to_string()))?;
-            fs::write(full_path.join("style.css"), "body { font-family: sans-serif; }").await
-                .map_err(|e| AppError::IOError(e.to_string()))?;
-            fs::write(full_path.join("script.js"), "console.log('Hello, World!');").await
+            fs::write(
+                full_path.join("style.css"),
+                "body { font-family: sans-serif; }",
+            )
+            .await
+            .map_err(|e| AppError::IOError(e.to_string()))?;
+            fs::write(full_path.join("script.js"), "console.log('Hello, World!');")
+                .await
                 .map_err(|e| AppError::IOError(e.to_string()))?;
             created_files.push("index.html");
             created_files.push("style.css");
             created_files.push("script.js");
-        },
-        _ => return Err(AppError::ValidationError(format!("Unknown project type: {}", proj_type))),
+        }
+        _ => {
+            return Err(AppError::ValidationError(format!(
+                "Unknown project type: {}",
+                proj_type
+            )))
+        }
     }
 
-    Ok(format!("Created {} project at {}. Files: {:?}", proj_type, path_str, created_files))
+    Ok(format!(
+        "Created {} project at {}. Files: {:?}",
+        proj_type, path_str, created_files
+    ))
 }
 
 async fn tool_run_command(workspace: &Path, args: &serde_json::Value) -> Result<String> {
-    let command = args["command"].as_str()
+    let command = args["command"]
+        .as_str()
         .ok_or_else(|| AppError::ValidationError("command is required".to_string()))?;
-    
+
     secure_execute_command(workspace, command, None).await
 }
 
@@ -1141,57 +1266,104 @@ async fn tool_run_command(workspace: &Path, args: &serde_json::Value) -> Result<
 /// - 1MB output limit to prevent OOM
 /// - Restricted environment variables
 /// - Working directory locked to workspace
-async fn secure_execute_command(workspace: &Path, command: &str, description: Option<&str>) -> Result<String> {
+async fn secure_execute_command(
+    workspace: &Path,
+    command: &str,
+    description: Option<&str>,
+) -> Result<String> {
     // Normalize command for checking (lowercase, collapse whitespace)
     let cmd_lower = command.to_lowercase();
     let cmd_normalized = cmd_lower.split_whitespace().collect::<Vec<_>>().join(" ");
-    
+
     // === COMPREHENSIVE BLOCKLIST ===
     // Block by exact dangerous commands
     let blocked_commands = [
-        "rm -rf /", "rm -rf /*", "rm -rf ~", "rm -rf $home",
-        "mkfs", "dd if=", ":(){", "fork", "chmod 777 /",
-        "shutdown", "reboot", "halt", "poweroff", "init 0", "init 6",
+        "rm -rf /",
+        "rm -rf /*",
+        "rm -rf ~",
+        "rm -rf $home",
+        "mkfs",
+        "dd if=",
+        ":(){",
+        "fork",
+        "chmod 777 /",
+        "shutdown",
+        "reboot",
+        "halt",
+        "poweroff",
+        "init 0",
+        "init 6",
     ];
     for b in blocked_commands {
         if cmd_normalized.contains(b) {
-            return Err(AppError::ValidationError(format!("Blocked dangerous command pattern: {}", b)));
+            return Err(AppError::ValidationError(format!(
+                "Blocked dangerous command pattern: {}",
+                b
+            )));
         }
     }
-    
+
     // Block privilege escalation
     let blocked_prefixes = ["sudo ", "su ", "doas ", "pkexec ", "runas "];
     for prefix in blocked_prefixes {
-        if cmd_normalized.starts_with(prefix) || cmd_normalized.contains(&format!("| {}", prefix)) || cmd_normalized.contains(&format!("&& {}", prefix)) {
-            return Err(AppError::ValidationError(format!("Blocked privilege escalation: {}", prefix.trim())));
+        if cmd_normalized.starts_with(prefix)
+            || cmd_normalized.contains(&format!("| {}", prefix))
+            || cmd_normalized.contains(&format!("&& {}", prefix))
+        {
+            return Err(AppError::ValidationError(format!(
+                "Blocked privilege escalation: {}",
+                prefix.trim()
+            )));
         }
     }
-    
+
     // Block network exfiltration tools (when piped from sensitive sources)
     let blocked_patterns = [
-        "curl.*-d.*etc", "wget.*--post", "nc -e", "ncat -e",
-        "/dev/tcp", "/dev/udp", "base64.*|.*curl",
+        "curl.*-d.*etc",
+        "wget.*--post",
+        "nc -e",
+        "ncat -e",
+        "/dev/tcp",
+        "/dev/udp",
+        "base64.*|.*curl",
     ];
     for pattern in blocked_patterns {
         if let Ok(re) = regex::Regex::new(pattern) {
             if re.is_match(&cmd_normalized) {
-                return Err(AppError::ValidationError("Blocked potentially dangerous command pattern".to_string()));
+                return Err(AppError::ValidationError(
+                    "Blocked potentially dangerous command pattern".to_string(),
+                ));
             }
         }
     }
-    
+
     // Block writing to system directories
-    let system_dirs = ["/etc/", "/usr/", "/bin/", "/sbin/", "/var/", "/boot/", "/root/", "/System/", "/Library/"];
+    let system_dirs = [
+        "/etc/",
+        "/usr/",
+        "/bin/",
+        "/sbin/",
+        "/var/",
+        "/boot/",
+        "/root/",
+        "/System/",
+        "/Library/",
+    ];
     for dir in system_dirs {
         let dir_lower = dir.to_lowercase();
-        if cmd_normalized.contains(&format!(">{}", dir_lower)) || cmd_normalized.contains(&format!("> {}", dir_lower)) {
-            return Err(AppError::ValidationError(format!("Cannot write to system directory: {}", dir)));
+        if cmd_normalized.contains(&format!(">{}", dir_lower))
+            || cmd_normalized.contains(&format!("> {}", dir_lower))
+        {
+            return Err(AppError::ValidationError(format!(
+                "Cannot write to system directory: {}",
+                dir
+            )));
         }
     }
-    
+
     // === EXECUTE WITH TIMEOUT ===
     let timeout_duration = std::time::Duration::from_secs(30);
-    
+
     let child = tokio::process::Command::new("sh")
         .args(["-c", command])
         .current_dir(workspace)
@@ -1204,80 +1376,93 @@ async fn secure_execute_command(workspace: &Path, command: &str, description: Op
         .stderr(std::process::Stdio::piped())
         .spawn()
         .map_err(|e| AppError::IOError(format!("Failed to spawn command: {}", e)))?;
-    
+
     // Wait with timeout
     let result = tokio::time::timeout(timeout_duration, child.wait_with_output()).await;
-    
+
     match result {
         Ok(Ok(output)) => {
             // Limit output size to 1MB
             const MAX_OUTPUT: usize = 1_048_576;
             let stdout_raw = String::from_utf8_lossy(&output.stdout);
             let stderr_raw = String::from_utf8_lossy(&output.stderr);
-            
+
             let stdout = if stdout_raw.len() > MAX_OUTPUT {
-                format!("{}\n... [truncated, {} bytes total]", &stdout_raw[..MAX_OUTPUT], stdout_raw.len())
+                format!(
+                    "{}\n... [truncated, {} bytes total]",
+                    &stdout_raw[..MAX_OUTPUT],
+                    stdout_raw.len()
+                )
             } else {
                 stdout_raw.to_string()
             };
-            
+
             let stderr = if stderr_raw.len() > MAX_OUTPUT {
-                format!("{}\n... [truncated, {} bytes total]", &stderr_raw[..MAX_OUTPUT], stderr_raw.len())
+                format!(
+                    "{}\n... [truncated, {} bytes total]",
+                    &stderr_raw[..MAX_OUTPUT],
+                    stderr_raw.len()
+                )
             } else {
                 stderr_raw.to_string()
             };
-            
+
             let exit_code = output.status.code().unwrap_or(-1);
-            
+
             let desc_line = if let Some(d) = description {
                 format!("\nDescription: {}", d)
             } else {
                 String::new()
             };
-            
+
             Ok(format!(
                 "Command: {}{}\nExit Code: {}\n\nSTDOUT:\n{}\n\nSTDERR:\n{}",
                 command, desc_line, exit_code, stdout, stderr
             ))
         }
         Ok(Err(e)) => Err(AppError::IOError(format!("Command failed: {}", e))),
-        Err(_) => Err(AppError::IOError(format!("Command timed out after {} seconds: {}", timeout_duration.as_secs(), command))),
+        Err(_) => Err(AppError::IOError(format!(
+            "Command timed out after {} seconds: {}",
+            timeout_duration.as_secs(),
+            command
+        ))),
     }
 }
 
 async fn tool_git_status(workspace: &Path) -> Result<String> {
     let status = get_git_status(workspace).await?;
-    
+
     let mut output = format!("Branch: {}\n\n", status.branch);
-    
+
     if !status.staged_files.is_empty() {
         output.push_str("Staged:\n");
         for f in &status.staged_files {
             output.push_str(&format!("  ✓ {}\n", f));
         }
     }
-    
+
     if !status.modified_files.is_empty() {
         output.push_str("\nModified:\n");
         for f in &status.modified_files {
             output.push_str(&format!("  M {}\n", f));
         }
     }
-    
+
     if !status.untracked_files.is_empty() {
         output.push_str("\nUntracked:\n");
         for f in &status.untracked_files {
             output.push_str(&format!("  ? {}\n", f));
         }
     }
-    
+
     Ok(output)
 }
 
 async fn tool_git_commit(workspace: &Path, args: &serde_json::Value) -> Result<String> {
-    let message = args["message"].as_str()
+    let message = args["message"]
+        .as_str()
         .ok_or_else(|| AppError::ValidationError("message is required".to_string()))?;
-    
+
     // Stage all if no specific files
     let files = args["files"].as_array();
     if files.is_none() || files.unwrap().is_empty() {
@@ -1299,7 +1484,7 @@ async fn tool_git_commit(workspace: &Path, args: &serde_json::Value) -> Result<S
             }
         }
     }
-    
+
     // Commit
     let output = tokio::process::Command::new("git")
         .args(["commit", "-m", message])
@@ -1307,7 +1492,7 @@ async fn tool_git_commit(workspace: &Path, args: &serde_json::Value) -> Result<S
         .output()
         .await
         .map_err(|e| AppError::IOError(e.to_string()))?;
-    
+
     if output.status.success() {
         Ok(format!("Committed: {}", message))
     } else {
@@ -1330,28 +1515,34 @@ fn resolve_path(workspace: &Path, path_str: &str) -> PathBuf {
 }
 
 fn validate_path_in_workspace(workspace: &Path, path: &Path) -> Result<()> {
-    let canonical_workspace = workspace.canonicalize()
+    let canonical_workspace = workspace
+        .canonicalize()
         .map_err(|e| AppError::IOError(e.to_string()))?;
-    
+
     // For new files, check parent
     let check_path = if path.exists() {
-        path.canonicalize().map_err(|e| AppError::IOError(e.to_string()))?
+        path.canonicalize()
+            .map_err(|e| AppError::IOError(e.to_string()))?
     } else if let Some(parent) = path.parent() {
         if parent.exists() {
-            parent.canonicalize().map_err(|e| AppError::IOError(e.to_string()))?
+            parent
+                .canonicalize()
+                .map_err(|e| AppError::IOError(e.to_string()))?
         } else {
-            return Err(AppError::ValidationError("Parent directory does not exist".to_string()));
+            return Err(AppError::ValidationError(
+                "Parent directory does not exist".to_string(),
+            ));
         }
     } else {
         return Err(AppError::ValidationError("Invalid path".to_string()));
     };
-    
+
     if !check_path.starts_with(&canonical_workspace) {
         return Err(AppError::ValidationError(
-            "Path is outside workspace (security restriction)".to_string()
+            "Path is outside workspace (security restriction)".to_string(),
         ));
     }
-    
+
     Ok(())
 }
 
@@ -1372,10 +1563,10 @@ fn log_file_operation(
         timestamp: Utc::now(),
         can_undo: true,
     };
-    
+
     let mut log = FILE_OPERATION_LOG.write().unwrap();
     log.push(op);
-    
+
     // Keep only last 100 operations
     if log.len() > 100 {
         log.remove(0);
@@ -1394,31 +1585,38 @@ pub async fn undo_last_operation(session_id: &str) -> Result<String> {
             .find(|o| o.session_id == session_id && o.can_undo)
             .cloned()
     };
-    
+
     let op = op.ok_or_else(|| AppError::NotFound("No operation to undo".to_string()))?;
-    
+
     match op.operation {
         OperationType::CreateFile | OperationType::ModifyFile => {
             if let Some(old_content) = op.old_content {
-                fs::write(&op.file_path, old_content as String).await
+                fs::write(&op.file_path, old_content as String)
+                    .await
                     .map_err(|e| AppError::IOError(e.to_string()))?;
                 Ok(format!("Restored: {}", op.file_path.display()))
             } else {
-                fs::remove_file(&op.file_path).await
+                fs::remove_file(&op.file_path)
+                    .await
                     .map_err(|e| AppError::IOError(e.to_string()))?;
                 Ok(format!("Deleted created file: {}", op.file_path.display()))
             }
         }
         OperationType::DeleteFile => {
             if let Some(content) = op.old_content {
-                fs::write(&op.file_path, content).await
+                fs::write(&op.file_path, content)
+                    .await
                     .map_err(|e| AppError::IOError(e.to_string()))?;
                 Ok(format!("Restored deleted file: {}", op.file_path.display()))
             } else {
-                Err(AppError::IOError("Cannot restore: no backup content".to_string()))
+                Err(AppError::IOError(
+                    "Cannot restore: no backup content".to_string(),
+                ))
             }
         }
-        _ => Err(AppError::ValidationError("This operation cannot be undone".to_string())),
+        _ => Err(AppError::ValidationError(
+            "This operation cannot be undone".to_string(),
+        )),
     }
 }
 
@@ -1430,11 +1628,11 @@ pub async fn undo_last_operation(session_id: &str) -> Result<String> {
 pub fn generate_diff(file_path: &str, old_content: &str, new_content: &str) -> FileDiff {
     let old_lines: Vec<&str> = old_content.lines().collect();
     let new_lines: Vec<&str> = new_content.lines().collect();
-    
+
     let mut hunks = Vec::new();
     let mut additions = 0;
     let mut deletions = 0;
-    
+
     // Simple line-by-line diff algorithm
     let mut i = 0;
     let mut j = 0;
@@ -1442,7 +1640,7 @@ pub fn generate_diff(file_path: &str, old_content: &str, new_content: &str) -> F
     let mut hunk_old_start = 0;
     let mut hunk_new_start = 0;
     let mut in_hunk = false;
-    
+
     while i < old_lines.len() || j < new_lines.len() {
         if i < old_lines.len() && j < new_lines.len() && old_lines[i] == new_lines[j] {
             // Context line
@@ -1471,9 +1669,12 @@ pub fn generate_diff(file_path: &str, old_content: &str, new_content: &str) -> F
                     });
                 }
             }
-            
+
             // Check for deletion
-            if i < old_lines.len() && (j >= new_lines.len() || !new_lines.iter().skip(j).take(5).any(|&l| l == old_lines[i])) {
+            if i < old_lines.len()
+                && (j >= new_lines.len()
+                    || !new_lines.iter().skip(j).take(5).any(|&l| l == old_lines[i]))
+            {
                 hunk_lines.push(DiffLine {
                     line_type: DiffLineType::Deletion,
                     content: old_lines[i].to_string(),
@@ -1494,12 +1695,18 @@ pub fn generate_diff(file_path: &str, old_content: &str, new_content: &str) -> F
                 j += 1;
             }
         }
-        
+
         // Flush hunk if we have enough context
         if in_hunk && i < old_lines.len() && j < new_lines.len() && old_lines[i] == new_lines[j] {
-            let old_count = hunk_lines.iter().filter(|l| matches!(l.line_type, DiffLineType::Deletion | DiffLineType::Context)).count();
-            let new_count = hunk_lines.iter().filter(|l| matches!(l.line_type, DiffLineType::Addition | DiffLineType::Context)).count();
-            
+            let old_count = hunk_lines
+                .iter()
+                .filter(|l| matches!(l.line_type, DiffLineType::Deletion | DiffLineType::Context))
+                .count();
+            let new_count = hunk_lines
+                .iter()
+                .filter(|l| matches!(l.line_type, DiffLineType::Addition | DiffLineType::Context))
+                .count();
+
             hunks.push(DiffHunk {
                 old_start: hunk_old_start,
                 old_count,
@@ -1510,12 +1717,18 @@ pub fn generate_diff(file_path: &str, old_content: &str, new_content: &str) -> F
             in_hunk = false;
         }
     }
-    
+
     // Flush remaining hunk
     if !hunk_lines.is_empty() {
-        let old_count = hunk_lines.iter().filter(|l| matches!(l.line_type, DiffLineType::Deletion | DiffLineType::Context)).count();
-        let new_count = hunk_lines.iter().filter(|l| matches!(l.line_type, DiffLineType::Addition | DiffLineType::Context)).count();
-        
+        let old_count = hunk_lines
+            .iter()
+            .filter(|l| matches!(l.line_type, DiffLineType::Deletion | DiffLineType::Context))
+            .count();
+        let new_count = hunk_lines
+            .iter()
+            .filter(|l| matches!(l.line_type, DiffLineType::Addition | DiffLineType::Context))
+            .count();
+
         hunks.push(DiffHunk {
             old_start: hunk_old_start,
             old_count,
@@ -1524,7 +1737,7 @@ pub fn generate_diff(file_path: &str, old_content: &str, new_content: &str) -> F
             lines: hunk_lines,
         });
     }
-    
+
     FileDiff {
         file_path: file_path.to_string(),
         old_content: old_content.to_string(),
@@ -1543,11 +1756,11 @@ pub fn generate_diff(file_path: &str, old_content: &str, new_content: &str) -> F
 pub async fn enhanced_chat(
     state: Arc<TokioRwLock<crate::state::AppState>>,
     request: ChatRequest,
-    ai_config: &crate::models::AIConfig
+    ai_config: &crate::models::AIConfig,
 ) -> Result<ChatResponse> {
     let session = get_session(&request.session_id)
         .ok_or_else(|| AppError::NotFound("Session not found".to_string()))?;
-    
+
     // Build context prompt with editor info
     let mut context_parts = vec![];
     if let Some(ref editor) = request.editor_context {
@@ -1567,27 +1780,34 @@ pub async fn enhanced_chat(
             let cursor_line = editor.cursor_line.unwrap_or(0);
             let start = cursor_line.saturating_sub(10);
             let end = (cursor_line + 10).min(lines.len());
-            let visible: Vec<String> = lines[start..end].iter()
+            let visible: Vec<String> = lines[start..end]
+                .iter()
                 .enumerate()
                 .map(|(i, l)| format!("{}: {}", start + i + 1, l))
                 .collect();
-            context_parts.push(format!("Code around cursor:\n```\n{}\n```", visible.join("\n")));
+            context_parts.push(format!(
+                "Code around cursor:\n```\n{}\n```",
+                visible.join("\n")
+            ));
         }
     }
     context_parts.push(format!("Workspace: {}", session.workspace_path.display()));
     context_parts.push(format!("Project type: {}", session.context.project_type));
 
     let tools = get_available_tools();
-    let tools_json: Vec<serde_json::Value> = tools.iter()
-        .map(|t| serde_json::json!({
-            "name": t.name,
-            "description": t.description,
-            "arguments": t.parameters
-        }))
+    let tools_json: Vec<serde_json::Value> = tools
+        .iter()
+        .map(|t| {
+            serde_json::json!({
+                "name": t.name,
+                "description": t.description,
+                "arguments": t.parameters
+            })
+        })
         .collect();
 
     let system_prompt = format!(
-            r#"You are an expert AI coding assistant, designed to rival tools like Cursor and Windsurf.
+        r#"You are an expert AI coding assistant, designed to rival tools like Cursor and Windsurf.
 CONTEXT:
 {}
 
@@ -1633,10 +1853,10 @@ REMEMBER: You are building the future of coding. Make it look magic."#,
         context_parts.join("\n"),
         serde_json::to_string_pretty(&tools_json).unwrap_or_default()
     );
-    
+
     // Build full prompt
     let full_prompt = format!("System: {}\n\nUser: {}", system_prompt, request.message);
-    
+
     // AI Loop for Autonomy & Self-Correction
     let mut current_prompt = full_prompt.clone();
     let mut total_tool_calls = Vec::new();
@@ -1648,23 +1868,29 @@ REMEMBER: You are building the future of coding. Make it look magic."#,
 
     // Merge request overrides with base config
     let mut actual_config = ai_config.clone();
-    if let Some(p) = &request.provider { actual_config.provider = p.clone(); }
-    if let Some(m) = &request.model { actual_config.model = m.clone(); }
-    if let Some(k) = &request.api_key { actual_config.api_key = k.clone(); }
+    if let Some(p) = &request.provider {
+        actual_config.provider = p.clone();
+    }
+    if let Some(m) = &request.model {
+        actual_config.model = m.clone();
+    }
+    if let Some(k) = &request.api_key {
+        actual_config.api_key = k.clone();
+    }
 
     let provider = crate::ai::get_provider(&actual_config.provider)?;
 
     while loop_count < max_loops {
         loop_count += 1;
-        
+
         // Call AI
         let ai_response: String = provider.generate(&current_prompt, &actual_config).await?;
-        
+
         // Parse tool calls from response
         let mut turn_tool_calls = Vec::new();
         let mut turn_tool_results = Vec::new();
         let mut turn_content = ai_response.clone();
-        
+
         // Try to extract JSON tool calls
         let json_pattern = regex::Regex::new(r#"\[\s*\{[\s\S]*?"name"[\s\S]*?\}\s*\]"#).ok();
         if let Some(pattern) = json_pattern {
@@ -1672,17 +1898,21 @@ REMEMBER: You are building the future of coding. Make it look magic."#,
                 let json_str = captures.as_str();
                 if let Ok(calls) = serde_json::from_str::<Vec<serde_json::Value>>(json_str) {
                     for call in calls {
-                        if let (Some(name), Some(args)) = (call["name"].as_str(), call.get("arguments")) {
+                        if let (Some(name), Some(args)) =
+                            (call["name"].as_str(), call.get("arguments"))
+                        {
                             let tc = ToolCall {
                                 id: uuid::Uuid::new_v4().to_string(),
                                 name: name.to_string(),
                                 arguments: args.clone(),
                             };
                             turn_tool_calls.push(tc.clone());
-                            
+
                             // Execute tool or create pending change
                             if request.auto_execute || !is_destructive_tool(name) {
-                                match execute_tool(state.clone(), &request.session_id, name, args).await {
+                                match execute_tool(state.clone(), &request.session_id, name, args)
+                                    .await
+                                {
                                     Ok(result) => turn_tool_results.push(result),
                                     Err(e) => turn_tool_results.push(ToolResult {
                                         tool_call_id: tc.id.clone(),
@@ -1692,7 +1922,13 @@ REMEMBER: You are building the future of coding. Make it look magic."#,
                                     }),
                                 }
                             } else {
-                                if let Some(pc) = create_pending_change(&request.session_id, &tc, &session.workspace_path).await {
+                                if let Some(pc) = create_pending_change(
+                                    &request.session_id,
+                                    &tc,
+                                    &session.workspace_path,
+                                )
+                                .await
+                                {
                                     pending_changes.push(pc);
                                 }
                             }
@@ -1705,7 +1941,7 @@ REMEMBER: You are building the future of coding. Make it look magic."#,
 
         total_tool_calls.extend(turn_tool_calls.clone());
         total_tool_results.extend(turn_tool_results.clone());
-        
+
         if final_assistant_content.is_empty() {
             final_assistant_content = turn_content.clone();
         } else if !turn_content.is_empty() {
@@ -1719,10 +1955,20 @@ REMEMBER: You are building the future of coding. Make it look magic."#,
         }
 
         // Prepare next turn prompt with tool results
-        current_prompt.push_str(&format!("\n\nAssistant: {}\n\nTool Results:\n", ai_response));
+        current_prompt.push_str(&format!(
+            "\n\nAssistant: {}\n\nTool Results:\n",
+            ai_response
+        ));
         for result in &turn_tool_results {
-            current_prompt.push_str(&format!("Tool Call {}: {}\n", result.tool_call_id, 
-                if result.success { result.output.clone() } else { result.error.clone().unwrap_or_default() }));
+            current_prompt.push_str(&format!(
+                "Tool Call {}: {}\n",
+                result.tool_call_id,
+                if result.success {
+                    result.output.clone()
+                } else {
+                    result.error.clone().unwrap_or_default()
+                }
+            ));
         }
         current_prompt.push_str("\nBased on these results, what is your next step?");
     }
@@ -1747,9 +1993,9 @@ REMEMBER: You are building the future of coding. Make it look magic."#,
     });
     updated_session.updated_at = Utc::now();
     update_session(updated_session);
-    
+
     let final_session = get_session(&request.session_id).unwrap_or(session);
-    
+
     Ok(ChatResponse {
         message_id: uuid::Uuid::new_v4().to_string(),
         content: final_assistant_content,
@@ -1766,15 +2012,17 @@ REMEMBER: You are building the future of coding. Make it look magic."#,
 pub fn enhanced_chat_stream(
     state: Arc<TokioRwLock<crate::state::AppState>>,
     request: ChatRequest,
-    ai_config: crate::models::AIConfig
+    ai_config: crate::models::AIConfig,
 ) -> BoxStream<'static, Result<AgentStreamEvent>> {
     let (tx, rx) = tokio::sync::mpsc::channel(100);
-    
+
     tokio::spawn(async move {
         let session = match get_session(&request.session_id) {
             Some(s) => s,
             None => {
-                let _ = tx.send(Err(AppError::NotFound("Session not found".to_string()))).await;
+                let _ = tx
+                    .send(Err(AppError::NotFound("Session not found".to_string())))
+                    .await;
                 return;
             }
         };
@@ -1782,7 +2030,7 @@ pub fn enhanced_chat_stream(
         // Reuse system prompt building logic from enhanced_chat (refactor would be better, but for speed...)
         // For now, let's just assume we need to rebuild it or passed in.
         // Actually, to avoid massive duplication, let's keep it simple.
-        
+
         // Build context parts
         let mut context_parts = vec![];
         if let Some(ref editor) = request.editor_context {
@@ -1802,11 +2050,15 @@ pub fn enhanced_chat_stream(
                 let cursor_line = editor.cursor_line.unwrap_or(0);
                 let start = cursor_line.saturating_sub(10);
                 let end = (cursor_line + 10).min(lines.len());
-                let visible: Vec<String> = lines[start..end].iter()
+                let visible: Vec<String> = lines[start..end]
+                    .iter()
                     .enumerate()
                     .map(|(i, l)| format!("{}: {}", start + i + 1, l))
                     .collect();
-                context_parts.push(format!("Code around cursor:\n```\n{}\n```", visible.join("\n")));
+                context_parts.push(format!(
+                    "Code around cursor:\n```\n{}\n```",
+                    visible.join("\n")
+                ));
             }
         }
         context_parts.push(format!("Workspace: {}", session.workspace_path.display()));
@@ -1835,11 +2087,17 @@ INSTRUCTIONS:
         );
 
         let mut current_prompt = format!("System: {}\n\nUser: {}", system_prompt, request.message);
-        
+
         let mut actual_config = ai_config.clone();
-        if let Some(p) = &request.provider { actual_config.provider = p.clone(); }
-        if let Some(m) = &request.model { actual_config.model = m.clone(); }
-        if let Some(k) = &request.api_key { actual_config.api_key = k.clone(); }
+        if let Some(p) = &request.provider {
+            actual_config.provider = p.clone();
+        }
+        if let Some(m) = &request.model {
+            actual_config.model = m.clone();
+        }
+        if let Some(k) = &request.api_key {
+            actual_config.api_key = k.clone();
+        }
 
         let provider = match crate::ai::get_provider(&actual_config.provider) {
             Ok(p) => p,
@@ -1857,9 +2115,12 @@ INSTRUCTIONS:
 
         while loop_count < max_loops {
             loop_count += 1;
-            
+
             let mut turn_full_content = String::new();
-            match provider.generate_stream(&current_prompt, &actual_config).await {
+            match provider
+                .generate_stream(&current_prompt, &actual_config)
+                .await
+            {
                 Ok(mut stream) => {
                     while let Some(chunk_res) = stream.next().await {
                         match chunk_res {
@@ -1890,34 +2151,52 @@ INSTRUCTIONS:
                     let json_str = captures.as_str();
                     if let Ok(calls) = serde_json::from_str::<Vec<serde_json::Value>>(json_str) {
                         for call in calls {
-                            if let (Some(name), Some(args)) = (call["name"].as_str(), call.get("arguments")) {
+                            if let (Some(name), Some(args)) =
+                                (call["name"].as_str(), call.get("arguments"))
+                            {
                                 let tc = ToolCall {
                                     id: uuid::Uuid::new_v4().to_string(),
                                     name: name.to_string(),
                                     arguments: args.clone(),
                                 };
                                 turn_tool_calls.push(tc.clone());
-                                let _ = tx.send(Ok(AgentStreamEvent::ToolStart { name: tc.name.clone(), id: tc.id.clone() })).await;
-                                
+                                let _ = tx
+                                    .send(Ok(AgentStreamEvent::ToolStart {
+                                        name: tc.name.clone(),
+                                        id: tc.id.clone(),
+                                    }))
+                                    .await;
+
                                 // Execute tool or create pending change
                                 if request.auto_execute || !is_destructive_tool(name) {
-                                    match execute_tool(state.clone(), &request.session_id, name, args).await {
+                                    match execute_tool(
+                                        state.clone(),
+                                        &request.session_id,
+                                        name,
+                                        args,
+                                    )
+                                    .await
+                                    {
                                         Ok(result) => {
-                                            let _ = tx.send(Ok(AgentStreamEvent::ToolEnd { 
-                                                id: tc.id.clone(), 
-                                                success: result.success, 
-                                                output: result.output.clone(), 
-                                                error: result.error.clone() 
-                                            })).await;
+                                            let _ = tx
+                                                .send(Ok(AgentStreamEvent::ToolEnd {
+                                                    id: tc.id.clone(),
+                                                    success: result.success,
+                                                    output: result.output.clone(),
+                                                    error: result.error.clone(),
+                                                }))
+                                                .await;
                                             turn_tool_results.push(result);
                                         }
                                         Err(e) => {
-                                            let _ = tx.send(Ok(AgentStreamEvent::ToolEnd { 
-                                                id: tc.id.clone(), 
-                                                success: false, 
-                                                output: String::new(), 
-                                                error: Some(e.to_string()) 
-                                            })).await;
+                                            let _ = tx
+                                                .send(Ok(AgentStreamEvent::ToolEnd {
+                                                    id: tc.id.clone(),
+                                                    success: false,
+                                                    output: String::new(),
+                                                    error: Some(e.to_string()),
+                                                }))
+                                                .await;
                                             turn_tool_results.push(ToolResult {
                                                 tool_call_id: tc.id.clone(),
                                                 success: false,
@@ -1927,8 +2206,15 @@ INSTRUCTIONS:
                                         }
                                     }
                                 } else {
-                                    if let Some(pc) = create_pending_change(&request.session_id, &tc, &session.workspace_path).await {
-                                        let _ = tx.send(Ok(AgentStreamEvent::PendingChange(pc))).await;
+                                    if let Some(pc) = create_pending_change(
+                                        &request.session_id,
+                                        &tc,
+                                        &session.workspace_path,
+                                    )
+                                    .await
+                                    {
+                                        let _ =
+                                            tx.send(Ok(AgentStreamEvent::PendingChange(pc))).await;
                                     }
                                 }
                             }
@@ -1939,7 +2225,7 @@ INSTRUCTIONS:
 
             total_tool_calls.extend(turn_tool_calls);
             total_tool_results.extend(turn_tool_results.clone());
-            
+
             if final_content.is_empty() {
                 final_content = turn_full_content.clone();
             } else {
@@ -1952,10 +2238,20 @@ INSTRUCTIONS:
             }
 
             // Prepare next turn prompt
-            current_prompt.push_str(&format!("\n\nAssistant: {}\n\nTool Results:\n", turn_full_content));
+            current_prompt.push_str(&format!(
+                "\n\nAssistant: {}\n\nTool Results:\n",
+                turn_full_content
+            ));
             for result in &turn_tool_results {
-                current_prompt.push_str(&format!("Tool Call {}: {}\n", result.tool_call_id, 
-                    if result.success { result.output.clone() } else { result.error.clone().unwrap_or_default() }));
+                current_prompt.push_str(&format!(
+                    "Tool Call {}: {}\n",
+                    result.tool_call_id,
+                    if result.success {
+                        result.output.clone()
+                    } else {
+                        result.error.clone().unwrap_or_default()
+                    }
+                ));
             }
             current_prompt.push_str("\nBased on these results, what is your next step?");
         }
@@ -1988,7 +2284,15 @@ INSTRUCTIONS:
 }
 
 fn is_destructive_tool(name: &str) -> bool {
-    matches!(name, "write_file" | "edit_file" | "delete_file" | "run_command" | "git_commit" | "create_project")
+    matches!(
+        name,
+        "write_file"
+            | "edit_file"
+            | "delete_file"
+            | "run_command"
+            | "git_commit"
+            | "create_project"
+    )
 }
 
 // ==========================================
@@ -2008,7 +2312,7 @@ pub fn run_agent_loop_stream(
     let stream = stream! {
         // 1. Get or Create Session
         let _ = ensure_session_exists_sync(&session_id, &workspace);
-        
+
         // 2. Append User Message
         {
             let mut sessions = AGENT_SESSIONS.write().unwrap();
@@ -2023,9 +2327,9 @@ pub fn run_agent_loop_stream(
                 });
             }
         }
-        
+
         // 3. Build Context & Prompt
-        let system_prompt = construct_system_prompt_sync(&workspace); 
+        let system_prompt = construct_system_prompt_sync(&workspace);
         let mut tools_json = String::new();
         {
              let tools = get_available_tools();
@@ -2036,7 +2340,7 @@ pub fn run_agent_loop_stream(
         let mut full_prompt = String::new();
         full_prompt.push_str(&format!("System: {}\n", system_prompt));
         full_prompt.push_str(&format!("TOOLS: {}\n\n", tools_json));
-        
+
         // Retrieve history
         {
             let sessions = AGENT_SESSIONS.read().unwrap();
@@ -2065,7 +2369,7 @@ pub fn run_agent_loop_stream(
         let mut loop_count = 0;
         let max_loops = 5;
         let mut current_turn_prompt = full_prompt.clone();
-        
+
         // Setup AI Config
         let mut config = crate::models::AIConfig::default();
         config.provider = provider_name.clone();
@@ -2075,7 +2379,7 @@ pub fn run_agent_loop_stream(
         loop {
             if loop_count >= max_loops { break; }
             loop_count += 1;
-            
+
             let provider = match crate::ai::get_provider(&config.provider) {
                 Ok(p) => p,
                 Err(e) => {
@@ -2127,18 +2431,18 @@ pub fn run_agent_loop_stream(
                      }
                 }
             }
-            
+
             if turn_tool_calls.is_empty() {
                 // No tools called, we are done
                 break;
             }
-            
+
             // Execute Tools
             let mut turn_tool_results = Vec::new();
-            
+
             for tc in &turn_tool_calls {
                 yield Ok(AgentStreamEvent::ToolStart { name: tc.name.clone(), id: tc.id.clone() });
-                
+
                 let result = if auto_execute || !is_destructive_tool(&tc.name) {
                      execute_tool(state.clone(), &session_id, &tc.name, &tc.arguments).await
                 } else {
@@ -2161,7 +2465,7 @@ pub fn run_agent_loop_stream(
                          })
                      }
                 };
-                
+
                 match result {
                     Ok(res) => {
                          yield Ok(AgentStreamEvent::ToolEnd {
@@ -2182,7 +2486,7 @@ pub fn run_agent_loop_stream(
                     }
                 }
             }
-            
+
             // Update Prompt for next turn
             current_turn_prompt.push_str("\n\nAssistant: ");
             current_turn_prompt.push_str(&turn_content);
@@ -2191,8 +2495,8 @@ pub fn run_agent_loop_stream(
                 current_turn_prompt.push_str(&format!("Tool Call {}: {}\n", res.tool_call_id, res.output));
             }
             current_turn_prompt.push_str("\nBased on these results, what is your next step?");
-            
-            // If we executed tools, we loop again. 
+
+            // If we executed tools, we loop again.
             // Save this turn to session
              {
                 let mut sessions = AGENT_SESSIONS.write().unwrap();
@@ -2208,14 +2512,12 @@ pub fn run_agent_loop_stream(
                 }
             }
         }
-        
+
         yield Ok(AgentStreamEvent::Done);
     };
-    
+
     Box::pin(stream)
 }
-
-
 
 fn construct_system_prompt_sync(_workspace: &Path) -> String {
     "You are an AI programming assistant. Auto-indexing is enabled.".to_string()
@@ -2224,36 +2526,41 @@ fn construct_system_prompt_sync(_workspace: &Path) -> String {
 fn ensure_session_exists_sync(session_id: &str, workspace: &Path) {
     let mut sessions = AGENT_SESSIONS.write().unwrap();
     if !sessions.contains_key(session_id) {
-        sessions.insert(session_id.to_string(), AgentSession {
-            id: session_id.to_string(),
-            workspace_path: workspace.to_path_buf(),
-            messages: Vec::new(),
-            context: ProjectContext {
-                root_path: workspace.to_path_buf(),
-                project_type: "unknown".to_string(),
-                files: vec![],
-                recent_files: vec![],
-                symbols: vec![],
-                dependencies: vec![],
-                git_status: None,
+        sessions.insert(
+            session_id.to_string(),
+            AgentSession {
+                id: session_id.to_string(),
+                workspace_path: workspace.to_path_buf(),
+                messages: Vec::new(),
+                context: ProjectContext {
+                    root_path: workspace.to_path_buf(),
+                    project_type: "unknown".to_string(),
+                    files: vec![],
+                    recent_files: vec![],
+                    symbols: vec![],
+                    dependencies: vec![],
+                    git_status: None,
+                },
+                tasks: Vec::new(),
+                pending_operations: Vec::new(),
+                created_at: Utc::now(),
+                updated_at: Utc::now(),
+                current_plan: None,
             },
-            tasks: Vec::new(),
-            pending_operations: Vec::new(),
-            created_at: Utc::now(),
-            updated_at: Utc::now(),
-            current_plan: None,
-        });
+        );
     }
 }
 
-
-
-async fn create_pending_change(session_id: &str, tool_call: &ToolCall, workspace: &Path) -> Option<PendingChange> {
+async fn create_pending_change(
+    session_id: &str,
+    tool_call: &ToolCall,
+    workspace: &Path,
+) -> Option<PendingChange> {
     match tool_call.name.as_str() {
         "write_file" | "edit_file" => {
             let path = tool_call.arguments["path"].as_str()?;
             let full_path = resolve_path(workspace, path);
-            
+
             let old_content = fs::read_to_string(&full_path).await.unwrap_or_default();
             let new_content = if tool_call.name == "write_file" {
                 tool_call.arguments["content"].as_str()?.to_string()
@@ -2262,9 +2569,9 @@ async fn create_pending_change(session_id: &str, tool_call: &ToolCall, workspace
                 let replace = tool_call.arguments["replace"].as_str()?;
                 old_content.replace(search, replace)
             };
-            
+
             let diff = generate_diff(path, &old_content, &new_content);
-            
+
             let pc = PendingChange {
                 id: uuid::Uuid::new_v4().to_string(),
                 session_id: session_id.to_string(),
@@ -2274,14 +2581,14 @@ async fn create_pending_change(session_id: &str, tool_call: &ToolCall, workspace
                 status: PendingChangeStatus::Pending,
                 created_at: Utc::now(),
             };
-            
+
             // Store pending change
             let mut changes = PENDING_CHANGES.write().unwrap();
             changes.insert(pc.id.clone(), pc.clone());
-            
+
             Some(pc)
         }
-        _ => None
+        _ => None,
     }
 }
 
@@ -2291,22 +2598,24 @@ pub async fn apply_pending_change(change_id: &str) -> Result<String> {
         let changes = PENDING_CHANGES.read().unwrap();
         changes.get(change_id).cloned()
     };
-    
-    let change = change.ok_or_else(|| AppError::NotFound("Pending change not found".to_string()))?;
-    
+
+    let change =
+        change.ok_or_else(|| AppError::NotFound("Pending change not found".to_string()))?;
+
     // Write the new content
-    fs::write(&change.diff.file_path, &change.diff.new_content as &str).await
+    fs::write(&change.diff.file_path, &change.diff.new_content as &str)
+        .await
         .map_err(|e| AppError::IOError(e.to_string()))?;
-    
+
     // Log for undo
     log_file_operation(
-        &change.session_id, 
-        OperationType::ModifyFile, 
+        &change.session_id,
+        OperationType::ModifyFile,
         Path::new(&change.diff.file_path),
         Some(change.diff.old_content.clone()),
-        Some(change.diff.new_content.clone())
+        Some(change.diff.new_content.clone()),
     );
-    
+
     // Update status
     {
         let mut changes = PENDING_CHANGES.write().unwrap();
@@ -2314,7 +2623,7 @@ pub async fn apply_pending_change(change_id: &str) -> Result<String> {
             c.status = PendingChangeStatus::Accepted;
         }
     }
-    
+
     Ok(format!("Applied changes to {}", change.diff.file_path))
 }
 
@@ -2332,7 +2641,8 @@ pub fn reject_pending_change(change_id: &str) -> Result<String> {
 /// Get all pending changes for a session
 pub fn get_pending_changes(session_id: &str) -> Vec<PendingChange> {
     let changes = PENDING_CHANGES.read().unwrap();
-    changes.values()
+    changes
+        .values()
         .filter(|c| c.session_id == session_id && c.status == PendingChangeStatus::Pending)
         .cloned()
         .collect()
@@ -2346,9 +2656,12 @@ pub async fn tool_create_plan(
     let num_steps = steps.len();
     let mut plan_steps = Vec::new();
     for (i, step) in steps.into_iter().enumerate() {
-        let desc = step.get("description").and_then(|v| v.as_str()).unwrap_or("No description");
+        let desc = step
+            .get("description")
+            .and_then(|v| v.as_str())
+            .unwrap_or("No description");
         let tool = step.get("tool").and_then(|v| v.as_str()).unwrap_or("none");
-        
+
         plan_steps.push(PlanStep {
             id: format!("step-{}", i + 1),
             description: desc.to_string(),
@@ -2378,30 +2691,43 @@ pub async fn tool_create_plan(
     Ok(format!("Plan created: {}. {} steps queued. Please confirm with the user before proceeding with execution tools.", description, num_steps))
 }
 
-async fn tool_search_rag(state: Arc<TokioRwLock<crate::state::AppState>>, args: &serde_json::Value) -> Result<String> {
-    let query = args["query"].as_str()
+async fn tool_search_rag(
+    state: Arc<TokioRwLock<crate::state::AppState>>,
+    args: &serde_json::Value,
+) -> Result<String> {
+    let query = args["query"]
+        .as_str()
         .ok_or_else(|| AppError::ValidationError("query is required".to_string()))?;
     let limit = args["limit"].as_u64().unwrap_or(5) as usize;
-    
+
     let st = state.read().await;
-    let mut guard: tokio::sync::MutexGuard<Option<crate::rag::RagEngine>> = st.rag_engine.lock().await;
-    let engine = guard.as_mut().ok_or_else(|| AppError::InternalError("RAG engine not initialized. Please start indexing first.".to_string()))?;
-    
+    let mut guard: tokio::sync::MutexGuard<Option<crate::rag::RagEngine>> =
+        st.rag_engine.lock().await;
+    let engine = guard.as_mut().ok_or_else(|| {
+        AppError::InternalError(
+            "RAG engine not initialized. Please start indexing first.".to_string(),
+        )
+    })?;
+
     let results = engine.search_with_expansion(query, limit)?;
     let mut output = format!("Semantic search results for '{}':\n\n", query);
-    
+
     for (chunk, score) in results {
-        output.push_str(&format!("--- {} (score: {:.2}) ---\n{}\n\n", chunk.file_path, score, chunk.content));
+        output.push_str(&format!(
+            "--- {} (score: {:.2}) ---\n{}\n\n",
+            chunk.file_path, score, chunk.content
+        ));
     }
-    
+
     Ok(output)
 }
 
 async fn tool_execute_command(workspace: &Path, args: &serde_json::Value) -> Result<String> {
-    let command = args["command"].as_str()
+    let command = args["command"]
+        .as_str()
         .ok_or_else(|| AppError::ValidationError("command is required".to_string()))?;
     let description = args["description"].as_str();
-    
+
     // Reuse the same secure execution path
     secure_execute_command(workspace, command, description).await
 }

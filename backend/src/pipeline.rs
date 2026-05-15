@@ -4,13 +4,13 @@
 // GitHub Actions-compatible YAML workflow parser
 // with local shell, SSH deploy, and git sync execution.
 
+use chrono::Utc;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use tokio::sync::{Mutex, broadcast};
 use tokio::process::Command;
-use chrono::Utc;
+use tokio::sync::{broadcast, Mutex};
 use uuid::Uuid;
 
 // ==========================================
@@ -261,8 +261,7 @@ impl PipelineEngine {
         let content = std::fs::read_to_string(&path)
             .map_err(|e| format!("Cannot read workflow file: {}", e))?;
 
-        serde_yaml::from_str::<Workflow>(&content)
-            .map_err(|e| format!("YAML parse error: {}", e))
+        serde_yaml::from_str::<Workflow>(&content).map_err(|e| format!("YAML parse error: {}", e))
     }
 
     pub async fn save_workflow(&self, filename: &str, content: &str) -> Result<(), String> {
@@ -337,14 +336,18 @@ impl PipelineEngine {
         let mut job_runs: Vec<JobRun> = Vec::new();
         for job_key in &job_order {
             let job = &workflow.jobs[job_key];
-            let step_runs: Vec<StepRun> = job.steps.iter().map(|s| StepRun {
-                name: s.name.clone(),
-                status: RunStatus::Queued,
-                started_at: None,
-                finished_at: None,
-                exit_code: None,
-                logs: vec![],
-            }).collect();
+            let step_runs: Vec<StepRun> = job
+                .steps
+                .iter()
+                .map(|s| StepRun {
+                    name: s.name.clone(),
+                    status: RunStatus::Queued,
+                    started_at: None,
+                    finished_at: None,
+                    exit_code: None,
+                    logs: vec![],
+                })
+                .collect();
 
             job_runs.push(JobRun {
                 id: format!("{}-{}", run_id, job_key),
@@ -379,7 +382,9 @@ impl PipelineEngine {
         let wf = workflow.clone();
 
         tokio::spawn(async move {
-            engine.execute_pipeline(&rid, &wf, &job_order, &project_dir, env_overrides).await;
+            engine
+                .execute_pipeline(&rid, &wf, &job_order, &project_dir, env_overrides)
+                .await;
         });
 
         Ok(run_id)
@@ -408,10 +413,17 @@ impl PipelineEngine {
             let mut job_env = global_env.clone();
             job_env.extend(job.env.clone());
 
-            self.emit_log(run_id, &job_id, &format!("Job: {}", job.name.as_deref().unwrap_or(job_key)), 
-                &format!("▶ Starting job: {}", job.name.as_deref().unwrap_or(job_key)), "info").await;
+            self.emit_log(
+                run_id,
+                &job_id,
+                &format!("Job: {}", job.name.as_deref().unwrap_or(job_key)),
+                &format!("▶ Starting job: {}", job.name.as_deref().unwrap_or(job_key)),
+                "info",
+            )
+            .await;
 
-            self.update_job_status(run_id, job_idx, RunStatus::Running, true).await;
+            self.update_job_status(run_id, job_idx, RunStatus::Running, true)
+                .await;
 
             let mut job_success = true;
 
@@ -420,41 +432,96 @@ impl PipelineEngine {
                 let mut step_env = job_env.clone();
                 step_env.extend(step.env.clone());
 
-                self.emit_log(run_id, &job_id, &step.name,
-                    &format!("⏳ Step: {}", step.name), "info").await;
+                self.emit_log(
+                    run_id,
+                    &job_id,
+                    &step.name,
+                    &format!("⏳ Step: {}", step.name),
+                    "info",
+                )
+                .await;
 
-                self.update_step_status(run_id, job_idx, step_idx, RunStatus::Running, true).await;
+                self.update_step_status(run_id, job_idx, step_idx, RunStatus::Running, true)
+                    .await;
 
-                let result = self.execute_step(run_id, &job_id, step, project_dir, &step_env).await;
+                let result = self
+                    .execute_step(run_id, &job_id, step, project_dir, &step_env)
+                    .await;
 
                 match result {
                     Ok(code) => {
                         if code == 0 {
-                            self.emit_log(run_id, &job_id, &step.name,
-                                &format!("✅ Step '{}' succeeded", step.name), "info").await;
-                            self.update_step_status(run_id, job_idx, step_idx, RunStatus::Success, false).await;
-                            self.update_step_exit_code(run_id, job_idx, step_idx, code).await;
+                            self.emit_log(
+                                run_id,
+                                &job_id,
+                                &step.name,
+                                &format!("✅ Step '{}' succeeded", step.name),
+                                "info",
+                            )
+                            .await;
+                            self.update_step_status(
+                                run_id,
+                                job_idx,
+                                step_idx,
+                                RunStatus::Success,
+                                false,
+                            )
+                            .await;
+                            self.update_step_exit_code(run_id, job_idx, step_idx, code)
+                                .await;
                         } else {
-                            self.emit_log(run_id, &job_id, &step.name,
-                                &format!("❌ Step '{}' failed (exit code: {})", step.name, code), "info").await;
-                            self.update_step_status(run_id, job_idx, step_idx, RunStatus::Failed, false).await;
-                            self.update_step_exit_code(run_id, job_idx, step_idx, code).await;
+                            self.emit_log(
+                                run_id,
+                                &job_id,
+                                &step.name,
+                                &format!("❌ Step '{}' failed (exit code: {})", step.name, code),
+                                "info",
+                            )
+                            .await;
+                            self.update_step_status(
+                                run_id,
+                                job_idx,
+                                step_idx,
+                                RunStatus::Failed,
+                                false,
+                            )
+                            .await;
+                            self.update_step_exit_code(run_id, job_idx, step_idx, code)
+                                .await;
                             job_success = false;
                             break;
                         }
                     }
                     Err(e) => {
-                        self.emit_log(run_id, &job_id, &step.name,
-                            &format!("❌ Step '{}' error: {}", step.name, e), "stderr").await;
-                        self.update_step_status(run_id, job_idx, step_idx, RunStatus::Failed, false).await;
+                        self.emit_log(
+                            run_id,
+                            &job_id,
+                            &step.name,
+                            &format!("❌ Step '{}' error: {}", step.name, e),
+                            "stderr",
+                        )
+                        .await;
+                        self.update_step_status(
+                            run_id,
+                            job_idx,
+                            step_idx,
+                            RunStatus::Failed,
+                            false,
+                        )
+                        .await;
                         job_success = false;
                         break;
                     }
                 }
             }
 
-            let job_status = if job_success { RunStatus::Success } else { RunStatus::Failed };
-            self.update_job_status(run_id, job_idx, job_status, false).await;
+            let job_status = if job_success {
+                RunStatus::Success
+            } else {
+                RunStatus::Failed
+            };
+            self.update_job_status(run_id, job_idx, job_status, false)
+                .await;
 
             if !job_success {
                 all_success = false;
@@ -463,7 +530,11 @@ impl PipelineEngine {
         }
 
         let elapsed = start.elapsed().as_millis() as u64;
-        let final_status = if all_success { RunStatus::Success } else { RunStatus::Failed };
+        let final_status = if all_success {
+            RunStatus::Success
+        } else {
+            RunStatus::Failed
+        };
 
         {
             let mut runs = self.runs.lock().await;
@@ -474,9 +545,19 @@ impl PipelineEngine {
             }
         }
 
-        let status_str = if all_success { "✅ Pipeline succeeded" } else { "❌ Pipeline failed" };
-        self.emit_log(run_id, "", "pipeline",
-            &format!("{} in {:.1}s", status_str, elapsed as f64 / 1000.0), "info").await;
+        let status_str = if all_success {
+            "✅ Pipeline succeeded"
+        } else {
+            "❌ Pipeline failed"
+        };
+        self.emit_log(
+            run_id,
+            "",
+            "pipeline",
+            &format!("{} in {:.1}s", status_str, elapsed as f64 / 1000.0),
+            "info",
+        )
+        .await;
     }
 
     // ==========================================
@@ -494,17 +575,28 @@ impl PipelineEngine {
         if let Some(ref cmd) = step.run {
             // Local shell command
             let expanded = Self::expand_env(cmd, env);
-            self.execute_shell(run_id, job_id, &step.name, &expanded, project_dir, env).await
+            self.execute_shell(run_id, job_id, &step.name, &expanded, project_dir, env)
+                .await
         } else if let Some(ref action) = step.uses {
             let args = step.with_args.clone().unwrap_or_default();
-            let expanded_args: HashMap<String, String> = args.iter()
+            let expanded_args: HashMap<String, String> = args
+                .iter()
                 .map(|(k, v)| (k.clone(), Self::expand_env(v, env)))
                 .collect();
 
             match action.as_str() {
-                "ssh-deploy" => self.execute_ssh_deploy(run_id, job_id, &step.name, &expanded_args, project_dir).await,
-                "ssh-run" => self.execute_ssh_run(run_id, job_id, &step.name, &expanded_args).await,
-                "git-sync" => self.execute_git_sync(run_id, job_id, &step.name, &expanded_args, project_dir).await,
+                "ssh-deploy" => {
+                    self.execute_ssh_deploy(run_id, job_id, &step.name, &expanded_args, project_dir)
+                        .await
+                }
+                "ssh-run" => {
+                    self.execute_ssh_run(run_id, job_id, &step.name, &expanded_args)
+                        .await
+                }
+                "git-sync" => {
+                    self.execute_git_sync(run_id, job_id, &step.name, &expanded_args, project_dir)
+                        .await
+                }
                 _ => Err(format!("Unknown action: {}", action)),
             }
         } else {
@@ -521,7 +613,14 @@ impl PipelineEngine {
         cwd: &Path,
         env: &HashMap<String, String>,
     ) -> Result<i32, String> {
-        self.emit_log(run_id, job_id, step_name, &format!("$ {}", command), "stdout").await;
+        self.emit_log(
+            run_id,
+            job_id,
+            step_name,
+            &format!("$ {}", command),
+            "stdout",
+        )
+        .await;
 
         let mut child = Command::new("sh")
             .arg("-c")
@@ -548,7 +647,9 @@ impl PipelineEngine {
                 let reader = BufReader::new(stdout);
                 let mut lines = reader.lines();
                 while let Ok(Some(line)) = lines.next_line().await {
-                    engine_out.emit_log(&rid_out, &jid_out, &sn_out, &line, "stdout").await;
+                    engine_out
+                        .emit_log(&rid_out, &jid_out, &sn_out, &line, "stdout")
+                        .await;
                 }
             }
         });
@@ -564,7 +665,9 @@ impl PipelineEngine {
                 let reader = BufReader::new(stderr);
                 let mut lines = reader.lines();
                 while let Ok(Some(line)) = lines.next_line().await {
-                    engine_err.emit_log(&rid_err, &jid_err, &sn_err, &line, "stderr").await;
+                    engine_err
+                        .emit_log(&rid_err, &jid_err, &sn_err, &line, "stderr")
+                        .await;
                 }
             }
         });
@@ -588,20 +691,22 @@ impl PipelineEngine {
         let source = args.get("source").ok_or("ssh-deploy: missing 'source'")?;
         let target = args.get("target").ok_or("ssh-deploy: missing 'target'")?;
         let key_path = args.get("key_path");
-        let port = args.get("port").map(|p| p.to_string()).unwrap_or_else(|| "22".to_string());
+        let port = args
+            .get("port")
+            .map(|p| p.to_string())
+            .unwrap_or_else(|| "22".to_string());
 
         let source_path = project_dir.join(source);
         let dest = format!("{}@{}:{}", user, host, target);
 
-        let mut rsync_args = vec![
-            "-avz".to_string(),
-            "--delete".to_string(),
-            "-e".to_string(),
-        ];
+        let mut rsync_args = vec!["-avz".to_string(), "--delete".to_string(), "-e".to_string()];
 
         let ssh_cmd = if let Some(key) = key_path {
             let expanded_key = shellexpand::tilde(key).to_string();
-            format!("ssh -p {} -i {} -o StrictHostKeyChecking=no", port, expanded_key)
+            format!(
+                "ssh -p {} -i {} -o StrictHostKeyChecking=no",
+                port, expanded_key
+            )
         } else {
             format!("ssh -p {} -o StrictHostKeyChecking=no", port)
         };
@@ -611,9 +716,24 @@ impl PipelineEngine {
         rsync_args.push(dest);
 
         let cmd = format!("rsync {}", rsync_args.join(" "));
-        self.emit_log(run_id, job_id, step_name, &format!("🚀 Deploying {} → {}@{}:{}", source, user, host, target), "info").await;
+        self.emit_log(
+            run_id,
+            job_id,
+            step_name,
+            &format!("🚀 Deploying {} → {}@{}:{}", source, user, host, target),
+            "info",
+        )
+        .await;
 
-        self.execute_shell(run_id, job_id, step_name, &cmd, project_dir, &HashMap::new()).await
+        self.execute_shell(
+            run_id,
+            job_id,
+            step_name,
+            &cmd,
+            project_dir,
+            &HashMap::new(),
+        )
+        .await
     }
 
     async fn execute_ssh_run(
@@ -627,11 +747,16 @@ impl PipelineEngine {
         let user = args.get("user").ok_or("ssh-run: missing 'user'")?;
         let command = args.get("command").ok_or("ssh-run: missing 'command'")?;
         let key_path = args.get("key_path");
-        let port = args.get("port").map(|p| p.to_string()).unwrap_or_else(|| "22".to_string());
+        let port = args
+            .get("port")
+            .map(|p| p.to_string())
+            .unwrap_or_else(|| "22".to_string());
 
         let mut ssh_args = vec![
-            "-o".to_string(), "StrictHostKeyChecking=no".to_string(),
-            "-p".to_string(), port,
+            "-o".to_string(),
+            "StrictHostKeyChecking=no".to_string(),
+            "-p".to_string(),
+            port,
         ];
 
         if let Some(key) = key_path {
@@ -645,11 +770,19 @@ impl PipelineEngine {
         ssh_args.push(command.clone());
 
         let cmd = format!("ssh {}", ssh_args.join(" "));
-        self.emit_log(run_id, job_id, step_name, &format!("🔌 SSH {}> {}", dest, command), "info").await;
+        self.emit_log(
+            run_id,
+            job_id,
+            step_name,
+            &format!("🔌 SSH {}> {}", dest, command),
+            "info",
+        )
+        .await;
 
         // Use a temp dir for cwd since this is remote
         let tmp = std::env::temp_dir();
-        self.execute_shell(run_id, job_id, step_name, &cmd, &tmp, &HashMap::new()).await
+        self.execute_shell(run_id, job_id, step_name, &cmd, &tmp, &HashMap::new())
+            .await
     }
 
     async fn execute_git_sync(
@@ -663,10 +796,25 @@ impl PipelineEngine {
         let branch = args.get("branch").map(|s| s.as_str()).unwrap_or("main");
         let remote = args.get("remote").map(|s| s.as_str()).unwrap_or("origin");
 
-        self.emit_log(run_id, job_id, step_name, &format!("🔄 Git sync: {} {}", remote, branch), "info").await;
+        self.emit_log(
+            run_id,
+            job_id,
+            step_name,
+            &format!("🔄 Git sync: {} {}", remote, branch),
+            "info",
+        )
+        .await;
 
         let cmd = format!("git pull {} {}", remote, branch);
-        self.execute_shell(run_id, job_id, step_name, &cmd, project_dir, &HashMap::new()).await
+        self.execute_shell(
+            run_id,
+            job_id,
+            step_name,
+            &cmd,
+            project_dir,
+            &HashMap::new(),
+        )
+        .await
     }
 
     // ==========================================
@@ -725,7 +873,14 @@ impl PipelineEngine {
         Ok(order)
     }
 
-    async fn emit_log(&self, run_id: &str, job_id: &str, step_name: &str, line: &str, event_type: &str) {
+    async fn emit_log(
+        &self,
+        run_id: &str,
+        job_id: &str,
+        step_name: &str,
+        line: &str,
+        event_type: &str,
+    ) {
         let event = LogEvent {
             run_id: run_id.to_string(),
             job_id: job_id.to_string(),
@@ -755,7 +910,13 @@ impl PipelineEngine {
         let _ = self.log_tx.send(event);
     }
 
-    async fn update_job_status(&self, run_id: &str, job_idx: usize, status: RunStatus, is_start: bool) {
+    async fn update_job_status(
+        &self,
+        run_id: &str,
+        job_idx: usize,
+        status: RunStatus,
+        is_start: bool,
+    ) {
         let mut runs = self.runs.lock().await;
         if let Some(run) = runs.iter_mut().find(|r| r.id == run_id) {
             if let Some(job) = run.jobs.get_mut(job_idx) {
@@ -769,7 +930,14 @@ impl PipelineEngine {
         }
     }
 
-    async fn update_step_status(&self, run_id: &str, job_idx: usize, step_idx: usize, status: RunStatus, is_start: bool) {
+    async fn update_step_status(
+        &self,
+        run_id: &str,
+        job_idx: usize,
+        step_idx: usize,
+        status: RunStatus,
+        is_start: bool,
+    ) {
         let mut runs = self.runs.lock().await;
         if let Some(run) = runs.iter_mut().find(|r| r.id == run_id) {
             if let Some(job) = run.jobs.get_mut(job_idx) {
@@ -785,7 +953,13 @@ impl PipelineEngine {
         }
     }
 
-    async fn update_step_exit_code(&self, run_id: &str, job_idx: usize, step_idx: usize, code: i32) {
+    async fn update_step_exit_code(
+        &self,
+        run_id: &str,
+        job_idx: usize,
+        step_idx: usize,
+        code: i32,
+    ) {
         let mut runs = self.runs.lock().await;
         if let Some(run) = runs.iter_mut().find(|r| r.id == run_id) {
             if let Some(job) = run.jobs.get_mut(job_idx) {

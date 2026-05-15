@@ -67,14 +67,14 @@ async fn format_go(code: &str) -> Result<String> {
 /// Format code using AI with custom instructions (AI Formatter Ultra)
 pub async fn format_with_ai(code: &str, language: &str, instructions: &str) -> Result<String> {
     use crate::models::AIConfig;
-    
+
     // Default to a capable model for formatting
     let config = AIConfig {
         provider: "gemini".to_string(), // Or make this configurable
         model: "gemini-2.5-flash".to_string(),
         api_key: "".to_string(), // Will use env var
-        temperature: 0.1, // Low temperature for deterministic formatting
-        max_tokens: 8192, // High token limit for long code
+        temperature: 0.1,        // Low temperature for deterministic formatting
+        max_tokens: 8192,        // High token limit for long code
         microrent_token: None,
         use_microrent_proxy: false,
     };
@@ -90,15 +90,18 @@ pub async fn format_with_ai(code: &str, language: &str, instructions: &str) -> R
     let formatted = crate::ai::get_provider(&config.provider)?
         .generate(&prompt, &config)
         .await?;
-        
+
     // Clean up potential markdown if the model ignored instructions
     let clean_code = if formatted.starts_with("```") {
-         let lines: Vec<&str> = formatted.lines().collect();
-         if lines.len() >= 2 && lines[0].starts_with("```") && lines.last().unwrap_or(&"").starts_with("```") {
-             lines[1..lines.len()-1].join("\n")
-         } else {
-             formatted
-         }
+        let lines: Vec<&str> = formatted.lines().collect();
+        if lines.len() >= 2
+            && lines[0].starts_with("```")
+            && lines.last().unwrap_or(&"").starts_with("```")
+        {
+            lines[1..lines.len() - 1].join("\n")
+        } else {
+            formatted
+        }
     } else {
         formatted
     };
@@ -107,14 +110,10 @@ pub async fn format_with_ai(code: &str, language: &str, instructions: &str) -> R
 }
 
 /// Try to format code using an external command
-async fn try_format_with_command(
-    command: &str,
-    args: &[&str],
-    code: &str,
-) -> Result<String> {
+async fn try_format_with_command(command: &str, args: &[&str], code: &str) -> Result<String> {
+    use std::process::Stdio;
     use tokio::io::AsyncWriteExt;
     use tokio::process::Command;
-    use std::process::Stdio;
 
     let mut child = Command::new(command)
         .args(args)

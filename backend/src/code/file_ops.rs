@@ -34,25 +34,17 @@ pub async fn list_directory(path: &str) -> Result<Vec<FileInfo>> {
         let metadata = entry.metadata().await?;
 
         let file_info = FileInfo {
-            name: entry
-                .file_name()
-                .to_string_lossy()
-                .to_string(),
+            name: entry.file_name().to_string_lossy().to_string(),
             path: path.to_string_lossy().to_string(),
             is_directory: metadata.is_dir(),
             size: metadata.len(),
-            modified: metadata
-                .modified()
-                .ok()
-                .and_then(|time| {
-                    time.duration_since(std::time::UNIX_EPOCH)
-                        .ok()
-                        .map(|d| {
-                            chrono::DateTime::from_timestamp(d.as_secs() as i64, 0)
-                                .map(|dt| dt.to_rfc3339())
-                                .unwrap_or_default()
-                        })
-                }),
+            modified: metadata.modified().ok().and_then(|time| {
+                time.duration_since(std::time::UNIX_EPOCH).ok().map(|d| {
+                    chrono::DateTime::from_timestamp(d.as_secs() as i64, 0)
+                        .map(|dt| dt.to_rfc3339())
+                        .unwrap_or_default()
+                })
+            }),
             extension: path
                 .extension()
                 .and_then(|ext| ext.to_str())
@@ -63,12 +55,10 @@ pub async fn list_directory(path: &str) -> Result<Vec<FileInfo>> {
     }
 
     // Sort: directories first, then by name
-    files.sort_by(|a, b| {
-        match (a.is_directory, b.is_directory) {
-            (true, false) => std::cmp::Ordering::Less,
-            (false, true) => std::cmp::Ordering::Greater,
-            _ => a.name.to_lowercase().cmp(&b.name.to_lowercase()),
-        }
+    files.sort_by(|a, b| match (a.is_directory, b.is_directory) {
+        (true, false) => std::cmp::Ordering::Less,
+        (false, true) => std::cmp::Ordering::Greater,
+        _ => a.name.to_lowercase().cmp(&b.name.to_lowercase()),
     });
 
     Ok(files)
@@ -92,37 +82,33 @@ pub async fn list_directory_recursive(path: &str) -> Result<Vec<FileInfo>> {
     let mut files = Vec::new();
 
     for entry in WalkDir::new(path).follow_links(false) {
-        let entry = entry.map_err(|e| AppError::IoError(std::io::Error::new(
-            std::io::ErrorKind::Other,
-            e.to_string(),
-        )))?;
+        let entry = entry.map_err(|e| {
+            AppError::IoError(std::io::Error::new(
+                std::io::ErrorKind::Other,
+                e.to_string(),
+            ))
+        })?;
 
         let path = entry.path();
-        let metadata = entry.metadata().map_err(|e| AppError::IoError(std::io::Error::new(
-            std::io::ErrorKind::Other,
-            e.to_string(),
-        )))?;
+        let metadata = entry.metadata().map_err(|e| {
+            AppError::IoError(std::io::Error::new(
+                std::io::ErrorKind::Other,
+                e.to_string(),
+            ))
+        })?;
 
         let file_info = FileInfo {
-            name: entry
-                .file_name()
-                .to_string_lossy()
-                .to_string(),
+            name: entry.file_name().to_string_lossy().to_string(),
             path: path.to_string_lossy().to_string(),
             is_directory: metadata.is_dir(),
             size: metadata.len(),
-            modified: metadata
-                .modified()
-                .ok()
-                .and_then(|time| {
-                    time.duration_since(std::time::UNIX_EPOCH)
-                        .ok()
-                        .map(|d| {
-                            chrono::DateTime::from_timestamp(d.as_secs() as i64, 0)
-                                .map(|dt| dt.to_rfc3339())
-                                .unwrap_or_default()
-                        })
-                }),
+            modified: metadata.modified().ok().and_then(|time| {
+                time.duration_since(std::time::UNIX_EPOCH).ok().map(|d| {
+                    chrono::DateTime::from_timestamp(d.as_secs() as i64, 0)
+                        .map(|dt| dt.to_rfc3339())
+                        .unwrap_or_default()
+                })
+            }),
             extension: path
                 .extension()
                 .and_then(|ext| ext.to_str())
@@ -150,14 +136,14 @@ pub async fn read_file(path: &str) -> Result<String> {
         )));
     }
 
-    let mut file = fs::File::open(path).await.map_err(|e| {
-        AppError::FileReadError(format!("Failed to open file {}: {}", path, e))
-    })?;
+    let mut file = fs::File::open(path)
+        .await
+        .map_err(|e| AppError::FileReadError(format!("Failed to open file {}: {}", path, e)))?;
 
     let mut contents = String::new();
-    file.read_to_string(&mut contents).await.map_err(|e| {
-        AppError::FileReadError(format!("Failed to read file {}: {}", path, e))
-    })?;
+    file.read_to_string(&mut contents)
+        .await
+        .map_err(|e| AppError::FileReadError(format!("Failed to read file {}: {}", path, e)))?;
 
     Ok(contents)
 }
@@ -178,17 +164,17 @@ pub async fn write_file(path: &str, content: &str) -> Result<()> {
         }
     }
 
-    let mut file = fs::File::create(path).await.map_err(|e| {
-        AppError::FileWriteError(format!("Failed to create file {}: {}", path, e))
-    })?;
+    let mut file = fs::File::create(path)
+        .await
+        .map_err(|e| AppError::FileWriteError(format!("Failed to create file {}: {}", path, e)))?;
 
     file.write_all(content.as_bytes()).await.map_err(|e| {
         AppError::FileWriteError(format!("Failed to write to file {}: {}", path, e))
     })?;
 
-    file.sync_all().await.map_err(|e| {
-        AppError::FileWriteError(format!("Failed to sync file {}: {}", path, e))
-    })?;
+    file.sync_all()
+        .await
+        .map_err(|e| AppError::FileWriteError(format!("Failed to sync file {}: {}", path, e)))?;
 
     Ok(())
 }
@@ -202,13 +188,13 @@ pub async fn delete_file(path: &str) -> Result<()> {
     }
 
     if path_buf.is_dir() {
-        fs::remove_dir_all(path).await.map_err(|e| {
-            AppError::IoError(e)
-        })?;
+        fs::remove_dir_all(path)
+            .await
+            .map_err(|e| AppError::IoError(e))?;
     } else {
-        fs::remove_file(path).await.map_err(|e| {
-            AppError::IoError(e)
-        })?;
+        fs::remove_file(path)
+            .await
+            .map_err(|e| AppError::IoError(e))?;
     }
 
     Ok(())
@@ -216,9 +202,9 @@ pub async fn delete_file(path: &str) -> Result<()> {
 
 /// Create a new directory
 pub async fn create_directory(path: &str) -> Result<()> {
-    fs::create_dir_all(path).await.map_err(|e| {
-        AppError::IoError(e)
-    })?;
+    fs::create_dir_all(path)
+        .await
+        .map_err(|e| AppError::IoError(e))?;
 
     Ok(())
 }
@@ -256,18 +242,13 @@ pub async fn get_metadata(path: &str) -> Result<FileInfo> {
         path: path.to_string(),
         is_directory: metadata.is_dir(),
         size: metadata.len(),
-        modified: metadata
-            .modified()
-            .ok()
-            .and_then(|time| {
-                time.duration_since(std::time::UNIX_EPOCH)
-                    .ok()
-                    .map(|d| {
-                        chrono::DateTime::from_timestamp(d.as_secs() as i64, 0)
-                            .map(|dt| dt.to_rfc3339())
-                            .unwrap_or_default()
-                    })
-            }),
+        modified: metadata.modified().ok().and_then(|time| {
+            time.duration_since(std::time::UNIX_EPOCH).ok().map(|d| {
+                chrono::DateTime::from_timestamp(d.as_secs() as i64, 0)
+                    .map(|dt| dt.to_rfc3339())
+                    .unwrap_or_default()
+            })
+        }),
         extension: path_buf
             .extension()
             .and_then(|ext| ext.to_str())

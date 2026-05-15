@@ -95,7 +95,10 @@ impl McpContext {
 
         for tr in &self.tool_results {
             let status = if tr.success { "OK" } else { "FAIL" };
-            parts.push(format!("[Tool: {} ({})] {}", tr.tool_name, status, tr.result));
+            parts.push(format!(
+                "[Tool: {} ({})] {}",
+                tr.tool_name, status, tr.result
+            ));
         }
 
         parts.join("\n\n")
@@ -106,7 +109,7 @@ impl McpContext {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ChatMessage {
-    pub role: String,      // "system", "user", "assistant"
+    pub role: String, // "system", "user", "assistant"
     pub content: String,
 }
 
@@ -137,7 +140,9 @@ pub trait LlmProvider: Send + Sync {
         max_tokens: u32,
     ) -> Result<String, LlmError> {
         use futures::StreamExt;
-        let mut stream = self.stream_completion(messages, system_prompt, context, model, max_tokens).await?;
+        let mut stream = self
+            .stream_completion(messages, system_prompt, context, model, max_tokens)
+            .await?;
         let mut result = String::new();
         while let Some(chunk) = stream.next().await {
             match chunk {
@@ -183,7 +188,10 @@ impl ProviderRegistry {
 
         if let Some(key) = keys.get("anthropic") {
             if !key.is_empty() {
-                registry.register("anthropic", Box::new(anthropic::AnthropicProvider::new(key.clone())));
+                registry.register(
+                    "anthropic",
+                    Box::new(anthropic::AnthropicProvider::new(key.clone())),
+                );
             }
         }
         if let Some(key) = keys.get("gemini") {

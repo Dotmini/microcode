@@ -16,7 +16,11 @@ use std::env;
 #[async_trait]
 pub trait AIProvider: Send + Sync {
     async fn generate(&self, prompt: &str, config: &AIConfig) -> Result<String>;
-    async fn generate_stream(&self, prompt: &str, config: &AIConfig) -> Result<futures::stream::BoxStream<'static, Result<String>>>;
+    async fn generate_stream(
+        &self,
+        prompt: &str,
+        config: &AIConfig,
+    ) -> Result<futures::stream::BoxStream<'static, Result<String>>>;
     fn name(&self) -> &str;
     fn models(&self) -> Vec<AIModel>;
 }
@@ -40,12 +44,19 @@ impl GeminiProvider {
 #[async_trait]
 impl AIProvider for GeminiProvider {
     async fn generate(&self, prompt: &str, config: &AIConfig) -> Result<String> {
-        let (url, auth_header) = if config.use_microrent_proxy || env::var("USE_MICRORENT_PROXY").unwrap_or_else(|_| "0".to_string()) == "1" {
-            let proxy_url = env::var("MICRORENT_PROXY_URL")
-                .map_err(|_| AppError::AIProviderError("MICRORENT_PROXY_URL not configured".to_string()))?;
-            let token = config.microrent_token.clone()
+        let (url, auth_header) = if config.use_microrent_proxy
+            || env::var("USE_MICRORENT_PROXY").unwrap_or_else(|_| "0".to_string()) == "1"
+        {
+            let proxy_url = env::var("MICRORENT_PROXY_URL").map_err(|_| {
+                AppError::AIProviderError("MICRORENT_PROXY_URL not configured".to_string())
+            })?;
+            let token = config
+                .microrent_token
+                .clone()
                 .or_else(|| env::var("MICRORENT_TOKEN").ok())
-                .ok_or_else(|| AppError::AIProviderError("MICRORENT_TOKEN not found for Gateway".to_string()))?;
+                .ok_or_else(|| {
+                    AppError::AIProviderError("MICRORENT_TOKEN not found for Gateway".to_string())
+                })?;
             (proxy_url, format!("Bearer {}", token))
         } else {
             let api_key = if config.api_key.is_empty() {
@@ -153,13 +164,24 @@ impl AIProvider for GeminiProvider {
             .ok_or_else(|| AppError::AIRequestFailed("No response from Gemini".to_string()))
     }
 
-    async fn generate_stream(&self, prompt: &str, config: &AIConfig) -> Result<futures::stream::BoxStream<'static, Result<String>>> {
-        let (url, auth_header) = if config.use_microrent_proxy || env::var("USE_MICRORENT_PROXY").unwrap_or_else(|_| "0".to_string()) == "1" {
-            let proxy_url = env::var("MICRORENT_PROXY_URL")
-                .map_err(|_| AppError::AIProviderError("MICRORENT_PROXY_URL not configured".to_string()))?;
-            let token = config.microrent_token.clone()
+    async fn generate_stream(
+        &self,
+        prompt: &str,
+        config: &AIConfig,
+    ) -> Result<futures::stream::BoxStream<'static, Result<String>>> {
+        let (url, auth_header) = if config.use_microrent_proxy
+            || env::var("USE_MICRORENT_PROXY").unwrap_or_else(|_| "0".to_string()) == "1"
+        {
+            let proxy_url = env::var("MICRORENT_PROXY_URL").map_err(|_| {
+                AppError::AIProviderError("MICRORENT_PROXY_URL not configured".to_string())
+            })?;
+            let token = config
+                .microrent_token
+                .clone()
                 .or_else(|| env::var("MICRORENT_TOKEN").ok())
-                .ok_or_else(|| AppError::AIProviderError("MICRORENT_TOKEN not found for Gateway".to_string()))?;
+                .ok_or_else(|| {
+                    AppError::AIProviderError("MICRORENT_TOKEN not found for Gateway".to_string())
+                })?;
             (proxy_url, format!("Bearer {}", token))
         } else {
             let api_key = if config.api_key.is_empty() {
@@ -235,22 +257,22 @@ impl AIProvider for GeminiProvider {
         }
 
         use futures::StreamExt;
-        
+
         let mut stream = response.bytes_stream();
         let re = std::sync::OnceLock::new();
-        
+
         // Manual stream implementation with proper buffer management
         let stream = async_stream::stream! {
             let re = re.get_or_init(|| regex::Regex::new(r#""text":\s*"([^"]*)""#).unwrap());
             let mut buffer = String::new();
             const OVERLAP: usize = 200; // Keep last N bytes for split-token handling
-            
+
             while let Some(chunk_res) = stream.next().await {
                 match chunk_res {
                     Ok(bytes) => {
                         let s = String::from_utf8_lossy(&bytes);
                         buffer.push_str(&s);
-                        
+
                         // Find all matches in accumulated buffer
                         let mut last_match_end = 0;
                         for cap in re.captures_iter(&buffer) {
@@ -260,7 +282,7 @@ impl AIProvider for GeminiProvider {
                             }
                             yield Ok(part);
                         }
-                        
+
                         // Trim processed content, keeping overlap for split tokens
                         if last_match_end > 0 && buffer.len() > OVERLAP {
                             let trim_to = last_match_end.saturating_sub(OVERLAP);
@@ -337,12 +359,19 @@ impl OpenAIProvider {
 #[async_trait]
 impl AIProvider for OpenAIProvider {
     async fn generate(&self, prompt: &str, config: &AIConfig) -> Result<String> {
-        let (url, auth_header) = if config.use_microrent_proxy || env::var("USE_MICRORENT_PROXY").unwrap_or_else(|_| "0".to_string()) == "1" {
-            let proxy_url = env::var("MICRORENT_PROXY_URL")
-                .map_err(|_| AppError::AIProviderError("MICRORENT_PROXY_URL not configured".to_string()))?;
-            let token = config.microrent_token.clone()
+        let (url, auth_header) = if config.use_microrent_proxy
+            || env::var("USE_MICRORENT_PROXY").unwrap_or_else(|_| "0".to_string()) == "1"
+        {
+            let proxy_url = env::var("MICRORENT_PROXY_URL").map_err(|_| {
+                AppError::AIProviderError("MICRORENT_PROXY_URL not configured".to_string())
+            })?;
+            let token = config
+                .microrent_token
+                .clone()
                 .or_else(|| env::var("MICRORENT_TOKEN").ok())
-                .ok_or_else(|| AppError::AIProviderError("MICRORENT_TOKEN not found for Gateway".to_string()))?;
+                .ok_or_else(|| {
+                    AppError::AIProviderError("MICRORENT_TOKEN not found for Gateway".to_string())
+                })?;
             (proxy_url, format!("Bearer {}", token))
         } else {
             let api_key = if config.api_key.is_empty() {
@@ -352,7 +381,10 @@ impl AIProvider for OpenAIProvider {
             } else {
                 config.api_key.clone()
             };
-            ("https://api.openai.com/v1/chat/completions".to_string(), format!("Bearer {}", api_key))
+            (
+                "https://api.openai.com/v1/chat/completions".to_string(),
+                format!("Bearer {}", api_key),
+            )
         };
 
         #[derive(Serialize)]
@@ -401,7 +433,9 @@ impl AIProvider for OpenAIProvider {
             .header("Content-Type", "application/json")
             .json(&request);
 
-        if config.use_microrent_proxy || env::var("USE_MICRORENT_PROXY").unwrap_or_else(|_| "0".to_string()) == "1" {
+        if config.use_microrent_proxy
+            || env::var("USE_MICRORENT_PROXY").unwrap_or_else(|_| "0".to_string()) == "1"
+        {
             request_builder = request_builder
                 .header("x-microrent-provider", "openai")
                 .header("x-microrent-model", &config.model)
@@ -433,13 +467,24 @@ impl AIProvider for OpenAIProvider {
             .ok_or_else(|| AppError::AIRequestFailed("No response from OpenAI".to_string()))
     }
 
-    async fn generate_stream(&self, prompt: &str, config: &AIConfig) -> Result<futures::stream::BoxStream<'static, Result<String>>> {
-        let (url, auth_header) = if config.use_microrent_proxy || env::var("USE_MICRORENT_PROXY").unwrap_or_else(|_| "0".to_string()) == "1" {
-            let proxy_url = env::var("MICRORENT_PROXY_URL")
-                .map_err(|_| AppError::AIProviderError("MICRORENT_PROXY_URL not configured".to_string()))?;
-            let token = config.microrent_token.clone()
+    async fn generate_stream(
+        &self,
+        prompt: &str,
+        config: &AIConfig,
+    ) -> Result<futures::stream::BoxStream<'static, Result<String>>> {
+        let (url, auth_header) = if config.use_microrent_proxy
+            || env::var("USE_MICRORENT_PROXY").unwrap_or_else(|_| "0".to_string()) == "1"
+        {
+            let proxy_url = env::var("MICRORENT_PROXY_URL").map_err(|_| {
+                AppError::AIProviderError("MICRORENT_PROXY_URL not configured".to_string())
+            })?;
+            let token = config
+                .microrent_token
+                .clone()
                 .or_else(|| env::var("MICRORENT_TOKEN").ok())
-                .ok_or_else(|| AppError::AIProviderError("MICRORENT_TOKEN not found for Gateway".to_string()))?;
+                .ok_or_else(|| {
+                    AppError::AIProviderError("MICRORENT_TOKEN not found for Gateway".to_string())
+                })?;
             (proxy_url, format!("Bearer {}", token))
         } else {
             let api_key = if config.api_key.is_empty() {
@@ -449,7 +494,10 @@ impl AIProvider for OpenAIProvider {
             } else {
                 config.api_key.clone()
             };
-            ("https://api.openai.com/v1/chat/completions".to_string(), format!("Bearer {}", api_key))
+            (
+                "https://api.openai.com/v1/chat/completions".to_string(),
+                format!("Bearer {}", api_key),
+            )
         };
 
         #[derive(Serialize)]
@@ -484,8 +532,10 @@ impl AIProvider for OpenAIProvider {
             .header("Authorization", auth_header)
             .header("Content-Type", "application/json")
             .json(&request);
-            
-        if config.use_microrent_proxy || env::var("USE_MICRORENT_PROXY").unwrap_or_else(|_| "0".to_string()) == "1" {
+
+        if config.use_microrent_proxy
+            || env::var("USE_MICRORENT_PROXY").unwrap_or_else(|_| "0".to_string()) == "1"
+        {
             request_builder = request_builder
                 .header("x-microrent-provider", "openai")
                 .header("x-microrent-model", &config.model)
@@ -505,28 +555,27 @@ impl AIProvider for OpenAIProvider {
             )));
         }
 
-        use futures::StreamExt;
         use eventsource_stream::Eventsource;
+        use futures::StreamExt;
 
-        let stream = response.bytes_stream()
+        let stream = response
+            .bytes_stream()
             .eventsource()
-            .map(|event| {
-                match event {
-                    Ok(event) => {
-                        if event.data == "[DONE]" {
-                            return Ok("".to_string());
-                        }
-                        let json: serde_json::Value = serde_json::from_str(&event.data)
-                            .map_err(|e| AppError::AIRequestFailed(e.to_string()))?;
-                        
-                        let content = json["choices"][0]["delta"]["content"]
-                            .as_str()
-                            .unwrap_or("")
-                            .to_string();
-                        Ok(content)
+            .map(|event| match event {
+                Ok(event) => {
+                    if event.data == "[DONE]" {
+                        return Ok("".to_string());
                     }
-                    Err(e) => Err(AppError::AIRequestFailed(e.to_string())),
+                    let json: serde_json::Value = serde_json::from_str(&event.data)
+                        .map_err(|e| AppError::AIRequestFailed(e.to_string()))?;
+
+                    let content = json["choices"][0]["delta"]["content"]
+                        .as_str()
+                        .unwrap_or("")
+                        .to_string();
+                    Ok(content)
                 }
+                Err(e) => Err(AppError::AIRequestFailed(e.to_string())),
             })
             .boxed();
 
@@ -592,12 +641,19 @@ impl ClaudeProvider {
 #[async_trait]
 impl AIProvider for ClaudeProvider {
     async fn generate(&self, prompt: &str, config: &AIConfig) -> Result<String> {
-        let (url, auth_header) = if config.use_microrent_proxy || env::var("USE_MICRORENT_PROXY").unwrap_or_else(|_| "0".to_string()) == "1" {
-            let proxy_url = env::var("MICRORENT_PROXY_URL")
-                .map_err(|_| AppError::AIProviderError("MICRORENT_PROXY_URL not configured".to_string()))?;
-            let token = config.microrent_token.clone()
+        let (url, auth_header) = if config.use_microrent_proxy
+            || env::var("USE_MICRORENT_PROXY").unwrap_or_else(|_| "0".to_string()) == "1"
+        {
+            let proxy_url = env::var("MICRORENT_PROXY_URL").map_err(|_| {
+                AppError::AIProviderError("MICRORENT_PROXY_URL not configured".to_string())
+            })?;
+            let token = config
+                .microrent_token
+                .clone()
                 .or_else(|| env::var("MICRORENT_TOKEN").ok())
-                .ok_or_else(|| AppError::AIProviderError("MICRORENT_TOKEN not found for Gateway".to_string()))?;
+                .ok_or_else(|| {
+                    AppError::AIProviderError("MICRORENT_TOKEN not found for Gateway".to_string())
+                })?;
             (proxy_url, format!("Bearer {}", token))
         } else {
             let api_key = if config.api_key.is_empty() {
@@ -644,11 +700,11 @@ impl AIProvider for ClaudeProvider {
             temperature: config.temperature,
         };
 
-        let mut request_builder = self
-            .client
-            .post(url);
-            
-        if config.use_microrent_proxy || env::var("USE_MICRORENT_PROXY").unwrap_or_else(|_| "0".to_string()) == "1" {
+        let mut request_builder = self.client.post(url);
+
+        if config.use_microrent_proxy
+            || env::var("USE_MICRORENT_PROXY").unwrap_or_else(|_| "0".to_string()) == "1"
+        {
             request_builder = request_builder
                 .header("Authorization", auth_header)
                 .header("x-microrent-provider", "anthropic")
@@ -687,13 +743,24 @@ impl AIProvider for ClaudeProvider {
             .ok_or_else(|| AppError::AIRequestFailed("No response from Claude".to_string()))
     }
 
-    async fn generate_stream(&self, prompt: &str, config: &AIConfig) -> Result<futures::stream::BoxStream<'static, Result<String>>> {
-        let (url, auth_header) = if config.use_microrent_proxy || env::var("USE_MICRORENT_PROXY").unwrap_or_else(|_| "0".to_string()) == "1" {
-            let proxy_url = env::var("MICRORENT_PROXY_URL")
-                .map_err(|_| AppError::AIProviderError("MICRORENT_PROXY_URL not configured".to_string()))?;
-            let token = config.microrent_token.clone()
+    async fn generate_stream(
+        &self,
+        prompt: &str,
+        config: &AIConfig,
+    ) -> Result<futures::stream::BoxStream<'static, Result<String>>> {
+        let (url, auth_header) = if config.use_microrent_proxy
+            || env::var("USE_MICRORENT_PROXY").unwrap_or_else(|_| "0".to_string()) == "1"
+        {
+            let proxy_url = env::var("MICRORENT_PROXY_URL").map_err(|_| {
+                AppError::AIProviderError("MICRORENT_PROXY_URL not configured".to_string())
+            })?;
+            let token = config
+                .microrent_token
+                .clone()
                 .or_else(|| env::var("MICRORENT_TOKEN").ok())
-                .ok_or_else(|| AppError::AIProviderError("MICRORENT_TOKEN not found for Gateway".to_string()))?;
+                .ok_or_else(|| {
+                    AppError::AIProviderError("MICRORENT_TOKEN not found for Gateway".to_string())
+                })?;
             (proxy_url, format!("Bearer {}", token))
         } else {
             let api_key = if config.api_key.is_empty() {
@@ -732,11 +799,11 @@ impl AIProvider for ClaudeProvider {
             stream: true,
         };
 
-        let mut request_builder = self
-            .client
-            .post(url);
-            
-        if config.use_microrent_proxy || env::var("USE_MICRORENT_PROXY").unwrap_or_else(|_| "0".to_string()) == "1" {
+        let mut request_builder = self.client.post(url);
+
+        if config.use_microrent_proxy
+            || env::var("USE_MICRORENT_PROXY").unwrap_or_else(|_| "0".to_string()) == "1"
+        {
             request_builder = request_builder
                 .header("Authorization", auth_header)
                 .header("x-microrent-provider", "anthropic")
@@ -763,29 +830,25 @@ impl AIProvider for ClaudeProvider {
             )));
         }
 
-        use futures::StreamExt;
         use eventsource_stream::Eventsource;
+        use futures::StreamExt;
 
-        let stream = response.bytes_stream()
+        let stream = response
+            .bytes_stream()
             .eventsource()
-            .map(|event| {
-                match event {
-                    Ok(event) => {
-                        let json: serde_json::Value = serde_json::from_str(&event.data)
-                            .map_err(|e| AppError::AIRequestFailed(e.to_string()))?;
-                        
-                        if json["type"] == "content_block_delta" {
-                            let content = json["delta"]["text"]
-                                .as_str()
-                                .unwrap_or("")
-                                .to_string();
-                            Ok(content)
-                        } else {
-                            Ok("".to_string())
-                        }
+            .map(|event| match event {
+                Ok(event) => {
+                    let json: serde_json::Value = serde_json::from_str(&event.data)
+                        .map_err(|e| AppError::AIRequestFailed(e.to_string()))?;
+
+                    if json["type"] == "content_block_delta" {
+                        let content = json["delta"]["text"].as_str().unwrap_or("").to_string();
+                        Ok(content)
+                    } else {
+                        Ok("".to_string())
                     }
-                    Err(e) => Err(AppError::AIRequestFailed(e.to_string())),
                 }
+                Err(e) => Err(AppError::AIRequestFailed(e.to_string())),
             })
             .boxed();
 
@@ -845,12 +908,19 @@ impl DeepSeekProvider {
 #[async_trait]
 impl AIProvider for DeepSeekProvider {
     async fn generate(&self, prompt: &str, config: &AIConfig) -> Result<String> {
-        let (url, auth_header) = if config.use_microrent_proxy || env::var("USE_MICRORENT_PROXY").unwrap_or_else(|_| "0".to_string()) == "1" {
-            let proxy_url = env::var("MICRORENT_PROXY_URL")
-                .map_err(|_| AppError::AIProviderError("MICRORENT_PROXY_URL not configured".to_string()))?;
-            let token = config.microrent_token.clone()
+        let (url, auth_header) = if config.use_microrent_proxy
+            || env::var("USE_MICRORENT_PROXY").unwrap_or_else(|_| "0".to_string()) == "1"
+        {
+            let proxy_url = env::var("MICRORENT_PROXY_URL").map_err(|_| {
+                AppError::AIProviderError("MICRORENT_PROXY_URL not configured".to_string())
+            })?;
+            let token = config
+                .microrent_token
+                .clone()
                 .or_else(|| env::var("MICRORENT_TOKEN").ok())
-                .ok_or_else(|| AppError::AIProviderError("MICRORENT_TOKEN not found for Gateway".to_string()))?;
+                .ok_or_else(|| {
+                    AppError::AIProviderError("MICRORENT_TOKEN not found for Gateway".to_string())
+                })?;
             (proxy_url, format!("Bearer {}", token))
         } else {
             let api_key = if config.api_key.is_empty() {
@@ -860,7 +930,10 @@ impl AIProvider for DeepSeekProvider {
             } else {
                 config.api_key.clone()
             };
-            ("https://api.deepseek.com/chat/completions".to_string(), format!("Bearer {}", api_key))
+            (
+                "https://api.deepseek.com/chat/completions".to_string(),
+                format!("Bearer {}", api_key),
+            )
         };
 
         #[derive(Serialize)]
@@ -908,8 +981,10 @@ impl AIProvider for DeepSeekProvider {
             .header("Authorization", auth_header)
             .header("Content-Type", "application/json")
             .json(&request);
-            
-        if config.use_microrent_proxy || env::var("USE_MICRORENT_PROXY").unwrap_or_else(|_| "0".to_string()) == "1" {
+
+        if config.use_microrent_proxy
+            || env::var("USE_MICRORENT_PROXY").unwrap_or_else(|_| "0".to_string()) == "1"
+        {
             request_builder = request_builder
                 .header("x-microrent-provider", "openai") // DeepSeek uses OpenAI format
                 .header("x-microrent-model", &config.model)
@@ -941,13 +1016,24 @@ impl AIProvider for DeepSeekProvider {
             .ok_or_else(|| AppError::AIRequestFailed("No response from DeepSeek".to_string()))
     }
 
-    async fn generate_stream(&self, prompt: &str, config: &AIConfig) -> Result<futures::stream::BoxStream<'static, Result<String>>> {
-        let (url, auth_header) = if config.use_microrent_proxy || env::var("USE_MICRORENT_PROXY").unwrap_or_else(|_| "0".to_string()) == "1" {
-            let proxy_url = env::var("MICRORENT_PROXY_URL")
-                .map_err(|_| AppError::AIProviderError("MICRORENT_PROXY_URL not configured".to_string()))?;
-            let token = config.microrent_token.clone()
+    async fn generate_stream(
+        &self,
+        prompt: &str,
+        config: &AIConfig,
+    ) -> Result<futures::stream::BoxStream<'static, Result<String>>> {
+        let (url, auth_header) = if config.use_microrent_proxy
+            || env::var("USE_MICRORENT_PROXY").unwrap_or_else(|_| "0".to_string()) == "1"
+        {
+            let proxy_url = env::var("MICRORENT_PROXY_URL").map_err(|_| {
+                AppError::AIProviderError("MICRORENT_PROXY_URL not configured".to_string())
+            })?;
+            let token = config
+                .microrent_token
+                .clone()
                 .or_else(|| env::var("MICRORENT_TOKEN").ok())
-                .ok_or_else(|| AppError::AIProviderError("MICRORENT_TOKEN not found for Gateway".to_string()))?;
+                .ok_or_else(|| {
+                    AppError::AIProviderError("MICRORENT_TOKEN not found for Gateway".to_string())
+                })?;
             (proxy_url, format!("Bearer {}", token))
         } else {
             let api_key = if config.api_key.is_empty() {
@@ -957,7 +1043,10 @@ impl AIProvider for DeepSeekProvider {
             } else {
                 config.api_key.clone()
             };
-            ("https://api.deepseek.com/chat/completions".to_string(), format!("Bearer {}", api_key))
+            (
+                "https://api.deepseek.com/chat/completions".to_string(),
+                format!("Bearer {}", api_key),
+            )
         };
 
         #[derive(Serialize)]
@@ -992,8 +1081,10 @@ impl AIProvider for DeepSeekProvider {
             .header("Authorization", auth_header)
             .header("Content-Type", "application/json")
             .json(&request);
-            
-        if config.use_microrent_proxy || env::var("USE_MICRORENT_PROXY").unwrap_or_else(|_| "0".to_string()) == "1" {
+
+        if config.use_microrent_proxy
+            || env::var("USE_MICRORENT_PROXY").unwrap_or_else(|_| "0".to_string()) == "1"
+        {
             request_builder = request_builder
                 .header("x-microrent-provider", "openai") // DeepSeek uses OpenAI format
                 .header("x-microrent-model", &config.model)
@@ -1013,28 +1104,27 @@ impl AIProvider for DeepSeekProvider {
             )));
         }
 
-        use futures::StreamExt;
         use eventsource_stream::Eventsource;
+        use futures::StreamExt;
 
-        let stream = response.bytes_stream()
+        let stream = response
+            .bytes_stream()
             .eventsource()
-            .map(|event| {
-                match event {
-                    Ok(event) => {
-                        if event.data == "[DONE]" {
-                            return Ok("".to_string());
-                        }
-                        let json: serde_json::Value = serde_json::from_str(&event.data)
-                            .map_err(|e| AppError::AIRequestFailed(e.to_string()))?;
-                        
-                        let content = json["choices"][0]["delta"]["content"]
-                            .as_str()
-                            .unwrap_or("")
-                            .to_string();
-                        Ok(content)
+            .map(|event| match event {
+                Ok(event) => {
+                    if event.data == "[DONE]" {
+                        return Ok("".to_string());
                     }
-                    Err(e) => Err(AppError::AIRequestFailed(e.to_string())),
+                    let json: serde_json::Value = serde_json::from_str(&event.data)
+                        .map_err(|e| AppError::AIRequestFailed(e.to_string()))?;
+
+                    let content = json["choices"][0]["delta"]["content"]
+                        .as_str()
+                        .unwrap_or("")
+                        .to_string();
+                    Ok(content)
                 }
+                Err(e) => Err(AppError::AIRequestFailed(e.to_string())),
             })
             .boxed();
 
@@ -1095,9 +1185,8 @@ impl GLMProvider {
 impl AIProvider for GLMProvider {
     async fn generate(&self, prompt: &str, config: &AIConfig) -> Result<String> {
         let api_key = if config.api_key.is_empty() {
-            env::var("GLM_API_KEY").map_err(|_| {
-                AppError::AIProviderError("GLM_API_KEY not found".to_string())
-            })?
+            env::var("GLM_API_KEY")
+                .map_err(|_| AppError::AIProviderError("GLM_API_KEY not found".to_string()))?
         } else {
             config.api_key.clone()
         };
@@ -1173,11 +1262,14 @@ impl AIProvider for GLMProvider {
             .ok_or_else(|| AppError::AIRequestFailed("No response from GLM".to_string()))
     }
 
-    async fn generate_stream(&self, prompt: &str, config: &AIConfig) -> Result<futures::stream::BoxStream<'static, Result<String>>> {
+    async fn generate_stream(
+        &self,
+        prompt: &str,
+        config: &AIConfig,
+    ) -> Result<futures::stream::BoxStream<'static, Result<String>>> {
         let api_key = if config.api_key.is_empty() {
-            env::var("GLM_API_KEY").map_err(|_| {
-                AppError::AIProviderError("GLM_API_KEY not found".to_string())
-            })?
+            env::var("GLM_API_KEY")
+                .map_err(|_| AppError::AIProviderError("GLM_API_KEY not found".to_string()))?
         } else {
             config.api_key.clone()
         };
@@ -1228,28 +1320,27 @@ impl AIProvider for GLMProvider {
             )));
         }
 
-        use futures::StreamExt;
         use eventsource_stream::Eventsource;
+        use futures::StreamExt;
 
-        let stream = response.bytes_stream()
+        let stream = response
+            .bytes_stream()
             .eventsource()
-            .map(|event| {
-                match event {
-                    Ok(event) => {
-                        if event.data == "[DONE]" {
-                            return Ok("".to_string());
-                        }
-                        let json: serde_json::Value = serde_json::from_str(&event.data)
-                            .map_err(|e| AppError::AIRequestFailed(e.to_string()))?;
-                        
-                        let content = json["choices"][0]["delta"]["content"]
-                            .as_str()
-                            .unwrap_or("")
-                            .to_string();
-                        Ok(content)
+            .map(|event| match event {
+                Ok(event) => {
+                    if event.data == "[DONE]" {
+                        return Ok("".to_string());
                     }
-                    Err(e) => Err(AppError::AIRequestFailed(e.to_string())),
+                    let json: serde_json::Value = serde_json::from_str(&event.data)
+                        .map_err(|e| AppError::AIRequestFailed(e.to_string()))?;
+
+                    let content = json["choices"][0]["delta"]["content"]
+                        .as_str()
+                        .unwrap_or("")
+                        .to_string();
+                    Ok(content)
                 }
+                Err(e) => Err(AppError::AIRequestFailed(e.to_string())),
             })
             .boxed();
 
@@ -1304,7 +1395,8 @@ impl GrokProvider {
 impl AIProvider for GrokProvider {
     async fn generate(&self, prompt: &str, config: &AIConfig) -> Result<String> {
         let api_key = if config.api_key.is_empty() {
-            env::var("GROK_API_KEY").map_err(|_| AppError::AIProviderError("GROK_API_KEY not found".to_string()))?
+            env::var("GROK_API_KEY")
+                .map_err(|_| AppError::AIProviderError("GROK_API_KEY not found".to_string()))?
         } else {
             config.api_key.clone()
         };
@@ -1316,7 +1408,9 @@ impl AIProvider for GrokProvider {
             "max_tokens": config.max_tokens,
         });
 
-        let response = self.client.post("https://api.x.ai/v1/chat/completions")
+        let response = self
+            .client
+            .post("https://api.x.ai/v1/chat/completions")
             .header("Authorization", format!("Bearer {}", api_key))
             .json(&request)
             .send()
@@ -1324,16 +1418,30 @@ impl AIProvider for GrokProvider {
             .map_err(|e| AppError::AIRequestFailed(e.to_string()))?;
 
         if !response.status().is_success() {
-            return Err(AppError::AIRequestFailed(format!("Grok API error: {}", response.text().await.unwrap_or_default())));
+            return Err(AppError::AIRequestFailed(format!(
+                "Grok API error: {}",
+                response.text().await.unwrap_or_default()
+            )));
         }
 
-        let result: serde_json::Value = response.json().await.map_err(|e| AppError::AIRequestFailed(e.to_string()))?;
-        Ok(result["choices"][0]["message"]["content"].as_str().unwrap_or("").to_string())
+        let result: serde_json::Value = response
+            .json()
+            .await
+            .map_err(|e| AppError::AIRequestFailed(e.to_string()))?;
+        Ok(result["choices"][0]["message"]["content"]
+            .as_str()
+            .unwrap_or("")
+            .to_string())
     }
 
-    async fn generate_stream(&self, prompt: &str, config: &AIConfig) -> Result<futures::stream::BoxStream<'static, Result<String>>> {
+    async fn generate_stream(
+        &self,
+        prompt: &str,
+        config: &AIConfig,
+    ) -> Result<futures::stream::BoxStream<'static, Result<String>>> {
         let api_key = if config.api_key.is_empty() {
-            env::var("GROK_API_KEY").map_err(|_| AppError::AIProviderError("GROK_API_KEY not found".to_string()))?
+            env::var("GROK_API_KEY")
+                .map_err(|_| AppError::AIProviderError("GROK_API_KEY not found".to_string()))?
         } else {
             config.api_key.clone()
         };
@@ -1346,33 +1454,55 @@ impl AIProvider for GrokProvider {
             "stream": true,
         });
 
-        let response = self.client.post("https://api.x.ai/v1/chat/completions")
+        let response = self
+            .client
+            .post("https://api.x.ai/v1/chat/completions")
             .header("Authorization", format!("Bearer {}", api_key))
             .json(&request)
             .send()
             .await
             .map_err(|e| AppError::AIRequestFailed(e.to_string()))?;
 
-        use futures::StreamExt;
         use eventsource_stream::Eventsource;
+        use futures::StreamExt;
 
-        Ok(response.bytes_stream().eventsource().map(|event| {
-            match event {
+        Ok(response
+            .bytes_stream()
+            .eventsource()
+            .map(|event| match event {
                 Ok(event) => {
-                    if event.data == "[DONE]" { return Ok("".to_string()); }
-                    let json: serde_json::Value = serde_json::from_str(&event.data).map_err(|e| AppError::AIRequestFailed(e.to_string()))?;
-                    Ok(json["choices"][0]["delta"]["content"].as_str().unwrap_or("").to_string())
+                    if event.data == "[DONE]" {
+                        return Ok("".to_string());
+                    }
+                    let json: serde_json::Value = serde_json::from_str(&event.data)
+                        .map_err(|e| AppError::AIRequestFailed(e.to_string()))?;
+                    Ok(json["choices"][0]["delta"]["content"]
+                        .as_str()
+                        .unwrap_or("")
+                        .to_string())
                 }
                 Err(e) => Err(AppError::AIRequestFailed(e.to_string())),
-            }
-        }).boxed())
+            })
+            .boxed())
     }
 
-    fn name(&self) -> &str { "grok" }
+    fn name(&self) -> &str {
+        "grok"
+    }
     fn models(&self) -> Vec<AIModel> {
         vec![
-            AIModel { id: "grok-3".to_string(), name: "Grok 3".to_string(), provider: "grok".to_string(), context_length: 131072 },
-            AIModel { id: "grok-3-mini".to_string(), name: "Grok 3 Mini".to_string(), provider: "grok".to_string(), context_length: 131072 },
+            AIModel {
+                id: "grok-3".to_string(),
+                name: "Grok 3".to_string(),
+                provider: "grok".to_string(),
+                context_length: 131072,
+            },
+            AIModel {
+                id: "grok-3-mini".to_string(),
+                name: "Grok 3 Mini".to_string(),
+                provider: "grok".to_string(),
+                context_length: 131072,
+            },
         ]
     }
 }
@@ -1397,7 +1527,8 @@ impl QwenProvider {
 impl AIProvider for QwenProvider {
     async fn generate(&self, prompt: &str, config: &AIConfig) -> Result<String> {
         let api_key = if config.api_key.is_empty() {
-            env::var("QWEN_API_KEY").map_err(|_| AppError::AIProviderError("QWEN_API_KEY not found".to_string()))?
+            env::var("QWEN_API_KEY")
+                .map_err(|_| AppError::AIProviderError("QWEN_API_KEY not found".to_string()))?
         } else {
             config.api_key.clone()
         };
@@ -1409,7 +1540,9 @@ impl AIProvider for QwenProvider {
         });
 
         // DashScope API
-        let response = self.client.post("https://dashscope.aliyuncs.com/api/v1/services/aigc/text-generation/generation")
+        let response = self
+            .client
+            .post("https://dashscope.aliyuncs.com/api/v1/services/aigc/text-generation/generation")
             .header("Authorization", format!("Bearer {}", api_key))
             .header("Content-Type", "application/json")
             .json(&request)
@@ -1418,16 +1551,27 @@ impl AIProvider for QwenProvider {
             .map_err(|e| AppError::AIRequestFailed(e.to_string()))?;
 
         if !response.status().is_success() {
-            return Err(AppError::AIRequestFailed(format!("Qwen API error: {}", response.text().await.unwrap_or_default())));
+            return Err(AppError::AIRequestFailed(format!(
+                "Qwen API error: {}",
+                response.text().await.unwrap_or_default()
+            )));
         }
 
-        let result: serde_json::Value = response.json().await.map_err(|e| AppError::AIRequestFailed(e.to_string()))?;
+        let result: serde_json::Value = response
+            .json()
+            .await
+            .map_err(|e| AppError::AIRequestFailed(e.to_string()))?;
         Ok(result["output"]["text"].as_str().unwrap_or("").to_string())
     }
 
-    async fn generate_stream(&self, prompt: &str, config: &AIConfig) -> Result<futures::stream::BoxStream<'static, Result<String>>> {
+    async fn generate_stream(
+        &self,
+        prompt: &str,
+        config: &AIConfig,
+    ) -> Result<futures::stream::BoxStream<'static, Result<String>>> {
         let api_key = if config.api_key.is_empty() {
-            env::var("QWEN_API_KEY").map_err(|_| AppError::AIProviderError("QWEN_API_KEY not found".to_string()))?
+            env::var("QWEN_API_KEY")
+                .map_err(|_| AppError::AIProviderError("QWEN_API_KEY not found".to_string()))?
         } else {
             config.api_key.clone()
         };
@@ -1438,7 +1582,9 @@ impl AIProvider for QwenProvider {
             "parameters": { "temperature": config.temperature, "max_tokens": config.max_tokens, "incremental_output": true }
         });
 
-        let response = self.client.post("https://dashscope.aliyuncs.com/api/v1/services/aigc/text-generation/generation")
+        let response = self
+            .client
+            .post("https://dashscope.aliyuncs.com/api/v1/services/aigc/text-generation/generation")
             .header("Authorization", format!("Bearer {}", api_key))
             .header("X-DashScope-SSE", "enable")
             .header("Content-Type", "application/json")
@@ -1448,28 +1594,47 @@ impl AIProvider for QwenProvider {
             .map_err(|e| AppError::AIRequestFailed(e.to_string()))?;
 
         use futures::StreamExt;
-        Ok(response.bytes_stream().map(|result| {
-            match result {
+        Ok(response
+            .bytes_stream()
+            .map(|result| match result {
                 Ok(bytes) => {
                     let s = String::from_utf8_lossy(&bytes);
                     if s.contains("output") {
-                        let json: serde_json::Value = serde_json::from_str(&s.replace("data:", "")).unwrap_or(serde_json::json!({}));
+                        let json: serde_json::Value = serde_json::from_str(&s.replace("data:", ""))
+                            .unwrap_or(serde_json::json!({}));
                         Ok(json["output"]["text"].as_str().unwrap_or("").to_string())
                     } else {
                         Ok("".to_string())
                     }
                 }
                 Err(e) => Err(AppError::AIRequestFailed(e.to_string())),
-            }
-        }).boxed())
+            })
+            .boxed())
     }
 
-    fn name(&self) -> &str { "qwen" }
+    fn name(&self) -> &str {
+        "qwen"
+    }
     fn models(&self) -> Vec<AIModel> {
         vec![
-            AIModel { id: "qwen3-235b-a22b".to_string(), name: "Qwen3 235B-A22B".to_string(), provider: "qwen".to_string(), context_length: 128000 },
-            AIModel { id: "qwen-max".to_string(), name: "Qwen Max".to_string(), provider: "qwen".to_string(), context_length: 30000 },
-            AIModel { id: "qwen-plus".to_string(), name: "Qwen Plus".to_string(), provider: "qwen".to_string(), context_length: 30000 },
+            AIModel {
+                id: "qwen3-235b-a22b".to_string(),
+                name: "Qwen3 235B-A22B".to_string(),
+                provider: "qwen".to_string(),
+                context_length: 128000,
+            },
+            AIModel {
+                id: "qwen-max".to_string(),
+                name: "Qwen Max".to_string(),
+                provider: "qwen".to_string(),
+                context_length: 30000,
+            },
+            AIModel {
+                id: "qwen-plus".to_string(),
+                name: "Qwen Plus".to_string(),
+                provider: "qwen".to_string(),
+                context_length: 30000,
+            },
         ]
     }
 }
@@ -1504,22 +1669,39 @@ impl AIProvider for OllamaProvider {
         });
 
         let url = env::var("OLLAMA_HOST").unwrap_or_else(|_| "http://127.0.0.1:11434".to_string());
-        
-        let response = self.client.post(format!("{}/api/generate", url))
+
+        let response = self
+            .client
+            .post(format!("{}/api/generate", url))
             .json(&request)
             .send()
             .await
-            .map_err(|e| AppError::AIRequestFailed(format!("Ollama connection failed (Is it running?): {}", e)))?;
+            .map_err(|e| {
+                AppError::AIRequestFailed(format!(
+                    "Ollama connection failed (Is it running?): {}",
+                    e
+                ))
+            })?;
 
         if !response.status().is_success() {
-            return Err(AppError::AIRequestFailed(format!("Ollama API error: {}", response.text().await.unwrap_or_default())));
+            return Err(AppError::AIRequestFailed(format!(
+                "Ollama API error: {}",
+                response.text().await.unwrap_or_default()
+            )));
         }
 
-        let result: serde_json::Value = response.json().await.map_err(|e| AppError::AIRequestFailed(e.to_string()))?;
+        let result: serde_json::Value = response
+            .json()
+            .await
+            .map_err(|e| AppError::AIRequestFailed(e.to_string()))?;
         Ok(result["response"].as_str().unwrap_or("").to_string())
     }
 
-    async fn generate_stream(&self, prompt: &str, config: &AIConfig) -> Result<futures::stream::BoxStream<'static, Result<String>>> {
+    async fn generate_stream(
+        &self,
+        prompt: &str,
+        config: &AIConfig,
+    ) -> Result<futures::stream::BoxStream<'static, Result<String>>> {
         let request = serde_json::json!({
             "model": config.model,
             "prompt": prompt,
@@ -1532,36 +1714,50 @@ impl AIProvider for OllamaProvider {
 
         let url = env::var("OLLAMA_HOST").unwrap_or_else(|_| "http://127.0.0.1:11434".to_string());
 
-        let response = self.client.post(format!("{}/api/generate", url))
+        let response = self
+            .client
+            .post(format!("{}/api/generate", url))
             .json(&request)
             .send()
             .await
-            .map_err(|e| AppError::AIRequestFailed(format!("Ollama connection failed (Is it running?): {}", e)))?;
+            .map_err(|e| {
+                AppError::AIRequestFailed(format!(
+                    "Ollama connection failed (Is it running?): {}",
+                    e
+                ))
+            })?;
 
         use futures::StreamExt;
-        
-        Ok(response.bytes_stream().map(|result| {
-            match result {
-                Ok(bytes) => {
-                    let s = String::from_utf8_lossy(&bytes);
-                    let mut final_text = String::new();
-                    // Ollama streams JSON-Lines. We might get multiple JSON objects in one chunk
-                    for line in s.lines() {
-                        if line.trim().is_empty() { continue; }
-                        if let Ok(json) = serde_json::from_str::<serde_json::Value>(line) {
-                            if let Some(text) = json["response"].as_str() {
-                                final_text.push_str(text);
+
+        Ok(response
+            .bytes_stream()
+            .map(|result| {
+                match result {
+                    Ok(bytes) => {
+                        let s = String::from_utf8_lossy(&bytes);
+                        let mut final_text = String::new();
+                        // Ollama streams JSON-Lines. We might get multiple JSON objects in one chunk
+                        for line in s.lines() {
+                            if line.trim().is_empty() {
+                                continue;
+                            }
+                            if let Ok(json) = serde_json::from_str::<serde_json::Value>(line) {
+                                if let Some(text) = json["response"].as_str() {
+                                    final_text.push_str(text);
+                                }
                             }
                         }
+                        Ok(final_text)
                     }
-                    Ok(final_text)
+                    Err(e) => Err(AppError::AIRequestFailed(e.to_string())),
                 }
-                Err(e) => Err(AppError::AIRequestFailed(e.to_string())),
-            }
-        }).boxed())
+            })
+            .boxed())
     }
 
-    fn name(&self) -> &str { "ollama" }
+    fn name(&self) -> &str {
+        "ollama"
+    }
     fn models(&self) -> Vec<AIModel> {
         vec![]
     }
@@ -1616,7 +1812,11 @@ pub async fn refactor(code: &str, instructions: &str, config: &AIConfig) -> Resu
 }
 
 /// Refactor code using AI with streaming
-pub async fn refactor_stream(code: &str, instructions: &str, config: &AIConfig) -> Result<futures::stream::BoxStream<'static, Result<String>>> {
+pub async fn refactor_stream(
+    code: &str,
+    instructions: &str,
+    config: &AIConfig,
+) -> Result<futures::stream::BoxStream<'static, Result<String>>> {
     let provider = get_provider(&config.provider)?;
 
     let prompt = format!(
@@ -1631,7 +1831,12 @@ pub async fn refactor_stream(code: &str, instructions: &str, config: &AIConfig) 
 }
 
 /// Transpile code from one language to another (e.g., SAS to Python)
-pub async fn transpile(code: &str, target_lang: &str, instructions: &str, config: &AIConfig) -> Result<String> {
+pub async fn transpile(
+    code: &str,
+    target_lang: &str,
+    instructions: &str,
+    config: &AIConfig,
+) -> Result<String> {
     let provider = get_provider(&config.provider)?;
 
     let prompt = format!(

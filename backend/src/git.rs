@@ -13,10 +13,7 @@ pub async fn status(repo_path: &str) -> Result<GitStatus> {
 
     // Get current branch
     let head = repo.head().map_err(|e| AppError::GitError(e.to_string()))?;
-    let branch = head
-        .shorthand()
-        .unwrap_or("HEAD")
-        .to_string();
+    let branch = head.shorthand().unwrap_or("HEAD").to_string();
 
     // Get file statuses
     let mut opts = StatusOptions::new();
@@ -60,22 +57,38 @@ pub async fn commit(repo_path: &str, message: &str) -> Result<()> {
     let repo = open_repository(repo_path)?;
 
     // Get the signature
-    let signature = repo.signature().map_err(|e| AppError::GitError(e.to_string()))?;
+    let signature = repo
+        .signature()
+        .map_err(|e| AppError::GitError(e.to_string()))?;
 
     // Get the current tree
-    let mut index = repo.index().map_err(|e| AppError::GitError(e.to_string()))?;
-    index.add_all(["*"].iter(), git2::IndexAddOption::DEFAULT, None)
+    let mut index = repo
+        .index()
         .map_err(|e| AppError::GitError(e.to_string()))?;
-    index.write().map_err(|e| AppError::GitError(e.to_string()))?;
+    index
+        .add_all(["*"].iter(), git2::IndexAddOption::DEFAULT, None)
+        .map_err(|e| AppError::GitError(e.to_string()))?;
+    index
+        .write()
+        .map_err(|e| AppError::GitError(e.to_string()))?;
 
-    let tree_id = index.write_tree().map_err(|e| AppError::GitError(e.to_string()))?;
-    let tree = repo.find_tree(tree_id).map_err(|e| AppError::GitError(e.to_string()))?;
+    let tree_id = index
+        .write_tree()
+        .map_err(|e| AppError::GitError(e.to_string()))?;
+    let tree = repo
+        .find_tree(tree_id)
+        .map_err(|e| AppError::GitError(e.to_string()))?;
 
     // Get parent commit
     let parent_commit = match repo.head() {
         Ok(head) => {
-            let oid = head.target().ok_or_else(|| AppError::GitError("Invalid HEAD".to_string()))?;
-            Some(repo.find_commit(oid).map_err(|e| AppError::GitError(e.to_string()))?)
+            let oid = head
+                .target()
+                .ok_or_else(|| AppError::GitError("Invalid HEAD".to_string()))?;
+            Some(
+                repo.find_commit(oid)
+                    .map_err(|e| AppError::GitError(e.to_string()))?,
+            )
         }
         Err(_) => None,
     };
@@ -172,7 +185,9 @@ pub async fn pull(repo_path: &str) -> Result<()> {
 pub async fn log(repo_path: &str, limit: usize) -> Result<Vec<GitCommit>> {
     let repo = open_repository(repo_path)?;
 
-    let mut revwalk = repo.revwalk().map_err(|e| AppError::GitError(e.to_string()))?;
+    let mut revwalk = repo
+        .revwalk()
+        .map_err(|e| AppError::GitError(e.to_string()))?;
     revwalk
         .push_head()
         .map_err(|e| AppError::GitError(e.to_string()))?;
@@ -218,10 +233,7 @@ pub async fn diff(repo_path: &str) -> Result<String> {
 
     let mut diff_text = String::new();
     diff.print(git2::DiffFormat::Patch, |_delta, _hunk, line| {
-        diff_text.push_str(&format!(
-            "{}",
-            String::from_utf8_lossy(line.content())
-        ));
+        diff_text.push_str(&format!("{}", String::from_utf8_lossy(line.content())));
         true
     })
     .map_err(|e| AppError::GitError(e.to_string()))?;
@@ -233,7 +245,8 @@ pub async fn diff(repo_path: &str) -> Result<String> {
 
 fn open_repository(path: &str) -> Result<Repository> {
     let path_buf = Path::new(path);
-    Repository::open(path_buf).map_err(|e| AppError::GitRepositoryNotFound(format!("{}: {}", path, e)))
+    Repository::open(path_buf)
+        .map_err(|e| AppError::GitRepositoryNotFound(format!("{}: {}", path, e)))
 }
 
 fn calculate_ahead_behind(repo: &Repository) -> Result<(usize, usize)> {

@@ -343,7 +343,10 @@ public final class SyntaxHighlightingEngine: @unchecked Sendable {
         let removedText = nsOld.substring(with: oldRange)
         let removedLinesCount = removedText.components(separatedBy: "\n").count - 1
         
-        let addedText = (newContent as NSString).substring(with: range)
+        let nsNew = newContent as NSString
+        let safeAddedLocation = max(0, min(range.location, nsNew.length))
+        let safeAddedLength = max(0, min(range.length, nsNew.length - safeAddedLocation))
+        let addedText = nsNew.substring(with: NSRange(location: safeAddedLocation, length: safeAddedLength))
         let addedLinesCount = addedText.components(separatedBy: "\n").count - 1
         
         // Update Offsets Cache (O(L))
@@ -550,13 +553,15 @@ public final class SyntaxHighlightingEngine: @unchecked Sendable {
         assert(Thread.isMainThread, "applyTokens must be called on the main thread")
         
         let fgColor = themeManager.editorForegroundColor
-        let bgColor = themeManager.editorBackgroundColor
+        let defaultFont = font ?? NSFont.monospacedSystemFont(ofSize: fontSize, weight: .regular)
         
         let fullRange = NSRange(location: 0, length: textStorage.length)
         if fullRange.length > 0 {
             textStorage.beginEditing()
             textStorage.addAttributes([
-                .foregroundColor: fgColor
+                .foregroundColor: fgColor,
+                .font: defaultFont,
+                .ligature: 0
             ], range: fullRange)
             textStorage.endEditing()
         }
@@ -564,8 +569,6 @@ public final class SyntaxHighlightingEngine: @unchecked Sendable {
         // CHUNK SIZE: Apply 2000 tokens at a time to keep frame rate high
         // 2000 tokens ~ 200 lines of code roughly.
         let chunkSize = 2000
-        let defaultFont = font ?? NSFont.monospacedSystemFont(ofSize: fontSize, weight: .regular)
-        
         // If small enough, apply synchronously (fast path)
         if tokens.count <= chunkSize {
             textStorage.beginEditing()
@@ -762,6 +765,32 @@ class NoIntrinsicScrollView: NSScrollView {
     override var intrinsicContentSize: NSSize {
         return NSSize(width: NSView.noIntrinsicMetric, height: NSView.noIntrinsicMetric)
     }
+
+    override func layout() {
+        super.layout()
+        resizeTextDocumentView()
+    }
+
+    private func resizeTextDocumentView() {
+        guard let textView = documentView as? NSTextView else { return }
+
+        let visibleSize = contentView.bounds.size
+        let targetWidth = max(1, visibleSize.width)
+        let targetHeight = max(1, visibleSize.height)
+
+        var frame = textView.frame
+        if textView.isHorizontallyResizable {
+            frame.size.width = max(frame.size.width, targetWidth)
+        } else {
+            frame.size.width = targetWidth
+        }
+        frame.size.height = max(frame.size.height, targetHeight)
+
+        if abs(frame.width - textView.frame.width) > 0.5 ||
+            abs(frame.height - textView.frame.height) > 0.5 {
+            textView.frame = frame
+        }
+    }
 }
 
 public struct SyntaxHighlightedCodeView: NSViewRepresentable {
@@ -813,17 +842,19 @@ public struct SyntaxHighlightedCodeView: NSViewRepresentable {
         scrollView.borderType = .noBorder
         
         let contentSize = scrollView.contentSize
+        let initialWidth = max(1, contentSize.width)
+        let initialHeight = max(1, contentSize.height)
         
         // Properly initialize TextKit 1 Stack (Required for rendering)
         let textStorage = NSTextStorage()
         let layoutManager = NSLayoutManager()
         textStorage.addLayoutManager(layoutManager)
         
-        let textContainer = NSTextContainer(containerSize: NSSize(width: contentSize.width, height: CGFloat.greatestFiniteMagnitude))
+        let textContainer = NSTextContainer(containerSize: NSSize(width: initialWidth, height: CGFloat.greatestFiniteMagnitude))
         textContainer.widthTracksTextView = true
         layoutManager.addTextContainer(textContainer)
         
-        let textView = NSTextView(frame: NSRect(x: 0, y: 0, width: contentSize.width, height: contentSize.height), textContainer: textContainer)
+        let textView = NSTextView(frame: NSRect(x: 0, y: 0, width: initialWidth, height: initialHeight), textContainer: textContainer)
         textView.minSize = NSSize(width: 0, height: 0)
         textView.maxSize = NSSize(width: CGFloat.greatestFiniteMagnitude, height: CGFloat.greatestFiniteMagnitude)
         textView.isVerticallyResizable = true
@@ -906,27 +937,7 @@ public struct SyntaxHighlightedCodeView: NSViewRepresentable {
             scrollView.backgroundColor  = effectiveTransparent ? .clear : bgColor
 
             // ── Layout ───────────────────────────────────────────────────
-            let wrapText = !coordinator.parent.isScrollEnabled
-            tv.isVerticallyResizable = true
-            
-            if wrapText {
-                tv.autoresizingMask = [.width]
-                tv.isHorizontallyResizable = false
-                tv.textContainer?.widthTracksTextView = true
-                tv.textContainer?.containerSize = NSSize(width: 0, height: CGFloat.greatestFiniteMagnitude)
-            } else {
-                // FIX: Prevent AppKit _NSViewLayout recursion loop by allowing horizontal
-                // scaling without forcing the text view to match the scroll view's size.
-                // Using an empty mask [] ensures the NSTextView can grow independently.
-                tv.autoresizingMask = []
-                tv.isHorizontallyResizable = true
-                tv.textContainer?.widthTracksTextView = false
-                tv.textContainer?.containerSize = NSSize(width: CGFloat.greatestFiniteMagnitude, height: CGFloat.greatestFiniteMagnitude)
-            }
-            
-            tv.minSize = NSSize(width: 0, height: 0)
-            tv.maxSize = NSSize(width: CGFloat.greatestFiniteMagnitude,
-                                height: CGFloat.greatestFiniteMagnitude)
+            coordinator.configureTextGeometry(for: tv, in: scrollView)
 
             // ── Line Numbers (safe to add after view is in hierarchy) ─────
             let rulerView = LineNumberRulerView(textView: tv, scrollView: scrollView,
@@ -947,6 +958,7 @@ public struct SyntaxHighlightedCodeView: NSViewRepresentable {
             scrollView.setContentHuggingPriority(.defaultLow, for: .vertical)
             scrollView.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
             scrollView.setContentCompressionResistancePriority(.defaultLow, for: .vertical)
+            scrollView.needsLayout = true
 
 
             // ── Mark view as ready — updateNSView handles text content ───
@@ -992,12 +1004,13 @@ public struct SyntaxHighlightedCodeView: NSViewRepresentable {
         ReportLogManager.shared.log("updateNSView called", type: .debug)
 
         guard let textView = scrollView.documentView as? NSTextView,
-              let textStorage = textView.textStorage else { return }
+              textView.textStorage != nil else { return }
         
         guard let engine = context.coordinator.engine else { return }
         
         // Critical: Update coordinator's parent to ensure Binding is fresh
         context.coordinator.parent = self
+        context.coordinator.configureTextGeometry(for: textView, in: scrollView)
         
         let normalizedText = text.replacingOccurrences(of: "\r\n", with: "\n")
         
@@ -1085,7 +1098,7 @@ public struct SyntaxHighlightedCodeView: NSViewRepresentable {
         // We store the current language in the engine to compare
         let languageChanged = engine.currentLanguage != language
         // FIX: Use the pre-computed change flags instead of comparing against already-updated cache
-        let needsContentUpdate = textView.string != normalizedText || languageChanged || themeNameChanged || darkChanged
+        let needsContentUpdate = textView.string != normalizedText || languageChanged || themeNameChanged || darkChanged || fontChanged || transparentChanged
         
         if needsContentUpdate {
             // Update the actual text view content if it changed
@@ -1098,7 +1111,8 @@ public struct SyntaxHighlightedCodeView: NSViewRepresentable {
                     let attrString = NSMutableAttributedString(string: normalizedText)
                     attrString.addAttributes([
                         .foregroundColor: fgColor,
-                        .font: newCustomFont
+                        .font: newCustomFont,
+                        .ligature: 0
                     ], range: newRange)
                     textView.textStorage?.setAttributedString(attrString)
                 } else {
@@ -1147,6 +1161,41 @@ public struct SyntaxHighlightedCodeView: NSViewRepresentable {
         
         init(_ parent: SyntaxHighlightedCodeView) {
             self.parent = parent
+        }
+
+        func configureTextGeometry(for textView: NSTextView, in scrollView: NSScrollView) {
+            let visibleSize = scrollView.contentView.bounds.size
+            let targetWidth = max(1, visibleSize.width)
+            let targetHeight = max(1, visibleSize.height)
+            let wrapText = !parent.isScrollEnabled
+
+            textView.isVerticallyResizable = true
+            textView.minSize = NSSize(width: 0, height: targetHeight)
+            textView.maxSize = NSSize(width: CGFloat.greatestFiniteMagnitude,
+                                      height: CGFloat.greatestFiniteMagnitude)
+
+            if wrapText {
+                textView.autoresizingMask = [.width]
+                textView.isHorizontallyResizable = false
+                textView.textContainer?.widthTracksTextView = true
+                textView.textContainer?.containerSize = NSSize(width: targetWidth,
+                                                               height: CGFloat.greatestFiniteMagnitude)
+            } else {
+                textView.autoresizingMask = [.width]
+                textView.isHorizontallyResizable = true
+                textView.textContainer?.widthTracksTextView = false
+                textView.textContainer?.containerSize = NSSize(width: CGFloat.greatestFiniteMagnitude,
+                                                               height: CGFloat.greatestFiniteMagnitude)
+            }
+
+            var frame = textView.frame
+            frame.size.width = max(frame.width, targetWidth)
+            frame.size.height = max(frame.height, targetHeight)
+
+            if abs(frame.width - textView.frame.width) > 0.5 ||
+                abs(frame.height - textView.frame.height) > 0.5 {
+                textView.frame = frame
+            }
         }
         
         deinit {

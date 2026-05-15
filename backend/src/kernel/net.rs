@@ -18,6 +18,6 @@ impl NetworkManager {
         // On macOS: SCNetworkReachability
         true
     }
-    
+
     // Future: Firewall logic for extensions
 }

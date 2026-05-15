@@ -7,4 +7,4 @@ pub mod host;
 pub mod ipc;
 
 pub use host::PreviewHost;
-pub use ipc::{PreviewServer, PreviewMessage};
+pub use ipc::{PreviewMessage, PreviewServer};

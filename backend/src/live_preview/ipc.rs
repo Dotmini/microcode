@@ -88,9 +88,7 @@ impl PreviewServer {
         }
 
         let listener = UnixListener::bind(&self.socket_path)
-            .map_err(|e| AppError::ExecutionError(format!(
-                "Failed to bind socket: {}", e
-            )))?;
+            .map_err(|e| AppError::ExecutionError(format!("Failed to bind socket: {}", e)))?;
 
         self.listener = Some(listener);
 
@@ -100,21 +98,20 @@ impl PreviewServer {
     }
 
     /// Accept a client connection and process messages
-    pub async fn accept_and_handle<F>(
-        &self,
-        mut message_handler: F,
-    ) -> Result<()>
+    pub async fn accept_and_handle<F>(&self, mut message_handler: F) -> Result<()>
     where
         F: FnMut(PreviewMessage) -> Option<PreviewMessage>,
     {
-        let listener = self.listener.as_ref()
+        let listener = self
+            .listener
+            .as_ref()
             .ok_or_else(|| AppError::ExecutionError("Server not started".into()))?;
 
         loop {
             match listener.accept().await {
                 Ok((stream, _)) => {
                     println!("📥 Client connected");
-                    
+
                     if let Err(e) = self.handle_client(stream, &mut message_handler).await {
                         eprintln!("Client error: {}", e);
                     }
@@ -126,11 +123,7 @@ impl PreviewServer {
         }
     }
 
-    async fn handle_client<F>(
-        &self,
-        stream: UnixStream,
-        handler: &mut F,
-    ) -> Result<()>
+    async fn handle_client<F>(&self, stream: UnixStream, handler: &mut F) -> Result<()>
     where
         F: FnMut(PreviewMessage) -> Option<PreviewMessage>,
     {
@@ -140,8 +133,10 @@ impl PreviewServer {
 
         loop {
             line.clear();
-            
-            let bytes_read = reader.read_line(&mut line).await
+
+            let bytes_read = reader
+                .read_line(&mut line)
+                .await
                 .map_err(|e| AppError::ExecutionError(e.to_string()))?;
 
             if bytes_read == 0 {
@@ -163,9 +158,13 @@ impl PreviewServer {
                         let response_json = serde_json::to_string(&response)
                             .map_err(|e| AppError::ExecutionError(e.to_string()))?;
 
-                        write_half.write_all(response_json.as_bytes()).await
+                        write_half
+                            .write_all(response_json.as_bytes())
+                            .await
                             .map_err(|e| AppError::ExecutionError(e.to_string()))?;
-                        write_half.write_all(b"\n").await
+                        write_half
+                            .write_all(b"\n")
+                            .await
                             .map_err(|e| AppError::ExecutionError(e.to_string()))?;
                     }
                 }
@@ -181,7 +180,7 @@ impl PreviewServer {
     /// Stop the server
     pub fn stop(&mut self) {
         self.listener = None;
-        
+
         // Remove socket file
         if self.socket_path.exists() {
             std::fs::remove_file(&self.socket_path).ok();
@@ -209,10 +208,9 @@ impl PreviewClient {
     pub async fn connect(&mut self) -> Result<()> {
         let socket_path = get_socket_path();
 
-        let stream = UnixStream::connect(&socket_path).await
-            .map_err(|e| AppError::ExecutionError(format!(
-                "Failed to connect to preview server: {}", e
-            )))?;
+        let stream = UnixStream::connect(&socket_path).await.map_err(|e| {
+            AppError::ExecutionError(format!("Failed to connect to preview server: {}", e))
+        })?;
 
         self.stream = Some(stream);
         Ok(())
@@ -220,16 +218,22 @@ impl PreviewClient {
 
     /// Send a message and receive response
     pub async fn send(&mut self, message: PreviewMessage) -> Result<PreviewMessage> {
-        let stream = self.stream.as_mut()
+        let stream = self
+            .stream
+            .as_mut()
             .ok_or_else(|| AppError::ExecutionError("Not connected".into()))?;
 
         // Send message
-        let msg_json = serde_json::to_string(&message)
-            .map_err(|e| AppError::ExecutionError(e.to_string()))?;
+        let msg_json =
+            serde_json::to_string(&message).map_err(|e| AppError::ExecutionError(e.to_string()))?;
 
-        stream.write_all(msg_json.as_bytes()).await
+        stream
+            .write_all(msg_json.as_bytes())
+            .await
             .map_err(|e| AppError::ExecutionError(e.to_string()))?;
-        stream.write_all(b"\n").await
+        stream
+            .write_all(b"\n")
+            .await
             .map_err(|e| AppError::ExecutionError(e.to_string()))?;
 
         // Read response
@@ -237,11 +241,12 @@ impl PreviewClient {
         let mut reader = BufReader::new(read_half);
         let mut line = String::new();
 
-        reader.read_line(&mut line).await
+        reader
+            .read_line(&mut line)
+            .await
             .map_err(|e| AppError::ExecutionError(e.to_string()))?;
 
-        serde_json::from_str(&line)
-            .map_err(|e| AppError::ExecutionError(e.to_string()))
+        serde_json::from_str(&line).map_err(|e| AppError::ExecutionError(e.to_string()))
     }
 
     /// Close the connection

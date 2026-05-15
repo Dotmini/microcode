@@ -8,7 +8,7 @@ struct Client {}
 #[async_trait::async_trait]
 impl client::Handler for Client {
     type Error = russh::Error;
-    
+
     async fn check_server_key(
         &mut self,
         server_public_key: &key::PublicKey,
@@ -21,7 +21,7 @@ impl client::Handler for Client {
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut config = client::Config::default();
-    
+
     // Exact configuration from remote.rs
     config.preferred = Preferred {
         kex: std::borrow::Cow::Borrowed(&[
@@ -57,17 +57,17 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let sh = Client {};
 
     println!("Connecting to ssh.lightning.ai:22...");
-    
+
     // Try to connect
     match tokio::time::timeout(
         Duration::from_secs(10),
-        client::connect(config, ("ssh.lightning.ai", 22), sh)
-    ).await {
-        Ok(res) => {
-            match res {
-                Ok(_) => println!("✅ Connection/Handshake Successful!"),
-                Err(e) => println!("❌ Connection Failed: {}", e),
-            }
+        client::connect(config, ("ssh.lightning.ai", 22), sh),
+    )
+    .await
+    {
+        Ok(res) => match res {
+            Ok(_) => println!("✅ Connection/Handshake Successful!"),
+            Err(e) => println!("❌ Connection Failed: {}", e),
         },
         Err(_) => println!("❌ Connection Timed Out"),
     }
