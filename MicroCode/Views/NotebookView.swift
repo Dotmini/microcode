@@ -373,7 +373,72 @@ final class NotebookViewModel: ObservableObject {
     @Published var isEditingName: Bool = false
     @Published var workingDirectory: URL
     @Published var selectedPythonPath: String = "python3"  // Can be set from UI
-    
+    /// The .mic file this notebook is bound to (Quick Save target). nil → not
+    /// yet saved to a user-chosen file (autosave still protects the work).
+    @Published var currentFileURL: URL?
+    @Published var lastAutoSave: Date?
+    private var autoSaveWork: DispatchWorkItem?
+
+    /// Realtime autosave: debounced so rapid typing/runs don't thrash disk.
+    /// Always writes the UserDefaults crash-recovery snapshot AND a real .mic
+    /// file (the bound file, or a stable autosave.mic) so work is never lost.
+    func scheduleAutoSave() {
+        autoSaveWork?.cancel()
+        let work = DispatchWorkItem { [weak self] in self?.performAutoSave() }
+        autoSaveWork = work
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.8, execute: work)
+    }
+
+    private func performAutoSave() {
+        autoSave() // UserDefaults snapshot (crash recovery — keep)
+        guard let notebook = activeNotebook else { return }
+        let url = currentFileURL
+            ?? workingDirectory.appendingPathComponent("autosave.mic")
+        exportAsMic(notebook: notebook, to: url)
+        lastAutoSave = Date()
+    }
+
+    /// Quick Save → write straight to the bound .mic file (no dialog). If the
+    /// notebook has never been saved to a user file, fall back to Save As.
+    func quickSave() {
+        guard let notebook = activeNotebook else { return }
+        if let url = currentFileURL {
+            exportAsMic(notebook: notebook, to: url)
+            lastAutoSave = Date()
+        } else {
+            saveAs()
+        }
+    }
+
+    /// Save As → .mic by default. Remembers the chosen file for Quick Save.
+    func saveAs() {
+        guard let notebook = activeNotebook else { return }
+        let panel = NSSavePanel()
+        panel.allowedContentTypes = [UTType(filenameExtension: "mic") ?? .data]
+        panel.nameFieldStringValue = "\(notebook.name).mic"
+        panel.title = "Save Notebook"
+        panel.begin { [weak self] response in
+            guard response == .OK, var url = panel.url else { return }
+            if url.pathExtension != "mic" { url.deletePathExtension(); url.appendPathExtension("mic") }
+            self?.exportAsMic(notebook: notebook, to: url)
+            self?.currentFileURL = url
+            self?.lastAutoSave = Date()
+        }
+    }
+
+    /// Export a copy as Jupyter .ipynb (does not change the bound .mic file).
+    func exportIpynb() {
+        guard let notebook = activeNotebook else { return }
+        let panel = NSSavePanel()
+        panel.allowedContentTypes = [UTType(filenameExtension: "ipynb") ?? .json]
+        panel.nameFieldStringValue = "\(notebook.name).ipynb"
+        panel.title = "Export as Jupyter Notebook"
+        panel.begin { [weak self] response in
+            guard response == .OK, let url = panel.url else { return }
+            self?.exportAsIPYNB(notebook: notebook, to: url)
+        }
+    }
+
     var activeNotebook: NotebookModel? {
         notebooks.first { $0.id == activeNotebookId }
     }
@@ -455,8 +520,9 @@ final class NotebookViewModel: ObservableObject {
         
         selectedCellId = newCell.id
         notebook.modifiedAt = Date()
+        scheduleAutoSave()
     }
-    
+
     func deleteCell(_ cell: NotebookCellModel) {
         guard let notebook = activeNotebook else { return }
         if let idx = notebook.cells.firstIndex(where: { $0.id == cell.id }) {
@@ -465,9 +531,10 @@ final class NotebookViewModel: ObservableObject {
                 selectedCellId = notebook.cells.first?.id
             }
             notebook.modifiedAt = Date()
+            scheduleAutoSave()
         }
     }
-    
+
     func moveCell(_ cell: NotebookCellModel, direction: Int) {
         guard let notebook = activeNotebook else { return }
         guard let index = notebook.cells.firstIndex(where: { $0.id == cell.id }) else { return }
@@ -475,6 +542,7 @@ final class NotebookViewModel: ObservableObject {
         guard newIndex >= 0 && newIndex < notebook.cells.count else { return }
         notebook.cells.swapAt(index, newIndex)
         notebook.modifiedAt = Date()
+        scheduleAutoSave()
     }
     
     func runCell(_ cell: NotebookCellModel, computeTarget: ComputeTarget = .localCPU) {
@@ -1885,6 +1953,7 @@ final class NotebookViewModel: ObservableObject {
             DispatchQueue.main.async {
                 self.notebooks.append(notebook)
                 self.activeNotebookId = notebook.id
+                self.currentFileURL = url   // Quick Save now targets this file
                 if let firstCell = notebook.cells.first {
                     self.selectedCellId = firstCell.id
                 }
@@ -2620,23 +2689,34 @@ struct NotebookView: View {
             }
             .help("Open Notebook")
             
-            // Save
+            // Save (autosaves continuously; .mic is the default format)
             Menu {
-                Button(action: { viewModel.saveNotebook() }) {
-                    Label("Save As...", systemImage: "square.and.arrow.down")
+                Button(action: { viewModel.quickSave() }) {
+                    Label("Quick Save (.mic)", systemImage: "bolt.fill")
+                }
+                .keyboardShortcut("s", modifiers: .command)
+                Button(action: { viewModel.saveAs() }) {
+                    Label("Save As… (.mic)", systemImage: "square.and.arrow.down")
+                }
+                .keyboardShortcut("s", modifiers: [.command, .shift])
+                Divider()
+                Button(action: { viewModel.exportIpynb() }) {
+                    Label("Export as Jupyter (.ipynb)", systemImage: "arrow.up.forward.square")
                 }
                 Divider()
-                Button(action: { viewModel.autoSave() }) {
-                    Label("Quick Save", systemImage: "externaldrive.fill.badge.checkmark")
+                if let t = viewModel.lastAutoSave {
+                    Text("Autosaved \(t.formatted(date: .omitted, time: .standard))")
+                } else {
+                    Text("Autosave on")
                 }
             } label: {
                 Image(systemName: "square.and.arrow.down")
                     .font(.system(size: 11))
             } primaryAction: {
-                viewModel.autoSave()
+                viewModel.quickSave()
             }
             .menuIndicator(.hidden)
-            .help("Save")
+            .help("Save — autosaves continuously (.mic). Menu: Save As / Export .ipynb")
             
             Divider().frame(height: 14)
             
@@ -2904,6 +2984,12 @@ struct NotebookCellsList: View {
                             }
                         }
                     )
+                    // Realtime autosave on every keystroke / output / tag /
+                    // language change (debounced inside the view model).
+                    .onChange(of: cell.content) { _ in viewModel.scheduleAutoSave() }
+                    .onChange(of: cell.output) { _ in viewModel.scheduleAutoSave() }
+                    .onChange(of: cell.tag) { _ in viewModel.scheduleAutoSave() }
+                    .onChange(of: cell.language) { _ in viewModel.scheduleAutoSave() }
                 }
 
                 HStack(spacing: 16) {

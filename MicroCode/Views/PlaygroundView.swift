@@ -105,6 +105,11 @@ struct PlaygroundView: View {
                 code = exportedCode
                 appState.aiExportedCode = nil // Clear after consuming
                 print("🚀 PlaygroundView: Loaded code from AI Agent")
+            } else if let saved = UserDefaults.standard.string(forKey: "microcode_playground_code_\(language)"),
+                      !saved.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                // Restore the user's last Playground work (autosave) so it is
+                // never lost between launches.
+                code = saved
             } else if code == "print('Hello, Playground!')" {
                 updateDefaultCode(for: language)
             }
@@ -468,6 +473,9 @@ struct PlaygroundView: View {
         )
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .onChange(of: code) { newValue in
+            // Realtime autosave so Playground work is never lost.
+            UserDefaults.standard.set(newValue, forKey: "microcode_playground_code_\(language)")
+
             // Immediate Clear on Empty
             if newValue.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
                 coordinatorTask?.cancel()
@@ -478,7 +486,7 @@ struct PlaygroundView: View {
                 pythonEnvManager.detectedPackages = []
                 return
             }
-            
+
             handleCodeChange()
         }
     }
