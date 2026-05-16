@@ -161,6 +161,7 @@ let package = Package(
                 "Kernel/JupyterClient.swift",
                 "Kernel/JupyterKernel.swift",
                 "Kernel/RemoteGPUService.swift",
+                "Kernel/RemoteProviderService.swift",
                 "Views/Design/AIDesignPanel.swift",
                 "Services/AIDesignEngine.swift",
                 "Services/BillingService.swift",
