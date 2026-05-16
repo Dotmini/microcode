@@ -1076,9 +1076,72 @@ public struct SyntaxHighlightedCodeView: NSViewRepresentable {
         var lastIsDark: Bool = false
         var lastIsTransparent: Bool = false  // FIX: track transparent mode
         var lastFileURL: URL? = nil // Added fileURL to cache
-        
+        var didRenderSelfTest = false
+
         init(_ parent: SyntaxHighlightedCodeView) {
             self.parent = parent
+        }
+
+        /// One-shot render self-test. Runs ~0.7s after content is applied and
+        /// the view is in a window, when AppKit has actually drawn. Captures
+        /// the concrete reason glyphs are invisible: occluding sibling views,
+        /// layer/alpha/mask, clip bounds vs glyph used-rect, container metrics.
+        func scheduleRenderSelfTest(_ textView: NSTextView, _ scrollView: NSScrollView) {
+            guard !didRenderSelfTest else { return }
+            didRenderSelfTest = true
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.7) { [weak self, weak textView, weak scrollView] in
+                guard let self = self, !self.isInvalidated,
+                      let tv = textView, let sv = scrollView else { return }
+                func r(_ rc: NSRect) -> String { "\(Int(rc.origin.x)),\(Int(rc.origin.y)) \(Int(rc.width))x\(Int(rc.height))" }
+
+                var lines: [String] = ["=== RENDER SELF-TEST id=\(self.parent.editorID ?? "nil") ==="]
+                lines.append("win=\(tv.window != nil) winVisible=\(tv.window?.isVisible ?? false) occ=\(tv.window?.occlusionState.contains(.visible) ?? false)")
+                lines.append("tv.frame=\(r(tv.frame)) bounds=\(r(tv.bounds)) flipped=\(tv.isFlipped) hidden=\(tv.isHidden) alpha=\(tv.alphaValue) opaque=\(tv.isOpaque)")
+                lines.append("tv.wantsLayer=\(tv.wantsLayer) layer=\(tv.layer != nil) layerOpacity=\(tv.layer?.opacity ?? -1) layerHidden=\(tv.layer?.isHidden ?? false) layerMask=\(tv.layer?.mask != nil) layerBounds=\(tv.layer.map { r($0.bounds) } ?? "nil")")
+                lines.append("tv.string.count=\(tv.string.count) prefix=\(tv.string.prefix(24).replacingOccurrences(of: "\n", with: "\\n"))")
+                if let lm = tv.layoutManager, let tc = tv.textContainer {
+                    let glyphs = lm.numberOfGlyphs
+                    let used = lm.usedRect(for: tc)
+                    let gr = lm.glyphRange(for: tc)
+                    lm.ensureLayout(for: tc)
+                    let firstFrag = glyphs > 0 ? lm.lineFragmentRect(forGlyphAt: 0, effectiveRange: nil) : .zero
+                    lines.append("glyphs=\(glyphs) usedRect=\(r(used)) glyphRange=\(gr) firstFrag=\(r(firstFrag)) inset=\(tv.textContainerInset) origin=\(tv.textContainerOrigin) container=\(tc.size) pad=\(tc.lineFragmentPadding) widthTracks=\(tc.widthTracksTextView)")
+                }
+                if let clip = sv.contentView as NSClipView? {
+                    lines.append("clip=\(type(of: clip)) bounds=\(r(clip.bounds)) docVisible=\(r(sv.documentVisibleRect)) clipDraws=\(clip.drawsBackground) svDraws=\(sv.drawsBackground) doc==tv:\(sv.documentView === tv)")
+                }
+                // Ancestor chain — detect a covering/opaque/zero-alpha parent.
+                var v: NSView? = tv
+                var depth = 0
+                while let cur = v, depth < 12 {
+                    lines.append("  ANC[\(depth)] \(type(of: cur)) frame=\(r(cur.frame)) hidden=\(cur.isHidden) alpha=\(cur.alphaValue) layerOpacity=\(cur.layer?.opacity ?? -1) subviews=\(cur.superview?.subviews.count ?? 0)")
+                    v = cur.superview; depth += 1
+                }
+                // Occlusion: siblings drawn AFTER our branch overlapping the tv.
+                if let win = tv.window, let content = win.contentView {
+                    let tvInWin = tv.convert(tv.bounds, to: content)
+                    var occluders: [String] = []
+                    func scan(_ view: NSView, _ path: String) {
+                        for (i, sub) in view.subviews.enumerated() {
+                            // Skip tv itself, ancestors of tv, and views inside tv.
+                            let isAncestorOfTV = tv.isDescendant(of: sub)
+                            let isInsideTV = sub.isDescendant(of: tv)
+                            let f = sub.convert(sub.bounds, to: content)
+                            if sub !== tv, !isAncestorOfTV, !isInsideTV,
+                               !sub.isHidden, sub.alphaValue > 0.01,
+                               f.intersects(tvInWin), f.width > 50, f.height > 50 {
+                                let hasBG = sub.layer?.backgroundColor != nil
+                                occluders.append("\(path)[\(i)] \(type(of: sub)) f=\(r(f)) opaque=\(sub.isOpaque) bg=\(hasBG) a=\(sub.alphaValue)")
+                            }
+                            if !isInsideTV { scan(sub, "\(path)[\(i)]") }
+                        }
+                    }
+                    scan(content, "win")
+                    lines.append("tvInWin=\(r(tvInWin)) possibleOccluders(\(occluders.count)): \(occluders.prefix(8).joined(separator: " | "))")
+                }
+                CrashReporter.shared.breadcrumb(lines.joined(separator: "\n"))
+                tv.needsDisplay = true
+            }
         }
 
         /// Single, synchronous code path that configures geometry/theme/font
@@ -1192,6 +1255,8 @@ public struct SyntaxHighlightedCodeView: NSViewRepresentable {
 
             let glyphs = textView.layoutManager?.numberOfGlyphs ?? -1
             CrashReporter.shared.breadcrumb("SHCV.applyContent force=\(force) lang=\(p.language) tvFrame=\(Int(textView.frame.width))x\(Int(textView.frame.height)) content=\(Int(scrollView.contentSize.width))x\(Int(scrollView.contentSize.height)) glyphs=\(glyphs) tsLen=\(textView.textStorage?.length ?? -1) draws=\(textView.drawsBackground) hidden=\(textView.isHidden) win=\(textView.window != nil)")
+
+            scheduleRenderSelfTest(textView, scrollView)
         }
 
         func configureTextGeometry(for textView: NSTextView, in scrollView: NSScrollView) {
