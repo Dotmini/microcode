@@ -308,6 +308,7 @@ final class NotebookCellModel: ObservableObject, Identifiable {
     @Published var colorTheme: CellColorTheme = .none
     @Published var customColor: CustomCellColor? = nil  // Custom RGB color
     @Published var useCustomColor: Bool = false
+    @Published var tag: String = ""   // User name-tag / catalog label for selective run
     @Published var isCollapsed: Bool = false
     @Published var dataFramePath: String? = nil
     @Published var isDataFrame: Bool = false
@@ -1484,6 +1485,28 @@ final class NotebookViewModel: ObservableObject {
         let grouped = getCellsByColor()
         return grouped.keys.sorted { $0.rawValue < $1.rawValue }
     }
+
+    /// Distinct non-empty name-tags across runnable cells (any language).
+    func getUsedTags() -> [String] {
+        guard let notebook = activeNotebook else { return [] }
+        let tags = notebook.cells
+            .filter { $0.type == .code || $0.type == .procedure || $0.type == .agent }
+            .map { $0.tag.trimmingCharacters(in: .whitespaces) }
+            .filter { !$0.isEmpty }
+        return Array(Set(tags)).sorted()
+    }
+
+    /// Run every runnable cell carrying the given name-tag, in order, across
+    /// all languages (each cell runs via its own `cell.language`).
+    func runCellsByTag(_ tag: String, computeTarget: ComputeTarget = .localCPU) {
+        guard let notebook = activeNotebook else { return }
+        let key = tag.trimmingCharacters(in: .whitespaces)
+        for cell in notebook.cells where
+            (cell.type == .code || cell.type == .procedure || cell.type == .agent)
+            && cell.tag.trimmingCharacters(in: .whitespaces) == key {
+            runCell(cell, computeTarget: computeTarget)
+        }
+    }
     
     func runSelectedCell(computeTarget: ComputeTarget = .localCPU) {
         guard let notebook = activeNotebook,
@@ -1590,6 +1613,7 @@ final class NotebookViewModel: ObservableObject {
                 "output": cell.output,
                 "execution_count": cell.executionCount as Any,
                 "color_theme": cell.colorTheme.rawValue,
+                "tag": cell.tag,
                 "is_collapsed": cell.isCollapsed,
                 "use_custom_color": cell.useCustomColor,
             ]
@@ -1686,6 +1710,7 @@ final class NotebookViewModel: ObservableObject {
                 cell.output = output
                 cell.executionCount = executionCount
                 cell.colorTheme = CellColorTheme(rawValue: colorThemeStr) ?? .none
+                cell.tag = cellDict["tag"] as? String ?? ""
                 cell.isCollapsed = isCollapsed
                 cell.useCustomColor = useCustomColor
                 
@@ -1884,6 +1909,7 @@ final class NotebookViewModel: ObservableObject {
                     "content": cell.content,
                     "output": cell.output,
                     "color_theme": cell.colorTheme.rawValue,
+                    "tag": cell.tag,
                     "is_collapsed": cell.isCollapsed,
                 ]
                 if let ec = cell.executionCount { cellDict["execution_count"] = ec }
@@ -1941,6 +1967,7 @@ final class NotebookViewModel: ObservableObject {
                     cell.output = output
                     cell.executionCount = executionCount
                     cell.colorTheme = CellColorTheme(rawValue: colorStr) ?? .none
+                    cell.tag = cellDict["tag"] as? String ?? ""
                     cell.isCollapsed = isCollapsed
                     
                     notebook.cells.append(cell)
@@ -2279,13 +2306,45 @@ struct NotebookView: View {
                     // Actions
                     GroupBox {
                         VStack(spacing: 8) {
-                            Button(action: { viewModel.runAllCells(computeTarget: appState.currentComputeTarget) }) {
+                            Menu {
+                                Button {
+                                    viewModel.runAllCells(computeTarget: appState.currentComputeTarget)
+                                } label: { Label("Run All Cells", systemImage: "forward.fill") }
+
+                                let colors = viewModel.getUsedColors().filter { $0 != .none }
+                                if !colors.isEmpty {
+                                    Menu("Run by Color") {
+                                        ForEach(colors, id: \.self) { theme in
+                                            Button {
+                                                viewModel.runCellsByColor(theme, computeTarget: appState.currentComputeTarget)
+                                            } label: {
+                                                Label(theme.rawValue.capitalized, systemImage: "circle.fill")
+                                            }
+                                        }
+                                    }
+                                }
+
+                                let tags = viewModel.getUsedTags()
+                                if !tags.isEmpty {
+                                    Menu("Run by Tag") {
+                                        ForEach(tags, id: \.self) { t in
+                                            Button {
+                                                viewModel.runCellsByTag(t, computeTarget: appState.currentComputeTarget)
+                                            } label: { Label(t, systemImage: "tag.fill") }
+                                        }
+                                    }
+                                }
+                            } label: {
                                 HStack {
                                     Image(systemName: "play.fill")
-                                    Text("Run All")
+                                    Text("Run…")
                                     Spacer()
+                                    Image(systemName: "chevron.up.chevron.down").font(.system(size: 9))
                                 }
+                            } primaryAction: {
+                                viewModel.runAllCells(computeTarget: appState.currentComputeTarget)
                             }
+                            .menuStyle(.borderlessButton)
                             .buttonStyle(.plain)
                             
                             Button(action: { viewModel.clearAllOutputs() }) {
@@ -2517,13 +2576,29 @@ struct NotebookView: View {
                 
                 Divider()
                 
-                ForEach(viewModel.getUsedColors()) { theme in
-                    Button {
-                        viewModel.runCellsByColor(theme, computeTarget: appState.currentComputeTarget)
-                    } label: {
-                        HStack {
-                            Circle().fill(theme.iconColor).frame(width: 8, height: 8)
-                            Text("Run \(theme.rawValue)")
+                let usedColors = viewModel.getUsedColors().filter { $0 != .none }
+                if !usedColors.isEmpty {
+                    Menu("Run by Color") {
+                        ForEach(usedColors) { theme in
+                            Button {
+                                viewModel.runCellsByColor(theme, computeTarget: appState.currentComputeTarget)
+                            } label: {
+                                HStack {
+                                    Circle().fill(theme.iconColor).frame(width: 8, height: 8)
+                                    Text(theme.rawValue.capitalized)
+                                }
+                            }
+                        }
+                    }
+                }
+
+                let usedTags = viewModel.getUsedTags()
+                if !usedTags.isEmpty {
+                    Menu("Run by Tag") {
+                        ForEach(usedTags, id: \.self) { t in
+                            Button {
+                                viewModel.runCellsByTag(t, computeTarget: appState.currentComputeTarget)
+                            } label: { Label(t, systemImage: "tag.fill") }
                         }
                     }
                 }
@@ -2873,6 +2948,8 @@ struct NotebookCellView: View {
     let onGenerateCode: (String) -> Void
     
     @State private var isHovering = false
+    @State private var showTagEditor = false
+    @State private var tagDraft = ""
     @State private var codeHeight: CGFloat = 80
     
     private var panelBackground: Color {
@@ -3130,6 +3207,50 @@ struct NotebookCellView: View {
                 .cornerRadius(4)
             }
             
+            // Name-tag (catalog) chip — used for "Run by Tag"
+            Button {
+                tagDraft = cell.tag
+                showTagEditor = true
+            } label: {
+                HStack(spacing: 3) {
+                    Image(systemName: "tag\(cell.tag.isEmpty ? "" : ".fill")")
+                        .font(.system(size: 9))
+                    Text(cell.tag.isEmpty ? "Tag" : cell.tag)
+                        .font(.system(size: 9, weight: .medium))
+                        .lineLimit(1)
+                }
+                .padding(.horizontal, 6)
+                .padding(.vertical, 2)
+                .background((cell.tag.isEmpty ? Color.secondary : Color.accentColor).opacity(0.18))
+                .foregroundColor(cell.tag.isEmpty ? .secondary : .accentColor)
+                .cornerRadius(4)
+            }
+            .buttonStyle(.plain)
+            .help("Name this cell for selective Run by Tag")
+            .popover(isPresented: $showTagEditor, arrowEdge: .bottom) {
+                VStack(alignment: .leading, spacing: 10) {
+                    Text("Cell Name-tag").font(.system(size: 12, weight: .semibold))
+                    TextField("e.g. setup, train, report", text: $tagDraft)
+                        .textFieldStyle(.roundedBorder)
+                        .frame(width: 220)
+                        .onSubmit {
+                            cell.tag = tagDraft.trimmingCharacters(in: .whitespaces)
+                            showTagEditor = false
+                        }
+                    HStack {
+                        Button("Clear") { cell.tag = ""; tagDraft = ""; showTagEditor = false }
+                        Spacer()
+                        Button("Set") {
+                            cell.tag = tagDraft.trimmingCharacters(in: .whitespaces)
+                            showTagEditor = false
+                        }
+                        .buttonStyle(.borderedProminent)
+                    }
+                    .frame(width: 220)
+                }
+                .padding(14)
+            }
+
             // Enhanced Color Picker
             Menu {
                 // Preset Colors in Grid-like sections
