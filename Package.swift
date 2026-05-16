@@ -45,6 +45,7 @@ let package = Package(
             ],
             sources: [
                 "MicroCodeApp.swift",
+                "Services/CrashReporter.swift",
                 "Managers/ReportLogManager.swift",
                 "Managers/PDFGenerator.swift",
                 "Models/AppState.swift",
