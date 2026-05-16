@@ -909,9 +909,11 @@ struct EditorArea: View {
             case .notebook:
                 NotebookView()
                     .environmentObject(appState)
+                    .onAppear { CrashReporter.shared.breadcrumb("EditorArea -> NotebookView (Cell mode)") }
             case .playground:
                 PlaygroundView()
                     .environmentObject(appState)
+                    .onAppear { CrashReporter.shared.breadcrumb("EditorArea -> PlaygroundView") }
             case .remoteX:
                 RemoteXView()
             case .design:

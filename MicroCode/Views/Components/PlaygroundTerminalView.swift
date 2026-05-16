@@ -16,18 +16,26 @@ struct PlaygroundTerminalView: NSViewRepresentable {
     
     @available(macOS 13.0, *)
     func sizeThatFits(_ proposal: ProposedViewSize, nsView: TerminalView, context: Context) -> CGSize? {
-        return proposal.replacingUnspecifiedDimensions()
+        // Never report a degenerate size — a zero/near-zero terminal makes
+        // SwiftTerm compute 0 cols/rows and feeds an empty grid.
+        let s = proposal.replacingUnspecifiedDimensions()
+        return CGSize(width: max(120, s.width), height: max(60, s.height))
     }
-    
+
     func makeNSView(context: Context) -> TerminalView {
-        let terminal = TerminalView(frame: .zero)
+        CrashReporter.shared.breadcrumb("PlaygroundTerminalView.makeNSView")
+        // A non-zero initial frame avoids SwiftTerm initializing with a 0x0
+        // grid (Int(0/cell)=0) before the first real layout pass.
+        let terminal = TerminalView(frame: NSRect(x: 0, y: 0, width: 600, height: 320))
         terminal.font = NSFont.monospacedSystemFont(ofSize: fontSize, weight: .regular)
         terminal.nativeBackgroundColor = theme.editorBackground
         terminal.nativeForegroundColor = theme.editorText
-        
-        // Configure terminal checks
-        terminal.feed(text: text)
-        
+
+        if !text.isEmpty {
+            terminal.feed(text: text)
+        }
+        context.coordinator.cachedText = text
+        CrashReporter.shared.breadcrumb("PlaygroundTerminalView.makeNSView done")
         return terminal
     }
     

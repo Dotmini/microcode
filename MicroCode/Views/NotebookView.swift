@@ -2050,6 +2050,7 @@ struct NotebookView: View {
             }
         }
         .onAppear {
+            CrashReporter.shared.breadcrumb("NotebookView.onAppear notebooks=\(viewModel.notebooks.count)")
             isReady = true
             // Ensure notebook is active
             if viewModel.activeNotebookId == nil && !viewModel.notebooks.isEmpty {
