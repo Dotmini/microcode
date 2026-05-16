@@ -766,14 +766,33 @@ import SwiftUI
 class NoIntrinsicScrollView: NSScrollView {
     // Returning noIntrinsicMetric prevents the scroll view from bubbling the
     // text view's content size up to SwiftUI, which is what triggered the
-    // _FlexFrameLayout recursion crash. We deliberately do NOT override
-    // layout() to stomp the document view's frame: AppKit already keeps the
-    // NSTextView sized correctly via isVerticallyResizable + autoresizingMask.
-    // The previous manual frame override fought the layout manager and left
-    // glyphs laid out (so the gutter ruler still drew line numbers) while the
-    // text view itself rendered nothing — the "black screen" regression.
+    // _FlexFrameLayout recursion crash. sizeThatFits returning the proposal
+    // also stops SwiftUI from ever querying intrinsic size, so this never
+    // recurses back into SwiftUI layout.
     override var intrinsicContentSize: NSSize {
         return NSSize(width: NSView.noIntrinsicMetric, height: NSView.noIntrinsicMetric)
+    }
+
+    // The deferred configureTextGeometry() can run before SwiftUI has given
+    // this scroll view its real frame (contentSize ≈ 0 → text view 1pt wide →
+    // every glyph wraps off-screen → "nothing shows"). Once the scroll view
+    // gets a real size, AppKit calls layout(); here we keep the document
+    // NSTextView's width synced to the content width. This is the canonical
+    // maintenance for a *wrapping* (isHorizontallyResizable = false,
+    // widthTracksTextView = true) text view and does NOT fight the layout
+    // manager — unlike the old override that also forced an infinite-width
+    // container while horizontally resizable.
+    override func layout() {
+        super.layout()
+        guard let tv = documentView as? NSTextView else { return }
+        let w = contentSize.width
+        let h = contentSize.height
+        guard w > 1 else { return }
+        if abs(tv.frame.width - w) > 0.5 {
+            tv.setFrameSize(NSSize(width: w, height: max(tv.frame.height, h)))
+        } else if tv.frame.height < h {
+            tv.setFrameSize(NSSize(width: tv.frame.width, height: h))
+        }
     }
 }
 
@@ -1202,6 +1221,9 @@ public struct SyntaxHighlightedCodeView: NSViewRepresentable {
                 abs(textView.frame.height - newHeight) > 0.5 {
                 textView.setFrameSize(NSSize(width: newWidth, height: newHeight))
             }
+            let fg = textView.textColor?.description ?? "nil"
+            let bg = textView.backgroundColor.description
+            CrashReporter.shared.breadcrumb("SHCV.configureTextGeometry content=\(Int(contentSize.width))x\(Int(contentSize.height)) tvFrame=\(Int(textView.frame.width))x\(Int(textView.frame.height)) tsLen=\(textView.textStorage?.length ?? -1) draws=\(textView.drawsBackground) fg=\(fg) bg=\(bg)")
         }
         
         deinit {

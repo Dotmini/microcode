@@ -478,7 +478,13 @@ final class NotebookViewModel: ObservableObject {
     
     func runCell(_ cell: NotebookCellModel, computeTarget: ComputeTarget = .localCPU) {
         guard cell.type == .code || cell.type == .procedure || cell.type == .agent else { return }
-        
+
+        // Auto-detect 3rd-party imports so the env manager always reflects what
+        // the code actually needs without the user typing anything.
+        if cell.language == .python {
+            _ = PythonEnvManager.shared.detectImportsFromCode(cell.content)
+        }
+
         cell.isExecuting = true
         cell.clearOutput()
         kernelStatus = "Running"
@@ -2178,6 +2184,13 @@ struct NotebookView: View {
                                     }
                                     Divider()
                                     Button("Manage Environments...") {
+                                        // Auto-detect required packages from ALL cells so the
+                                        // env sheet opens with them pre-filled (Auto-first UX).
+                                        let allCode = (viewModel.activeNotebook?.cells ?? [])
+                                            .filter { $0.type == .code }
+                                            .map { $0.content }
+                                            .joined(separator: "\n")
+                                        _ = pythonEnvManager.detectImportsFromCode(allCode)
                                         appState.showingPythonEnv = true
                                     }
                                 } label: {
