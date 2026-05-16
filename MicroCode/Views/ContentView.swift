@@ -3012,89 +3012,99 @@ struct SettingsView: View {
     @State private var authError = ""
     @State private var currentPlan: String = "free"
     
+    static let sidebarItems: [(tab: Int, title: String, icon: String)] = [
+        (0, "General", "gearshape"),
+        (1, "Editor", "text.cursor"),
+        (2, "AI", "brain"),
+        (3, "Tools", "wrench.and.screwdriver"),
+        (5, "Extensions", "puzzlepiece.extension"),
+        (6, "Subscription", "crown"),
+        (4, "About", "info.circle")
+    ]
+
     var body: some View {
-        VStack(spacing: 0) {
-            // Toolbar Header
-            HStack {
-                Image(systemName: "gearshape.fill")
-                    .foregroundColor(.accentColor)
-                Text("Settings")
-                    .font(.system(size: 13, weight: .semibold))
-                
-                Spacer()
-                
-                Button("Cancel") {
-                    dismiss()
+        HStack(spacing: 0) {
+            // ── Sidebar (Codex-style) ──────────────────────────────────
+            VStack(alignment: .leading, spacing: 2) {
+                Button(action: { dismiss() }) {
+                    HStack(spacing: 6) {
+                        Image(systemName: "chevron.left")
+                        Text("Back to app")
+                    }
+                    .font(.system(size: 12, weight: .medium))
+                    .foregroundColor(.secondary)
                 }
-                .keyboardShortcut(.cancelAction)
-                
-                Button("Save Settings") {
-                    saveAllSettings()
-                    dismiss()
-                }
-                .buttonStyle(.borderedProminent)
-                .keyboardShortcut(.defaultAction)
-            }
-            .padding(.horizontal, 16)
-            .padding(.vertical, 12)
-            .background(Color(nsColor: .windowBackgroundColor))
-            
-            Divider()
-            
-            // Tab Bar
-            HStack(spacing: 0) {
-                SettingsTabButton(title: "General", icon: "gearshape", isSelected: selectedTab == 0) { selectedTab = 0 }
-                SettingsTabButton(title: "Editor", icon: "text.cursor", isSelected: selectedTab == 1) { selectedTab = 1 }
-                SettingsTabButton(title: "AI", icon: "brain", isSelected: selectedTab == 2) { selectedTab = 2 }
-                SettingsTabButton(title: "Tools", icon: "wrench.and.screwdriver", isSelected: selectedTab == 3) { selectedTab = 3 }
-                SettingsTabButton(title: "Extensions", icon: "puzzlepiece.extension", isSelected: selectedTab == 5) { selectedTab = 5 }
-                SettingsTabButton(title: "Subscription", icon: "crown", isSelected: selectedTab == 6) { selectedTab = 6 }
-                SettingsTabButton(title: "About", icon: "info.circle", isSelected: selectedTab == 4) { selectedTab = 4 }
-                Spacer()
-            }
-            .padding(.horizontal, 8)
-            .padding(.vertical, 4)
-            .background(Color(nsColor: .controlBackgroundColor))
-            
-            Divider()
-            
-            // Content
-            ScrollView {
-                VStack(alignment: .leading, spacing: 16) {
-                    if selectedTab == 0 {
-                        generalSettingsContent
-                    } else if selectedTab == 1 {
-                        editorSettingsContent
-                    } else if selectedTab == 2 {
-                        aiSettingsContent
-                    } else if selectedTab == 3 {
-                        toolsSettingsContent
-                    } else if selectedTab == 5 {
-                        ExtensionSettingsView()
-                    } else if selectedTab == 6 {
-                        subscriptionSettingsContent
-                    } else {
-                        aboutContent
+                .buttonStyle(.plain)
+                .padding(.top, 6)
+                .padding(.bottom, 16)
+
+                ForEach(Self.sidebarItems, id: \.tab) { item in
+                    CodexSidebarRow(title: item.title, icon: item.icon,
+                                    selected: selectedTab == item.tab) {
+                        selectedTab = item.tab
                     }
                 }
-                .padding(24)
-                .frame(maxWidth: .infinity, alignment: .leading)
-            }
-            .background(Color(nsColor: .textBackgroundColor))
-            
-            // Footer with copyright
-            Divider()
-            HStack {
-                Text("© 2025 MicroCode | Dotmini Software 2.0. All Rights Reserved.")
-                    .font(.system(size: 10))
-                    .foregroundColor(.secondary)
+
                 Spacer()
+
+                Text("© 2025 MicroCode · Dotmini Software")
+                    .font(.system(size: 10))
+                    .foregroundColor(.secondary.opacity(0.65))
             }
-            .padding(.horizontal, 16)
-            .padding(.vertical, 8)
+            .padding(.horizontal, 14)
+            .padding(.vertical, 18)
+            .frame(width: 236, alignment: .leading)
+            .background(VisualEffectView(material: .sidebar, blendingMode: .behindWindow))
+
+            Divider()
+
+            // ── Content ────────────────────────────────────────────────
+            VStack(alignment: .leading, spacing: 0) {
+                HStack(alignment: .firstTextBaseline) {
+                    Text(Self.sidebarItems.first { $0.tab == selectedTab }?.title ?? "Settings")
+                        .font(.system(size: 26, weight: .bold))
+                    Spacer()
+                    Button("Cancel") { dismiss() }
+                        .keyboardShortcut(.cancelAction)
+                    Button("Save") { saveAllSettings(); dismiss() }
+                        .buttonStyle(.borderedProminent)
+                        .keyboardShortcut(.defaultAction)
+                }
+                .padding(.horizontal, 32)
+                .padding(.top, 30)
+                .padding(.bottom, 20)
+
+                ScrollView {
+                    VStack(alignment: .leading, spacing: 18) {
+                        Group {
+                            if selectedTab == 0 { generalSettingsContent }
+                            else if selectedTab == 1 { editorSettingsContent }
+                            else if selectedTab == 2 { aiSettingsContent }
+                            else if selectedTab == 3 { toolsSettingsContent }
+                            else if selectedTab == 5 { ExtensionSettingsView() }
+                            else if selectedTab == 6 { subscriptionSettingsContent }
+                            else { aboutContent }
+                        }
+                        .padding(22)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .background(
+                            RoundedRectangle(cornerRadius: 14, style: .continuous)
+                                .fill(Color(nsColor: .controlBackgroundColor).opacity(0.55))
+                        )
+                        .overlay(
+                            RoundedRectangle(cornerRadius: 14, style: .continuous)
+                                .strokeBorder(Color.primary.opacity(0.06), lineWidth: 1)
+                        )
+                    }
+                    .padding(.horizontal, 32)
+                    .padding(.bottom, 32)
+                }
+            }
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
             .background(Color(nsColor: .windowBackgroundColor))
         }
-        .frame(minWidth: 600, idealWidth: 700, maxWidth: 900, minHeight: 500, idealHeight: 600, maxHeight: 800)
+        .frame(minWidth: 880, idealWidth: 1000, maxWidth: 1240,
+               minHeight: 600, idealHeight: 700, maxHeight: 920)
         .onAppear {
             loadCurrentSettings()
         }
@@ -4306,9 +4316,42 @@ struct SettingsTabButton: View {
     }
 }
 
+struct CodexSidebarRow: View {
+    let title: String
+    let icon: String
+    let selected: Bool
+    let action: () -> Void
+    @State private var hovering = false
+
+    var body: some View {
+        Button(action: action) {
+            HStack(spacing: 10) {
+                Image(systemName: icon)
+                    .font(.system(size: 13))
+                    .frame(width: 20)
+                    .foregroundColor(selected ? .accentColor : .secondary)
+                Text(title)
+                    .font(.system(size: 13, weight: selected ? .semibold : .regular))
+                    .foregroundColor(selected ? .primary : .secondary)
+                Spacer(minLength: 0)
+            }
+            .padding(.horizontal, 10)
+            .padding(.vertical, 7)
+            .background(
+                RoundedRectangle(cornerRadius: 8, style: .continuous)
+                    .fill(selected ? Color.accentColor.opacity(0.15)
+                          : (hovering ? Color.primary.opacity(0.06) : Color.clear))
+            )
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .onHover { hovering = $0 }
+    }
+}
+
 struct SettingsSectionHeader: View {
     let title: String
-    
+
     var body: some View {
         Text(title.uppercased())
             .font(.system(size: 11, weight: .bold))

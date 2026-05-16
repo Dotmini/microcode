@@ -215,10 +215,53 @@ class PythonEnvManager: ObservableObject {
     
     // MARK: - Package Detection
     
+    /// Python import names that differ from their PyPI distribution name.
+    /// `import sklearn` must be installed as `scikit-learn`, etc. Installing
+    /// the literal import name fails (e.g. the `sklearn` PyPI stub is
+    /// deprecated and errors during metadata generation).
+    static let importToPyPI: [String: String] = [
+        "sklearn": "scikit-learn",
+        "cv2": "opencv-python",
+        "PIL": "Pillow",
+        "bs4": "beautifulsoup4",
+        "yaml": "PyYAML",
+        "skimage": "scikit-image",
+        "Crypto": "pycryptodome",
+        "dotenv": "python-dotenv",
+        "OpenSSL": "pyOpenSSL",
+        "serial": "pyserial",
+        "usb": "pyusb",
+        "google": "google-api-python-client",
+        "dateutil": "python-dateutil",
+        "jwt": "PyJWT",
+        "attr": "attrs",
+        "MySQLdb": "mysqlclient",
+        "psycopg2": "psycopg2-binary",
+        "lxml": "lxml",
+        "win32api": "pywin32",
+        "pkg_resources": "setuptools",
+        "fitz": "PyMuPDF",
+        "docx": "python-docx",
+        "pptx": "python-pptx",
+        "magic": "python-magic",
+        "redis": "redis",
+        "slugify": "python-slugify",
+        "telebot": "pyTelegramBotAPI",
+        "Xlib": "python-xlib",
+        "gi": "PyGObject"
+    ]
+
+    static func pypiName(for importName: String) -> String {
+        importToPyPI[importName] ?? importName
+    }
+
     func detectImportsFromCode(_ code: String) -> [String] {
+        // Map import names → real PyPI package names so the chips shown to the
+        // user and the install command both use installable names.
         let packages = PythonEnvManager.analyzeImports(code)
-        self.detectedPackages = packages
-        return packages
+            .map { PythonEnvManager.pypiName(for: $0) }
+        self.detectedPackages = Array(Set(packages)).sorted()
+        return self.detectedPackages
     }
     
     /// Pure function for background analysis
@@ -283,51 +326,60 @@ class PythonEnvManager: ObservableObject {
             return
         }
         
+        // Normalise import names → PyPI names (sklearn → scikit-learn …) and
+        // dedupe, so a deprecated stub name can't abort the batch.
+        let resolved = Array(Set(packages
+            .map { $0.trimmingCharacters(in: .whitespaces) }
+            .filter { !$0.isEmpty }
+            .map { PythonEnvManager.pypiName(for: $0) })).sorted()
+
         isWorking = true
-        output += "\n📦 Installing packages: \(packages.joined(separator: ", "))...\n"
-        
+        output += "\n📦 Installing: \(resolved.joined(separator: ", "))…\n"
+
         DispatchQueue.global(qos: .userInitiated).async { [weak self] in
             guard let self = self else { return }
-            
-            let process = Process()
-            process.executableURL = URL(fileURLWithPath: env.pipPath)
-            process.arguments = ["install"] + packages
-            
-            let pipe = Pipe()
-            process.standardOutput = pipe
-            process.standardError = pipe
-            
-            // Read output in real-time
-            pipe.fileHandleForReading.readabilityHandler = { handle in
-                let data = handle.availableData
-                if let text = String(data: data, encoding: .utf8), !text.isEmpty {
-                    DispatchQueue.main.async {
-                        self.output += text
+
+            // Install ONE package per pip invocation so a single bad/deprecated
+            // package (e.g. the old `sklearn` stub) does not stop the others.
+            var failed: [String] = []
+            for pkg in resolved {
+                DispatchQueue.main.async { self.output += "\n→ pip install \(pkg)\n" }
+                let process = Process()
+                process.executableURL = URL(fileURLWithPath: env.pipPath)
+                process.arguments = ["install", "--upgrade-strategy", "only-if-needed", pkg]
+                let pipe = Pipe()
+                process.standardOutput = pipe
+                process.standardError = pipe
+                pipe.fileHandleForReading.readabilityHandler = { handle in
+                    let data = handle.availableData
+                    if let text = String(data: data, encoding: .utf8), !text.isEmpty {
+                        DispatchQueue.main.async { self.output += text }
                     }
+                }
+                do {
+                    try process.run()
+                    process.waitUntilExit()
+                    pipe.fileHandleForReading.readabilityHandler = nil
+                    if process.terminationStatus != 0 { failed.append(pkg) }
+                } catch {
+                    pipe.fileHandleForReading.readabilityHandler = nil
+                    failed.append(pkg)
+                    DispatchQueue.main.async { self.output += "❌ \(pkg): \(error.localizedDescription)\n" }
                 }
             }
-            
-            do {
-                try process.run()
-                process.waitUntilExit()
-                
-                DispatchQueue.main.async {
-                    self.isWorking = false
-                    pipe.fileHandleForReading.readabilityHandler = nil
-                    
-                    if process.terminationStatus == 0 {
-                        self.output += "\n✅ Packages installed successfully!\n"
-                        completion(true, "Installed")
-                    } else {
-                        self.output += "\n❌ Some packages failed to install\n"
-                        completion(false, "Failed")
-                    }
-                }
-            } catch {
-                DispatchQueue.main.async {
-                    self.isWorking = false
-                    self.output += "❌ Error: \(error.localizedDescription)\n"
-                    completion(false, error.localizedDescription)
+
+            DispatchQueue.main.async {
+                self.isWorking = false
+                let ok = resolved.filter { !failed.contains($0) }
+                if failed.isEmpty {
+                    self.output += "\n✅ Installed: \(ok.joined(separator: ", "))\n"
+                    completion(true, "Installed")
+                } else if ok.isEmpty {
+                    self.output += "\n❌ Failed: \(failed.joined(separator: ", "))\n"
+                    completion(false, "Failed: \(failed.joined(separator: ", "))")
+                } else {
+                    self.output += "\n⚠️ Installed: \(ok.joined(separator: ", ")) — Failed: \(failed.joined(separator: ", "))\n"
+                    completion(false, "Partial — failed: \(failed.joined(separator: ", "))")
                 }
             }
         }

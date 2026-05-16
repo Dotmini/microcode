@@ -172,13 +172,33 @@ class LSPManager: ObservableObject {
     
     // MARK: - Status
     
-    /// Check if LSP is available for a language
+    /// Check if LSP is available for a language (resolves the server binary the
+    /// same way it would be launched, so user installs via Homebrew/npm-g/
+    /// pyenv/nvm/asdf are detected — not just the hardcoded paths).
     func isAvailable(for language: String) -> Bool {
         guard let serverType = LanguageServer.serverFor(language: language) else { return false }
-        if let client = activeClients[serverType] {
-            return client.isRunning
+        if let client = activeClients[serverType] { return client.isRunning }
+        return LSPClientService.resolveBinary(serverType.rawValue, searchPaths: serverType.searchPaths) != nil
+    }
+
+    /// Cache of detected servers so the scan (spawns a login shell per server)
+    /// runs at most once unless explicitly refreshed.
+    private var detectedServersCache: [LanguageServer]?
+
+    /// Language servers actually installed on this machine. Used to show the
+    /// user which languages have full IDE support available.
+    func detectInstalledServers(refresh: Bool = false) -> [LanguageServer] {
+        if !refresh, let c = detectedServersCache { return c }
+        let found = LanguageServer.allCases.filter {
+            LSPClientService.resolveBinary($0.rawValue, searchPaths: $0.searchPaths) != nil
         }
-        return serverType.searchPaths.contains { FileManager.default.isExecutableFile(atPath: $0) }
+        detectedServersCache = found
+        return found
+    }
+
+    /// Flat list of language ids that have an installed language server.
+    func detectedLanguages(refresh: Bool = false) -> [String] {
+        Array(Set(detectInstalledServers(refresh: refresh).flatMap { $0.languageIds })).sorted()
     }
     
     /// Get server capabilities for a language
