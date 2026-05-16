@@ -100,15 +100,56 @@ final class RemoteGPUService: ObservableObject {
         if log.count > 12_000 { log = String(log.suffix(10_000)) }
     }
 
+    /// First existing key in ~/.ssh when the user didn't pick one (so the
+    /// common case "I have a key but it isn't a default name" still works).
+    private func autoKey() -> String? {
+        let ssh = (NSHomeDirectory() as NSString).appendingPathComponent(".ssh")
+        let names = ["id_ed25519", "id_rsa", "id_ecdsa", "microcode", "vast",
+                     "runpod", "id_dsa"]
+        let fm = FileManager.default
+        for n in names {
+            let p = (ssh as NSString).appendingPathComponent(n)
+            if fm.fileExists(atPath: p) { return p }
+        }
+        // Any private-looking key file (no .pub) as a last resort.
+        if let items = try? fm.contentsOfDirectory(atPath: ssh) {
+            for f in items where !f.hasSuffix(".pub")
+                && f != "known_hosts" && f != "config" && f != "authorized_keys" {
+                return (ssh as NSString).appendingPathComponent(f)
+            }
+        }
+        return nil
+    }
+
     private func sshBaseArgs(_ t: Target) -> [String] {
         var a = ["-o", "BatchMode=yes",
                  "-o", "StrictHostKeyChecking=accept-new",
+                 "-o", "NumberOfPasswordPrompts=0",
+                 "-o", "PreferredAuthentications=publickey",
                  "-o", "ServerAliveInterval=20",
                  "-o", "ServerAliveCountMax=3",
                  "-o", "ConnectTimeout=12",
                  "-p", String(t.port)]
-        if let k = t.keyPath, !k.isEmpty { a += ["-i", k] }
+        let key = (t.keyPath?.isEmpty == false) ? t.keyPath : autoKey()
+        if let k = key, !k.isEmpty {
+            a += ["-i", k, "-o", "IdentitiesOnly=yes"]
+        }
         return a
+    }
+
+    /// Watch ssh stderr for the unmistakable key-auth failure and fail FAST
+    /// with an actionable message instead of timing out 40 s later.
+    private func checkAuthFailure(_ s: String) {
+        guard status == .connecting else { return }
+        if s.contains("Permission denied (publickey)")
+            || s.contains("Too many authentication failures")
+            || s.contains("No such identity")
+            || s.contains("Host key verification failed") {
+            CrashReporter.shared.breadcrumb("RemoteGPU.authFail: \(s.prefix(160))")
+            append("\n❌ SSH key rejected.\n")
+            status = .failed("SSH key rejected. Click “Choose .pem…” and select your PRIVATE key — the one matching the key you added on Vast/RunPod (often ~/.ssh/<name>, not a default id_rsa).")
+            disconnect(silent: true)
+        }
     }
 
     // MARK: - Connect / Disconnect
@@ -123,6 +164,7 @@ final class RemoteGPUService: ObservableObject {
         status = .connecting
         log = ""
         token = UUID().uuidString.replacingOccurrences(of: "-", with: "")
+        CrashReporter.shared.breadcrumb("RemoteGPU.connect \(t.user)@\(t.host):\(t.port) key=\(t.keyPath ?? "none")")
         append("→ \(t.user)@\(t.host):\(t.port)\(t.keyPath.map { " (key: \(($0 as NSString).lastPathComponent))" } ?? "")\n")
 
         // 1) Launch Jupyter remotely (this ssh stays alive = the server).
@@ -140,7 +182,7 @@ final class RemoteGPUService: ObservableObject {
         jpPipe.fileHandleForReading.readabilityHandler = { [weak self] h in
             let d = h.availableData
             guard !d.isEmpty, let s = String(data: d, encoding: .utf8) else { return }
-            Task { @MainActor in self?.append(s) }
+            Task { @MainActor in self?.append(s); self?.checkAuthFailure(s) }
         }
         do { try jp.run(); jupyterProc = jp; append("• starting jupyter on the instance…\n") }
         catch { status = .failed("ssh failed: \(error.localizedDescription)"); return }
@@ -164,7 +206,7 @@ final class RemoteGPUService: ObservableObject {
         tpPipe.fileHandleForReading.readabilityHandler = { [weak self] h in
             let d = h.availableData
             guard !d.isEmpty, let s = String(data: d, encoding: .utf8) else { return }
-            Task { @MainActor in self?.append("[tunnel] \(s)") }
+            Task { @MainActor in self?.append("[tunnel] \(s)"); self?.checkAuthFailure(s) }
         }
         do { try tp.run(); tunnelProc = tp; append("• opening secure tunnel localhost:\(localPort) → remote:\(remotePort)…\n") }
         catch { status = .failed("Tunnel failed: \(error.localizedDescription)"); return }
@@ -186,11 +228,13 @@ final class RemoteGPUService: ObservableObject {
                     UserDefaults.standard.set(token, forKey: "hpcToken")
                     localURL = base
                     status = .connected
+                    CrashReporter.shared.breadcrumb("RemoteGPU.connected → \(base) (hpcEndpoint/hpcToken set)")
                     append("✅ Connected. Cells now run on the remote GPU.\n")
                     return
                 }
             }
         }
+        CrashReporter.shared.breadcrumb("RemoteGPU.timeout — jupyter never answered on \(base)")
         append("❌ Timed out waiting for the remote Jupyter server.\n")
         status = .failed("Timed out. Ensure Python/jupyter can run on the instance.")
         disconnect(silent: true)
