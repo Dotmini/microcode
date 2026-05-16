@@ -3543,8 +3543,13 @@ struct NotebookCellView: View {
 struct HPCSettingsView: View {
     @EnvironmentObject var appState: AppState
     @ObservedObject private var gpu = RemoteGPUService.shared
+    @ObservedObject private var prov = RemoteProviderService.shared
     @AppStorage("remoteSSHCommand") private var sshCmd = ""
     @AppStorage("remoteSSHKey") private var sshKey = ""
+    @AppStorage("runpodApiKey") private var runpodKey = ""
+    @AppStorage("vastApiKey") private var vastKey = ""
+    @State private var providerSel: RemoteProviderService.Provider = .runpod
+    @State private var showProvider = false
     @State private var showAdvanced = false
     @State private var testing = false
     @State private var testOK: Bool? = nil
@@ -3651,6 +3656,64 @@ struct HPCSettingsView: View {
                 .padding(8)
                 .background(RoundedRectangle(cornerRadius: 6).fill(Color.black.opacity(0.25)))
             }
+
+            DisclosureGroup("Connect via provider API key (RunPod / Vast.ai)", isExpanded: $showProvider) {
+                VStack(alignment: .leading, spacing: 8) {
+                    Picker("", selection: $providerSel) {
+                        ForEach(RemoteProviderService.Provider.allCases) { Text($0.rawValue).tag($0) }
+                    }
+                    .pickerStyle(.segmented).labelsHidden()
+
+                    SecureField(providerSel == .runpod ? "RunPod API key" : "Vast.ai API key",
+                                text: providerSel == .runpod ? $runpodKey : $vastKey)
+                        .textFieldStyle(.roundedBorder)
+
+                    HStack(spacing: 8) {
+                        Button {
+                            Task {
+                                await prov.listInstances(provider: providerSel,
+                                                         apiKey: providerSel == .runpod ? runpodKey : vastKey)
+                            }
+                        } label: {
+                            HStack(spacing: 6) {
+                                if prov.isLoading { ProgressView().scaleEffect(0.6) }
+                                Text(prov.isLoading ? "Loading…" : "List instances")
+                            }
+                        }
+                        .buttonStyle(.bordered)
+                        .disabled(prov.isLoading)
+                        if !prov.error.isEmpty {
+                            Text(prov.error).font(.system(size: 10)).foregroundColor(.red)
+                                .lineLimit(2).fixedSize(horizontal: false, vertical: true)
+                        }
+                    }
+
+                    ForEach(prov.instances) { inst in
+                        Button {
+                            sshCmd = prov.sshCommand(for: inst)
+                            gpu.connect(sshCommand: sshCmd,
+                                        keyPath: sshKey.isEmpty ? nil : sshKey)
+                        } label: {
+                            HStack(spacing: 6) {
+                                Circle().fill(inst.running ? Color.green : Color.secondary)
+                                    .frame(width: 7, height: 7)
+                                Text(inst.label).font(.system(size: 11)).lineLimit(1)
+                                Spacer()
+                                Image(systemName: "link").font(.system(size: 10))
+                            }
+                            .contentShape(Rectangle())
+                        }
+                        .buttonStyle(.plain)
+                        .disabled(!inst.running)
+                    }
+
+                    Text("Uses your account SSH key (or pick a .pem above). Pick an instance → MicroCode SSHes in and connects automatically.")
+                        .font(.system(size: 10)).foregroundColor(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+                .padding(.top, 6)
+            }
+            .font(.system(size: 11))
 
             DisclosureGroup("Advanced — manual Jupyter URL/token", isExpanded: $showAdvanced) {
                 VStack(alignment: .leading, spacing: 8) {
