@@ -7,12 +7,22 @@
 
 import Foundation
 
-enum JupyterError: Error {
+enum JupyterError: Error, LocalizedError {
     case invalidURL
     case connectionFailed(String)
     case kernelCreationFailed(String)
     case invalidResponse
     case executionTimeout
+
+    var errorDescription: String? {
+        switch self {
+        case .invalidURL: return "Invalid server URL."
+        case .connectionFailed(let m): return m
+        case .kernelCreationFailed(let m): return "Kernel start failed: \(m)"
+        case .invalidResponse: return "The server did not return a valid Jupyter response."
+        case .executionTimeout: return "Remote execution timed out."
+        }
+    }
 }
 
 struct JupyterKernelInfo: Codable {
@@ -75,24 +85,48 @@ class JupyterClient {
     }
     
     func startKernel(name: String = "python3") async throws -> String {
+        // Reachability probe first so the error tells us EXACTLY what's wrong
+        // (DNS/tunnel down vs. wrong token vs. not-a-Jupyter URL).
+        CrashReporter.shared.breadcrumb("Jupyter.startKernel base=\(baseURL) kernel=\(name)")
+        if let probe = makeRequest(path: "/api", method: "GET") {
+            do {
+                let (_, presp) = try await URLSession.shared.data(for: probe)
+                let pcode = (presp as? HTTPURLResponse)?.statusCode ?? -1
+                CrashReporter.shared.breadcrumb("Jupyter.probe /api → HTTP \(pcode)")
+                if pcode == 401 || pcode == 403 {
+                    throw JupyterError.connectionFailed("Server reached but the token was rejected (HTTP \(pcode)). Re-check the Jupyter token.")
+                }
+                if pcode == -1 || pcode >= 500 {
+                    throw JupyterError.connectionFailed("Server returned HTTP \(pcode) on /api — is \(baseURL) really the Jupyter base URL?")
+                }
+            } catch let e as JupyterError {
+                throw e
+            } catch {
+                CrashReporter.shared.breadcrumb("Jupyter.probe failed: \(error.localizedDescription)")
+                throw JupyterError.connectionFailed("Can't reach \(baseURL): \(error.localizedDescription). The tunnel/instance may be down, or the URL isn't the Jupyter base URL.")
+            }
+        }
+
         guard let request = makeRequest(path: "/api/kernels", method: "POST", body: ["name": name]) else {
             throw JupyterError.invalidURL
         }
-        
+
         let (data, response) = try await URLSession.shared.data(for: request)
-        
+
         guard let httpResponse = response as? HTTPURLResponse else {
             throw JupyterError.invalidResponse
         }
-        
+
         if (200...299).contains(httpResponse.statusCode) {
             let decoder = JSONDecoder()
             let kernelInfo = try decoder.decode(JupyterKernelInfo.self, from: data)
             self.activeKernelID = kernelInfo.id
+            CrashReporter.shared.breadcrumb("Jupyter.startKernel OK id=\(kernelInfo.id)")
             return kernelInfo.id
         } else {
-            let errorMsg = String(data: data, encoding: .utf8) ?? "Unknown HTTP Error \(httpResponse.statusCode)"
-            throw JupyterError.kernelCreationFailed(errorMsg)
+            let body = String(data: data, encoding: .utf8)?.prefix(300) ?? ""
+            CrashReporter.shared.breadcrumb("Jupyter.startKernel FAIL HTTP \(httpResponse.statusCode) body=\(body)")
+            throw JupyterError.kernelCreationFailed("HTTP \(httpResponse.statusCode) creating '\(name)' kernel. \(body.isEmpty ? "Is that kernel installed on the instance?" : String(body))")
         }
     }
     

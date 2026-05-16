@@ -123,6 +123,7 @@ final class RemoteGPUService: ObservableObject {
         status = .connecting
         log = ""
         token = UUID().uuidString.replacingOccurrences(of: "-", with: "")
+        CrashReporter.shared.breadcrumb("RemoteGPU.connect \(t.user)@\(t.host):\(t.port) key=\(t.keyPath ?? "none")")
         append("→ \(t.user)@\(t.host):\(t.port)\(t.keyPath.map { " (key: \(($0 as NSString).lastPathComponent))" } ?? "")\n")
 
         // 1) Launch Jupyter remotely (this ssh stays alive = the server).
@@ -186,11 +187,13 @@ final class RemoteGPUService: ObservableObject {
                     UserDefaults.standard.set(token, forKey: "hpcToken")
                     localURL = base
                     status = .connected
+                    CrashReporter.shared.breadcrumb("RemoteGPU.connected → \(base) (hpcEndpoint/hpcToken set)")
                     append("✅ Connected. Cells now run on the remote GPU.\n")
                     return
                 }
             }
         }
+        CrashReporter.shared.breadcrumb("RemoteGPU.timeout — jupyter never answered on \(base)")
         append("❌ Timed out waiting for the remote Jupyter server.\n")
         status = .failed("Timed out. Ensure Python/jupyter can run on the instance.")
         disconnect(silent: true)
