@@ -853,23 +853,25 @@ public struct SyntaxHighlightedCodeView: NSViewRepresentable {
         let contentSize = scrollView.contentSize
         let initialWidth = max(1, contentSize.width)
         let initialHeight = max(1, contentSize.height)
-        
-        // Properly initialize TextKit 1 Stack (Required for rendering)
-        let textStorage = NSTextStorage()
-        let layoutManager = NSLayoutManager()
-        textStorage.addLayoutManager(layoutManager)
-        
-        let textContainer = NSTextContainer(containerSize: NSSize(width: initialWidth, height: CGFloat.greatestFiniteMagnitude))
-        textContainer.widthTracksTextView = true
-        layoutManager.addTextContainer(textContainer)
-        
-        let textView = NSTextView(frame: NSRect(x: 0, y: 0, width: initialWidth, height: initialHeight), textContainer: textContainer)
+
+        // Use AppKit's OWN construction (explicit TextKit 1) instead of a
+        // hand-assembled NSTextStorage/NSLayoutManager/NSTextContainer.
+        // On macOS 26 the manual stack assigned via `documentView` laid glyphs
+        // out (the gutter ruler drew correctly) but the text view itself drew
+        // NOTHING — the v2.5.5 diagnostic proved frame/window/glyphs were all
+        // correct, so the blank editor was a TextKit-stack/rendering quirk, not
+        // geometry or colour. `NSTextView(usingTextLayoutManager: false)` builds
+        // a fully-wired, render-correct TextKit 1 view (macOS 13+).
+        let textView = NSTextView(usingTextLayoutManager: false)
+        textView.frame = NSRect(x: 0, y: 0, width: initialWidth, height: initialHeight)
         textView.minSize = NSSize(width: 0, height: 0)
         textView.maxSize = NSSize(width: CGFloat.greatestFiniteMagnitude, height: CGFloat.greatestFiniteMagnitude)
         textView.isVerticallyResizable = true
         textView.isHorizontallyResizable = false
         textView.autoresizingMask = [.width]
-        
+        textView.textContainer?.widthTracksTextView = true
+        textView.textContainer?.containerSize = NSSize(width: initialWidth, height: CGFloat.greatestFiniteMagnitude)
+
         scrollView.documentView = textView
 
         // Only set the delegate here — this does NOT trigger layout.
