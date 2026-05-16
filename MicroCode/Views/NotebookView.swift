@@ -3542,50 +3542,113 @@ struct NotebookCellView: View {
 
 struct HPCSettingsView: View {
     @EnvironmentObject var appState: AppState
-    
+    @State private var testing = false
+    @State private var testOK: Bool? = nil
+    @State private var testMsg = ""
+
     var body: some View {
-        VStack(alignment: .leading, spacing: 16) {
-            HStack {
-                Image(systemName: "server.rack")
-                    .font(.title2)
-                    .foregroundColor(.blue)
-                Text("Custom HPC Agent Settings")
+        VStack(alignment: .leading, spacing: 14) {
+            HStack(spacing: 8) {
+                Image(systemName: "bolt.horizontal.circle.fill")
+                    .font(.title2).foregroundColor(.blue)
+                Text("Remote GPU — RunPod / Vast.ai")
                     .font(.headline)
             }
-            
-            Text("Run `microcode-agent` on your remote server to generate these credentials.")
-                .font(.caption)
-                .foregroundColor(.secondary)
+
+            Text("Run a Jupyter server on your RunPod/Vast instance and expose it (e.g. a Cloudflare tunnel). Paste its public URL + token below.")
+                .font(.caption).foregroundColor(.secondary)
                 .fixedSize(horizontal: false, vertical: true)
-            
+
             VStack(alignment: .leading, spacing: 4) {
-                Text("WebSocket Endpoint")
-                    .font(.caption)
-                    .fontWeight(.semibold)
-                TextField("ws://192.168.1.55:8080", text: $appState.hpcEndpoint)
-                    .textFieldStyle(RoundedBorderTextFieldStyle())
-                    .disableAutocorrection(true)
-            }
-            
-            VStack(alignment: .leading, spacing: 4) {
-                Text("Agent Auth Token (Bearer)")
-                    .font(.caption)
-                    .fontWeight(.semibold)
-                SecureField("Paste UUID token here", text: $appState.hpcToken)
-                    .textFieldStyle(RoundedBorderTextFieldStyle())
-            }
-            
-            HStack {
-                Spacer()
-                Button("Done") {
-                    // Popover is dismissed by user clicking outside, but we can also provide a dismiss button if we pass @Environment(\.presentationMode) or just let it autosave via @AppStorage.
+                Text("SERVER URL").font(.system(size: 10, weight: .bold)).foregroundColor(.secondary)
+                HStack(spacing: 6) {
+                    TextField("https://xxxx.trycloudflare.com", text: $appState.hpcEndpoint)
+                        .textFieldStyle(.roundedBorder)
+                        .disableAutocorrection(true)
+                        .autocorrectionDisabled(true)
+                    Button {
+                        if let s = NSPasteboard.general.string(forType: .string) {
+                            appState.hpcEndpoint = s.trimmingCharacters(in: .whitespacesAndNewlines)
+                        }
+                    } label: { Image(systemName: "doc.on.clipboard") }
+                    .buttonStyle(.borderless)
+                    .help("Paste from clipboard")
                 }
-                .keyboardShortcut(.defaultAction)
-                .opacity(0) // Hidden but keeps the keyboard shortcut active for return key
-                .frame(width: 0, height: 0)
+            }
+
+            VStack(alignment: .leading, spacing: 4) {
+                Text("TOKEN").font(.system(size: 10, weight: .bold)).foregroundColor(.secondary)
+                SecureField("Jupyter token", text: $appState.hpcToken)
+                    .textFieldStyle(.roundedBorder)
+            }
+
+            HStack(spacing: 8) {
+                Button {
+                    Task { await testConnection() }
+                } label: {
+                    HStack(spacing: 6) {
+                        if testing { ProgressView().scaleEffect(0.6) }
+                        Image(systemName: "antenna.radiowaves.left.and.right")
+                        Text(testing ? "Testing…" : "Test Connection")
+                    }
+                }
+                .buttonStyle(.borderedProminent)
+                .disabled(testing || appState.hpcEndpoint.trimmingCharacters(in: .whitespaces).isEmpty)
+
+                if let ok = testOK {
+                    Image(systemName: ok ? "checkmark.circle.fill" : "xmark.octagon.fill")
+                        .foregroundColor(ok ? .green : .red)
+                }
+            }
+
+            if !testMsg.isEmpty {
+                Text(testMsg)
+                    .font(.system(size: 11, design: .monospaced))
+                    .foregroundColor(testOK == true ? .green : .red)
+                    .fixedSize(horizontal: false, vertical: true)
+                    .textSelection(.enabled)
             }
         }
         .padding()
-        .frame(width: 300)
+        .frame(width: 360)
+    }
+
+    private func testConnection() async {
+        testing = true; testOK = nil; testMsg = ""
+        defer { testing = false }
+        var base = appState.hpcEndpoint.trimmingCharacters(in: .whitespacesAndNewlines)
+        if base.hasSuffix("/") { base.removeLast() }
+        // ws:// → http:// for the REST probe
+        var probe = base
+        if probe.hasPrefix("ws://") { probe = "http://" + probe.dropFirst(5) }
+        if probe.hasPrefix("wss://") { probe = "https://" + probe.dropFirst(6) }
+        guard let url = URL(string: "\(probe)/api/kernelspecs") else {
+            testOK = false; testMsg = "Invalid URL"; return
+        }
+        var req = URLRequest(url: url)
+        req.timeoutInterval = 8
+        let tok = appState.hpcToken.trimmingCharacters(in: .whitespaces)
+        if !tok.isEmpty { req.setValue("Token \(tok)", forHTTPHeaderField: "Authorization") }
+        let t0 = Date()
+        do {
+            let (data, resp) = try await URLSession.shared.data(for: req)
+            let ms = Int(Date().timeIntervalSince(t0) * 1000)
+            guard let http = resp as? HTTPURLResponse else {
+                testOK = false; testMsg = "No HTTP response"; return
+            }
+            if http.statusCode == 200,
+               let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+               let specs = json["kernelspecs"] as? [String: Any] {
+                testOK = true
+                testMsg = "✅ Jupyter reachable (\(ms) ms)\nKernels: \(specs.keys.sorted().joined(separator: ", "))"
+            } else if http.statusCode == 403 || http.statusCode == 401 {
+                testOK = false; testMsg = "Reached server but token rejected (HTTP \(http.statusCode)). Check the token."
+            } else {
+                testOK = false; testMsg = "HTTP \(http.statusCode) — is this a Jupyter server URL?"
+            }
+        } catch {
+            testOK = false
+            testMsg = "Unreachable: \(error.localizedDescription)\nCheck the tunnel is running and the URL is public."
+        }
     }
 }
