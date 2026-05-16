@@ -812,11 +812,19 @@ public struct SyntaxHighlightedCodeView: NSViewRepresentable {
     public let fileURL: URL?
     public let isScrollEnabled: Bool
     public let isTransparent: Bool
-    
-    /// Local engine instance - MOVED TO COORDINATOR
-    // private let engine = SyntaxHighlightingEngine()
-    
-    public init(text: Binding<String>, language: String, fontSize: CGFloat = 13, isDark: Bool = true, themeName: String? = nil, fontName: String = "Menlo", fontWeight: Int = 2, fileURL: URL? = nil, isScrollEnabled: Bool = true, isTransparent: Bool = false) {
+    /// Stable identity for this logical editor (file id / "playground" / cell
+    /// id). SwiftUI churns this representable's identity (it recreates the
+    /// NSView via makeNSView repeatedly), and the freshly-created EMPTY view
+    /// kept replacing the one that had content → permanently blank editor.
+    /// When an editorID is supplied we cache & REUSE the NSScrollView so churn
+    /// always returns the same, content-bearing, mounted view.
+    public let editorID: String?
+
+    /// Per-editor reused scroll views, keyed by editorID. Main-actor only
+    /// (SyntaxHighlightedCodeView is always used from SwiftUI/main).
+    @MainActor private static var viewCache: [String: NSScrollView] = [:]
+
+    public init(text: Binding<String>, language: String, fontSize: CGFloat = 13, isDark: Bool = true, themeName: String? = nil, fontName: String = "Menlo", fontWeight: Int = 2, fileURL: URL? = nil, isScrollEnabled: Bool = true, isTransparent: Bool = false, editorID: String? = nil) {
         self._text = text
         self.language = language
         self.fontSize = fontSize
@@ -827,6 +835,7 @@ public struct SyntaxHighlightedCodeView: NSViewRepresentable {
         self.fileURL = fileURL
         self.isScrollEnabled = isScrollEnabled
         self.isTransparent = isTransparent
+        self.editorID = editorID
     }
 
     @available(macOS 13.0, *)
@@ -841,7 +850,21 @@ public struct SyntaxHighlightedCodeView: NSViewRepresentable {
         // ─────────────────────────────────────────────────────────────────
         // CRITICAL: makeNSView is called INSIDE a SwiftUI/AppKit layout pass.
         // ─────────────────────────────────────────────────────────────────
-        CrashReporter.shared.breadcrumb("SHCV.makeNSView lang=\(language) start")
+        CrashReporter.shared.breadcrumb("SHCV.makeNSView lang=\(language) start id=\(editorID ?? "nil")")
+
+        // REUSE: SwiftUI keeps recreating this representable's NSView (identity
+        // churn). Return the SAME cached scroll view (it already holds the
+        // content + ruler) so a fresh empty view never replaces it on screen.
+        if let id = editorID, let cached = Self.viewCache[id],
+           let tv = cached.documentView as? NSTextView {
+            let engine = SyntaxHighlightingEngine()
+            context.coordinator.engine = engine
+            tv.delegate = context.coordinator
+            tv.textStorage?.delegate = context.coordinator
+            CrashReporter.shared.breadcrumb("SHCV.makeNSView REUSE id=\(id) tsLen=\(tv.textStorage?.length ?? -1)")
+            context.coordinator.applyContent(self, to: tv, scrollView: cached, force: true)
+            return cached
+        }
 
         // Custom ScrollView to prevent intrinsic size bubbling
         let scrollView = NoIntrinsicScrollView()
@@ -1000,6 +1023,21 @@ public struct SyntaxHighlightedCodeView: NSViewRepresentable {
         // is never blank waiting on an async tick. SwiftUI also calls
         // updateNSView right after this, which is a cheap no-op if unchanged.
         context.coordinator.applyContent(self, to: textView, scrollView: scrollView, force: true)
+
+        // Cache so subsequent SwiftUI identity churn reuses THIS view.
+        if let id = editorID {
+            Self.viewCache[id] = scrollView
+            // Bound the cache so long sessions with many files don't grow
+            // without limit.
+            if Self.viewCache.count > 24 {
+                for key in Self.viewCache.keys where key != id {
+                    if (Self.viewCache[key]?.window) == nil {
+                        Self.viewCache.removeValue(forKey: key)
+                    }
+                    if Self.viewCache.count <= 24 { break }
+                }
+            }
+        }
 
         return scrollView
     }

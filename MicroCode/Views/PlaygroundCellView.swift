@@ -114,7 +114,8 @@ struct PlaygroundCellView: View {
                     themeName: appState.appTheme.rawValue,
                     fontName: appState.playgroundFontName,
                     fontWeight: appState.playgroundFontWeight,
-                    isScrollEnabled: false // FIX JITTER: Disable internal scrolling
+                    isScrollEnabled: false, // FIX JITTER: Disable internal scrolling
+                    editorID: "pgcell-\(cell.id.uuidString)"
                 )
                 .frame(height: max(60, min(calculatedHeight, 600)))
                 .background(Color(NSColor.textBackgroundColor).opacity(0.1)) // Subtle inner bg for code area

@@ -1156,7 +1156,8 @@ struct CodeEditor: View {
                 fontSize: appState.fontSize,
                 isDark: appState.appTheme.isDark,
                 themeName: appState.appTheme.rawValue,
-                fileURL: URL(fileURLWithPath: file.path)
+                fileURL: URL(fileURLWithPath: file.path),
+                editorID: "file-\(file.id.uuidString)"
             )
             .frame(maxWidth: .infinity, maxHeight: .infinity)
         }

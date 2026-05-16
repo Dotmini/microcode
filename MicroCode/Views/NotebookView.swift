@@ -2939,7 +2939,8 @@ struct NotebookCellView: View {
                             isDark: appState.appTheme.isDark,
                             themeName: appState.appTheme.rawValue,
                             fontName: appState.cellFontName,
-                            fontWeight: appState.cellFontWeight
+                            fontWeight: appState.cellFontWeight,
+                            editorID: "cell-\(cell.id.uuidString)"
                         )
                         .frame(height: max(50, min(calculatedHeight, 500)))
                         .cornerRadius(4)
