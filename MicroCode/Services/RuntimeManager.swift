@@ -53,6 +53,20 @@ enum RuntimeType: String, CaseIterable, Identifiable {
         case .dotnet: return "dotnet"
         }
     }
+
+    /// Subdirectory inside a Full-Bundle app:
+    /// App.app/Contents/Resources/RuntimeLib/<bundleDirName>/bin/<binaryName>
+    /// (matches bundle_runtimes.sh RUNTIMES_ROOT layout).
+    var bundleDirName: String {
+        switch self {
+        case .python: return "python"
+        case .nodejs: return "nodejs"
+        case .go: return "go"
+        case .rust: return "rust"
+        case .swift: return "swift"
+        case .dotnet: return "dotnet"
+        }
+    }
     
     // Download URLs (portable versions)
     func getDownloadInfo() -> (url: String, size: String, fileName: String)? {
@@ -152,29 +166,86 @@ class RuntimeManager: ObservableObject {
     }
     
     private func detectRuntime(_ type: RuntimeType) -> (isInstalled: Bool, version: String?, path: String?) {
-        // First check system PATH
-        let whichResult = runCommand("/usr/bin/which", arguments: [type.binaryName])
-        if let path = whichResult.output?.trimmingCharacters(in: .whitespacesAndNewlines), !path.isEmpty {
-            let version = getVersion(for: type)
-            return (true, version, path)
+        let fm = FileManager.default
+
+        // 1. FULL BUNDLE: runtime embedded inside the .app
+        //    (App.app/Contents/Resources/RuntimeLib/<dir>/bin/<bin>).
+        if let res = Bundle.main.resourceURL {
+            let embedded = res.appendingPathComponent("RuntimeLib")
+                .appendingPathComponent(type.bundleDirName)
+                .appendingPathComponent("bin")
+                .appendingPathComponent(type.binaryName)
+            if fm.isExecutableFile(atPath: embedded.path) {
+                return (true, getVersion(for: type) ?? "bundled", embedded.path)
+            }
         }
-        
-        // Check our bundled runtime
+
+        // 2. In-app downloaded runtime (Application Support)
         let bundledBin = runtimesDir.appendingPathComponent(type.rawValue.lowercased())
             .appendingPathComponent("bin")
             .appendingPathComponent(type.binaryName)
-        
-        if FileManager.default.fileExists(atPath: bundledBin.path) {
+        if fm.isExecutableFile(atPath: bundledBin.path) {
             return (true, "bundled", bundledBin.path)
         }
-        
-        // For Go, check GOROOT
         let goBin = runtimesDir.appendingPathComponent("go/go/bin/go")
-        if type == .go && FileManager.default.fileExists(atPath: goBin.path) {
+        if type == .go && fm.fileExists(atPath: goBin.path) {
             return (true, "bundled", goBin.path)
         }
-        
+
+        // 3. LITE / system install: a GUI .app inherits a stripped PATH
+        //    (no Homebrew / pyenv / nvm / cargo), so a plain `which` misses
+        //    user-installed languages. Resolve through the user's LOGIN shell
+        //    (which sources their profile), then scan common install dirs.
+        if let p = resolveViaLoginShell(type.binaryName) ?? searchCommonInstallPaths(type.binaryName) {
+            return (true, getVersion(for: type), p)
+        }
+
+        // 4. Last resort: default minimal PATH.
+        let whichResult = runCommand("/usr/bin/which", arguments: [type.binaryName])
+        if let path = whichResult.output?.trimmingCharacters(in: .whitespacesAndNewlines), !path.isEmpty {
+            return (true, getVersion(for: type), path)
+        }
+
         return (false, nil, nil)
+    }
+
+    /// Ask the user's login shell for the binary path so their real PATH
+    /// (Homebrew, pyenv, nvm, cargo, asdf, …) is honoured even though the GUI
+    /// app was launched with a stripped environment.
+    private func resolveViaLoginShell(_ bin: String) -> String? {
+        let shell = ProcessInfo.processInfo.environment["SHELL"] ?? "/bin/zsh"
+        guard FileManager.default.isExecutableFile(atPath: shell) else { return nil }
+        let r = runCommand(shell, arguments: ["-l", "-c", "command -v \(bin) 2>/dev/null"])
+        if let out = r.output?.split(separator: "\n").first.map(String.init)?
+            .trimmingCharacters(in: .whitespacesAndNewlines),
+           !out.isEmpty, FileManager.default.isExecutableFile(atPath: out) {
+            return out
+        }
+        return nil
+    }
+
+    /// Scan the well-known install locations as a final auto-detect for the
+    /// Lite build when the login-shell probe is unavailable.
+    private func searchCommonInstallPaths(_ bin: String) -> String? {
+        let fm = FileManager.default
+        let home = fm.homeDirectoryForCurrentUser.path
+        var dirs = [
+            "/opt/homebrew/bin", "/usr/local/bin", "/usr/bin", "/bin",
+            "\(home)/.cargo/bin", "\(home)/.local/bin", "\(home)/go/bin",
+            "/usr/local/go/bin", "\(home)/.pyenv/shims",
+            "/opt/homebrew/opt/python@3.12/bin", "/opt/homebrew/opt/python@3.11/bin",
+            "/Library/Frameworks/Python.framework/Versions/Current/bin",
+            "/usr/local/share/dotnet", "\(home)/.dotnet"
+        ]
+        let nvmRoot = "\(home)/.nvm/versions/node"
+        if let versions = try? fm.contentsOfDirectory(atPath: nvmRoot) {
+            for v in versions { dirs.append("\(nvmRoot)/\(v)/bin") }
+        }
+        for d in dirs {
+            let p = (d as NSString).appendingPathComponent(bin)
+            if fm.isExecutableFile(atPath: p) { return p }
+        }
+        return nil
     }
     
     private func getVersion(for type: RuntimeType) -> String? {

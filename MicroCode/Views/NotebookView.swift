@@ -1994,33 +1994,12 @@ struct NotebookView: View {
                 
                 // Cells Area
                 if let notebook = viewModel.activeNotebook {
-                    ScrollView {
-                        LazyVStack(spacing: 12) {
-                            ForEach(notebook.cells) { cell in
-                                NotebookCellView(
-                                    cell: cell,
-                                    isSelected: viewModel.selectedCellId == cell.id,
-                                    onSelect: { viewModel.selectedCellId = cell.id },
-                                    onRun: { viewModel.runCell(cell, computeTarget: appState.currentComputeTarget) },
-                                    onDelete: { viewModel.deleteCell(cell) },
-                                    onMoveUp: { viewModel.moveCell(cell, direction: -1) },
-                                    onMoveDown: { viewModel.moveCell(cell, direction: 1) },
-                                    onGenerateCode: { code in
-                                        viewModel.addCell(type: .code, language: .python)
-                                        if let lastCell = viewModel.activeNotebook?.cells.last {
-                                            lastCell.content = code
-                                            viewModel.runCell(lastCell, computeTarget: appState.currentComputeTarget)
-                                        }
-                                    }
-                                )
-                            }
-                            
-                            addCellButton
-                                .padding(.vertical, 20)
-                        }
-                        .padding()
-                    }
-                    .background(appState.appTheme == .transparent ? Color.clear : Color(nsColor: .textBackgroundColor).opacity(0.3))
+                    // Observes the NotebookModel directly so add/delete/reorder
+                    // of cells refreshes the list INSTANTLY (previously the
+                    // model was reached via a computed property and never
+                    // @ObservedObject, so deleting a non-selected cell only
+                    // updated on the next unrelated viewModel change → lag).
+                    NotebookCellsList(notebook: notebook, viewModel: viewModel)
                 } else {
                     VStack(spacing: 16) {
                         ProgressView()
@@ -2696,47 +2675,6 @@ struct NotebookView: View {
         return "Python"
     }
     
-    // MARK: - Add Cell Button
-    
-    private var addCellButton: some View {
-        HStack(spacing: 16) {
-            Button(action: { viewModel.addCell(type: .code) }) {
-                HStack {
-                    Image(systemName: "chevron.left.forwardslash.chevron.right")
-                    Text("Code")
-                }
-                .padding(.horizontal, 16)
-                .padding(.vertical, 8)
-                .background(controlBackground)
-                .cornerRadius(8)
-            }
-            .buttonStyle(.plain)
-            
-            Button(action: { viewModel.addCell(type: .markdown) }) {
-                HStack {
-                    Image(systemName: "text.alignleft")
-                    Text("Text")
-                }
-                .padding(.horizontal, 16)
-                .padding(.vertical, 8)
-                .background(controlBackground)
-                .cornerRadius(8)
-            }
-            .buttonStyle(.plain)
-            
-            Button(action: { viewModel.addCell(type: .procedure) }) {
-                HStack {
-                    Image(systemName: "tablecells.fill")
-                    Text("Procedure")
-                }
-                .padding(.horizontal, 16)
-                .padding(.vertical, 8)
-                .background(controlBackground)
-                .cornerRadius(8)
-            }
-            .buttonStyle(.plain)
-        }
-    }
 }
 
 // MARK: - Notebook List Item
@@ -2857,6 +2795,67 @@ struct DataFileRow: View {
                 onRemove()
             }
         }
+    }
+}
+
+// MARK: - Notebook Cells List (observes NotebookModel for realtime add/delete)
+
+struct NotebookCellsList: View {
+    @ObservedObject var notebook: NotebookModel
+    @ObservedObject var viewModel: NotebookViewModel
+    @EnvironmentObject var appState: AppState
+
+    private var controlBackground: Color {
+        appState.appTheme == .transparent ? Color.white.opacity(0.08) : Color(nsColor: .controlBackgroundColor)
+    }
+
+    var body: some View {
+        ScrollView {
+            LazyVStack(spacing: 12) {
+                ForEach(notebook.cells) { cell in
+                    NotebookCellView(
+                        cell: cell,
+                        isSelected: viewModel.selectedCellId == cell.id,
+                        onSelect: { viewModel.selectedCellId = cell.id },
+                        onRun: { viewModel.runCell(cell, computeTarget: appState.currentComputeTarget) },
+                        onDelete: { viewModel.deleteCell(cell) },
+                        onMoveUp: { viewModel.moveCell(cell, direction: -1) },
+                        onMoveDown: { viewModel.moveCell(cell, direction: 1) },
+                        onGenerateCode: { code in
+                            viewModel.addCell(type: .code, language: .python)
+                            if let lastCell = viewModel.activeNotebook?.cells.last {
+                                lastCell.content = code
+                                viewModel.runCell(lastCell, computeTarget: appState.currentComputeTarget)
+                            }
+                        }
+                    )
+                }
+
+                HStack(spacing: 16) {
+                    Button(action: { viewModel.addCell(type: .code) }) {
+                        HStack { Image(systemName: "chevron.left.forwardslash.chevron.right"); Text("Code") }
+                            .padding(.horizontal, 16).padding(.vertical, 8)
+                            .background(controlBackground).cornerRadius(8)
+                    }
+                    .buttonStyle(.plain)
+                    Button(action: { viewModel.addCell(type: .markdown) }) {
+                        HStack { Image(systemName: "text.alignleft"); Text("Text") }
+                            .padding(.horizontal, 16).padding(.vertical, 8)
+                            .background(controlBackground).cornerRadius(8)
+                    }
+                    .buttonStyle(.plain)
+                    Button(action: { viewModel.addCell(type: .procedure) }) {
+                        HStack { Image(systemName: "tablecells.fill"); Text("Procedure") }
+                            .padding(.horizontal, 16).padding(.vertical, 8)
+                            .background(controlBackground).cornerRadius(8)
+                    }
+                    .buttonStyle(.plain)
+                }
+                .padding(.vertical, 20)
+            }
+            .padding()
+        }
+        .background(appState.appTheme == .transparent ? Color.clear : Color(nsColor: .textBackgroundColor).opacity(0.3))
     }
 }
 
