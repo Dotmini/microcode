@@ -3542,12 +3542,35 @@ struct NotebookCellView: View {
 
 struct HPCSettingsView: View {
     @EnvironmentObject var appState: AppState
+    @ObservedObject private var gpu = RemoteGPUService.shared
+    @AppStorage("remoteSSHCommand") private var sshCmd = ""
+    @AppStorage("remoteSSHKey") private var sshKey = ""
+    @State private var showAdvanced = false
     @State private var testing = false
     @State private var testOK: Bool? = nil
     @State private var testMsg = ""
 
+    private var connected: Bool { gpu.status == .connected }
+    private var connecting: Bool { gpu.status == .connecting }
+    private var statusText: String {
+        switch gpu.status {
+        case .disconnected: return "Not connected"
+        case .connecting:   return "Connecting…"
+        case .connected:    return "Connected — cells run on the remote GPU"
+        case .failed(let m): return m
+        }
+    }
+    private var statusColor: Color {
+        switch gpu.status {
+        case .connected: return .green
+        case .connecting: return .orange
+        case .failed: return .red
+        default: return .secondary
+        }
+    }
+
     var body: some View {
-        VStack(alignment: .leading, spacing: 14) {
+        VStack(alignment: .leading, spacing: 12) {
             HStack(spacing: 8) {
                 Image(systemName: "bolt.horizontal.circle.fill")
                     .font(.title2).foregroundColor(.blue)
@@ -3555,62 +3578,114 @@ struct HPCSettingsView: View {
                     .font(.headline)
             }
 
-            Text("Run a Jupyter server on your RunPod/Vast instance and expose it (e.g. a Cloudflare tunnel). Paste its public URL + token below.")
+            Text("Paste the SSH command your provider gives you. MicroCode starts Jupyter, opens a secure tunnel and connects — no token, no URL to type.")
                 .font(.caption).foregroundColor(.secondary)
                 .fixedSize(horizontal: false, vertical: true)
 
             VStack(alignment: .leading, spacing: 4) {
-                Text("SERVER URL").font(.system(size: 10, weight: .bold)).foregroundColor(.secondary)
+                Text("SSH COMMAND").font(.system(size: 10, weight: .bold)).foregroundColor(.secondary)
                 HStack(spacing: 6) {
-                    TextField("https://xxxx.trycloudflare.com", text: $appState.hpcEndpoint)
+                    TextField("ssh -p 41122 root@1.2.3.4 -i ~/.ssh/key", text: $sshCmd, axis: .vertical)
                         .textFieldStyle(.roundedBorder)
+                        .lineLimit(1...3)
                         .disableAutocorrection(true)
-                        .autocorrectionDisabled(true)
                     Button {
                         if let s = NSPasteboard.general.string(forType: .string) {
-                            appState.hpcEndpoint = s.trimmingCharacters(in: .whitespacesAndNewlines)
+                            sshCmd = s.trimmingCharacters(in: .whitespacesAndNewlines)
                         }
                     } label: { Image(systemName: "doc.on.clipboard") }
-                    .buttonStyle(.borderless)
-                    .help("Paste from clipboard")
+                    .buttonStyle(.borderless).help("Paste")
                 }
             }
 
-            VStack(alignment: .leading, spacing: 4) {
-                Text("TOKEN").font(.system(size: 10, weight: .bold)).foregroundColor(.secondary)
-                SecureField("Jupyter token", text: $appState.hpcToken)
-                    .textFieldStyle(.roundedBorder)
+            HStack(spacing: 6) {
+                Text("SSH KEY").font(.system(size: 10, weight: .bold)).foregroundColor(.secondary)
+                Text(sshKey.isEmpty ? "from command / default" : (sshKey as NSString).lastPathComponent)
+                    .font(.system(size: 11)).foregroundColor(.secondary).lineLimit(1)
+                Spacer()
+                Button("Choose .pem…") {
+                    let p = NSOpenPanel()
+                    p.canChooseFiles = true; p.canChooseDirectories = false
+                    p.allowsMultipleSelection = false
+                    p.showsHiddenFiles = true
+                    if p.runModal() == .OK, let u = p.url { sshKey = u.path }
+                }
+                .buttonStyle(.borderless).font(.system(size: 11))
+                if !sshKey.isEmpty {
+                    Button { sshKey = "" } label: { Image(systemName: "xmark.circle.fill") }
+                        .buttonStyle(.borderless).foregroundColor(.secondary)
+                }
             }
 
-            HStack(spacing: 8) {
-                Button {
-                    Task { await testConnection() }
-                } label: {
-                    HStack(spacing: 6) {
-                        if testing { ProgressView().scaleEffect(0.6) }
-                        Image(systemName: "antenna.radiowaves.left.and.right")
-                        Text(testing ? "Testing…" : "Test Connection")
+            HStack(spacing: 10) {
+                if connected {
+                    Button(role: .destructive) { gpu.disconnect() } label: {
+                        Label("Disconnect", systemImage: "stop.circle")
+                    }
+                } else {
+                    Button {
+                        gpu.connect(sshCommand: sshCmd, keyPath: sshKey.isEmpty ? nil : sshKey)
+                    } label: {
+                        HStack(spacing: 6) {
+                            if connecting { ProgressView().scaleEffect(0.6) }
+                            Image(systemName: "link")
+                            Text(connecting ? "Connecting…" : "Connect")
+                        }
+                    }
+                    .buttonStyle(.borderedProminent)
+                    .disabled(connecting || sshCmd.trimmingCharacters(in: .whitespaces).isEmpty)
+                }
+                Circle().fill(statusColor).frame(width: 8, height: 8)
+                Text(statusText).font(.system(size: 11)).foregroundColor(statusColor)
+                    .lineLimit(2).fixedSize(horizontal: false, vertical: true)
+            }
+
+            if !gpu.log.isEmpty {
+                ScrollView {
+                    Text(gpu.log)
+                        .font(.system(size: 10, design: .monospaced))
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .textSelection(.enabled)
+                }
+                .frame(height: 110)
+                .padding(8)
+                .background(RoundedRectangle(cornerRadius: 6).fill(Color.black.opacity(0.25)))
+            }
+
+            DisclosureGroup("Advanced — manual Jupyter URL/token", isExpanded: $showAdvanced) {
+                VStack(alignment: .leading, spacing: 8) {
+                    TextField("https://xxxx.trycloudflare.com", text: $appState.hpcEndpoint)
+                        .textFieldStyle(.roundedBorder).disableAutocorrection(true)
+                    SecureField("Jupyter token", text: $appState.hpcToken)
+                        .textFieldStyle(.roundedBorder)
+                    HStack(spacing: 8) {
+                        Button {
+                            Task { await testConnection() }
+                        } label: {
+                            HStack(spacing: 6) {
+                                if testing { ProgressView().scaleEffect(0.6) }
+                                Text(testing ? "Testing…" : "Test Connection")
+                            }
+                        }
+                        .buttonStyle(.bordered)
+                        .disabled(testing || appState.hpcEndpoint.trimmingCharacters(in: .whitespaces).isEmpty)
+                        if let ok = testOK {
+                            Image(systemName: ok ? "checkmark.circle.fill" : "xmark.octagon.fill")
+                                .foregroundColor(ok ? .green : .red)
+                        }
+                    }
+                    if !testMsg.isEmpty {
+                        Text(testMsg).font(.system(size: 10, design: .monospaced))
+                            .foregroundColor(testOK == true ? .green : .red)
+                            .fixedSize(horizontal: false, vertical: true).textSelection(.enabled)
                     }
                 }
-                .buttonStyle(.borderedProminent)
-                .disabled(testing || appState.hpcEndpoint.trimmingCharacters(in: .whitespaces).isEmpty)
-
-                if let ok = testOK {
-                    Image(systemName: ok ? "checkmark.circle.fill" : "xmark.octagon.fill")
-                        .foregroundColor(ok ? .green : .red)
-                }
+                .padding(.top, 6)
             }
-
-            if !testMsg.isEmpty {
-                Text(testMsg)
-                    .font(.system(size: 11, design: .monospaced))
-                    .foregroundColor(testOK == true ? .green : .red)
-                    .fixedSize(horizontal: false, vertical: true)
-                    .textSelection(.enabled)
-            }
+            .font(.system(size: 11))
         }
         .padding()
-        .frame(width: 360)
+        .frame(width: 380)
     }
 
     private func testConnection() async {
