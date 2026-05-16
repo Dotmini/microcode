@@ -28,13 +28,23 @@ class JupyterClient {
     private var webSocketTask: URLSessionWebSocketTask?
     private var isConnected = false
     private var activeKernelID: String?
-    
+
     // Callback handlers
     private var onOutput: ((String) -> Void)?
     private var onComplete: ((String) -> Void)?
     private var onError: ((Error) -> Void)?
-    
+
     private var currentExecutionMsgID: String?
+    /// Guards against resuming the execution continuation more than once
+    /// (e.g. an `error` iopub message followed by `status: idle`, or a socket
+    /// failure during streaming). Reset at the start of every executeCode().
+    private var executionSettled = false
+
+    /// True only while the websocket is believed to be live. Used by the
+    /// kernel layer to decide whether to transparently reconnect a tunnel
+    /// that dropped (RunPod/Vast Cloudflare tunnels recycle connections).
+    var isLive: Bool { isConnected && webSocketTask != nil }
+    var kernelID: String? { activeKernelID }
     
     init(endpoint: String, token: String) {
         // Ensure endpoint does not end with a slash
@@ -118,11 +128,37 @@ class JupyterClient {
             request.setValue("Token \(token)", forHTTPHeaderField: "Authorization")
         }
         
+        sawAnyMessage = false
         webSocketTask = URLSession.shared.webSocketTask(with: request)
         webSocketTask?.resume()
         isConnected = true
-        
+
         listenForMessages()
+    }
+
+    private var sawAnyMessage = false
+
+    /// Block until the kernel actually answers, so the user's FIRST cell is
+    /// never silently dropped on a freshly-opened (high-latency tunnel)
+    /// socket. Sends `kernel_info_request` and waits for any reply.
+    func waitUntilReady(timeoutSeconds: Double = 15) async throws {
+        let deadline = Date().addingTimeInterval(timeoutSeconds)
+        while Date() < deadline {
+            guard isLive else { throw JupyterError.connectionFailed("WebSocket closed before the kernel was ready.") }
+            if sawAnyMessage { return }
+            // Best-effort poke; repeated until the kernel responds.
+            let probe: [String: Any] = [
+                "header": ["msg_id": UUID().uuidString, "username": "microcode",
+                           "session": sessionID, "msg_type": "kernel_info_request", "version": "5.3"],
+                "parent_header": [:], "metadata": [:], "content": [:], "channel": "shell"
+            ]
+            if let d = try? JSONSerialization.data(withJSONObject: probe),
+               let s = String(data: d, encoding: .utf8) {
+                try? await webSocketTask?.send(.string(s))
+            }
+            try? await Task.sleep(nanoseconds: 350_000_000)
+        }
+        throw JupyterError.connectionFailed("Kernel did not respond within \(Int(timeoutSeconds))s. Check the tunnel URL and token.")
     }
     
     func disconnectWebSocket() {
@@ -137,9 +173,21 @@ class JupyterClient {
         }
         
         self.onOutput = onOutput
-        self.onComplete = onComplete
-        self.onError = onError
-        
+        // Single-fire wrappers: whichever of complete/error happens first wins;
+        // any later signal for the same run is ignored so the caller's
+        // continuation can never be resumed twice (which would crash).
+        self.executionSettled = false
+        self.onComplete = { [weak self] msg in
+            guard let self = self, !self.executionSettled else { return }
+            self.executionSettled = true
+            onComplete(msg)
+        }
+        self.onError = { [weak self] err in
+            guard let self = self, !self.executionSettled else { return }
+            self.executionSettled = true
+            onError(err)
+        }
+
         let msgID = UUID().uuidString
         self.currentExecutionMsgID = msgID
         
@@ -203,6 +251,7 @@ class JupyterClient {
     }
     
     private func handleJupyterMessage(_ jsonString: String) {
+        sawAnyMessage = true   // kernel is alive → unblocks waitUntilReady()
         guard let data = jsonString.data(using: .utf8),
               let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
               let msgType = (json["msg_type"] as? String) ?? (json["header"] as? [String: Any])?["msg_type"] as? String else {

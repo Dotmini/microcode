@@ -292,6 +292,33 @@ enum CellLanguage: String, CaseIterable, Identifiable {
         case .latex: return "tex"
         }
     }
+
+    /// Resolve a Markdown code-fence tag (```python, ```tex, ```cpp …) to a
+    /// CellLanguage, covering the common aliases AI models emit. Returns nil
+    /// for unknown tags so the caller can fall back sensibly.
+    static func from(fenceTag raw: String) -> CellLanguage? {
+        let t = raw.lowercased().trimmingCharacters(in: .whitespaces)
+        if t.isEmpty { return nil }
+        switch t {
+        case "python", "py", "python3", "ipython": return .python
+        case "r", "rscript": return .r
+        case "julia", "jl": return .julia
+        case "sql", "mysql", "postgresql", "postgres", "sqlite", "plsql", "tsql": return .sql
+        case "rust", "rs": return .rust
+        case "go", "golang": return .go
+        case "cpp", "c++", "cxx", "cc", "c", "h", "hpp": return .cpp
+        case "objc", "objective-c", "objectivec", "m", "mm": return .objc
+        case "java": return .java
+        case "csharp", "c#", "cs", "dotnet", ".net": return .csharp
+        case "rmarkdown", "rmd": return .rmarkdown
+        case "latex", "tex", "katex": return .latex
+        default:
+            // Fall back to enum rawValue / fileExtension match.
+            return allCases.first {
+                $0.rawValue.lowercased() == t || $0.fileExtension.lowercased() == t
+            }
+        }
+    }
 }
 
 // MARK: - Notebook Cell Model
@@ -308,6 +335,7 @@ final class NotebookCellModel: ObservableObject, Identifiable {
     @Published var colorTheme: CellColorTheme = .none
     @Published var customColor: CustomCellColor? = nil  // Custom RGB color
     @Published var useCustomColor: Bool = false
+    @Published var tag: String = ""   // User name-tag / catalog label for selective run
     @Published var isCollapsed: Bool = false
     @Published var dataFramePath: String? = nil
     @Published var isDataFrame: Bool = false
@@ -372,7 +400,72 @@ final class NotebookViewModel: ObservableObject {
     @Published var isEditingName: Bool = false
     @Published var workingDirectory: URL
     @Published var selectedPythonPath: String = "python3"  // Can be set from UI
-    
+    /// The .mic file this notebook is bound to (Quick Save target). nil → not
+    /// yet saved to a user-chosen file (autosave still protects the work).
+    @Published var currentFileURL: URL?
+    @Published var lastAutoSave: Date?
+    private var autoSaveWork: DispatchWorkItem?
+
+    /// Realtime autosave: debounced so rapid typing/runs don't thrash disk.
+    /// Always writes the UserDefaults crash-recovery snapshot AND a real .mic
+    /// file (the bound file, or a stable autosave.mic) so work is never lost.
+    func scheduleAutoSave() {
+        autoSaveWork?.cancel()
+        let work = DispatchWorkItem { [weak self] in self?.performAutoSave() }
+        autoSaveWork = work
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.8, execute: work)
+    }
+
+    private func performAutoSave() {
+        autoSave() // UserDefaults snapshot (crash recovery — keep)
+        guard let notebook = activeNotebook else { return }
+        let url = currentFileURL
+            ?? workingDirectory.appendingPathComponent("autosave.mic")
+        exportAsMic(notebook: notebook, to: url)
+        lastAutoSave = Date()
+    }
+
+    /// Quick Save → write straight to the bound .mic file (no dialog). If the
+    /// notebook has never been saved to a user file, fall back to Save As.
+    func quickSave() {
+        guard let notebook = activeNotebook else { return }
+        if let url = currentFileURL {
+            exportAsMic(notebook: notebook, to: url)
+            lastAutoSave = Date()
+        } else {
+            saveAs()
+        }
+    }
+
+    /// Save As → .mic by default. Remembers the chosen file for Quick Save.
+    func saveAs() {
+        guard let notebook = activeNotebook else { return }
+        let panel = NSSavePanel()
+        panel.allowedContentTypes = [UTType(filenameExtension: "mic") ?? .data]
+        panel.nameFieldStringValue = "\(notebook.name).mic"
+        panel.title = "Save Notebook"
+        panel.begin { [weak self] response in
+            guard response == .OK, var url = panel.url else { return }
+            if url.pathExtension != "mic" { url.deletePathExtension(); url.appendPathExtension("mic") }
+            self?.exportAsMic(notebook: notebook, to: url)
+            self?.currentFileURL = url
+            self?.lastAutoSave = Date()
+        }
+    }
+
+    /// Export a copy as Jupyter .ipynb (does not change the bound .mic file).
+    func exportIpynb() {
+        guard let notebook = activeNotebook else { return }
+        let panel = NSSavePanel()
+        panel.allowedContentTypes = [UTType(filenameExtension: "ipynb") ?? .json]
+        panel.nameFieldStringValue = "\(notebook.name).ipynb"
+        panel.title = "Export as Jupyter Notebook"
+        panel.begin { [weak self] response in
+            guard response == .OK, let url = panel.url else { return }
+            self?.exportAsIPYNB(notebook: notebook, to: url)
+        }
+    }
+
     var activeNotebook: NotebookModel? {
         notebooks.first { $0.id == activeNotebookId }
     }
@@ -454,8 +547,9 @@ final class NotebookViewModel: ObservableObject {
         
         selectedCellId = newCell.id
         notebook.modifiedAt = Date()
+        scheduleAutoSave()
     }
-    
+
     func deleteCell(_ cell: NotebookCellModel) {
         guard let notebook = activeNotebook else { return }
         if let idx = notebook.cells.firstIndex(where: { $0.id == cell.id }) {
@@ -464,9 +558,10 @@ final class NotebookViewModel: ObservableObject {
                 selectedCellId = notebook.cells.first?.id
             }
             notebook.modifiedAt = Date()
+            scheduleAutoSave()
         }
     }
-    
+
     func moveCell(_ cell: NotebookCellModel, direction: Int) {
         guard let notebook = activeNotebook else { return }
         guard let index = notebook.cells.firstIndex(where: { $0.id == cell.id }) else { return }
@@ -474,6 +569,7 @@ final class NotebookViewModel: ObservableObject {
         guard newIndex >= 0 && newIndex < notebook.cells.count else { return }
         notebook.cells.swapAt(index, newIndex)
         notebook.modifiedAt = Date()
+        scheduleAutoSave()
     }
     
     func runCell(_ cell: NotebookCellModel, computeTarget: ComputeTarget = .localCPU) {
@@ -1484,6 +1580,28 @@ final class NotebookViewModel: ObservableObject {
         let grouped = getCellsByColor()
         return grouped.keys.sorted { $0.rawValue < $1.rawValue }
     }
+
+    /// Distinct non-empty name-tags across runnable cells (any language).
+    func getUsedTags() -> [String] {
+        guard let notebook = activeNotebook else { return [] }
+        let tags = notebook.cells
+            .filter { $0.type == .code || $0.type == .procedure || $0.type == .agent }
+            .map { $0.tag.trimmingCharacters(in: .whitespaces) }
+            .filter { !$0.isEmpty }
+        return Array(Set(tags)).sorted()
+    }
+
+    /// Run every runnable cell carrying the given name-tag, in order, across
+    /// all languages (each cell runs via its own `cell.language`).
+    func runCellsByTag(_ tag: String, computeTarget: ComputeTarget = .localCPU) {
+        guard let notebook = activeNotebook else { return }
+        let key = tag.trimmingCharacters(in: .whitespaces)
+        for cell in notebook.cells where
+            (cell.type == .code || cell.type == .procedure || cell.type == .agent)
+            && cell.tag.trimmingCharacters(in: .whitespaces) == key {
+            runCell(cell, computeTarget: computeTarget)
+        }
+    }
     
     func runSelectedCell(computeTarget: ComputeTarget = .localCPU) {
         guard let notebook = activeNotebook,
@@ -1590,6 +1708,7 @@ final class NotebookViewModel: ObservableObject {
                 "output": cell.output,
                 "execution_count": cell.executionCount as Any,
                 "color_theme": cell.colorTheme.rawValue,
+                "tag": cell.tag,
                 "is_collapsed": cell.isCollapsed,
                 "use_custom_color": cell.useCustomColor,
             ]
@@ -1686,6 +1805,7 @@ final class NotebookViewModel: ObservableObject {
                 cell.output = output
                 cell.executionCount = executionCount
                 cell.colorTheme = CellColorTheme(rawValue: colorThemeStr) ?? .none
+                cell.tag = cellDict["tag"] as? String ?? ""
                 cell.isCollapsed = isCollapsed
                 cell.useCustomColor = useCustomColor
                 
@@ -1860,6 +1980,7 @@ final class NotebookViewModel: ObservableObject {
             DispatchQueue.main.async {
                 self.notebooks.append(notebook)
                 self.activeNotebookId = notebook.id
+                self.currentFileURL = url   // Quick Save now targets this file
                 if let firstCell = notebook.cells.first {
                     self.selectedCellId = firstCell.id
                 }
@@ -1884,6 +2005,7 @@ final class NotebookViewModel: ObservableObject {
                     "content": cell.content,
                     "output": cell.output,
                     "color_theme": cell.colorTheme.rawValue,
+                    "tag": cell.tag,
                     "is_collapsed": cell.isCollapsed,
                 ]
                 if let ec = cell.executionCount { cellDict["execution_count"] = ec }
@@ -1941,6 +2063,7 @@ final class NotebookViewModel: ObservableObject {
                     cell.output = output
                     cell.executionCount = executionCount
                     cell.colorTheme = CellColorTheme(rawValue: colorStr) ?? .none
+                    cell.tag = cellDict["tag"] as? String ?? ""
                     cell.isCollapsed = isCollapsed
                     
                     notebook.cells.append(cell)
@@ -2056,25 +2179,24 @@ struct NotebookView: View {
             }
         }
         .onReceive(NotificationCenter.default.publisher(for: Notification.Name("ApplyCodeToCell"))) { notification in
-            guard let code = notification.userInfo?["code"] as? String else { return }
-            
-            // Apply to selected cell, or create a new one
-            if let selectedId = viewModel.selectedCellId,
-               let notebook = viewModel.activeNotebook,
-               let cell = notebook.cells.first(where: { $0.id == selectedId }),
-               cell.type == .code {
-                cell.content = code
-            } else {
-                // Detect language from notification
-                let langStr = notification.userInfo?["language"] as? String ?? ""
-                let language: CellLanguage = CellLanguage.allCases.first(where: {
-                    $0.fileExtension == langStr || $0.rawValue.lowercased() == langStr.lowercased()
-                }) ?? .python
-                
-                viewModel.addCell(type: .code, language: language)
-                if let lastCell = viewModel.activeNotebook?.cells.last {
-                    lastCell.content = code
-                }
+            guard let code = notification.userInfo?["code"] as? String,
+                  !code.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return }
+
+            // SMART + SAFE: AI-generated code ALWAYS becomes a brand-new cell.
+            // It must never overwrite or inject into an existing cell (the
+            // user's previous work is untouchable). Language is resolved from
+            // the AI code-fence tag for ALL supported languages — LaTeX, C++,
+            // Go, Rust, SQL, Java, etc. — not just Python/R.
+            let langStr = notification.userInfo?["language"] as? String ?? ""
+            let language = CellLanguage.from(fenceTag: langStr)
+                ?? viewModel.activeNotebook?.cells.last?.language
+                ?? .python
+
+            viewModel.addCell(type: .code, language: language)
+            if let newCell = viewModel.activeNotebook?.cells.last {
+                newCell.content = code
+                viewModel.selectedCellId = newCell.id   // focus the new cell
+                viewModel.scheduleAutoSave()
             }
         }
     }
@@ -2279,13 +2401,45 @@ struct NotebookView: View {
                     // Actions
                     GroupBox {
                         VStack(spacing: 8) {
-                            Button(action: { viewModel.runAllCells(computeTarget: appState.currentComputeTarget) }) {
+                            Menu {
+                                Button {
+                                    viewModel.runAllCells(computeTarget: appState.currentComputeTarget)
+                                } label: { Label("Run All Cells", systemImage: "forward.fill") }
+
+                                let colors = viewModel.getUsedColors().filter { $0 != .none }
+                                if !colors.isEmpty {
+                                    Menu("Run by Color") {
+                                        ForEach(colors, id: \.self) { theme in
+                                            Button {
+                                                viewModel.runCellsByColor(theme, computeTarget: appState.currentComputeTarget)
+                                            } label: {
+                                                Label(theme.rawValue.capitalized, systemImage: "circle.fill")
+                                            }
+                                        }
+                                    }
+                                }
+
+                                let tags = viewModel.getUsedTags()
+                                if !tags.isEmpty {
+                                    Menu("Run by Tag") {
+                                        ForEach(tags, id: \.self) { t in
+                                            Button {
+                                                viewModel.runCellsByTag(t, computeTarget: appState.currentComputeTarget)
+                                            } label: { Label(t, systemImage: "tag.fill") }
+                                        }
+                                    }
+                                }
+                            } label: {
                                 HStack {
                                     Image(systemName: "play.fill")
-                                    Text("Run All")
+                                    Text("Run…")
                                     Spacer()
+                                    Image(systemName: "chevron.up.chevron.down").font(.system(size: 9))
                                 }
+                            } primaryAction: {
+                                viewModel.runAllCells(computeTarget: appState.currentComputeTarget)
                             }
+                            .menuStyle(.borderlessButton)
                             .buttonStyle(.plain)
                             
                             Button(action: { viewModel.clearAllOutputs() }) {
@@ -2517,13 +2671,29 @@ struct NotebookView: View {
                 
                 Divider()
                 
-                ForEach(viewModel.getUsedColors()) { theme in
-                    Button {
-                        viewModel.runCellsByColor(theme, computeTarget: appState.currentComputeTarget)
-                    } label: {
-                        HStack {
-                            Circle().fill(theme.iconColor).frame(width: 8, height: 8)
-                            Text("Run \(theme.rawValue)")
+                let usedColors = viewModel.getUsedColors().filter { $0 != .none }
+                if !usedColors.isEmpty {
+                    Menu("Run by Color") {
+                        ForEach(usedColors) { theme in
+                            Button {
+                                viewModel.runCellsByColor(theme, computeTarget: appState.currentComputeTarget)
+                            } label: {
+                                HStack {
+                                    Circle().fill(theme.iconColor).frame(width: 8, height: 8)
+                                    Text(theme.rawValue.capitalized)
+                                }
+                            }
+                        }
+                    }
+                }
+
+                let usedTags = viewModel.getUsedTags()
+                if !usedTags.isEmpty {
+                    Menu("Run by Tag") {
+                        ForEach(usedTags, id: \.self) { t in
+                            Button {
+                                viewModel.runCellsByTag(t, computeTarget: appState.currentComputeTarget)
+                            } label: { Label(t, systemImage: "tag.fill") }
                         }
                     }
                 }
@@ -2545,23 +2715,34 @@ struct NotebookView: View {
             }
             .help("Open Notebook")
             
-            // Save
+            // Save (autosaves continuously; .mic is the default format)
             Menu {
-                Button(action: { viewModel.saveNotebook() }) {
-                    Label("Save As...", systemImage: "square.and.arrow.down")
+                Button(action: { viewModel.quickSave() }) {
+                    Label("Quick Save (.mic)", systemImage: "bolt.fill")
+                }
+                .keyboardShortcut("s", modifiers: .command)
+                Button(action: { viewModel.saveAs() }) {
+                    Label("Save As… (.mic)", systemImage: "square.and.arrow.down")
+                }
+                .keyboardShortcut("s", modifiers: [.command, .shift])
+                Divider()
+                Button(action: { viewModel.exportIpynb() }) {
+                    Label("Export as Jupyter (.ipynb)", systemImage: "arrow.up.forward.square")
                 }
                 Divider()
-                Button(action: { viewModel.autoSave() }) {
-                    Label("Quick Save", systemImage: "externaldrive.fill.badge.checkmark")
+                if let t = viewModel.lastAutoSave {
+                    Text("Autosaved \(t.formatted(date: .omitted, time: .standard))")
+                } else {
+                    Text("Autosave on")
                 }
             } label: {
                 Image(systemName: "square.and.arrow.down")
                     .font(.system(size: 11))
             } primaryAction: {
-                viewModel.autoSave()
+                viewModel.quickSave()
             }
             .menuIndicator(.hidden)
-            .help("Save")
+            .help("Save — autosaves continuously (.mic). Menu: Save As / Export .ipynb")
             
             Divider().frame(height: 14)
             
@@ -2829,6 +3010,12 @@ struct NotebookCellsList: View {
                             }
                         }
                     )
+                    // Realtime autosave on every keystroke / output / tag /
+                    // language change (debounced inside the view model).
+                    .onChange(of: cell.content) { _ in viewModel.scheduleAutoSave() }
+                    .onChange(of: cell.output) { _ in viewModel.scheduleAutoSave() }
+                    .onChange(of: cell.tag) { _ in viewModel.scheduleAutoSave() }
+                    .onChange(of: cell.language) { _ in viewModel.scheduleAutoSave() }
                 }
 
                 HStack(spacing: 16) {
@@ -2873,6 +3060,8 @@ struct NotebookCellView: View {
     let onGenerateCode: (String) -> Void
     
     @State private var isHovering = false
+    @State private var showTagEditor = false
+    @State private var tagDraft = ""
     @State private var codeHeight: CGFloat = 80
     
     private var panelBackground: Color {
@@ -3130,6 +3319,50 @@ struct NotebookCellView: View {
                 .cornerRadius(4)
             }
             
+            // Name-tag (catalog) chip — used for "Run by Tag"
+            Button {
+                tagDraft = cell.tag
+                showTagEditor = true
+            } label: {
+                HStack(spacing: 3) {
+                    Image(systemName: "tag\(cell.tag.isEmpty ? "" : ".fill")")
+                        .font(.system(size: 9))
+                    Text(cell.tag.isEmpty ? "Tag" : cell.tag)
+                        .font(.system(size: 9, weight: .medium))
+                        .lineLimit(1)
+                }
+                .padding(.horizontal, 6)
+                .padding(.vertical, 2)
+                .background((cell.tag.isEmpty ? Color.secondary : Color.accentColor).opacity(0.18))
+                .foregroundColor(cell.tag.isEmpty ? .secondary : .accentColor)
+                .cornerRadius(4)
+            }
+            .buttonStyle(.plain)
+            .help("Name this cell for selective Run by Tag")
+            .popover(isPresented: $showTagEditor, arrowEdge: .bottom) {
+                VStack(alignment: .leading, spacing: 10) {
+                    Text("Cell Name-tag").font(.system(size: 12, weight: .semibold))
+                    TextField("e.g. setup, train, report", text: $tagDraft)
+                        .textFieldStyle(.roundedBorder)
+                        .frame(width: 220)
+                        .onSubmit {
+                            cell.tag = tagDraft.trimmingCharacters(in: .whitespaces)
+                            showTagEditor = false
+                        }
+                    HStack {
+                        Button("Clear") { cell.tag = ""; tagDraft = ""; showTagEditor = false }
+                        Spacer()
+                        Button("Set") {
+                            cell.tag = tagDraft.trimmingCharacters(in: .whitespaces)
+                            showTagEditor = false
+                        }
+                        .buttonStyle(.borderedProminent)
+                    }
+                    .frame(width: 220)
+                }
+                .padding(14)
+            }
+
             // Enhanced Color Picker
             Menu {
                 // Preset Colors in Grid-like sections
@@ -3309,50 +3542,113 @@ struct NotebookCellView: View {
 
 struct HPCSettingsView: View {
     @EnvironmentObject var appState: AppState
-    
+    @State private var testing = false
+    @State private var testOK: Bool? = nil
+    @State private var testMsg = ""
+
     var body: some View {
-        VStack(alignment: .leading, spacing: 16) {
-            HStack {
-                Image(systemName: "server.rack")
-                    .font(.title2)
-                    .foregroundColor(.blue)
-                Text("Custom HPC Agent Settings")
+        VStack(alignment: .leading, spacing: 14) {
+            HStack(spacing: 8) {
+                Image(systemName: "bolt.horizontal.circle.fill")
+                    .font(.title2).foregroundColor(.blue)
+                Text("Remote GPU — RunPod / Vast.ai")
                     .font(.headline)
             }
-            
-            Text("Run `microcode-agent` on your remote server to generate these credentials.")
-                .font(.caption)
-                .foregroundColor(.secondary)
+
+            Text("Run a Jupyter server on your RunPod/Vast instance and expose it (e.g. a Cloudflare tunnel). Paste its public URL + token below.")
+                .font(.caption).foregroundColor(.secondary)
                 .fixedSize(horizontal: false, vertical: true)
-            
+
             VStack(alignment: .leading, spacing: 4) {
-                Text("WebSocket Endpoint")
-                    .font(.caption)
-                    .fontWeight(.semibold)
-                TextField("ws://192.168.1.55:8080", text: $appState.hpcEndpoint)
-                    .textFieldStyle(RoundedBorderTextFieldStyle())
-                    .disableAutocorrection(true)
-            }
-            
-            VStack(alignment: .leading, spacing: 4) {
-                Text("Agent Auth Token (Bearer)")
-                    .font(.caption)
-                    .fontWeight(.semibold)
-                SecureField("Paste UUID token here", text: $appState.hpcToken)
-                    .textFieldStyle(RoundedBorderTextFieldStyle())
-            }
-            
-            HStack {
-                Spacer()
-                Button("Done") {
-                    // Popover is dismissed by user clicking outside, but we can also provide a dismiss button if we pass @Environment(\.presentationMode) or just let it autosave via @AppStorage.
+                Text("SERVER URL").font(.system(size: 10, weight: .bold)).foregroundColor(.secondary)
+                HStack(spacing: 6) {
+                    TextField("https://xxxx.trycloudflare.com", text: $appState.hpcEndpoint)
+                        .textFieldStyle(.roundedBorder)
+                        .disableAutocorrection(true)
+                        .autocorrectionDisabled(true)
+                    Button {
+                        if let s = NSPasteboard.general.string(forType: .string) {
+                            appState.hpcEndpoint = s.trimmingCharacters(in: .whitespacesAndNewlines)
+                        }
+                    } label: { Image(systemName: "doc.on.clipboard") }
+                    .buttonStyle(.borderless)
+                    .help("Paste from clipboard")
                 }
-                .keyboardShortcut(.defaultAction)
-                .opacity(0) // Hidden but keeps the keyboard shortcut active for return key
-                .frame(width: 0, height: 0)
+            }
+
+            VStack(alignment: .leading, spacing: 4) {
+                Text("TOKEN").font(.system(size: 10, weight: .bold)).foregroundColor(.secondary)
+                SecureField("Jupyter token", text: $appState.hpcToken)
+                    .textFieldStyle(.roundedBorder)
+            }
+
+            HStack(spacing: 8) {
+                Button {
+                    Task { await testConnection() }
+                } label: {
+                    HStack(spacing: 6) {
+                        if testing { ProgressView().scaleEffect(0.6) }
+                        Image(systemName: "antenna.radiowaves.left.and.right")
+                        Text(testing ? "Testing…" : "Test Connection")
+                    }
+                }
+                .buttonStyle(.borderedProminent)
+                .disabled(testing || appState.hpcEndpoint.trimmingCharacters(in: .whitespaces).isEmpty)
+
+                if let ok = testOK {
+                    Image(systemName: ok ? "checkmark.circle.fill" : "xmark.octagon.fill")
+                        .foregroundColor(ok ? .green : .red)
+                }
+            }
+
+            if !testMsg.isEmpty {
+                Text(testMsg)
+                    .font(.system(size: 11, design: .monospaced))
+                    .foregroundColor(testOK == true ? .green : .red)
+                    .fixedSize(horizontal: false, vertical: true)
+                    .textSelection(.enabled)
             }
         }
         .padding()
-        .frame(width: 300)
+        .frame(width: 360)
+    }
+
+    private func testConnection() async {
+        testing = true; testOK = nil; testMsg = ""
+        defer { testing = false }
+        var base = appState.hpcEndpoint.trimmingCharacters(in: .whitespacesAndNewlines)
+        if base.hasSuffix("/") { base.removeLast() }
+        // ws:// → http:// for the REST probe
+        var probe = base
+        if probe.hasPrefix("ws://") { probe = "http://" + probe.dropFirst(5) }
+        if probe.hasPrefix("wss://") { probe = "https://" + probe.dropFirst(6) }
+        guard let url = URL(string: "\(probe)/api/kernelspecs") else {
+            testOK = false; testMsg = "Invalid URL"; return
+        }
+        var req = URLRequest(url: url)
+        req.timeoutInterval = 8
+        let tok = appState.hpcToken.trimmingCharacters(in: .whitespaces)
+        if !tok.isEmpty { req.setValue("Token \(tok)", forHTTPHeaderField: "Authorization") }
+        let t0 = Date()
+        do {
+            let (data, resp) = try await URLSession.shared.data(for: req)
+            let ms = Int(Date().timeIntervalSince(t0) * 1000)
+            guard let http = resp as? HTTPURLResponse else {
+                testOK = false; testMsg = "No HTTP response"; return
+            }
+            if http.statusCode == 200,
+               let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+               let specs = json["kernelspecs"] as? [String: Any] {
+                testOK = true
+                testMsg = "✅ Jupyter reachable (\(ms) ms)\nKernels: \(specs.keys.sorted().joined(separator: ", "))"
+            } else if http.statusCode == 403 || http.statusCode == 401 {
+                testOK = false; testMsg = "Reached server but token rejected (HTTP \(http.statusCode)). Check the token."
+            } else {
+                testOK = false; testMsg = "HTTP \(http.statusCode) — is this a Jupyter server URL?"
+            }
+        } catch {
+            testOK = false
+            testMsg = "Unreachable: \(error.localizedDescription)\nCheck the tunnel is running and the URL is public."
+        }
     }
 }

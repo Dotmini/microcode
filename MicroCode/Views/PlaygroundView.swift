@@ -105,6 +105,11 @@ struct PlaygroundView: View {
                 code = exportedCode
                 appState.aiExportedCode = nil // Clear after consuming
                 print("🚀 PlaygroundView: Loaded code from AI Agent")
+            } else if let saved = UserDefaults.standard.string(forKey: "microcode_playground_code_\(language)"),
+                      !saved.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                // Restore the user's last Playground work (autosave) so it is
+                // never lost between launches.
+                code = saved
             } else if code == "print('Hello, Playground!')" {
                 updateDefaultCode(for: language)
             }
@@ -468,6 +473,9 @@ struct PlaygroundView: View {
         )
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .onChange(of: code) { newValue in
+            // Realtime autosave so Playground work is never lost.
+            UserDefaults.standard.set(newValue, forKey: "microcode_playground_code_\(language)")
+
             // Immediate Clear on Empty
             if newValue.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
                 coordinatorTask?.cancel()
@@ -478,7 +486,7 @@ struct PlaygroundView: View {
                 pythonEnvManager.detectedPackages = []
                 return
             }
-            
+
             handleCodeChange()
         }
     }
@@ -710,34 +718,36 @@ struct PlaygroundView: View {
     
     private var guiPreviewPanel: some View {
         VStack(alignment: .leading, spacing: 0) {
-            // Header
-            HStack {
-                Image(systemName: language == "latex" ? "function" : (language == "markdown" ? "doc.richtext" : "macwindow"))
-                    .foregroundColor(language == "latex" ? .orange : (language == "markdown" ? .blue : .purple))
-                Text(language == "latex" ? "LaTeX Preview" : (language == "markdown" ? "Markdown Preview" : "SwiftUI Preview"))
-                    .font(.system(size: 11, weight: .semibold))
+            // Header — only for SwiftUI preview (needs Refresh). Document
+            // previews (Markdown/LaTeX) are headerless so the preview pane
+            // lines up exactly with the editor pane on the other side.
+            if language != "latex" && language != "markdown" {
+                HStack {
+                    Image(systemName: "macwindow")
+                        .foregroundColor(.purple)
+                    Text("SwiftUI Preview")
+                        .font(.system(size: 11, weight: .semibold))
 
-                Spacer()
+                    Spacer()
 
-                if isPreviewLoading {
-                    ProgressView()
-                        .scaleEffect(0.6)
-                }
+                    if isPreviewLoading {
+                        ProgressView()
+                            .scaleEffect(0.6)
+                    }
 
-                if language != "latex" && language != "markdown" {
                     Button("⟳ Refresh") {
                         renderSwiftUIPreview()
                     }
                     .buttonStyle(.borderless)
                     .font(.system(size: 11))
                 }
+                .padding(.horizontal, 12)
+                .padding(.vertical, 8)
+                .background(panelBackground)
+
+                Divider()
             }
-            .padding(.horizontal, 12)
-            .padding(.vertical, 8)
-            .background(panelBackground)
-            
-            Divider()
-            
+
             // LaTeX Real-time Preview
             if language == "latex" {
                 LaTeXPreviewWebView(latexCode: code)

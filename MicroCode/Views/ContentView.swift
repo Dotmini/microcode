@@ -1710,136 +1710,113 @@ struct WelcomeScreen: View {
     
     var body: some View {
         if appState.openFiles.isEmpty && appState.workspaceFolder == nil {
-            GeometryReader { geometry in
-                ZStack {
-                    // Background
-                    LinearGradient(
-                        colors: [
-                            Color(nsColor: .textBackgroundColor),
-                            Color(nsColor: .textBackgroundColor).opacity(0.95)
-                        ],
-                        startPoint: .top,
-                        endPoint: .bottom
-                    )
-                    
-                    ScrollView {
-                        VStack(spacing: 32) {
-                            
-                            // App Icon
-                            ZStack {
-                                RoundedRectangle(cornerRadius: 22, style: .continuous)
-                                    .fill(Color(nsColor: .windowBackgroundColor))
-                                    .frame(width: 88, height: 88)
-                                    .shadow(color: Color.black.opacity(0.15), radius: 10, x: 0, y: 5)
-                                    
-                                RoundedRectangle(cornerRadius: 22, style: .continuous)
-                                    .stroke(Color(nsColor: .separatorColor).opacity(0.3), lineWidth: 1)
-                                    .frame(width: 88, height: 88)
-                                
-                                Image(systemName: "chevron.left.forwardslash.chevron.right")
-                                    .font(.system(size: 32, weight: .light))
-                                    .foregroundColor(.secondary)
-                            }
-                            
-                            // App Title
-                            VStack(spacing: 6) {
-                                Text("MicroCode")
-                                    .font(.system(size: 32, weight: .semibold))
-                                    .foregroundColor(.primary)
-                                
-                                Text("Version 2.0")
-                                    .font(.system(size: 13, weight: .medium))
-                                    .foregroundColor(.secondary)
-                            }
-                            
-                            // AI Project Builder
-                            VStack(alignment: .leading, spacing: 10) {
-                                Text("Bootstrap via AI Agent")
-                                    .font(.system(size: 13, weight: .semibold))
-                                    .foregroundColor(.secondary)
-                                
-                                HStack(spacing: 12) {
-                                    Image(systemName: "sparkles")
-                                        .foregroundColor(.secondary)
-                                        .font(.system(size: 14))
-                                    
-                                    TextField("Describe the project architecture...", text: $aiPrompt)
-                                        .textFieldStyle(.plain)
-                                        .font(.system(size: 13))
-                                        .onSubmit { buildWithAI() }
-                                    
-                                    if !aiPrompt.isEmpty {
-                                        Button(action: buildWithAI) {
-                                            Image(systemName: "return")
-                                                .font(.system(size: 11, weight: .bold))
-                                                .foregroundColor(.primary)
-                                                .padding(4)
-                                                .background(Color(nsColor: .windowBackgroundColor))
-                                                .cornerRadius(4)
-                                        }
-                                        .buttonStyle(.plain)
+            // Theme-cohesive palette derived from the active editor theme.
+            let bg = Color(nsColor: appState.appTheme.editorBackground)
+            let fg = Color(nsColor: appState.appTheme.editorText)
+            let accent = Color(nsColor: appState.appTheme.keywordColor)
+            let cardBG = fg.opacity(0.045)
+            let stroke = fg.opacity(0.10)
+
+            ZStack {
+                LinearGradient(colors: [bg, bg.opacity(0.92)],
+                               startPoint: .top, endPoint: .bottom)
+                    .ignoresSafeArea()
+
+                ScrollView {
+                    VStack(spacing: 0) {
+                        Spacer(minLength: 70)
+
+                        // Wordmark — no logo, accent-tinted
+                        Text("MicroCode")
+                            .font(.system(size: 40, weight: .bold, design: .rounded))
+                            .foregroundStyle(
+                                LinearGradient(colors: [fg, accent],
+                                               startPoint: .leading, endPoint: .trailing)
+                            )
+                        Text("Version 2.0 · The native AI-powered IDE for macOS")
+                            .font(.system(size: 12, weight: .medium))
+                            .foregroundColor(fg.opacity(0.55))
+                            .padding(.top, 8)
+
+                        // Bootstrap via AI
+                        VStack(alignment: .leading, spacing: 8) {
+                            Text("BOOTSTRAP VIA AI AGENT")
+                                .font(.system(size: 10, weight: .bold))
+                                .foregroundColor(fg.opacity(0.45))
+                                .tracking(0.6)
+
+                            HStack(spacing: 10) {
+                                Image(systemName: "sparkles")
+                                    .foregroundColor(accent)
+                                    .font(.system(size: 14))
+                                TextField("Describe the project architecture…", text: $aiPrompt)
+                                    .textFieldStyle(.plain)
+                                    .font(.system(size: 13))
+                                    .foregroundColor(fg)
+                                    .onSubmit { buildWithAI() }
+                                if !aiPrompt.isEmpty {
+                                    Button(action: buildWithAI) {
+                                        Image(systemName: "arrow.up.circle.fill")
+                                            .font(.system(size: 18))
+                                            .foregroundColor(accent)
                                     }
+                                    .buttonStyle(.plain)
                                 }
-                                .padding(12)
-                                .background(Color(nsColor: .controlBackgroundColor))
-                                .cornerRadius(6)
-                                .overlay(
-                                    RoundedRectangle(cornerRadius: 6)
-                                        .stroke(isHoveringAI ? Color.accentColor.opacity(0.5) : Color(nsColor: .separatorColor).opacity(0.4), lineWidth: 1)
-                                )
-                                .onHover { isHoveringAI = $0 }
                             }
-                            .frame(maxWidth: 640)
-                            .padding(.top, 16)
-                            
-                            HStack(alignment: .top, spacing: 40) {
-                                // Killer Features (New Project)
-                                VStack(alignment: .leading, spacing: 12) {
-                                    Text("New Workspace")
-                                        .font(.system(size: 13, weight: .semibold))
-                                        .foregroundColor(.secondary)
-                                    
-                                    LazyVGrid(columns: [GridItem(.adaptive(minimum: 120, maximum: 140), spacing: 10)], spacing: 10) {
-                                        ProjectTemplateCard(title: "Vite + React", icon: "atom", color: .secondary) { createProject("vite") }
-                                        ProjectTemplateCard(title: "Next.js", icon: "n.square.fill", color: .secondary) { createProject("nextjs") }
-                                        ProjectTemplateCard(title: "Express API", icon: "server.rack", color: .secondary) { createProject("express") }
-                                        ProjectTemplateCard(title: "Spring Boot", icon: "leaf.fill", color: .secondary) { createProject("spring") }
-                                        ProjectTemplateCard(title: "React Native", icon: "iphone", color: .secondary) { createProject("react-native") }
-                                        ProjectTemplateCard(title: "SwiftUI App", icon: "swift", color: .secondary) { createProject("swift") }
-                                        ProjectTemplateCard(title: "Go Gin", icon: "g.circle.fill", color: .secondary) { createProject("go") }
-                                    }
-                                }
-                                .frame(maxWidth: 360, alignment: .leading)
-                                
-                                // Recent Projects
-                                VStack(alignment: .leading, spacing: 12) {
-                                    Text("Recent")
-                                        .font(.system(size: 13, weight: .semibold))
-                                        .foregroundColor(.secondary)
-                                    
-                                    if recentProjects.isEmpty {
-                                        Text("No recent projects found.")
-                                            .foregroundColor(.secondary)
-                                            .font(.subheadline)
-                                    } else {
-                                        VStack(alignment: .leading, spacing: 8) {
-                                            ForEach(recentProjects.prefix(6), id: \.self) { url in
-                                                RecentProjectRow(url: url) {
-                                                    appState.workspaceFolder = url
-                                                }
-                                            }
-                                        }
-                                    }
-                                }
-                                .frame(width: 240)
-                            }
-                            .frame(maxWidth: 640)
-                            .padding(.top, 16)
-                            
+                            .padding(.horizontal, 14)
+                            .padding(.vertical, 12)
+                            .background(RoundedRectangle(cornerRadius: 10, style: .continuous).fill(cardBG))
+                            .overlay(
+                                RoundedRectangle(cornerRadius: 10, style: .continuous)
+                                    .strokeBorder(isHoveringAI ? accent.opacity(0.6) : stroke, lineWidth: 1)
+                            )
+                            .onHover { isHoveringAI = $0 }
                         }
-                        .padding(.vertical, 60)
-                        .frame(maxWidth: .infinity)
+                        .frame(maxWidth: 680)
+                        .padding(.top, 40)
+
+                        // Two columns
+                        HStack(alignment: .top, spacing: 48) {
+                            VStack(alignment: .leading, spacing: 12) {
+                                Text("NEW WORKSPACE")
+                                    .font(.system(size: 10, weight: .bold))
+                                    .foregroundColor(fg.opacity(0.45)).tracking(0.6)
+                                LazyVGrid(columns: [GridItem(.adaptive(minimum: 128, maximum: 150), spacing: 12)], spacing: 12) {
+                                    ProjectTemplateCard(title: "Vite + React", icon: "atom", color: accent) { createProject("vite") }
+                                    ProjectTemplateCard(title: "Next.js", icon: "n.square.fill", color: accent) { createProject("nextjs") }
+                                    ProjectTemplateCard(title: "Express API", icon: "server.rack", color: accent) { createProject("express") }
+                                    ProjectTemplateCard(title: "Spring Boot", icon: "leaf.fill", color: accent) { createProject("spring") }
+                                    ProjectTemplateCard(title: "React Native", icon: "iphone", color: accent) { createProject("react-native") }
+                                    ProjectTemplateCard(title: "SwiftUI App", icon: "swift", color: accent) { createProject("swift") }
+                                    ProjectTemplateCard(title: "Go Gin", icon: "g.circle.fill", color: accent) { createProject("go") }
+                                }
+                            }
+                            .frame(maxWidth: 420, alignment: .leading)
+
+                            VStack(alignment: .leading, spacing: 12) {
+                                Text("RECENT")
+                                    .font(.system(size: 10, weight: .bold))
+                                    .foregroundColor(fg.opacity(0.45)).tracking(0.6)
+                                if recentProjects.isEmpty {
+                                    Text("No recent projects found.")
+                                        .foregroundColor(fg.opacity(0.5))
+                                        .font(.system(size: 12))
+                                } else {
+                                    VStack(alignment: .leading, spacing: 8) {
+                                        ForEach(recentProjects.prefix(6), id: \.self) { url in
+                                            RecentProjectRow(url: url) { appState.workspaceFolder = url }
+                                        }
+                                    }
+                                }
+                            }
+                            .frame(width: 240, alignment: .leading)
+                        }
+                        .frame(maxWidth: 680)
+                        .padding(.top, 36)
+
+                        Spacer(minLength: 70)
                     }
+                    .frame(maxWidth: .infinity)
                 }
             }
             .onAppear { loadRecentProjects() }
@@ -3088,20 +3065,21 @@ struct SettingsView: View {
                         .padding(22)
                         .frame(maxWidth: .infinity, alignment: .leading)
                         .background(
-                            RoundedRectangle(cornerRadius: 14, style: .continuous)
-                                .fill(Color(nsColor: .controlBackgroundColor).opacity(0.55))
+                            RoundedRectangle(cornerRadius: 16, style: .continuous)
+                                .fill(.ultraThinMaterial)
                         )
                         .overlay(
-                            RoundedRectangle(cornerRadius: 14, style: .continuous)
-                                .strokeBorder(Color.primary.opacity(0.06), lineWidth: 1)
+                            RoundedRectangle(cornerRadius: 16, style: .continuous)
+                                .strokeBorder(Color.primary.opacity(0.08), lineWidth: 1)
                         )
+                        .shadow(color: .black.opacity(0.18), radius: 12, y: 4)
                     }
                     .padding(.horizontal, 32)
                     .padding(.bottom, 32)
                 }
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity)
-            .background(Color(nsColor: .windowBackgroundColor))
+            .background(VisualEffectView(material: .underWindowBackground, blendingMode: .behindWindow))
         }
         .frame(minWidth: 880, idealWidth: 1000, maxWidth: 1240,
                minHeight: 600, idealHeight: 700, maxHeight: 920)
@@ -3223,90 +3201,64 @@ struct SettingsView: View {
     
     // MARK: - About Content
     
+    private var appVersionString: String {
+        let v = Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "2.0"
+        let b = Bundle.main.infoDictionary?["CFBundleVersion"] as? String ?? "1"
+        return "Version \(v) (\(b))"
+    }
+
     private var aboutContent: some View {
-        VStack(alignment: .center, spacing: 20) {
-            Spacer()
-            
-            // App Icon Graphic
-            ZStack {
-                RoundedRectangle(cornerRadius: 32, style: .continuous)
-                    .fill(LinearGradient(colors: [Color(red: 0.05, green: 0.08, blue: 0.15), Color(red: 0.01, green: 0.02, blue: 0.05)], startPoint: .topLeading, endPoint: .bottomTrailing))
-                    .frame(width: 140, height: 140)
-                    .shadow(color: .black.opacity(0.4), radius: 20, x: 0, y: 10)
-                
-                RoundedRectangle(cornerRadius: 32, style: .continuous)
-                    .strokeBorder(Color.primary.opacity(0.15), lineWidth: 1.5)
-                    .frame(width: 140, height: 140)
-                
-                // MicroCode 'M' interlocking logo
-                ZStack {
-                    Image(systemName: "chevron.left")
-                        .font(.system(size: 56, weight: .bold))
-                        .foregroundStyle(Color.primary)
-                        .offset(x: -16)
-                    
-                    Image(systemName: "chevron.right")
-                        .font(.system(size: 56, weight: .bold))
-                        .foregroundStyle(Color.primary)
-                        .offset(x: 16)
+        VStack(spacing: 0) {
+            Spacer(minLength: 24)
+
+            // Real app icon (Apple-style)
+            Group {
+                if let icon = NSApp.applicationIconImage {
+                    Image(nsImage: icon).resizable()
+                } else {
+                    Image(systemName: "chevron.left.forwardslash.chevron.right")
+                        .resizable().scaledToFit().padding(28)
+                        .background(RoundedRectangle(cornerRadius: 26, style: .continuous).fill(.thinMaterial))
                 }
             }
-            .padding(.bottom, 8)
-            
-            // App Name with colored text
-            HStack(spacing: 0) {
-                Text("MicroCode ")
-                    .font(.system(size: 32, weight: .heavy, design: .rounded))
-                    .foregroundColor(.primary)
-                Text("PRO")
-                    .font(.system(size: 32, weight: .heavy, design: .rounded))
-                    .foregroundStyle(Color.primary)
+            .frame(width: 116, height: 116)
+            .clipShape(RoundedRectangle(cornerRadius: 26, style: .continuous))
+            .shadow(color: .black.opacity(0.25), radius: 14, y: 8)
+            .padding(.bottom, 18)
+
+            Text("MicroCode")
+                .font(.system(size: 30, weight: .semibold))
+            Text(appVersionString)
+                .font(.system(size: 13))
+                .foregroundColor(.secondary)
+                .padding(.top, 2)
+
+            Text("The native AI-powered IDE for macOS")
+                .font(.system(size: 12))
+                .foregroundColor(.secondary)
+                .padding(.top, 10)
+
+            HStack(spacing: 18) {
+                Link(destination: URL(string: "https://github.com/Dotmini/microcode")!) {
+                    Label("GitHub", systemImage: "chevron.left.forwardslash.chevron.right")
+                }
+                Link(destination: URL(string: "https://dotmini.net")!) {
+                    Label("dotmini.net", systemImage: "globe")
+                }
             }
-            
-            Text("Version 2.0")
-                .font(.system(size: 16, weight: .medium, design: .rounded))
-                .foregroundColor(.secondary)
-            
-            Text("Version 2.0.0 Developer (Build 2025.1)")
-                .font(.system(size: 14))
-                .foregroundColor(.secondary)
-            
-            Divider()
-                .frame(width: 200)
-            
-            VStack(spacing: 8) {
-                HStack(spacing: 0) {
-                    Text("Created by Arsenal @ ")
-                        .font(.system(size: 14, weight: .medium))
-                        .foregroundColor(.secondary)
-                    Text("SPU AI CLUB")
-                        .font(.system(size: 14, weight: .medium))
-                        .foregroundColor(.primary)
-                }
-                
-                HStack(spacing: 0) {
-                    Text("Property of ")
-                        .font(.system(size: 12))
-                        .foregroundColor(.secondary)
-                    Text("Dotmini Software 2.0")
-                        .font(.system(size: 12, weight: .semibold))
-                        .foregroundColor(.primary)
-                    Text(" 2025")
-                        .font(.system(size: 12))
-                        .foregroundColor(.secondary)
-                }
-                
-                Text("ALL RIGHTS RESERVED")
-                    .font(.system(size: 10, weight: .bold))
+            .font(.system(size: 12, weight: .medium))
+            .padding(.top, 20)
+
+            Spacer(minLength: 24)
+
+            VStack(spacing: 3) {
+                Text("Dotmini Software")
+                    .font(.system(size: 12, weight: .semibold))
+                Text("© 2025 Dotmini Software. All rights reserved.")
+                    .font(.system(size: 11))
                     .foregroundColor(.secondary)
             }
-            
-            Spacer()
-            
-            Link("Visit SPU AI CLUB", destination: URL(string: "https://spuaiclub.com")!)
-                .font(.system(size: 12))
-            
-            Spacer()
+            .padding(.bottom, 8)
         }
         .frame(maxWidth: .infinity)
     }

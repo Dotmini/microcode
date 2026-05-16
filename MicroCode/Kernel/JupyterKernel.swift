@@ -60,31 +60,60 @@ class JupyterKernel: ComputeKernel {
         defer { state = .idle }
         
         let kernelName = getJupyterKernelName(for: language)
-        
-        if !isKernelStarted {
-            progress("🚀 Connecting to Jupyter Notebook Server (Kernel: \(kernelName))...\n")
+
+        // (Re)connect when first used OR when the tunnel dropped the socket
+        // (RunPod/Vast Cloudflare tunnels recycle connections). This makes
+        // subsequent cells "just work" instead of erroring out.
+        if !isKernelStarted || !client.isLive {
+            if isKernelStarted && !client.isLive {
+                progress("🔄 Remote tunnel dropped — reconnecting…\n")
+            } else {
+                progress("🚀 Connecting to remote Jupyter kernel (\(kernelName))…\n")
+            }
             do {
                 let kernelID = try await client.startKernel(name: kernelName)
                 try client.connectWebSocket(kernelID: kernelID)
+                try await client.waitUntilReady()   // don't lose the first cell
                 isKernelStarted = true
-                progress("✅ Connected to Jupyter Kernel [\(kernelID)]\n")
+                progress("✅ Connected — kernel [\(kernelID)] ready\n")
             } catch {
-                throw NSError(domain: "JupyterKernel", code: 500, userInfo: [NSLocalizedDescriptionKey: "Failed to connect to Jupyter Server: \(error.localizedDescription). Please verify your URL, Token, and ensure the requested kernel (\(kernelName)) is installed."])
+                isKernelStarted = false
+                throw NSError(domain: "JupyterKernel", code: 500, userInfo: [NSLocalizedDescriptionKey: "Could not connect to the remote Jupyter server.\n\(error.localizedDescription)\n\nCheck: (1) the tunnel/URL is the Jupyter base URL, (2) the token is correct, (3) the '\(kernelName)' kernel is installed on the instance."])
             }
         }
-        
+
+        // Safety watchdog: a silently-dead tunnel must not hang the cell
+        // forever. 45 min is generous enough for long training jobs while
+        // still guaranteeing the UI is never stuck.
         return try await withCheckedThrowingContinuation { continuation in
+            let settled = NSLock()
+            var done = false
+            func finish(_ block: () -> Void) {
+                settled.lock(); defer { settled.unlock() }
+                guard !done else { return }
+                done = true
+                block()
+            }
+
+            let watchdog = Task {
+                try? await Task.sleep(nanoseconds: 45 * 60 * 1_000_000_000)
+                finish { continuation.resume(throwing: NSError(domain: "JupyterKernel", code: 408, userInfo: [NSLocalizedDescriptionKey: "Remote execution timed out (no response for 45 min). The tunnel/instance may be down."])) }
+            }
+
             Task {
                 do {
                     try await client.executeCode(code: code, onOutput: { output in
                         DispatchQueue.main.async { progress(output) }
-                    }, onComplete: { message in
-                        continuation.resume(returning: "✅ Jupyter Execution complete.")
+                    }, onComplete: { _ in
+                        watchdog.cancel()
+                        finish { continuation.resume(returning: "✅ Jupyter Execution complete.") }
                     }, onError: { error in
-                        continuation.resume(throwing: error)
+                        watchdog.cancel()
+                        finish { continuation.resume(throwing: error) }
                     })
                 } catch {
-                    continuation.resume(throwing: error)
+                    watchdog.cancel()
+                    finish { continuation.resume(throwing: error) }
                 }
             }
         }
