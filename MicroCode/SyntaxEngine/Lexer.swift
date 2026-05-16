@@ -581,9 +581,13 @@ public func createPythonLexer() -> StateMachineLexer {
         "Tuple": .type, "Set": .type, "Callable": .type, "Awaitable": .type,
         
         // Built-in Functions (common)
+        // NOTE: int/str/float/bool/list/dict/tuple/set/type are intentionally
+        // NOT repeated here — they are already mapped to .type above. A Swift
+        // dictionary *literal* with duplicate keys is a fatal runtime trap
+        // (`Dictionary literal contains duplicate keys` → brk #1 / SIGTRAP),
+        // which is exactly what crashed Python files in Cell/Playground.
         "print": .function, "len": .function, "range": .function, "open": .function,
-        "input": .function, "int": .function, "str": .function, "list": .function,
-        "dict": .function, "set": .function, "tuple": .function, "type": .function,
+        "input": .function,
         "isinstance": .function, "issubclass": .function, "hasattr": .function,
         "getattr": .function, "setattr": .function, "delattr": .function,
         "super": .function, "property": .function, "staticmethod": .function,
@@ -740,8 +744,11 @@ public func createTypeScriptLexer() -> StateMachineLexer {
         "true": .number, "false": .number,
         
         // Common globals
+        // NOTE: "module" is intentionally omitted here — it is already mapped
+        // to .keywordDeclaration above. Duplicate keys in a Swift dictionary
+        // literal are a fatal runtime trap (brk #1 / SIGTRAP).
         "console": .type, "document": .type, "window": .type, "process": .type,
-        "require": .function, "module": .type, "exports": .type,
+        "require": .function, "exports": .type,
     ]
     
     return StateMachineLexer(
