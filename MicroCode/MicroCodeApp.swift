@@ -9,6 +9,7 @@
 //
 
 import SwiftUI
+import AppKit
 
 @main
 struct MicroCodeApp: App {
@@ -20,7 +21,14 @@ struct MicroCodeApp: App {
     
     // Services
     @StateObject private var performanceManager = PerformanceManager.shared
-    
+
+    init() {
+        // Install crash/error capture as early as possible so Swift traps,
+        // signals and exceptions during startup are recorded too.
+        CrashReporter.shared.install()
+        CrashReporter.shared.breadcrumb("MicroCodeApp.init")
+    }
+
     var body: some Scene {
         WindowGroup {
             ContentView()
@@ -92,7 +100,9 @@ struct MicroCodeApp: App {
 class AppDelegate: NSObject, NSApplicationDelegate {
     func applicationDidFinishLaunching(_ notification: Notification) {
         // Optimization: Don't block main thread with heavy inits here
-        
+        CrashReporter.shared.install() // idempotent backstop
+        CrashReporter.shared.breadcrumb("applicationDidFinishLaunching")
+
         // Configure appearance
         NSApp.appearance = NSAppearance(named: .darkAqua)
         
@@ -206,6 +216,30 @@ struct AppCommands: Commands {
                 .keyboardShortcut("p", modifiers: [.command, .option])
             Divider()
             Button("Git Settings...") { appState.showingGitSettings = true }
+        }
+
+        CommandMenu("Diagnostics") {
+            Button("Open Crash & Error Logs Folder") {
+                NSWorkspace.shared.activateFileViewerSelecting([CrashReporter.shared.logDirectory])
+            }
+            Button("Show Latest Crash Report") {
+                let dir = CrashReporter.shared.logDirectory
+                let latest = dir.appendingPathComponent("latest-crash.log")
+                if FileManager.default.fileExists(atPath: latest.path) {
+                    NSWorkspace.shared.open(latest)
+                } else {
+                    NSWorkspace.shared.activateFileViewerSelecting([dir])
+                }
+            }
+            Button("Open Breadcrumb Trail") {
+                NSWorkspace.shared.open(CrashReporter.shared.logDirectory.appendingPathComponent("breadcrumbs.log"))
+            }
+            Divider()
+            Button("Copy Recent Breadcrumbs") {
+                let text = CrashReporter.shared.recentBreadcrumbs().joined(separator: "\n")
+                NSPasteboard.general.clearContents()
+                NSPasteboard.general.setString(text, forType: .string)
+            }
         }
     }
 }

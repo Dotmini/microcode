@@ -495,8 +495,11 @@ public final class SyntaxHighlightingEngine: @unchecked Sendable {
         let lineCount = content.filter({ $0 == "\n" }).count
         if lineCount < 500 {
             // SYNC PATH (Zero Flash)
+            CrashReporter.shared.breadcrumb("Engine.applyHighlightingAsync sync: retokenize lang=\(currentLanguage) lines=\(lineCount)")
             let tokens = lexer.retokenizeDirtyRegions(in: content)
+            CrashReporter.shared.breadcrumb("Engine.applyHighlightingAsync sync: applyTokens count=\(tokens.count)")
              self.applyTokens(tokens, to: textStorage, fontSize: fontSize, font: font)
+            CrashReporter.shared.breadcrumb("Engine.applyHighlightingAsync sync: done")
              completion?()
              return
         }
@@ -814,6 +817,7 @@ public struct SyntaxHighlightedCodeView: NSViewRepresentable {
         // ─────────────────────────────────────────────────────────────────
         // CRITICAL: makeNSView is called INSIDE a SwiftUI/AppKit layout pass.
         // ─────────────────────────────────────────────────────────────────
+        CrashReporter.shared.breadcrumb("SHCV.makeNSView lang=\(language) start")
 
         // Custom ScrollView to prevent intrinsic size bubbling
         let scrollView = NoIntrinsicScrollView()
@@ -851,11 +855,13 @@ public struct SyntaxHighlightedCodeView: NSViewRepresentable {
         // Initialize engine and assign to coordinator NOW (safe, no layout side-effects).
         let engine = SyntaxHighlightingEngine()
         context.coordinator.engine = engine
-        
+        CrashReporter.shared.breadcrumb("SHCV.makeNSView engine created, scheduling config")
+
         // Defer ALL layout-triggering setup to after the view is in the hierarchy.
         DispatchQueue.main.async { [weak coordinator = context.coordinator] in
             guard let coordinator = coordinator, !coordinator.isInvalidated else { return }
             guard let tv = scrollView.documentView as? NSTextView else { return }
+            CrashReporter.shared.breadcrumb("SHCV.makeNSView config block start")
 
             // ── Text view behaviour ──────────────────────────────────────
             tv.isRichText = true
@@ -954,6 +960,7 @@ public struct SyntaxHighlightedCodeView: NSViewRepresentable {
             // the theme was set (the engine was ready but theme not yet applied).
             let lang = coordinator.parent.language
             if let ts = tv.textStorage, ts.length > 0 {
+                CrashReporter.shared.breadcrumb("SHCV.makeNSView config: setDocument lang=\(lang) len=\(ts.length)")
                 // Ensure engine has the correct document + theme
                 engine.setDocument(ts.string, language: lang)
                 // Apply correct foreground to all text first (baseline)
@@ -962,8 +969,10 @@ public struct SyntaxHighlightedCodeView: NSViewRepresentable {
                 ts.addAttributes([.foregroundColor: fgColor, .font: customFont], range: fullRange)
                 ts.endEditing()
                 // Then apply proper token colours
+                CrashReporter.shared.breadcrumb("SHCV.makeNSView config: applyHighlightingAsync")
                 engine.applyHighlightingAsync(to: ts, fontSize: coordinator.parent.fontSize, font: tv.font)
             }
+            CrashReporter.shared.breadcrumb("SHCV.makeNSView config block done")
 
             // ── LSP notification ─────────────────────────────────────────
             if let url = coordinator.parent.fileURL {
@@ -1002,6 +1011,7 @@ public struct SyntaxHighlightedCodeView: NSViewRepresentable {
         if !textChanged && !langChanged && !themeNameChanged && !fontChanged && !darkChanged && !transparentChanged {
             return
         }
+        CrashReporter.shared.breadcrumb("SHCV.updateNSView change detected lang=\(language)")
 
         context.coordinator.lastText = normalizedText
         context.coordinator.lastLanguage = language
@@ -1038,6 +1048,7 @@ public struct SyntaxHighlightedCodeView: NSViewRepresentable {
             guard let engine = coordinator.engine else { return }
             guard let textView = scrollView.documentView as? NSTextView,
                   textView.textStorage != nil else { return }
+            CrashReporter.shared.breadcrumb("SHCV.updateNSView deferred block start lang=\(lang)")
 
             coordinator.configureTextGeometry(for: textView, in: scrollView)
 
@@ -1116,13 +1127,16 @@ public struct SyntaxHighlightedCodeView: NSViewRepresentable {
                 coordinator.isUpdating = false
             }
 
+            CrashReporter.shared.breadcrumb("SHCV.updateNSView deferred: setDocument lang=\(lang) len=\(textView.string.utf16.count)")
             engine.setDocument(textView.string, language: lang)
 
             if let ts = textView.textStorage, ts.length > 0 {
+                CrashReporter.shared.breadcrumb("SHCV.updateNSView deferred: applyHighlightingAsync")
                 engine.applyHighlightingAsync(to: ts, fontSize: fontSizeLocal, font: textView.font)
             }
 
             coordinator.triggerDebouncedHighlight(for: textView)
+            CrashReporter.shared.breadcrumb("SHCV.updateNSView deferred block done")
         }
     }
     
