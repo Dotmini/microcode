@@ -981,12 +981,20 @@ public struct SyntaxHighlightedCodeView: NSViewRepresentable {
             // ── Layout ───────────────────────────────────────────────────
             coordinator.configureTextGeometry(for: tv, in: scrollView)
 
-            // ── Line Numbers (safe to add after view is in hierarchy) ─────
-            let rulerView = LineNumberRulerView(textView: tv, scrollView: scrollView,
-                                               themeManager: engine.themeManager)
-            scrollView.verticalRulerView = rulerView
-            scrollView.hasVerticalRuler  = true
-            scrollView.rulersVisible     = true
+            // ── Line Numbers DISABLED ────────────────────────────────────
+            // ROOT CAUSE of the blank editor (proven by RENDER SELF-TEST in
+            // v2.5.9): attaching an NSRulerView (LineNumberRulerView,
+            // ruleThickness 40) to this custom NoIntrinsicScrollView forces the
+            // NSClipView to bounds.origin.x = -40 (== ruler width, identical in
+            // every editor instance). The document text is shifted into the
+            // clipped region and AppKit's _NSScrollViewContentBackgroundView
+            // covers it, so glyphs never show while the ruler (drawn in its own
+            // area) still does. Removing the ruler restores a normal clip
+            // (origin 0,0) so text renders. Line numbers will be reintroduced
+            // later WITHOUT NSRulerView (e.g. an in-text-view gutter).
+            scrollView.verticalRulerView = nil
+            scrollView.hasVerticalRuler  = false
+            scrollView.rulersVisible     = false
             scrollView.hasVerticalScroller   = coordinator.parent.isScrollEnabled
             scrollView.hasHorizontalScroller = coordinator.parent.isScrollEnabled
             scrollView.autohidesScrollers    = true
