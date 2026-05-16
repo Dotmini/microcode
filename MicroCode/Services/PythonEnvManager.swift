@@ -57,15 +57,45 @@ class PythonEnvManager: ObservableObject {
         let appSupport = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first ?? FileManager.default.temporaryDirectory
         envsDirectory = appSupport.appendingPathComponent("MicroCode/envs")
         
-        // Find system Python
-        let pythonPaths = [
-            "/opt/homebrew/bin/python3",
-            "/usr/local/bin/python3",
-            "/usr/bin/python3",
-            "python3"
-        ]
-        
-        systemPython = pythonPaths.first { FileManager.default.fileExists(atPath: $0) } ?? "python3"
+        // Resolve Python:
+        // 1. Full-Bundle embedded Python (App.app/Contents/Resources/RuntimeLib/python/bin/python3)
+        // 2. Common system / Homebrew locations
+        // 3. The user's login shell (covers pyenv / asdf / custom installs;
+        //    a GUI app has a stripped PATH so bare "python3" fails at runtime)
+        let fm = FileManager.default
+        var resolved: String?
+        if let res = Bundle.main.resourceURL {
+            let embedded = res.appendingPathComponent("RuntimeLib/python/bin/python3").path
+            if fm.isExecutableFile(atPath: embedded) { resolved = embedded }
+        }
+        if resolved == nil {
+            let candidates = [
+                "/opt/homebrew/bin/python3",
+                "/usr/local/bin/python3",
+                "/usr/bin/python3",
+                "\(NSHomeDirectory())/.pyenv/shims/python3"
+            ]
+            resolved = candidates.first { fm.isExecutableFile(atPath: $0) }
+        }
+        if resolved == nil {
+            let shell = ProcessInfo.processInfo.environment["SHELL"] ?? "/bin/zsh"
+            if fm.isExecutableFile(atPath: shell) {
+                let p = Process()
+                p.executableURL = URL(fileURLWithPath: shell)
+                p.arguments = ["-l", "-c", "command -v python3 2>/dev/null"]
+                let pipe = Pipe()
+                p.standardOutput = pipe
+                p.standardError = Pipe()
+                if (try? p.run()) != nil {
+                    p.waitUntilExit()
+                    let out = String(data: pipe.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8)?
+                        .split(separator: "\n").first.map(String.init)?
+                        .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+                    if !out.isEmpty, fm.isExecutableFile(atPath: out) { resolved = out }
+                }
+            }
+        }
+        systemPython = resolved ?? "python3"
         
         // Ensure envs directory exists
         try? FileManager.default.createDirectory(at: envsDirectory, withIntermediateDirectories: true)

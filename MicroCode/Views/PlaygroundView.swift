@@ -463,7 +463,8 @@ struct PlaygroundView: View {
             isDark: appState.appTheme.isDark,
             themeName: appState.appTheme.rawValue,
             fontName: appState.playgroundFontName,
-            fontWeight: appState.playgroundFontWeight
+            fontWeight: appState.playgroundFontWeight,
+            editorID: "playground-main"
         )
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .onChange(of: code) { newValue in
