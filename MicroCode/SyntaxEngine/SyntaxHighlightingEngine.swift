@@ -871,16 +871,22 @@ public struct SyntaxHighlightedCodeView: NSViewRepresentable {
         textView.delegate = context.coordinator
         textView.textStorage?.delegate = context.coordinator
 
-        // Initialize engine and assign to coordinator NOW (safe, no layout side-effects).
+        // Initialize engine and assign to coordinator NOW.
         let engine = SyntaxHighlightingEngine()
         context.coordinator.engine = engine
-        CrashReporter.shared.breadcrumb("SHCV.makeNSView engine created, scheduling config")
 
-        // Defer ALL layout-triggering setup to after the view is in the hierarchy.
-        DispatchQueue.main.async { [weak coordinator = context.coordinator] in
-            guard let coordinator = coordinator, !coordinator.isInvalidated else { return }
-            guard let tv = scrollView.documentView as? NSTextView else { return }
-            CrashReporter.shared.breadcrumb("SHCV.makeNSView config block start")
+        // Configure the view fully & SYNCHRONOUSLY. The real crash was a lexer
+        // duplicate-dictionary-key trap (fixed) — NOT layout re-entrancy — so
+        // the old deferred double-async dance was unnecessary and caused a
+        // render race: the deferred config ran before the scroll view had a
+        // real frame and nothing re-synced → permanently blank editor.
+        // Synchronous configuration is the standard, reliable pattern;
+        // NoIntrinsicScrollView + sizeThatFits already stop SwiftUI from
+        // querying intrinsic size, so there is no recursion.
+        do {
+            let coordinator = context.coordinator
+            let tv = textView
+            CrashReporter.shared.breadcrumb("SHCV.makeNSView config (sync) start")
 
             // ── Text view behaviour ──────────────────────────────────────
             tv.isRichText = true
@@ -967,33 +973,12 @@ public struct SyntaxHighlightedCodeView: NSViewRepresentable {
             scrollView.needsLayout = true
 
 
-            // ── Mark view as ready — updateNSView handles text content ───
-            // CRITICAL: Do NOT call setAttributedString here.
-            // updateNSView already set the text content (it runs before this block).
-            // Calling setAttributedString here would RESET highlighted attributes to plain
-            // and create a race condition with the debounce timer in updateNSView.
             coordinator.engine?.isViewReady = true
-
-            // ── Force a re-highlight now that colors/theme are configured ──
-            // This corrects any placeholder colors applied by updateNSView before
-            // the theme was set (the engine was ready but theme not yet applied).
-            let lang = coordinator.parent.language
-            if let ts = tv.textStorage, ts.length > 0 {
-                CrashReporter.shared.breadcrumb("SHCV.makeNSView config: setDocument lang=\(lang) len=\(ts.length)")
-                // Ensure engine has the correct document + theme
-                engine.setDocument(ts.string, language: lang)
-                // Apply correct foreground to all text first (baseline)
-                let fullRange = NSRange(location: 0, length: ts.length)
-                ts.beginEditing()
-                ts.addAttributes([.foregroundColor: fgColor, .font: customFont], range: fullRange)
-                ts.endEditing()
-                // Then apply proper token colours
-                CrashReporter.shared.breadcrumb("SHCV.makeNSView config: applyHighlightingAsync")
-                engine.applyHighlightingAsync(to: ts, fontSize: coordinator.parent.fontSize, font: tv.font)
-            }
-            CrashReporter.shared.breadcrumb("SHCV.makeNSView config block done")
+            _ = fgColor; _ = customFont
+            CrashReporter.shared.breadcrumb("SHCV.makeNSView config (sync) done")
 
             // ── LSP notification ─────────────────────────────────────────
+            let lang = coordinator.parent.language
             if let url = coordinator.parent.fileURL {
                 let content = tv.textStorage?.string ?? ""
                 Task.detached(priority: .utility) {
@@ -1004,6 +989,11 @@ public struct SyntaxHighlightedCodeView: NSViewRepresentable {
             }
         }
 
+        // Push initial content + highlighting NOW (synchronous) so the editor
+        // is never blank waiting on an async tick. SwiftUI also calls
+        // updateNSView right after this, which is a cheap no-op if unchanged.
+        context.coordinator.applyContent(self, to: textView, scrollView: scrollView, force: true)
+
         return scrollView
     }
 
@@ -1012,151 +1002,11 @@ public struct SyntaxHighlightedCodeView: NSViewRepresentable {
         guard let textView = scrollView.documentView as? NSTextView,
               textView.textStorage != nil else { return }
         guard context.coordinator.engine != nil else { return }
-
         context.coordinator.parent = self
-
-        let normalizedText = text.replacingOccurrences(of: "\r\n", with: "\n")
-
-        // LOOP PROTECTION: only proceed if something actually changed. This is
-        // cheap and has no side effects, so it is safe to run synchronously
-        // inside SwiftUI's layout/sizeThatFits pass.
-        let textChanged = context.coordinator.lastText != normalizedText
-        let langChanged = context.coordinator.lastLanguage != language
-        let themeNameChanged = context.coordinator.lastThemeName != themeName
-        let fontChanged = context.coordinator.lastFontSize != fontSize
-        let darkChanged = context.coordinator.lastIsDark != isDark
-        let transparentChanged = context.coordinator.lastIsTransparent != isTransparent
-
-        if !textChanged && !langChanged && !themeNameChanged && !fontChanged && !darkChanged && !transparentChanged {
-            return
-        }
-        CrashReporter.shared.breadcrumb("SHCV.updateNSView change detected lang=\(language)")
-
-        context.coordinator.lastText = normalizedText
-        context.coordinator.lastLanguage = language
-        context.coordinator.lastThemeName = themeName
-        context.coordinator.lastFontSize = fontSize
-        context.coordinator.lastIsDark = isDark
-        context.coordinator.lastIsTransparent = isTransparent
-
-        // ─────────────────────────────────────────────────────────────────
-        // CRITICAL: SwiftUI invokes updateNSView *inside* its
-        // _FlexFrameLayout.sizeThatFits measurement pass (see crash stack:
-        // _FlexFrameLayout.sizeThatFits → PlatformViewChild.updateValue →
-        // performExternalUpdate → updateViewProvider → updateNSView).
-        // Mutating the text storage, running the lexer, changing colors/fonts
-        // or resizing the document view *synchronously* here re-enters the
-        // SwiftUI layout + AttributeGraph and trips a Swift runtime trap
-        // (brk #1) — the immediate crash when opening Playground / Cell mode,
-        // and the "black editor" in the simpler main-editor layout.
-        //
-        // Defer ALL view/engine mutation to the next runloop tick so it runs
-        // OUTSIDE the layout pass. Call sites give the view a definite frame
-        // (.frame(...)) so deferring content has no effect on sizing.
-        // ─────────────────────────────────────────────────────────────────
-        let lang = language
-        let themeNameLocal = themeName
-        let isDarkLocal = isDark
-        let isTransparentLocal = isTransparent
-        let fontNameLocal = fontName
-        let fontWeightLocal = fontWeight
-        let fontSizeLocal = fontSize
-
-        DispatchQueue.main.async { [weak coordinator = context.coordinator] in
-            guard let coordinator = coordinator, !coordinator.isInvalidated else { return }
-            guard let engine = coordinator.engine else { return }
-            guard let textView = scrollView.documentView as? NSTextView,
-                  textView.textStorage != nil else { return }
-            CrashReporter.shared.breadcrumb("SHCV.updateNSView deferred block start lang=\(lang)")
-
-            coordinator.configureTextGeometry(for: textView, in: scrollView)
-
-            // Theme
-            if themeNameChanged || darkChanged || transparentChanged {
-                let lowerTheme = themeNameLocal?.lowercased() ?? ""
-                let activeThemeID: String
-                if !lowerTheme.isEmpty && lowerTheme != "system", let tn = themeNameLocal {
-                    activeThemeID = tn
-                } else {
-                    activeThemeID = isDarkLocal ? "dark" : "light"
-                }
-                engine.themeManager.setActiveTheme(activeThemeID)
-
-                let effectiveTransparent = isTransparentLocal
-                    || themeNameLocal == "transparent" || themeNameLocal == "extraClear"
-                    || themeNameLocal == "crystalClear" || themeNameLocal == "obsidianGlass"
-                let newBgColor: NSColor = effectiveTransparent ? .clear : engine.themeManager.editorBackgroundColor
-                let newDrawsBg = !effectiveTransparent
-
-                textView.backgroundColor = newBgColor
-                textView.drawsBackground = newDrawsBg
-                scrollView.backgroundColor = newBgColor
-                scrollView.drawsBackground = newDrawsBg
-
-                let fg = engine.themeManager.editorForegroundColor
-                textView.insertionPointColor = fg
-                textView.textColor = fg
-                textView.typingAttributes[.foregroundColor] = fg
-                textView.selectedTextAttributes = [.backgroundColor: engine.themeManager.selectionColor]
-            }
-
-            let fgColor = engine.themeManager.editorForegroundColor
-
-            // Font
-            let customFont: NSFont
-            if fontChanged {
-                let fontWeightValue: NSFont.Weight
-                switch fontWeightLocal {
-                case 0: fontWeightValue = .ultraLight
-                case 1: fontWeightValue = .light
-                case 2: fontWeightValue = .regular
-                case 3: fontWeightValue = .medium
-                case 4: fontWeightValue = .semibold
-                case 5: fontWeightValue = .bold
-                default: fontWeightValue = .regular
-                }
-                let baseFont = NSFont.monospacedSystemFont(ofSize: fontSizeLocal, weight: fontWeightValue)
-                customFont = NSFont(name: fontNameLocal, size: fontSizeLocal) ?? baseFont
-                textView.font = customFont
-                textView.typingAttributes[.font] = customFont
-            } else {
-                customFont = textView.font ?? NSFont.monospacedSystemFont(ofSize: fontSizeLocal, weight: .regular)
-            }
-            textView.typingAttributes[.ligature] = 0
-
-            let languageChanged = engine.currentLanguage != lang
-            let needsContentUpdate = textView.string != normalizedText || languageChanged
-                || themeNameChanged || darkChanged || fontChanged || transparentChanged
-            guard needsContentUpdate else { return }
-
-            if textView.string != normalizedText {
-                coordinator.isUpdating = true
-                let newRange = NSRange(location: 0, length: (normalizedText as NSString).length)
-                if newRange.length > 0 {
-                    let attrString = NSMutableAttributedString(string: normalizedText)
-                    attrString.addAttributes([
-                        .foregroundColor: fgColor,
-                        .font: customFont,
-                        .ligature: 0
-                    ], range: newRange)
-                    textView.textStorage?.setAttributedString(attrString)
-                } else {
-                    textView.textStorage?.setAttributedString(NSAttributedString(string: ""))
-                }
-                coordinator.isUpdating = false
-            }
-
-            CrashReporter.shared.breadcrumb("SHCV.updateNSView deferred: setDocument lang=\(lang) len=\(textView.string.utf16.count)")
-            engine.setDocument(textView.string, language: lang)
-
-            if let ts = textView.textStorage, ts.length > 0 {
-                CrashReporter.shared.breadcrumb("SHCV.updateNSView deferred: applyHighlightingAsync")
-                engine.applyHighlightingAsync(to: ts, fontSize: fontSizeLocal, font: textView.font)
-            }
-
-            coordinator.triggerDebouncedHighlight(for: textView)
-            CrashReporter.shared.breadcrumb("SHCV.updateNSView deferred block done")
-        }
+        // Synchronous, single code path shared with makeNSView. No async
+        // deferral (that race left the editor permanently blank). Cheap no-op
+        // when nothing changed.
+        context.coordinator.applyContent(self, to: textView, scrollView: scrollView, force: false)
     }
     
     public func makeCoordinator() -> Coordinator {
@@ -1184,6 +1034,117 @@ public struct SyntaxHighlightedCodeView: NSViewRepresentable {
         
         init(_ parent: SyntaxHighlightedCodeView) {
             self.parent = parent
+        }
+
+        /// Single, synchronous code path that configures geometry/theme/font
+        /// and pushes the (highlighted) text into the view. Shared by
+        /// makeNSView (force=true) and updateNSView (force=false). No async
+        /// deferral — that previously raced and left the editor blank.
+        func applyContent(_ p: SyntaxHighlightedCodeView,
+                          to textView: NSTextView,
+                          scrollView: NSScrollView,
+                          force: Bool) {
+            guard let engine = engine else { return }
+            self.parent = p
+
+            // Always keep geometry synced (cheap, idempotent) — this is what
+            // makes the text visible once the scroll view finally gets a real
+            // frame, even on no-content-change update passes.
+            configureTextGeometry(for: textView, in: scrollView)
+
+            let normalizedText = p.text.replacingOccurrences(of: "\r\n", with: "\n")
+            let textChanged = lastText != normalizedText
+            let langChanged = lastLanguage != p.language
+            let themeNameChanged = lastThemeName != p.themeName
+            let fontChanged = lastFontSize != p.fontSize
+            let darkChanged = lastIsDark != p.isDark
+            let transparentChanged = lastIsTransparent != p.isTransparent
+
+            if !force && !textChanged && !langChanged && !themeNameChanged
+                && !fontChanged && !darkChanged && !transparentChanged {
+                return
+            }
+
+            lastText = normalizedText
+            lastLanguage = p.language
+            lastThemeName = p.themeName
+            lastFontSize = p.fontSize
+            lastIsDark = p.isDark
+            lastIsTransparent = p.isTransparent
+
+            // Theme + colours
+            if force || themeNameChanged || darkChanged || transparentChanged {
+                let lowerTheme = p.themeName?.lowercased() ?? ""
+                let activeThemeID: String
+                if !lowerTheme.isEmpty && lowerTheme != "system", let tn = p.themeName {
+                    activeThemeID = tn
+                } else {
+                    activeThemeID = p.isDark ? "dark" : "light"
+                }
+                engine.themeManager.setActiveTheme(activeThemeID)
+
+                let effectiveTransparent = p.isTransparent
+                    || p.themeName == "transparent" || p.themeName == "extraClear"
+                    || p.themeName == "crystalClear" || p.themeName == "obsidianGlass"
+                let bg: NSColor = effectiveTransparent ? .clear : engine.themeManager.editorBackgroundColor
+                let draws = !effectiveTransparent
+                textView.backgroundColor = bg
+                textView.drawsBackground = draws
+                scrollView.backgroundColor = bg
+                scrollView.drawsBackground = draws
+                let fg = engine.themeManager.editorForegroundColor
+                textView.insertionPointColor = fg
+                textView.textColor = fg
+                textView.typingAttributes[.foregroundColor] = fg
+                textView.selectedTextAttributes = [.backgroundColor: engine.themeManager.selectionColor]
+            }
+
+            let fgColor = engine.themeManager.editorForegroundColor
+
+            // Font
+            let customFont: NSFont
+            if force || fontChanged {
+                let weight: NSFont.Weight
+                switch p.fontWeight {
+                case 0: weight = .ultraLight
+                case 1: weight = .light
+                case 2: weight = .regular
+                case 3: weight = .medium
+                case 4: weight = .semibold
+                case 5: weight = .bold
+                default: weight = .regular
+                }
+                let base = NSFont.monospacedSystemFont(ofSize: p.fontSize, weight: weight)
+                customFont = NSFont(name: p.fontName, size: p.fontSize) ?? base
+                textView.font = customFont
+                textView.typingAttributes[.font] = customFont
+            } else {
+                customFont = textView.font ?? NSFont.monospacedSystemFont(ofSize: p.fontSize, weight: .regular)
+            }
+            textView.typingAttributes[.ligature] = 0
+
+            // Content
+            if textView.string != normalizedText {
+                isUpdating = true
+                let r = NSRange(location: 0, length: (normalizedText as NSString).length)
+                if r.length > 0 {
+                    let attr = NSMutableAttributedString(string: normalizedText)
+                    attr.addAttributes([.foregroundColor: fgColor, .font: customFont, .ligature: 0], range: r)
+                    textView.textStorage?.setAttributedString(attr)
+                } else {
+                    textView.textStorage?.setAttributedString(NSAttributedString(string: ""))
+                }
+                isUpdating = false
+            }
+
+            engine.setDocument(textView.string, language: p.language)
+            if let ts = textView.textStorage, ts.length > 0 {
+                engine.applyHighlightingAsync(to: ts, fontSize: p.fontSize, font: textView.font)
+            }
+            triggerDebouncedHighlight(for: textView)
+
+            let glyphs = textView.layoutManager?.numberOfGlyphs ?? -1
+            CrashReporter.shared.breadcrumb("SHCV.applyContent force=\(force) lang=\(p.language) tvFrame=\(Int(textView.frame.width))x\(Int(textView.frame.height)) content=\(Int(scrollView.contentSize.width))x\(Int(scrollView.contentSize.height)) glyphs=\(glyphs) tsLen=\(textView.textStorage?.length ?? -1) draws=\(textView.drawsBackground) hidden=\(textView.isHidden) win=\(textView.window != nil)")
         }
 
         func configureTextGeometry(for textView: NSTextView, in scrollView: NSScrollView) {
