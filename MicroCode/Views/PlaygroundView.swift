@@ -710,34 +710,36 @@ struct PlaygroundView: View {
     
     private var guiPreviewPanel: some View {
         VStack(alignment: .leading, spacing: 0) {
-            // Header
-            HStack {
-                Image(systemName: language == "latex" ? "function" : (language == "markdown" ? "doc.richtext" : "macwindow"))
-                    .foregroundColor(language == "latex" ? .orange : (language == "markdown" ? .blue : .purple))
-                Text(language == "latex" ? "LaTeX Preview" : (language == "markdown" ? "Markdown Preview" : "SwiftUI Preview"))
-                    .font(.system(size: 11, weight: .semibold))
+            // Header — only for SwiftUI preview (needs Refresh). Document
+            // previews (Markdown/LaTeX) are headerless so the preview pane
+            // lines up exactly with the editor pane on the other side.
+            if language != "latex" && language != "markdown" {
+                HStack {
+                    Image(systemName: "macwindow")
+                        .foregroundColor(.purple)
+                    Text("SwiftUI Preview")
+                        .font(.system(size: 11, weight: .semibold))
 
-                Spacer()
+                    Spacer()
 
-                if isPreviewLoading {
-                    ProgressView()
-                        .scaleEffect(0.6)
-                }
+                    if isPreviewLoading {
+                        ProgressView()
+                            .scaleEffect(0.6)
+                    }
 
-                if language != "latex" && language != "markdown" {
                     Button("⟳ Refresh") {
                         renderSwiftUIPreview()
                     }
                     .buttonStyle(.borderless)
                     .font(.system(size: 11))
                 }
+                .padding(.horizontal, 12)
+                .padding(.vertical, 8)
+                .background(panelBackground)
+
+                Divider()
             }
-            .padding(.horizontal, 12)
-            .padding(.vertical, 8)
-            .background(panelBackground)
-            
-            Divider()
-            
+
             // LaTeX Real-time Preview
             if language == "latex" {
                 LaTeXPreviewWebView(latexCode: code)
