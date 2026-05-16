@@ -235,6 +235,31 @@ struct AppCommands: Commands {
                 NSWorkspace.shared.open(CrashReporter.shared.logDirectory.appendingPathComponent("breadcrumbs.log"))
             }
             Divider()
+            Button("Detect Installed Languages") {
+                Task { @MainActor in
+                    let servers = LSPManager.shared.detectInstalledServers(refresh: true)
+                    let langs = LSPManager.shared.detectedLanguages()
+                    let rt = RuntimeManager.shared
+                    rt.detectAll()
+                    let alert = NSAlert()
+                    alert.messageText = "Detected Languages on this Mac"
+                    var body = "Language servers (full IDE support):\n"
+                    body += servers.isEmpty ? "  (none found)\n"
+                        : servers.map { "  • \($0.rawValue)" }.joined(separator: "\n") + "\n"
+                    body += "\nLanguages with LSP: \(langs.isEmpty ? "(none)" : langs.joined(separator: ", "))"
+                    body += "\n\nRuntimes:\n" + rt.runtimes.map {
+                        "  • \($0.type.rawValue): \($0.isInstalled ? ($0.path ?? "installed") : "not found")"
+                    }.joined(separator: "\n")
+                    alert.informativeText = body
+                    alert.addButton(withTitle: "OK")
+                    alert.addButton(withTitle: "Copy")
+                    if alert.runModal() == .alertSecondButtonReturn {
+                        NSPasteboard.general.clearContents()
+                        NSPasteboard.general.setString(body, forType: .string)
+                    }
+                }
+            }
+            Divider()
             Button("Copy Recent Breadcrumbs") {
                 let text = CrashReporter.shared.recentBreadcrumbs().joined(separator: "\n")
                 NSPasteboard.general.clearContents()

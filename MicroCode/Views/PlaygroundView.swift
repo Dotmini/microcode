@@ -712,19 +712,19 @@ struct PlaygroundView: View {
         VStack(alignment: .leading, spacing: 0) {
             // Header
             HStack {
-                Image(systemName: language == "latex" ? "function" : "macwindow")
-                    .foregroundColor(language == "latex" ? .orange : .purple)
-                Text(language == "latex" ? "LaTeX Preview" : "SwiftUI Preview")
+                Image(systemName: language == "latex" ? "function" : (language == "markdown" ? "doc.richtext" : "macwindow"))
+                    .foregroundColor(language == "latex" ? .orange : (language == "markdown" ? .blue : .purple))
+                Text(language == "latex" ? "LaTeX Preview" : (language == "markdown" ? "Markdown Preview" : "SwiftUI Preview"))
                     .font(.system(size: 11, weight: .semibold))
-                
+
                 Spacer()
-                
+
                 if isPreviewLoading {
                     ProgressView()
                         .scaleEffect(0.6)
                 }
-                
-                if language != "latex" {
+
+                if language != "latex" && language != "markdown" {
                     Button("⟳ Refresh") {
                         renderSwiftUIPreview()
                     }
@@ -741,6 +741,11 @@ struct PlaygroundView: View {
             // LaTeX Real-time Preview
             if language == "latex" {
                 LaTeXPreviewWebView(latexCode: code)
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+            }
+            // Markdown Real-time Preview
+            else if language == "markdown" {
+                MarkdownPreviewWebView(markdown: code)
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
             }
             // Preview Content
@@ -1451,10 +1456,22 @@ struct PlaygroundView: View {
     
     @MainActor
     private func runCode() async {
+        // Document languages are previewed live, never executed by the backend
+        // runner (which would report "Language 'markdown' not supported yet").
+        if language == "markdown" || language == "latex" {
+            await MainActor.run {
+                isExecuting = false
+                output = ""
+                exitCode = 0
+                showGUIPreview = true
+            }
+            return
+        }
+
         isExecuting = true
         output = ""
         exitCode = 0
-        
+
         let startTime = Date()
         
         if language == "python" {
@@ -2256,6 +2273,99 @@ struct LaTeXPreviewWebView: NSViewRepresentable {
         
         webView.loadHTMLString(html, baseURL: nil)
     }
+}
+
+// MARK: - Markdown Live Preview (marked.js + highlight.js + KaTeX)
+
+/// Real-time Markdown preview. The HTML shell + renderer load ONCE; each
+/// keystroke just calls a JS render function (no full page reload → no flicker).
+struct MarkdownPreviewWebView: NSViewRepresentable {
+    let markdown: String
+
+    func makeCoordinator() -> Coordinator { Coordinator() }
+
+    final class Coordinator: NSObject, WKNavigationDelegate {
+        var ready = false
+        var pending: String?
+        func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
+            ready = true
+            if let p = pending { render(webView, p); pending = nil }
+        }
+        func render(_ webView: WKWebView, _ md: String) {
+            guard ready else { pending = md; return }
+            let data = (try? JSONSerialization.data(withJSONObject: [md])) ?? Data("[\"\"]".utf8)
+            let json = String(data: data, encoding: .utf8) ?? "[\"\"]"
+            webView.evaluateJavaScript("window.__render(\(json)[0]);", completionHandler: nil)
+        }
+    }
+
+    func makeNSView(context: Context) -> WKWebView {
+        let cfg = WKWebViewConfiguration()
+        let prefs = WKWebpagePreferences()
+        prefs.allowsContentJavaScript = true
+        cfg.defaultWebpagePreferences = prefs
+        let webView = WKWebView(frame: .zero, configuration: cfg)
+        webView.navigationDelegate = context.coordinator
+        webView.setValue(false, forKey: "drawsBackground")
+        webView.loadHTMLString(Self.shellHTML, baseURL: nil)
+        return webView
+    }
+
+    func updateNSView(_ webView: WKWebView, context: Context) {
+        context.coordinator.render(webView, markdown)
+    }
+
+    private static let shellHTML = """
+    <!DOCTYPE html><html><head><meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.css">
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11.9.0/build/styles/github-dark.min.css">
+    <script src="https://cdn.jsdelivr.net/npm/marked@12.0.0/marked.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11.9.0/build/highlight.min.js"></script>
+    <script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.js"></script>
+    <script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/contrib/auto-render.min.js"></script>
+    <style>
+      *{box-sizing:border-box}
+      body{font-family:-apple-system,BlinkMacSystemFont,'SF Pro Text',sans-serif;
+        margin:0;padding:24px 28px;background:#1e1e1e;color:#e8e8e8;line-height:1.7;font-size:15px}
+      h1,h2,h3,h4{line-height:1.3;margin:1.2em 0 .5em;font-weight:600}
+      h1{border-bottom:1px solid #333;padding-bottom:.3em}
+      h2{border-bottom:1px solid #2a2a2a;padding-bottom:.25em}
+      a{color:#4ea1ff}
+      code{background:#2a2a2a;padding:2px 6px;border-radius:4px;
+        font-family:'SF Mono','Fira Code',monospace;font-size:.88em}
+      pre{background:#161616;padding:14px 16px;border-radius:8px;overflow-x:auto;border:1px solid #2a2a2a}
+      pre code{background:none;padding:0;font-size:.85em}
+      blockquote{border-left:3px solid #4ea1ff;margin:1em 0;padding:.2em 1em;color:#b8b8b8;background:#242424}
+      table{border-collapse:collapse;margin:1em 0;width:100%}
+      th,td{border:1px solid #333;padding:6px 12px}
+      th{background:#262626}
+      img{max-width:100%}
+      hr{border:none;border-top:1px solid #333;margin:1.5em 0}
+      .katex{font-size:1.05em}
+    </style></head>
+    <body><div id="c"></div>
+    <script>
+      function ready(fn){ if(window.marked&&window.hljs){fn()} else {setTimeout(function(){ready(fn)},30)} }
+      window.__render = function(md){
+        ready(function(){
+          marked.setOptions({ breaks:true, gfm:true,
+            highlight:function(code,lang){
+              try{ return (lang&&hljs.getLanguage(lang))?hljs.highlight(code,{language:lang}).value:hljs.highlightAuto(code).value }catch(e){return code}
+            }});
+          var el=document.getElementById('c');
+          el.innerHTML = marked.parse(md||'');
+          if(window.renderMathInElement){
+            renderMathInElement(el,{delimiters:[
+              {left:'$$',right:'$$',display:true},
+              {left:'$',right:'$',display:false},
+              {left:'\\\\[',right:'\\\\]',display:true},
+              {left:'\\\\(',right:'\\\\)',display:false}],throwOnError:false});
+          }
+        });
+      };
+    </script></body></html>
+    """
 }
 
 // MARK: - iPhone Frame View
