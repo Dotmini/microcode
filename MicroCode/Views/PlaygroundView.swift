@@ -97,6 +97,7 @@ struct PlaygroundView: View {
             }
         }
         .onAppear {
+            CrashReporter.shared.breadcrumb("PlaygroundView.onAppear lang=\(language) cellMode=\(isCellMode)")
             print("🚀 PlaygroundView: onAppear triggered")
             
             // Check if code was exported from AI Agent
