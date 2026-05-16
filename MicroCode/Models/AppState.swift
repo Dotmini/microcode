@@ -1443,15 +1443,15 @@ class AppState: ObservableObject {
             if binaryExtensions.contains(ext) {
                 content = "[Binary File]"
             } else {
-                // Try UTF-8 first, then fallback to Latin1 (ISO 8859-1) for non-UTF8 files
-                if let utf8Content = try? String(contentsOf: url, encoding: .utf8) {
-                    content = utf8Content
-                } else if let latin1Content = try? String(contentsOf: url, encoding: .isoLatin1) {
-                    content = latin1Content
-                } else {
-                    // Last resort: read as data and show placeholder
-                    content = "[Unable to decode file — unsupported encoding]"
-                }
+                // CRITICAL: AppState is @MainActor, so reading the file here
+                // would block the MAIN THREAD for the whole read — large files
+                // froze the UI on open ("Loading นานค้าง"). Read off-thread and
+                // await; the main actor stays responsive while the spinner shows.
+                content = await Task.detached(priority: .userInitiated) { () -> String in
+                    if let utf8 = try? String(contentsOf: url, encoding: .utf8) { return utf8 }
+                    if let latin1 = try? String(contentsOf: url, encoding: .isoLatin1) { return latin1 }
+                    return "[Unable to decode file — unsupported encoding]"
+                }.value
             }
             let language = detectLanguage(from: url)
 

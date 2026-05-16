@@ -490,11 +490,16 @@ public final class SyntaxHighlightingEngine: @unchecked Sendable {
             return
         }
         
-        // HYBRID APPROACH: If document is small enough, highlight synchronously to prevent "Flash"
-        // 500 lines is a safe budget for main thread processing (~1-2ms)
+        // HYBRID APPROACH: only highlight synchronously for genuinely small
+        // documents. 500 lines was far too high — a few hundred lines of dense
+        // code (or long minified lines) tokenized on the main thread, twice
+        // per change, across many SwiftUI update passes, froze the editor on
+        // open ("loading นานค้าง"). Gate by BOTH line count and char count and
+        // keep the budget tight; anything bigger is lexed off-thread (the
+        // plain text is already on screen, so colours just arrive a beat late).
         let lineCount = content.filter({ $0 == "\n" }).count
-        if lineCount < 500 {
-            // SYNC PATH (Zero Flash)
+        if lineCount < 150 && content.utf16.count < 6000 {
+            // SYNC PATH (Zero Flash) — small files only
             CrashReporter.shared.breadcrumb("Engine.applyHighlightingAsync sync: retokenize lang=\(currentLanguage) lines=\(lineCount)")
             let tokens = lexer.retokenizeDirtyRegions(in: content)
             CrashReporter.shared.breadcrumb("Engine.applyHighlightingAsync sync: applyTokens count=\(tokens.count)")
@@ -1139,9 +1144,11 @@ public struct SyntaxHighlightedCodeView: NSViewRepresentable {
 
             engine.setDocument(textView.string, language: p.language)
             if let ts = textView.textStorage, ts.length > 0 {
+                // Single highlight pass. The debounced pass is ONLY for live
+                // typing (Coordinator.textDidChange); doing both here doubled
+                // every retokenization and compounded the open-file freeze.
                 engine.applyHighlightingAsync(to: ts, fontSize: p.fontSize, font: textView.font)
             }
-            triggerDebouncedHighlight(for: textView)
 
             let glyphs = textView.layoutManager?.numberOfGlyphs ?? -1
             CrashReporter.shared.breadcrumb("SHCV.applyContent force=\(force) lang=\(p.language) tvFrame=\(Int(textView.frame.width))x\(Int(textView.frame.height)) content=\(Int(scrollView.contentSize.width))x\(Int(scrollView.contentSize.height)) glyphs=\(glyphs) tsLen=\(textView.textStorage?.length ?? -1) draws=\(textView.drawsBackground) hidden=\(textView.isHidden) win=\(textView.window != nil)")
