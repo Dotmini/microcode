@@ -3621,6 +3621,11 @@ struct HPCSettingsView: View {
                         .buttonStyle(.borderless).foregroundColor(.secondary)
                 }
             }
+            if sshKey.isEmpty {
+                Text("Tip: RunPod/Vast usually need your PRIVATE key — click “Choose .pem…” and pick the key file that matches the key you added on the provider (e.g. ~/.ssh/microcode).")
+                    .font(.system(size: 10)).foregroundColor(.orange)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
 
             HStack(spacing: 10) {
                 if connected {
