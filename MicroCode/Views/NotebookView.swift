@@ -292,6 +292,33 @@ enum CellLanguage: String, CaseIterable, Identifiable {
         case .latex: return "tex"
         }
     }
+
+    /// Resolve a Markdown code-fence tag (```python, ```tex, ```cpp …) to a
+    /// CellLanguage, covering the common aliases AI models emit. Returns nil
+    /// for unknown tags so the caller can fall back sensibly.
+    static func from(fenceTag raw: String) -> CellLanguage? {
+        let t = raw.lowercased().trimmingCharacters(in: .whitespaces)
+        if t.isEmpty { return nil }
+        switch t {
+        case "python", "py", "python3", "ipython": return .python
+        case "r", "rscript": return .r
+        case "julia", "jl": return .julia
+        case "sql", "mysql", "postgresql", "postgres", "sqlite", "plsql", "tsql": return .sql
+        case "rust", "rs": return .rust
+        case "go", "golang": return .go
+        case "cpp", "c++", "cxx", "cc", "c", "h", "hpp": return .cpp
+        case "objc", "objective-c", "objectivec", "m", "mm": return .objc
+        case "java": return .java
+        case "csharp", "c#", "cs", "dotnet", ".net": return .csharp
+        case "rmarkdown", "rmd": return .rmarkdown
+        case "latex", "tex", "katex": return .latex
+        default:
+            // Fall back to enum rawValue / fileExtension match.
+            return allCases.first {
+                $0.rawValue.lowercased() == t || $0.fileExtension.lowercased() == t
+            }
+        }
+    }
 }
 
 // MARK: - Notebook Cell Model
@@ -2152,25 +2179,24 @@ struct NotebookView: View {
             }
         }
         .onReceive(NotificationCenter.default.publisher(for: Notification.Name("ApplyCodeToCell"))) { notification in
-            guard let code = notification.userInfo?["code"] as? String else { return }
-            
-            // Apply to selected cell, or create a new one
-            if let selectedId = viewModel.selectedCellId,
-               let notebook = viewModel.activeNotebook,
-               let cell = notebook.cells.first(where: { $0.id == selectedId }),
-               cell.type == .code {
-                cell.content = code
-            } else {
-                // Detect language from notification
-                let langStr = notification.userInfo?["language"] as? String ?? ""
-                let language: CellLanguage = CellLanguage.allCases.first(where: {
-                    $0.fileExtension == langStr || $0.rawValue.lowercased() == langStr.lowercased()
-                }) ?? .python
-                
-                viewModel.addCell(type: .code, language: language)
-                if let lastCell = viewModel.activeNotebook?.cells.last {
-                    lastCell.content = code
-                }
+            guard let code = notification.userInfo?["code"] as? String,
+                  !code.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return }
+
+            // SMART + SAFE: AI-generated code ALWAYS becomes a brand-new cell.
+            // It must never overwrite or inject into an existing cell (the
+            // user's previous work is untouchable). Language is resolved from
+            // the AI code-fence tag for ALL supported languages — LaTeX, C++,
+            // Go, Rust, SQL, Java, etc. — not just Python/R.
+            let langStr = notification.userInfo?["language"] as? String ?? ""
+            let language = CellLanguage.from(fenceTag: langStr)
+                ?? viewModel.activeNotebook?.cells.last?.language
+                ?? .python
+
+            viewModel.addCell(type: .code, language: language)
+            if let newCell = viewModel.activeNotebook?.cells.last {
+                newCell.content = code
+                viewModel.selectedCellId = newCell.id   // focus the new cell
+                viewModel.scheduleAutoSave()
             }
         }
     }
