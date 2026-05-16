@@ -98,42 +98,51 @@ struct PythonEnvSheet: View {
                             .foregroundColor(.red)
                         }
                         
-                        // Install Packages
-                        GroupBox(label: Text("Install Packages")) {
+                        // ── Auto-detected packages (primary path) ───────────
+                        GroupBox(label: Label("Auto-detected from your code", systemImage: "wand.and.stars")) {
+                            VStack(alignment: .leading, spacing: 8) {
+                                if envManager.detectedPackages.isEmpty {
+                                    Text("No 3rd-party imports detected yet. Run a cell or write `import …` and they'll appear here automatically.")
+                                        .font(.caption)
+                                        .foregroundColor(.secondary)
+                                } else {
+                                    Text(envManager.detectedPackages.joined(separator: ", "))
+                                        .font(.system(.body, design: .monospaced))
+                                        .textSelection(.enabled)
+
+                                    Button {
+                                        envManager.installPackages(envManager.detectedPackages, in: env) { _, _ in }
+                                    } label: {
+                                        Label("Install \(envManager.detectedPackages.count) detected package\(envManager.detectedPackages.count == 1 ? "" : "s")",
+                                              systemImage: "arrow.down.circle.fill")
+                                    }
+                                    .buttonStyle(.borderedProminent)
+                                    .disabled(envManager.isWorking)
+                                }
+                            }
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                            .padding(.vertical, 4)
+                        }
+
+                        // ── Manual install (fallback) ───────────────────────
+                        GroupBox(label: Text("Or install manually")) {
                             VStack(alignment: .leading, spacing: 8) {
                                 HStack {
                                     TextField("Package names (space separated)", text: $packagesToInstall)
                                         .textFieldStyle(.roundedBorder)
-                                    
+
                                     Button("Install") {
                                         installPackages(env)
                                     }
-                                    .buttonStyle(.borderedProminent)
+                                    .buttonStyle(.bordered)
                                     .disabled(packagesToInstall.isEmpty || envManager.isWorking)
                                 }
-                                
+
                                 Text("Example: numpy pandas matplotlib")
                                     .font(.caption)
                                     .foregroundColor(.secondary)
                             }
                             .padding(.vertical, 4)
-                        }
-                        
-                        // Detected Packages
-                        if !envManager.detectedPackages.isEmpty {
-                            GroupBox(label: Text("Detected from Code")) {
-                                VStack(alignment: .leading, spacing: 8) {
-                                    Text(envManager.detectedPackages.joined(separator: ", "))
-                                        .font(.system(.body, design: .monospaced))
-                                    
-                                    Button("Install All Detected") {
-                                        envManager.installPackages(envManager.detectedPackages, in: env) { _, _ in }
-                                    }
-                                    .buttonStyle(.bordered)
-                                    .disabled(envManager.isWorking)
-                                }
-                                .padding(.vertical, 4)
-                            }
                         }
                         
                         Spacer()
