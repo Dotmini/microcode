@@ -496,29 +496,62 @@ class LSPClientService: ObservableObject {
     // MARK: - Server Binary Detection
     
     private func findServerBinary() -> String? {
-        for path in serverType.searchPaths {
-            if FileManager.default.isExecutableFile(atPath: path) {
+        return LSPClientService.resolveBinary(serverType.rawValue, searchPaths: serverType.searchPaths)
+    }
+
+    /// Resolve a language-server binary the user installed by ANY means.
+    /// A GUI .app has a stripped PATH (no Homebrew/npm-global/pyenv/nvm/asdf),
+    /// so a bare `which` misses most installs. Strategy: explicit known paths
+    /// → user LOGIN shell `command -v` (honours their real PATH/version mgrs)
+    /// → common version-manager dirs → plain which.
+    static func resolveBinary(_ name: String, searchPaths: [String]) -> String? {
+        let fm = FileManager.default
+        for path in searchPaths where fm.isExecutableFile(atPath: path) { return path }
+
+        // Login shell — picks up Homebrew, npm -g, pyenv, nvm, asdf, volta…
+        let shell = ProcessInfo.processInfo.environment["SHELL"] ?? "/bin/zsh"
+        if fm.isExecutableFile(atPath: shell) {
+            let p = Process()
+            p.executableURL = URL(fileURLWithPath: shell)
+            p.arguments = ["-l", "-c", "command -v \(name) 2>/dev/null"]
+            let pipe = Pipe(); p.standardOutput = pipe; p.standardError = Pipe()
+            if (try? p.run()) != nil {
+                p.waitUntilExit()
+                if let out = String(data: pipe.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8)?
+                    .split(separator: "\n").first.map(String.init)?
+                    .trimmingCharacters(in: .whitespaces), !out.isEmpty,
+                   fm.isExecutableFile(atPath: out) { return out }
+            }
+        }
+
+        // Common version-manager / global bin locations.
+        let home = fm.homeDirectoryForCurrentUser.path
+        var dirs = [
+            "/opt/homebrew/bin", "/usr/local/bin", "/usr/bin",
+            "\(home)/.cargo/bin", "\(home)/.local/bin", "\(home)/.deno/bin",
+            "\(home)/.bun/bin", "\(home)/.volta/bin", "\(home)/.pyenv/shims",
+            "\(home)/.asdf/shims", "\(home)/go/bin",
+            "/opt/homebrew/opt/node/bin", "/usr/local/share/dotnet"
+        ]
+        if let v = try? fm.contentsOfDirectory(atPath: "\(home)/.nvm/versions/node") {
+            for ver in v { dirs.append("\(home)/.nvm/versions/node/\(ver)/bin") }
+        }
+        for d in dirs {
+            let cand = (d as NSString).appendingPathComponent(name)
+            if fm.isExecutableFile(atPath: cand) { return cand }
+        }
+
+        let w = Process()
+        w.executableURL = URL(fileURLWithPath: "/usr/bin/which")
+        w.arguments = [name]
+        let pipe = Pipe(); w.standardOutput = pipe
+        if (try? w.run()) != nil {
+            w.waitUntilExit()
+            if let path = String(data: pipe.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8)?
+                .trimmingCharacters(in: .whitespacesAndNewlines), !path.isEmpty {
                 return path
             }
         }
-        
-        // Try `which` command
-        let whichProcess = Process()
-        whichProcess.executableURL = URL(fileURLWithPath: "/usr/bin/which")
-        whichProcess.arguments = [serverType.rawValue]
-        let pipe = Pipe()
-        whichProcess.standardOutput = pipe
-        
-        do {
-            try whichProcess.run()
-            whichProcess.waitUntilExit()
-            let data = pipe.fileHandleForReading.readDataToEndOfFile()
-            if let path = String(data: data, encoding: .utf8)?.trimmingCharacters(in: .whitespacesAndNewlines),
-               !path.isEmpty {
-                return path
-            }
-        } catch {}
-        
         return nil
     }
     
