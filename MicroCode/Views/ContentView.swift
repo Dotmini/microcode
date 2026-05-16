@@ -3088,20 +3088,21 @@ struct SettingsView: View {
                         .padding(22)
                         .frame(maxWidth: .infinity, alignment: .leading)
                         .background(
-                            RoundedRectangle(cornerRadius: 14, style: .continuous)
-                                .fill(Color(nsColor: .controlBackgroundColor).opacity(0.55))
+                            RoundedRectangle(cornerRadius: 16, style: .continuous)
+                                .fill(.ultraThinMaterial)
                         )
                         .overlay(
-                            RoundedRectangle(cornerRadius: 14, style: .continuous)
-                                .strokeBorder(Color.primary.opacity(0.06), lineWidth: 1)
+                            RoundedRectangle(cornerRadius: 16, style: .continuous)
+                                .strokeBorder(Color.primary.opacity(0.08), lineWidth: 1)
                         )
+                        .shadow(color: .black.opacity(0.18), radius: 12, y: 4)
                     }
                     .padding(.horizontal, 32)
                     .padding(.bottom, 32)
                 }
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity)
-            .background(Color(nsColor: .windowBackgroundColor))
+            .background(VisualEffectView(material: .underWindowBackground, blendingMode: .behindWindow))
         }
         .frame(minWidth: 880, idealWidth: 1000, maxWidth: 1240,
                minHeight: 600, idealHeight: 700, maxHeight: 920)
@@ -3223,90 +3224,64 @@ struct SettingsView: View {
     
     // MARK: - About Content
     
+    private var appVersionString: String {
+        let v = Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "2.0"
+        let b = Bundle.main.infoDictionary?["CFBundleVersion"] as? String ?? "1"
+        return "Version \(v) (\(b))"
+    }
+
     private var aboutContent: some View {
-        VStack(alignment: .center, spacing: 20) {
-            Spacer()
-            
-            // App Icon Graphic
-            ZStack {
-                RoundedRectangle(cornerRadius: 32, style: .continuous)
-                    .fill(LinearGradient(colors: [Color(red: 0.05, green: 0.08, blue: 0.15), Color(red: 0.01, green: 0.02, blue: 0.05)], startPoint: .topLeading, endPoint: .bottomTrailing))
-                    .frame(width: 140, height: 140)
-                    .shadow(color: .black.opacity(0.4), radius: 20, x: 0, y: 10)
-                
-                RoundedRectangle(cornerRadius: 32, style: .continuous)
-                    .strokeBorder(Color.primary.opacity(0.15), lineWidth: 1.5)
-                    .frame(width: 140, height: 140)
-                
-                // MicroCode 'M' interlocking logo
-                ZStack {
-                    Image(systemName: "chevron.left")
-                        .font(.system(size: 56, weight: .bold))
-                        .foregroundStyle(Color.primary)
-                        .offset(x: -16)
-                    
-                    Image(systemName: "chevron.right")
-                        .font(.system(size: 56, weight: .bold))
-                        .foregroundStyle(Color.primary)
-                        .offset(x: 16)
+        VStack(spacing: 0) {
+            Spacer(minLength: 24)
+
+            // Real app icon (Apple-style)
+            Group {
+                if let icon = NSApp.applicationIconImage {
+                    Image(nsImage: icon).resizable()
+                } else {
+                    Image(systemName: "chevron.left.forwardslash.chevron.right")
+                        .resizable().scaledToFit().padding(28)
+                        .background(RoundedRectangle(cornerRadius: 26, style: .continuous).fill(.thinMaterial))
                 }
             }
-            .padding(.bottom, 8)
-            
-            // App Name with colored text
-            HStack(spacing: 0) {
-                Text("MicroCode ")
-                    .font(.system(size: 32, weight: .heavy, design: .rounded))
-                    .foregroundColor(.primary)
-                Text("PRO")
-                    .font(.system(size: 32, weight: .heavy, design: .rounded))
-                    .foregroundStyle(Color.primary)
+            .frame(width: 116, height: 116)
+            .clipShape(RoundedRectangle(cornerRadius: 26, style: .continuous))
+            .shadow(color: .black.opacity(0.25), radius: 14, y: 8)
+            .padding(.bottom, 18)
+
+            Text("MicroCode")
+                .font(.system(size: 30, weight: .semibold))
+            Text(appVersionString)
+                .font(.system(size: 13))
+                .foregroundColor(.secondary)
+                .padding(.top, 2)
+
+            Text("The native AI-powered IDE for macOS")
+                .font(.system(size: 12))
+                .foregroundColor(.secondary)
+                .padding(.top, 10)
+
+            HStack(spacing: 18) {
+                Link(destination: URL(string: "https://github.com/Dotmini/microcode")!) {
+                    Label("GitHub", systemImage: "chevron.left.forwardslash.chevron.right")
+                }
+                Link(destination: URL(string: "https://dotmini.net")!) {
+                    Label("dotmini.net", systemImage: "globe")
+                }
             }
-            
-            Text("Version 2.0")
-                .font(.system(size: 16, weight: .medium, design: .rounded))
-                .foregroundColor(.secondary)
-            
-            Text("Version 2.0.0 Developer (Build 2025.1)")
-                .font(.system(size: 14))
-                .foregroundColor(.secondary)
-            
-            Divider()
-                .frame(width: 200)
-            
-            VStack(spacing: 8) {
-                HStack(spacing: 0) {
-                    Text("Created by Arsenal @ ")
-                        .font(.system(size: 14, weight: .medium))
-                        .foregroundColor(.secondary)
-                    Text("SPU AI CLUB")
-                        .font(.system(size: 14, weight: .medium))
-                        .foregroundColor(.primary)
-                }
-                
-                HStack(spacing: 0) {
-                    Text("Property of ")
-                        .font(.system(size: 12))
-                        .foregroundColor(.secondary)
-                    Text("Dotmini Software 2.0")
-                        .font(.system(size: 12, weight: .semibold))
-                        .foregroundColor(.primary)
-                    Text(" 2025")
-                        .font(.system(size: 12))
-                        .foregroundColor(.secondary)
-                }
-                
-                Text("ALL RIGHTS RESERVED")
-                    .font(.system(size: 10, weight: .bold))
+            .font(.system(size: 12, weight: .medium))
+            .padding(.top, 20)
+
+            Spacer(minLength: 24)
+
+            VStack(spacing: 3) {
+                Text("Dotmini Software")
+                    .font(.system(size: 12, weight: .semibold))
+                Text("© 2025 Dotmini Software. All rights reserved.")
+                    .font(.system(size: 11))
                     .foregroundColor(.secondary)
             }
-            
-            Spacer()
-            
-            Link("Visit SPU AI CLUB", destination: URL(string: "https://spuaiclub.com")!)
-                .font(.system(size: 12))
-            
-            Spacer()
+            .padding(.bottom, 8)
         }
         .frame(maxWidth: .infinity)
     }
