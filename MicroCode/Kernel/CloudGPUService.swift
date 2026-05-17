@@ -45,12 +45,12 @@ import Combine
 final class CloudGPUService: ObservableObject {
     static let shared = CloudGPUService()
 
-    /// Default lives on the existing Dotmini gateway (same Railway service as
-    /// the AI proxy at api.dotmini.net). Override via UserDefaults
+    /// Dedicated Cloud GPU gateway — its OWN Railway service/host, separate
+    /// from the AI proxy at api.dotmini.net. Override via UserDefaults
     /// ("cloudGPUBaseURL") — exposed in Settings → Connections.
     private var baseURL: String {
         let s = UserDefaults.standard.string(forKey: "cloudGPUBaseURL") ?? ""
-        return s.isEmpty ? "https://api.dotmini.net/gpu/v1" : s
+        return s.isEmpty ? "https://gpu.dotmini.net/gpu/v1" : s
     }
 
     struct GPUType: Identifiable, Decodable, Equatable {
