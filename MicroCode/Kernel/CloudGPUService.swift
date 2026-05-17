@@ -45,9 +45,12 @@ import Combine
 final class CloudGPUService: ObservableObject {
     static let shared = CloudGPUService()
 
-    /// Override for staging via UserDefaults("cloudGPUBaseURL").
+    /// Dedicated Cloud GPU gateway — its OWN Railway service/host, separate
+    /// from the AI proxy at api.dotmini.net. Override via UserDefaults
+    /// ("cloudGPUBaseURL") — exposed in Settings → Connections.
     private var baseURL: String {
-        UserDefaults.standard.string(forKey: "cloudGPUBaseURL") ?? "https://gpu.microcode.net/v1"
+        let s = UserDefaults.standard.string(forKey: "cloudGPUBaseURL") ?? ""
+        return s.isEmpty ? "https://gpu.dotmini.net/gpu/v1" : s
     }
 
     struct GPUType: Identifiable, Decodable, Equatable {
@@ -77,10 +80,11 @@ final class CloudGPUService: ObservableObject {
 
     private var pollTask: Task<Void, Never>?
 
-    // MARK: - Auth (set from the same place BillingService gets the JWT)
+    // MARK: - Auth (the same app identity token used by AIClient / Billing /
+    // ComputeKernel to call api.dotmini.net — NOT a separate "authToken").
 
     private var authToken: String? {
-        UserDefaults.standard.string(forKey: "authToken")
+        UserDefaults.standard.string(forKey: "microRentToken")
     }
 
     private func request(_ path: String, method: String = "GET",

@@ -3548,9 +3548,11 @@ struct HPCSettingsView: View {
     @AppStorage("remoteSSHKey") private var sshKey = ""
     @AppStorage("runpodApiKey") private var runpodKey = ""
     @AppStorage("vastApiKey") private var vastKey = ""
+    @AppStorage("cloudGPUBaseURL") private var cloudGPUBase = ""
     @State private var providerSel: RemoteProviderService.Provider = .runpod
     @State private var showProvider = false
     @State private var showAdvanced = false
+    @State private var showGateway = false
     @State private var testing = false
     @State private var testOK: Bool? = nil
     @State private var testMsg = ""
@@ -3779,6 +3781,33 @@ struct HPCSettingsView: View {
                             .foregroundColor(testOK == true ? .green : .red)
                             .fixedSize(horizontal: false, vertical: true).textSelection(.enabled)
                     }
+                }
+                .padding(.top, 6)
+            }
+            .font(.system(size: 11))
+
+            DisclosureGroup("Managed Cloud GPU gateway (advanced)", isExpanded: $showGateway) {
+                VStack(alignment: .leading, spacing: 8) {
+                    Text("Endpoint MicroCode uses for one-click Cloud GPU. Leave blank to use the default.")
+                        .font(.system(size: 10)).foregroundColor(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                    TextField("https://gpu.dotmini.net/gpu/v1", text: $cloudGPUBase)
+                        .textFieldStyle(.roundedBorder)
+                        .disableAutocorrection(true)
+                        .autocorrectionDisabled(true)
+                    HStack(spacing: 8) {
+                        Text("Default: https://gpu.dotmini.net/gpu/v1")
+                            .font(.system(size: 10, design: .monospaced))
+                            .foregroundColor(.secondary)
+                        Spacer()
+                        if !cloudGPUBase.isEmpty {
+                            Button("Reset") { cloudGPUBase = "" }
+                                .buttonStyle(.borderless).controlSize(.small)
+                        }
+                    }
+                    Text("Authenticated with your MicroCode account token (same as AI). Billed from the separate Cloud GPU Wallet.")
+                        .font(.system(size: 10)).foregroundColor(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
                 }
                 .padding(.top, 6)
             }
