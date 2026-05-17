@@ -2994,6 +2994,7 @@ struct SettingsView: View {
         (0, "General", "gearshape"),
         (1, "Editor", "text.cursor"),
         (2, "AI", "brain"),
+        (9, "Cloud GPU", "cpu"),
         (7, "Connections", "network"),
         (8, "MCP Servers", "server.rack"),
         (3, "Tools", "wrench.and.screwdriver"),
@@ -3060,6 +3061,7 @@ struct SettingsView: View {
                             if selectedTab == 0 { generalSettingsContent }
                             else if selectedTab == 1 { editorSettingsContent }
                             else if selectedTab == 2 { aiSettingsContent }
+                            else if selectedTab == 9 { CloudGPUView() }
                             else if selectedTab == 7 { HPCSettingsView().environmentObject(appState) }
                             else if selectedTab == 8 { mcpSettingsPanel }
                             else if selectedTab == 3 { toolsSettingsContent }

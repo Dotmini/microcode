@@ -57,6 +57,53 @@ final class RemoteProviderService: ObservableObject {
         "ssh -p \(i.sshPort) \(i.user)@\(i.sshHost)"
     }
 
+    /// Auto-register MicroCode's managed PUBLIC key on the provider account so
+    /// the SSH connect just works — true zero-setup (no copy/paste). Best
+    /// effort: if it fails the user can still paste the key manually.
+    @discardableResult
+    func uploadKey(provider: Provider, apiKey: String, publicKey: String) async -> Bool {
+        let key = apiKey.trimmingCharacters(in: .whitespacesAndNewlines)
+        let pub = publicKey.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !key.isEmpty, !pub.isEmpty else { return false }
+        switch provider {
+        case .vast:
+            guard let url = URL(string: "https://console.vast.ai/api/v0/ssh/") else { return false }
+            var r = URLRequest(url: url)
+            r.httpMethod = "POST"; r.timeoutInterval = 15
+            r.setValue("application/json", forHTTPHeaderField: "Content-Type")
+            r.setValue("Bearer \(key)", forHTTPHeaderField: "Authorization")
+            r.httpBody = try? JSONSerialization.data(withJSONObject: ["ssh_key": pub])
+            if let (data, resp) = try? await URLSession.shared.data(for: r) {
+                let code = (resp as? HTTPURLResponse)?.statusCode ?? -1
+                let body = String(data: data, encoding: .utf8) ?? ""
+                let ok = (200...299).contains(code) || body.lowercased().contains("already")
+                CrashReporter.shared.breadcrumb("Vast.uploadKey HTTP \(code) ok=\(ok)")
+                return ok
+            }
+            return false
+        case .runpod:
+            guard let url = URL(string: "https://api.runpod.io/graphql") else { return false }
+            var r = URLRequest(url: url)
+            r.httpMethod = "POST"; r.timeoutInterval = 15
+            r.setValue("application/json", forHTTPHeaderField: "Content-Type")
+            r.setValue("Bearer \(key)", forHTTPHeaderField: "Authorization")
+            // RunPod stores SSH keys in account settings; append ours.
+            let esc = pub.replacingOccurrences(of: "\\", with: "\\\\")
+                         .replacingOccurrences(of: "\"", with: "\\\"")
+                         .replacingOccurrences(of: "\n", with: "\\n")
+            let q = "{\"query\":\"mutation{updateUserSettings(input:{pubKey:\\\"\(esc)\\\"}){id}}\"}"
+            r.httpBody = q.data(using: .utf8)
+            if let (data, resp) = try? await URLSession.shared.data(for: r) {
+                let code = (resp as? HTTPURLResponse)?.statusCode ?? -1
+                let body = String(data: data, encoding: .utf8) ?? ""
+                let ok = (200...299).contains(code) && !body.contains("\"errors\"")
+                CrashReporter.shared.breadcrumb("RunPod.uploadKey HTTP \(code) ok=\(ok)")
+                return ok
+            }
+            return false
+        }
+    }
+
     // MARK: - RunPod (GraphQL)
 
     private func fetchRunPod(_ key: String) async throws -> [Instance] {
