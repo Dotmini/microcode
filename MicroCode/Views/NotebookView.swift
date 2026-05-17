@@ -3716,8 +3716,20 @@ struct HPCSettingsView: View {
                     ForEach(prov.instances) { inst in
                         Button {
                             sshCmd = prov.sshCommand(for: inst)
-                            gpu.connect(sshCommand: sshCmd,
-                                        keyPath: sshKey.isEmpty ? nil : sshKey)
+                            let useKey = sshKey.isEmpty ? nil : sshKey
+                            Task {
+                                // Zero-setup: auto-register MicroCode's managed
+                                // public key on the provider account using the
+                                // same API key, so the SSH connect just works
+                                // (no copy/paste). Best effort — connect anyway.
+                                if useKey == nil {
+                                    await prov.uploadKey(
+                                        provider: providerSel,
+                                        apiKey: providerSel == .runpod ? runpodKey : vastKey,
+                                        publicKey: gpu.managedPublicKey)
+                                }
+                                gpu.connect(sshCommand: sshCmd, keyPath: useKey)
+                            }
                         } label: {
                             HStack(spacing: 6) {
                                 Circle().fill(inst.running ? Color.green : Color.secondary)
@@ -3732,7 +3744,7 @@ struct HPCSettingsView: View {
                         .disabled(!inst.running)
                     }
 
-                    Text("Uses your account SSH key (or pick a .pem above). Pick an instance → MicroCode SSHes in and connects automatically.")
+                    Text("Zero-setup: pick an instance → MicroCode auto-registers its key on your account via this API key, SSHes in, and connects. No SSH key or .pem to manage.")
                         .font(.system(size: 10)).foregroundColor(.secondary)
                         .fixedSize(horizontal: false, vertical: true)
                 }

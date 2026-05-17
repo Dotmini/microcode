@@ -160,7 +160,9 @@ final class RemoteGPUService: ObservableObject {
         if s.contains("Permission denied (publickey)")
             || s.contains("Too many authentication failures")
             || s.contains("No such identity")
-            || s.contains("Host key verification failed") {
+            || s.contains("Host key verification failed")
+            || s.contains("Connection closed by")           // Vast proxy rejects unknown key
+            || s.contains("kex_exchange_identification") {
             CrashReporter.shared.breadcrumb("RemoteGPU.authFail: \(s.prefix(160))")
             append("\n❌ SSH key rejected.\n")
             status = .failed("SSH key not authorised yet. Click “Copy MicroCode SSH key”, paste it into your RunPod/Vast account (SSH Keys) once, then Connect again. (No need to manage your own .pem.)")
