@@ -100,25 +100,41 @@ final class RemoteGPUService: ObservableObject {
         if log.count > 12_000 { log = String(log.suffix(10_000)) }
     }
 
-    /// First existing key in ~/.ssh when the user didn't pick one (so the
-    /// common case "I have a key but it isn't a default name" still works).
-    private func autoKey() -> String? {
-        let ssh = (NSHomeDirectory() as NSString).appendingPathComponent(".ssh")
-        let names = ["id_ed25519", "id_rsa", "id_ecdsa", "microcode", "vast",
-                     "runpod", "id_dsa"]
-        let fm = FileManager.default
-        for n in names {
-            let p = (ssh as NSString).appendingPathComponent(n)
-            if fm.fileExists(atPath: p) { return p }
-        }
-        // Any private-looking key file (no .pub) as a last resort.
-        if let items = try? fm.contentsOfDirectory(atPath: ssh) {
-            for f in items where !f.hasSuffix(".pub")
-                && f != "known_hosts" && f != "config" && f != "authorized_keys" {
-                return (ssh as NSString).appendingPathComponent(f)
-            }
-        }
-        return nil
+    // MARK: - MicroCode-managed SSH key (the good-UX path)
+
+    /// MicroCode owns ONE ed25519 keypair. The user never picks a .pem — they
+    /// just paste MicroCode's PUBLIC key into RunPod/Vast once (or it's
+    /// auto-uploaded via the provider API key). Generated on first use.
+    private var managedKeyPath: String {
+        let dir = (NSHomeDirectory() as NSString)
+            .appendingPathComponent("Library/Application Support/MicroCode/ssh")
+        try? FileManager.default.createDirectory(atPath: dir, withIntermediateDirectories: true,
+                                                 attributes: [.posixPermissions: 0o700])
+        return (dir as NSString).appendingPathComponent("id_ed25519")
+    }
+
+    @discardableResult
+    func ensureManagedKeypair() -> String {
+        let priv = managedKeyPath
+        if FileManager.default.fileExists(atPath: priv) { return priv }
+        let p = Process()
+        p.executableURL = URL(fileURLWithPath: "/usr/bin/ssh-keygen")
+        p.arguments = ["-t", "ed25519", "-N", "", "-q",
+                       "-C", "microcode@\(Host.current().localizedName ?? "mac")",
+                       "-f", priv]
+        p.standardOutput = Pipe(); p.standardError = Pipe()
+        try? p.run(); p.waitUntilExit()
+        try? FileManager.default.setAttributes([.posixPermissions: 0o600],
+                                               ofItemAtPath: priv)
+        CrashReporter.shared.breadcrumb("RemoteGPU.managedKey generated rc=\(p.terminationStatus)")
+        return priv
+    }
+
+    /// The public key string to paste into the provider (one time).
+    var managedPublicKey: String {
+        ensureManagedKeypair()
+        return (try? String(contentsOfFile: managedKeyPath + ".pub", encoding: .utf8))?
+            .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
     }
 
     private func sshBaseArgs(_ t: Target) -> [String] {
@@ -130,10 +146,10 @@ final class RemoteGPUService: ObservableObject {
                  "-o", "ServerAliveCountMax=3",
                  "-o", "ConnectTimeout=12",
                  "-p", String(t.port)]
-        let key = (t.keyPath?.isEmpty == false) ? t.keyPath : autoKey()
-        if let k = key, !k.isEmpty {
-            a += ["-i", k, "-o", "IdentitiesOnly=yes"]
-        }
+        // User-chosen key wins; otherwise ALWAYS use MicroCode's own managed
+        // key (deterministic — the user just pastes our public key once).
+        let key = (t.keyPath?.isEmpty == false) ? t.keyPath! : ensureManagedKeypair()
+        a += ["-i", key, "-o", "IdentitiesOnly=yes"]
         return a
     }
 
@@ -147,7 +163,7 @@ final class RemoteGPUService: ObservableObject {
             || s.contains("Host key verification failed") {
             CrashReporter.shared.breadcrumb("RemoteGPU.authFail: \(s.prefix(160))")
             append("\n❌ SSH key rejected.\n")
-            status = .failed("SSH key rejected. Click “Choose .pem…” and select your PRIVATE key — the one matching the key you added on Vast/RunPod (often ~/.ssh/<name>, not a default id_rsa).")
+            status = .failed("SSH key not authorised yet. Click “Copy MicroCode SSH key”, paste it into your RunPod/Vast account (SSH Keys) once, then Connect again. (No need to manage your own .pem.)")
             disconnect(silent: true)
         }
     }
