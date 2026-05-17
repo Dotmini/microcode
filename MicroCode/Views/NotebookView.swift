@@ -3603,28 +3603,48 @@ struct HPCSettingsView: View {
                 }
             }
 
-            HStack(spacing: 6) {
-                Text("SSH KEY").font(.system(size: 10, weight: .bold)).foregroundColor(.secondary)
-                Text(sshKey.isEmpty ? "from command / default" : (sshKey as NSString).lastPathComponent)
-                    .font(.system(size: 11)).foregroundColor(.secondary).lineLimit(1)
-                Spacer()
-                Button("Choose .pem…") {
-                    let p = NSOpenPanel()
-                    p.canChooseFiles = true; p.canChooseDirectories = false
-                    p.allowsMultipleSelection = false
-                    p.showsHiddenFiles = true
-                    if p.runModal() == .OK, let u = p.url { sshKey = u.path }
+            // One-time key authorisation — no .pem juggling. MicroCode owns
+            // its own key; the user just pastes our PUBLIC key into the
+            // provider once.
+            VStack(alignment: .leading, spacing: 6) {
+                HStack(spacing: 6) {
+                    Text("ONE-TIME SETUP").font(.system(size: 10, weight: .bold)).foregroundColor(.secondary)
+                    Spacer()
+                    Button {
+                        NSPasteboard.general.clearContents()
+                        NSPasteboard.general.setString(gpu.managedPublicKey, forType: .string)
+                    } label: { Label("Copy MicroCode SSH key", systemImage: "key.fill") }
+                    .buttonStyle(.bordered).controlSize(.small)
                 }
-                .buttonStyle(.borderless).font(.system(size: 11))
-                if !sshKey.isEmpty {
-                    Button { sshKey = "" } label: { Image(systemName: "xmark.circle.fill") }
-                        .buttonStyle(.borderless).foregroundColor(.secondary)
-                }
-            }
-            if sshKey.isEmpty {
-                Text("Tip: RunPod/Vast usually need your PRIVATE key — click “Choose .pem…” and pick the key file that matches the key you added on the provider (e.g. ~/.ssh/microcode).")
-                    .font(.system(size: 10)).foregroundColor(.orange)
+                Text("Paste this once into your provider: RunPod → Settings ▸ SSH Public Keys, or Vast → instance ▸ Manage SSH Keys. Then just Connect — no .pem to pick.")
+                    .font(.system(size: 10)).foregroundColor(.secondary)
                     .fixedSize(horizontal: false, vertical: true)
+                Text(gpu.managedPublicKey.isEmpty ? "(generating key…)" :
+                        String(gpu.managedPublicKey.prefix(46)) + "…")
+                    .font(.system(size: 9, design: .monospaced))
+                    .foregroundColor(.secondary).lineLimit(1).textSelection(.enabled)
+
+                DisclosureGroup("Use my own private key instead") {
+                    HStack(spacing: 6) {
+                        Text(sshKey.isEmpty ? "none" : (sshKey as NSString).lastPathComponent)
+                            .font(.system(size: 11)).foregroundColor(.secondary).lineLimit(1)
+                        Spacer()
+                        Button("Choose .pem…") {
+                            let p = NSOpenPanel()
+                            p.canChooseFiles = true; p.canChooseDirectories = false
+                            p.allowsMultipleSelection = false
+                            p.showsHiddenFiles = true
+                            if p.runModal() == .OK, let u = p.url { sshKey = u.path }
+                        }
+                        .buttonStyle(.borderless).font(.system(size: 11))
+                        if !sshKey.isEmpty {
+                            Button { sshKey = "" } label: { Image(systemName: "xmark.circle.fill") }
+                                .buttonStyle(.borderless).foregroundColor(.secondary)
+                        }
+                    }
+                    .padding(.top, 4)
+                }
+                .font(.system(size: 10))
             }
 
             HStack(spacing: 10) {
@@ -3696,8 +3716,20 @@ struct HPCSettingsView: View {
                     ForEach(prov.instances) { inst in
                         Button {
                             sshCmd = prov.sshCommand(for: inst)
-                            gpu.connect(sshCommand: sshCmd,
-                                        keyPath: sshKey.isEmpty ? nil : sshKey)
+                            let useKey = sshKey.isEmpty ? nil : sshKey
+                            Task {
+                                // Zero-setup: auto-register MicroCode's managed
+                                // public key on the provider account using the
+                                // same API key, so the SSH connect just works
+                                // (no copy/paste). Best effort — connect anyway.
+                                if useKey == nil {
+                                    await prov.uploadKey(
+                                        provider: providerSel,
+                                        apiKey: providerSel == .runpod ? runpodKey : vastKey,
+                                        publicKey: gpu.managedPublicKey)
+                                }
+                                gpu.connect(sshCommand: sshCmd, keyPath: useKey)
+                            }
                         } label: {
                             HStack(spacing: 6) {
                                 Circle().fill(inst.running ? Color.green : Color.secondary)
@@ -3712,7 +3744,7 @@ struct HPCSettingsView: View {
                         .disabled(!inst.running)
                     }
 
-                    Text("Uses your account SSH key (or pick a .pem above). Pick an instance → MicroCode SSHes in and connects automatically.")
+                    Text("Zero-setup: pick an instance → MicroCode auto-registers its key on your account via this API key, SSHes in, and connects. No SSH key or .pem to manage.")
                         .font(.system(size: 10)).foregroundColor(.secondary)
                         .fixedSize(horizontal: false, vertical: true)
                 }
