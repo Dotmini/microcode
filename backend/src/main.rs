@@ -74,6 +74,11 @@ async fn main() -> Result<()> {
 
     info!("Starting MicroCode Backend v2.0.0");
 
+    // If the MicroCode app that spawned us dies (crash / force-quit / SIGKILL),
+    // macOS re-parents us to launchd (PID 1) and we'd keep running, spinning a
+    // CPU core and holding port 3000. Watch for that and exit.
+    spawn_parent_watchdog();
+
     // Initialize terminal manager
     let terminal_manager = Arc::new(crate::terminal::TerminalManager::new());
 
@@ -391,6 +396,39 @@ async fn main() -> Result<()> {
     axum::serve(listener, app).await?;
 
     Ok(())
+}
+
+/// Self-terminate if the parent (the MicroCode app) goes away. Covers the
+/// non-graceful paths the Swift side can't: app crash, force-quit, SIGKILL —
+/// after which we'd be re-parented to launchd (PID 1) and spin forever.
+fn spawn_parent_watchdog() {
+    // The launcher passes its PID; treat absence as "no watchdog requested".
+    let want_ppid: Option<i32> = std::env::var("MICROCODE_PARENT_PID")
+        .ok()
+        .and_then(|s| s.trim().parse::<i32>().ok());
+    let start_ppid = unsafe { libc::getppid() };
+
+    tokio::spawn(async move {
+        loop {
+            tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+
+            let ppid = unsafe { libc::getppid() };
+            // Re-parented to launchd/init, or our parent changed entirely.
+            let orphaned = ppid <= 1 || (start_ppid > 1 && ppid != start_ppid);
+            // The explicit parent PID we were handed no longer exists.
+            let parent_gone = match want_ppid {
+                Some(p) if p > 1 => (unsafe { libc::kill(p, 0) }) != 0,
+                _ => false,
+            };
+
+            if orphaned || parent_gone {
+                eprintln!(
+                    "[watchdog] parent gone (ppid={ppid}, start={start_ppid}); exiting to avoid orphaned CPU spin"
+                );
+                std::process::exit(0);
+            }
+        }
+    });
 }
 
 async fn health_check() -> impl IntoResponse {

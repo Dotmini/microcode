@@ -98,6 +98,8 @@ struct MicroCodeApp: App {
 // MARK: - App Delegate
 
 class AppDelegate: NSObject, NSApplicationDelegate {
+    private var signalSources: [DispatchSourceSignal] = []
+
     func applicationDidFinishLaunching(_ notification: Notification) {
         // Optimization: Don't block main thread with heavy inits here
         CrashReporter.shared.install() // idempotent backstop
@@ -105,7 +107,22 @@ class AppDelegate: NSObject, NSApplicationDelegate {
 
         // Configure appearance
         NSApp.appearance = NSAppearance(named: .darkAqua)
-        
+
+        // applicationWillTerminate is NOT called on SIGTERM/SIGINT (e.g. a
+        // `kill`, IDE stop, logout). Trap them so we still reap the backend
+        // instead of leaving a re-parented CPU-spinning orphan.
+        for sig in [SIGTERM, SIGINT] {
+            signal(sig, SIG_IGN) // disable default termination; let the source run
+            let src = DispatchSource.makeSignalSource(signal: sig, queue: .main)
+            src.setEventHandler {
+                ReportLogManager.shared.log("Signal \(sig) — stopping backend", type: .info)
+                BackendService.shared.stopBackend()
+                exit(0)
+            }
+            src.resume()
+            signalSources.append(src)
+        }
+
         // Pre-load critical singletons if needed, but prefer lazy
     }
 

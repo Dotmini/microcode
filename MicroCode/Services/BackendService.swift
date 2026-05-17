@@ -46,13 +46,20 @@ class BackendService {
             return
         }
         
+        // Reap any backend left spinning by a previous crash / force-quit
+        // (re-parented to launchd) before we bind port 3000 again.
+        killStaleBackends()
+
         print("🚀 Launching backend from bundle: \(backendURL.path)")
-        
+
         let process = Process()
         process.executableURL = backendURL
         process.arguments = []
         var env = ProcessInfo.processInfo.environment
         env["RUST_LOG"] = "info"
+        // Hand the backend our PID so it can self-exit if we die (the Rust
+        // side also watches for re-parenting to launchd as a backstop).
+        env["MICROCODE_PARENT_PID"] = String(ProcessInfo.processInfo.processIdentifier)
         
         // Fix: Ensure HOME and PATH are set correctly for the backend to find runtimes (rustc, node, etc.)
         // When running as an App Bundle, PATH might be stripped.
@@ -116,8 +123,35 @@ class BackendService {
     }
 
     func stopBackend() {
-        backendProcess?.terminate()
+        guard let p = backendProcess else { return }
         backendProcess = nil
+        guard p.isRunning else { return }
+        p.terminate() // SIGTERM — let it flush/clean up first
+        // Then hard-kill so it can NEVER linger as a CPU-spinning orphan.
+        let deadline = Date().addingTimeInterval(2)
+        while p.isRunning && Date() < deadline { usleep(50_000) }
+        if p.isRunning { kill(p.processIdentifier, SIGKILL) }
+    }
+
+    /// Kill backends a previous run leaked. After a crash / force-quit /
+    /// SIGKILL of the app, our child backend is re-parented to launchd (PID 1)
+    /// and keeps running — pegging a CPU core and holding port 3000 so the
+    /// next launch can't bind. Reap by exact binary name and by :3000 owner.
+    private func killStaleBackends() {
+        for name in ["microcode-backend", "codetunner-backend"] {
+            let pk = Process()
+            pk.executableURL = URL(fileURLWithPath: "/usr/bin/pkill")
+            pk.arguments = ["-9", "-x", name]
+            pk.standardOutput = FileHandle.nullDevice
+            pk.standardError = FileHandle.nullDevice
+            try? pk.run(); pk.waitUntilExit()
+        }
+        let sh = Process()
+        sh.executableURL = URL(fileURLWithPath: "/bin/sh")
+        sh.arguments = ["-c", "pids=$(lsof -ti tcp:3000); [ -n \"$pids\" ] && kill -9 $pids"]
+        sh.standardOutput = FileHandle.nullDevice
+        sh.standardError = FileHandle.nullDevice
+        try? sh.run(); sh.waitUntilExit()
     }
 
     // MARK: - Health Check
