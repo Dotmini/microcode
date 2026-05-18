@@ -14,6 +14,8 @@ import AppKit
 struct CloudGPUView: View {
     @ObservedObject private var svc = CloudGPUService.shared
     @State private var showTopUp = false
+    @State private var topUpMsg = ""
+    @State private var topUpBusy = false
 
     private let topUpPackages: [(id: String, label: String)] = [
         ("credit_200", "฿200"), ("credit_500", "฿500"),
@@ -44,14 +46,28 @@ struct CloudGPUView: View {
                     HStack(spacing: 8) {
                         ForEach(topUpPackages, id: \.id) { p in
                             Button(p.label) {
+                                topUpMsg = ""; topUpBusy = true
                                 Task {
-                                    if let url = await svc.topUp(packageId: p.id) {
+                                    let r = await svc.topUp(packageId: p.id)
+                                    topUpBusy = false
+                                    if let url = r.url {
                                         NSWorkspace.shared.open(url)
+                                        topUpMsg = "Opened secure checkout in your browser…"
+                                    } else {
+                                        topUpMsg = r.error ?? "Top-up failed."
                                     }
                                 }
                             }
                             .buttonStyle(.bordered)
+                            .disabled(topUpBusy)
                         }
+                        if topUpBusy { ProgressView().scaleEffect(0.6) }
+                    }
+                    if !topUpMsg.isEmpty {
+                        Text(topUpMsg)
+                            .font(.system(size: 10))
+                            .foregroundColor(topUpMsg.hasPrefix("Opened") ? .green : .red)
+                            .fixedSize(horizontal: false, vertical: true)
                     }
                     Text("Opens a secure Stripe checkout. Balance updates after payment.")
                         .font(.system(size: 10)).foregroundColor(.secondary)
