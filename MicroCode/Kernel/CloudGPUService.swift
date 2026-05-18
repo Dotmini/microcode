@@ -84,7 +84,15 @@ final class CloudGPUService: ObservableObject {
     // ComputeKernel to call api.dotmini.net — NOT a separate "authToken").
 
     private var authToken: String? {
-        UserDefaults.standard.string(forKey: "microRentToken")
+        // The user may have signed in via either surface — Settings → License
+        // stores "dotminiLicenseKey" (mc_live_<uid>), the older flow stores
+        // "microRentToken" (uid). Accept whichever is present.
+        let d = UserDefaults.standard
+        for k in ["microRentToken", "dotminiLicenseKey"] {
+            if let v = d.string(forKey: k)?.trimmingCharacters(in: .whitespacesAndNewlines),
+               !v.isEmpty { return v }
+        }
+        return nil
     }
 
     private func request(_ path: String, method: String = "GET",
@@ -209,12 +217,21 @@ final class CloudGPUService: ObservableObject {
 
     // MARK: - Wallet top-up (separate from subscription)
 
-    func topUp(packageId: String) async -> URL? {
-        guard let req = request("/wallet/topup", method: "POST", body: ["packageId": packageId]),
-              let (data, resp) = try? await URLSession.shared.data(for: req),
-              (resp as? HTTPURLResponse)?.statusCode == 200,
-              let j = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-              let s = j["checkoutURL"] as? String, let u = URL(string: s) else { return nil }
-        return u
+    func topUp(packageId: String) async -> (url: URL?, error: String?) {
+        guard let req = request("/wallet/topup", method: "POST", body: ["packageId": packageId]) else {
+            return (nil, "Could not build request.")
+        }
+        guard let (data, resp) = try? await URLSession.shared.data(for: req) else {
+            return (nil, "Can't reach the Cloud GPU service. Check your connection.")
+        }
+        let code = (resp as? HTTPURLResponse)?.statusCode ?? -1
+        let j = try? JSONSerialization.jsonObject(with: data) as? [String: Any]
+        if code == 200, let s = j?["checkoutURL"] as? String, let u = URL(string: s) {
+            return (u, nil)
+        }
+        if code == 401 {
+            return (nil, "Sign in to MicroCode first (Settings → License), then try again.")
+        }
+        return (nil, (j?["error"] as? String) ?? "Top-up unavailable (HTTP \(code)).")
     }
 }
