@@ -3041,19 +3041,25 @@ struct SettingsView: View {
 
             // ── Content ────────────────────────────────────────────────
             VStack(alignment: .leading, spacing: 0) {
-                HStack(alignment: .firstTextBaseline) {
-                    Text(Self.sidebarItems.first { $0.tab == selectedTab }?.title ?? "Settings")
-                        .font(.system(size: 26, weight: .bold))
-                    Spacer()
-                    Button("Cancel") { dismiss() }
-                        .keyboardShortcut(.cancelAction)
-                    Button("Save") { saveAllSettings(); dismiss() }
-                        .buttonStyle(.borderedProminent)
-                        .keyboardShortcut(.defaultAction)
+                VStack(spacing: 0) {
+                    HStack(alignment: .center) {
+                        Text(Self.sidebarItems.first { $0.tab == selectedTab }?.title ?? "Settings")
+                            .font(.system(size: 21, weight: .semibold))
+                        Spacer()
+                        Button("Cancel") { dismiss() }
+                            .buttonStyle(.plain)
+                            .foregroundColor(.secondary)
+                            .keyboardShortcut(.cancelAction)
+                        Button("Save") { saveAllSettings(); dismiss() }
+                            .buttonStyle(.borderedProminent)
+                            .controlSize(.large)
+                            .keyboardShortcut(.defaultAction)
+                    }
+                    .padding(.horizontal, 32)
+                    .padding(.top, 26)
+                    .padding(.bottom, 18)
+                    Divider().opacity(0.5)
                 }
-                .padding(.horizontal, 32)
-                .padding(.top, 30)
-                .padding(.bottom, 20)
 
                 ScrollView {
                     VStack(alignment: .leading, spacing: 18) {
@@ -3069,24 +3075,24 @@ struct SettingsView: View {
                             else if selectedTab == 6 { subscriptionSettingsContent }
                             else { aboutContent }
                         }
-                        .padding(22)
+                        .padding(26)
                         .frame(maxWidth: .infinity, alignment: .leading)
                         .background(
-                            RoundedRectangle(cornerRadius: 16, style: .continuous)
-                                .fill(.ultraThinMaterial)
+                            RoundedRectangle(cornerRadius: 12, style: .continuous)
+                                .fill(Color.primary.opacity(0.035))
                         )
                         .overlay(
-                            RoundedRectangle(cornerRadius: 16, style: .continuous)
-                                .strokeBorder(Color.primary.opacity(0.08), lineWidth: 1)
+                            RoundedRectangle(cornerRadius: 12, style: .continuous)
+                                .strokeBorder(Color.primary.opacity(0.06), lineWidth: 1)
                         )
-                        .shadow(color: .black.opacity(0.18), radius: 12, y: 4)
                     }
                     .padding(.horizontal, 32)
+                    .padding(.top, 26)
                     .padding(.bottom, 32)
                 }
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity)
-            .background(VisualEffectView(material: .underWindowBackground, blendingMode: .behindWindow))
+            .background(Color(nsColor: .windowBackgroundColor))
         }
         .frame(minWidth: 880, idealWidth: 1000, maxWidth: 1240,
                minHeight: 600, idealHeight: 700, maxHeight: 920)
@@ -4286,20 +4292,20 @@ struct CodexSidebarRow: View {
         Button(action: action) {
             HStack(spacing: 10) {
                 Image(systemName: icon)
-                    .font(.system(size: 13))
-                    .frame(width: 20)
-                    .foregroundColor(selected ? .accentColor : .secondary)
+                    .font(.system(size: 13, weight: selected ? .semibold : .regular))
+                    .frame(width: 18)
+                    .foregroundColor(selected ? .primary : .secondary)
                 Text(title)
                     .font(.system(size: 13, weight: selected ? .semibold : .regular))
                     .foregroundColor(selected ? .primary : .secondary)
                 Spacer(minLength: 0)
             }
             .padding(.horizontal, 10)
-            .padding(.vertical, 7)
+            .padding(.vertical, 6.5)
             .background(
-                RoundedRectangle(cornerRadius: 8, style: .continuous)
-                    .fill(selected ? Color.accentColor.opacity(0.15)
-                          : (hovering ? Color.primary.opacity(0.06) : Color.clear))
+                RoundedRectangle(cornerRadius: 7, style: .continuous)
+                    .fill(selected ? Color.primary.opacity(0.09)
+                          : (hovering ? Color.primary.opacity(0.045) : Color.clear))
             )
             .contentShape(Rectangle())
         }
