@@ -251,11 +251,10 @@ class CloudGPUKernel: ComputeKernel {
     private var streamManager = WebSocketStreamManager()
     
     func start() async throws {
-        state = .starting
-        if billingService.tokenBalance < billingService.getCostPerMinute(for: target) {
-            state = .error("Insufficient Tokens for Cloud GPU")
-            throw NSError(domain: "ComputeKernel", code: 402, userInfo: [NSLocalizedDescriptionKey: "Insufficient tokens"])
-        }
+        // Cloud GPU is gated by the SEPARATE gpu_wallets balance (฿), which
+        // CloudGPUService.connect() enforces against the per-minute price.
+        // Previously this used the AI-token balance — wrong wallet entirely;
+        // blocked cell runs even when GPU wallet was funded. Drop the guard.
         state = .idle
     }
     
