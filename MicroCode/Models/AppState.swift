@@ -910,6 +910,20 @@ class AppState: ObservableObject {
     }
 
     private func setupSubscriptions() {
+        // Zero-config: when the user connects a MicroCode Cloud GPU
+        // session, switch the active compute target automatically so
+        // cell runs route through the cloud Jupyter kernel without
+        // forcing the user to pick from a dropdown.
+        CloudGPUService.shared.$activeSession
+            .receive(on: RunLoop.main)
+            .sink { [weak self] session in
+                guard let self = self else { return }
+                if session != nil && self.currentComputeTarget != .customHPC {
+                    self.currentComputeTarget = .customHPC
+                }
+            }
+            .store(in: &cancellables)
+
         // Monitor current file changes
         $currentFileIndex
             .receive(on: RunLoop.main)

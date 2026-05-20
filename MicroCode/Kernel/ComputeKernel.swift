@@ -288,7 +288,7 @@ class CloudGPUKernel: ComputeKernel {
             throw NSError(domain: "ComputeKernel", code: 402, userInfo: [NSLocalizedDescriptionKey: "Out of tokens"])
         }
         
-        progress("🚀 Connecting to Cloud Premium GPU (A100) via WebSocket...\n")
+        progress("🚀 Connecting to MicroCode Cloud (Premium) via WebSocket...\n")
         
         return try await withCheckedThrowingContinuation { continuation in
             let url = URL(string: "wss://api.dotmini.net/v1/compute/cloud")!
@@ -472,7 +472,7 @@ class CustomHPCKernel: ComputeKernel {
             return "✅ Execution finished."
             
         } else {
-            progress("🔌 Connecting to Custom HPC Agent via WebSocket...\n")
+            progress("🔌 Connecting to MicroCode Cloud via WebSocket...\n")
             
             return try await withCheckedThrowingContinuation { continuation in
                 guard let url = URL(string: endpoint) else {
