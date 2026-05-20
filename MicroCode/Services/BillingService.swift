@@ -53,7 +53,11 @@ class BillingService: ObservableObject {
         case .localCPU, .localMLX, .localNvidia, .customHPC:
             return 0 // Free / Bring your own compute
         case .cloudPremium:
-            return 50 // 50 Tokens per minute
+            // Real Cloud GPU billing runs in CloudGPUService / gpu_wallets
+            // via the gateway; this legacy BillingService.tokenBalance was
+            // gating cell runs against a /v1/billing/balance endpoint that
+            // was never deployed — every cell hit "Insufficient tokens".
+            return 0
         }
     }
     
