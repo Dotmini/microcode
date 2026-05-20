@@ -205,6 +205,84 @@ final class CloudGPUService: ObservableObject {
         }
     }
 
+    // MARK: - Data transfer (Jupyter Contents API through the secure proxy)
+    //
+    // The session's wss URL is itself a reverse-proxy to the pod's Jupyter,
+    // so the same authenticated endpoint serves /api/contents for file I/O
+    // — no SSH, no S3, no extra plumbing.
+
+    private func jupyterBase() -> (url: String, token: String)? {
+        guard let s = activeSession else { return nil }
+        var b = s.wssURL
+        if b.hasPrefix("wss://") { b = "https://" + b.dropFirst(6) }
+        else if b.hasPrefix("ws://") { b = "http://" + b.dropFirst(5) }
+        return (b.trimmingCharacters(in: CharacterSet(charactersIn: "/")), s.jupyterToken)
+    }
+
+    private func contentsURL(_ remotePath: String) -> URL? {
+        guard let b = jupyterBase() else { return nil }
+        let p = remotePath.split(separator: "/").map {
+            String($0).addingPercentEncoding(withAllowedCharacters: .urlPathAllowed) ?? String($0)
+        }.joined(separator: "/")
+        return URL(string: "\(b.url)/api/contents/\(p)")
+    }
+
+    /// Upload a local file to the connected GPU pod via Jupyter Contents API.
+    /// Returns nil on success, an error message otherwise.
+    func uploadFile(_ local: URL, to remotePath: String) async -> String? {
+        guard let url = contentsURL(remotePath), let base = jupyterBase() else {
+            return "No active GPU session."
+        }
+        guard let data = try? Data(contentsOf: local) else { return "Couldn't read file." }
+        if data.count > 100 * 1024 * 1024 { return "File too large (>100 MB) — split or use object storage." }
+        var r = URLRequest(url: url)
+        r.httpMethod = "PUT"
+        r.timeoutInterval = 120
+        r.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        r.setValue("token \(base.token)", forHTTPHeaderField: "Authorization")
+        let body: [String: Any] = [
+            "type": "file", "format": "base64",
+            "content": data.base64EncodedString()
+        ]
+        r.httpBody = try? JSONSerialization.data(withJSONObject: body)
+        guard let (_, resp) = try? await URLSession.shared.data(for: r),
+              let code = (resp as? HTTPURLResponse)?.statusCode else {
+            return "Network error during upload."
+        }
+        return (200...299).contains(code) ? nil : "Upload failed (HTTP \(code))."
+    }
+
+    /// Download a file from the pod to a local URL.
+    func downloadFile(_ remotePath: String, to local: URL) async -> String? {
+        guard let url = contentsURL(remotePath), let base = jupyterBase() else {
+            return "No active GPU session."
+        }
+        var c = URLComponents(url: url, resolvingAgainstBaseURL: false)
+        c?.queryItems = [URLQueryItem(name: "content", value: "1")]
+        guard let qURL = c?.url else { return "Bad URL." }
+        var r = URLRequest(url: qURL)
+        r.timeoutInterval = 120
+        r.setValue("token \(base.token)", forHTTPHeaderField: "Authorization")
+        guard let (d, resp) = try? await URLSession.shared.data(for: r),
+              let code = (resp as? HTTPURLResponse)?.statusCode else {
+            return "Network error during download."
+        }
+        guard (200...299).contains(code) else { return "Download failed (HTTP \(code))." }
+        guard let j = try? JSONSerialization.jsonObject(with: d) as? [String: Any] else {
+            return "Bad response from server."
+        }
+        let format = (j["format"] as? String) ?? "text"
+        let content = (j["content"] as? String) ?? ""
+        let bytes: Data
+        if format == "base64" {
+            bytes = Data(base64Encoded: content) ?? Data()
+        } else {
+            bytes = content.data(using: .utf8) ?? Data()
+        }
+        do { try bytes.write(to: local); return nil }
+        catch { return "Couldn't save locally: \(error.localizedDescription)" }
+    }
+
     func stop() async {
         pollTask?.cancel()
         if let sid = activeSession?.sessionId, let req = request("/sessions/\(sid)", method: "DELETE") {
