@@ -20,21 +20,41 @@ enum ComputeTarget: String, CaseIterable, Identifiable, Codable {
     case localNvidia = "Nvidia GPU (CUDA/eGPU)"
     case cloudPremium = "Microrent Cloud (Serverless)"
     case customHPC = "Custom Cloud GPU (RunPod/Vast.ai/Akamai)"
-    
+
     var id: String { rawValue }
-    
+
+    // Human-facing label. rawValue is kept for Codable / legacy notebooks;
+    // UI must use this instead of rawValue so we can rebrand without
+    // breaking saved files.
+    var displayName: String {
+        switch self {
+        case .localCPU:      return "Local CPU"
+        case .localMLX:      return "Apple Silicon"
+        case .localNvidia:   return "Local Nvidia GPU"
+        case .cloudPremium:  return "MicroCode Cloud (Premium)"
+        case .customHPC:     return "MicroCode Cloud"
+        }
+    }
+
+    // Targets that should appear in the user-facing compute-engine menu.
+    // cloudPremium is legacy (separate stub kernel) — all premium GPUs now
+    // ship through the customHPC / Jupyter path managed by CloudGPUService.
+    static var userSelectable: [ComputeTarget] {
+        [.localCPU, .localMLX, .localNvidia, .customHPC]
+    }
+
     var icon: String {
         switch self {
         case .localCPU: return "cpu"
         case .localMLX: return "applelogo"
         case .localNvidia: return "memorychip"
         case .cloudPremium: return "cloud.fill"
-        case .customHPC: return "server.rack"
+        case .customHPC: return "cloud.fill"
         }
     }
-    
+
     var isPremium: Bool {
-        return self == .cloudPremium
+        return self == .cloudPremium || self == .customHPC
     }
 }
 

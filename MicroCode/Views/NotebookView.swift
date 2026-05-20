@@ -652,7 +652,7 @@ final class NotebookViewModel: ObservableObject {
             Task { @MainActor in
                 cell.isExecuting = true
                 cell.output = ""
-                cell.appendOutput("❌ Local execution for \(cell.language.rawValue) is not supported natively. Please use 'Custom HPC Agent' to connect to a Jupyter Kernel.\n")
+                cell.appendOutput("❌ Local execution for \(cell.language.rawValue) is not supported natively. Open MicroCode Cloud (cloud icon in toolbar) and Connect to a GPU.\n")
                 cell.isExecuting = false
             }
         }
@@ -2524,12 +2524,12 @@ struct NotebookView: View {
                     .font(.caption)
                     .foregroundColor(.secondary)
                 
-                ForEach(ComputeTarget.allCases) { target in
+                ForEach(ComputeTarget.userSelectable) { target in
                     Button {
                         appState.currentComputeTarget = target
                     } label: {
                         HStack {
-                            Text(target.rawValue)
+                            Text(target.displayName)
                             if appState.currentComputeTarget == target {
                                 Image(systemName: "checkmark")
                             }
@@ -2549,7 +2549,7 @@ struct NotebookView: View {
                 .font(.system(size: 11))
             }
             .menuIndicator(.hidden)
-            .help("Select Compute Engine: \(appState.currentComputeTarget.rawValue)")
+            .help("Select Compute Engine: \(appState.currentComputeTarget.displayName)")
             
             if appState.currentComputeTarget == .customHPC {
                 Button(action: { showingHPCSettings = true }) {
@@ -2558,7 +2558,7 @@ struct NotebookView: View {
                         .foregroundColor(.blue)
                 }
                 .buttonStyle(.plain)
-                .help("Configure Custom HPC Agent")
+                .help("MicroCode Cloud — advanced settings")
                 .popover(isPresented: $showingHPCSettings, arrowEdge: .bottom) {
                     HPCSettingsView()
                         .environmentObject(appState)
