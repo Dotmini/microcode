@@ -155,9 +155,12 @@ final class CloudGPUService: ObservableObject {
         if walletBalance < gpu.pricePerMinute { onNeedTopUp(); return }
         status = .connecting
         lastError = ""
-        guard let req = request("/sessions", method: "POST", body: ["gpuId": gpu.id]) else {
+        guard var req = request("/sessions", method: "POST", body: ["gpuId": gpu.id]) else {
             status = .failed("Bad request"); return
         }
+        // Provisioning waits for the pod + Jupyter to actually be ready
+        // (2-4 min). 20s default would time out → bump for this call only.
+        req.timeoutInterval = 360
         do {
             let (data, resp) = try await URLSession.shared.data(for: req)
             let code = (resp as? HTTPURLResponse)?.statusCode ?? -1
