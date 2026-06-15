@@ -2141,23 +2141,6 @@ struct WelcomeScreen: View {
         VStack(alignment: .leading, spacing: 20) {
             // Glowing neon-tinted MicroCode 2.0 app header
             HStack(spacing: 12) {
-                ZStack {
-                    RoundedRectangle(cornerRadius: 12, style: .continuous)
-                        .fill(
-                            LinearGradient(
-                                colors: [Color.blue, Color.purple],
-                                startPoint: .topLeading,
-                                endPoint: .bottomTrailing
-                            )
-                        )
-                        .frame(width: 44, height: 44)
-                        .shadow(color: Color.blue.opacity(0.5), radius: 6, x: 0, y: 2)
-                    
-                    Image(systemName: "chevron.left.forwardslash.chevron.right")
-                        .font(.system(size: 18, weight: .bold))
-                        .foregroundColor(.white)
-                }
-                
                 VStack(alignment: .leading, spacing: 2) {
                     Text("MicroCode")
                         .font(.system(size: 18, weight: .bold))
