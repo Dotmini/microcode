@@ -1519,12 +1519,12 @@ class AppState: ObservableObject {
             let fileUri = url.absoluteString
             Task.detached(priority: .utility) {
                 // 3-second timeout to prevent indefinite hang
-                let lspTask = Task {
-                    await self.lspManager.documentOpened(uri: fileUri, language: language, content: content)
+                let lspTask = Task.detached(priority: .utility) {
+                    await LSPManager.shared.documentOpened(uri: fileUri, language: language, content: content)
                 }
                 
                 // Race against timeout
-                let timeoutTask = Task {
+                let timeoutTask = Task.detached(priority: .utility) {
                     try? await Task.sleep(nanoseconds: 3_000_000_000)
                     lspTask.cancel()
                 }

@@ -2617,148 +2617,28 @@ struct RichMessageRow: View {
     private var isUser: Bool { message.role == .user }
     
     var body: some View {
-        VStack(alignment: .leading, spacing: 0) {
-            if isUser {
-                userCell
-            } else {
-                aiCell
+        if isUser {
+            // User bubble (matching Cell Mode AI)
+            HStack {
+                Spacer(minLength: 40)
+                
+                Text(message.content)
+                    .font(.system(size: 13))
+                    .foregroundColor(.white)
+                    .padding(10)
+                    .background(Color.accentColor)
+                    .cornerRadius(12, corners: [.topLeft, .topRight, .bottomLeft])
             }
-        }
-        .padding(.horizontal, 16)
-        .padding(.vertical, 6)
-    }
-    
-    // MARK: - User Cell
-    
-    private var userCell: some View {
-        VStack(alignment: .leading, spacing: 10) {
-            // Header Bar
-            HStack(spacing: 8) {
-                // In badge
-                HStack(spacing: 4) {
-                    Image(systemName: "arrow.right.to.line")
-                        .font(.system(size: 9))
-                    Text("In")
-                        .font(.system(size: 9, weight: .bold))
-                }
-                .foregroundColor(.secondary)
-                .padding(.horizontal, 6)
-                .padding(.vertical, 2)
-                .background(Color.primary.opacity(0.06))
-                .cornerRadius(3)
-                
-                Text("User Query")
-                    .font(.system(size: 11, weight: .semibold, design: .monospaced))
-                    .foregroundColor(.secondary)
-                
-                Spacer()
-                
-                Text(message.timestamp.formatted(date: .omitted, time: .shortened))
-                    .font(.caption2)
-                    .foregroundColor(.secondary)
+            .padding(.horizontal, 14)
+            .padding(.vertical, 6)
+        } else {
+            // AI response (matching Cell Mode AI)
+            VStack(alignment: .leading, spacing: 8) {
+                aiCellContent
             }
-            .padding(.horizontal, 12)
+            .padding(.horizontal, 14)
             .padding(.vertical, 8)
-            .background(Color.primary.opacity(0.03))
-            
-            // Content
-            userCellContent
-                .padding(.horizontal, 12)
-                .padding(.bottom, 12)
         }
-        .background(Color(nsColor: .controlBackgroundColor).opacity(0.4))
-        .cornerRadius(8)
-        .overlay(
-            RoundedRectangle(cornerRadius: 8)
-                .stroke(Color.primary.opacity(0.1), lineWidth: 1)
-        )
-    }
-    
-    @ViewBuilder
-    private var userCellContent: some View {
-        let blocks = MessageContentParser.parse(message.content)
-        VStack(alignment: .leading, spacing: 8) {
-            ForEach(blocks) { block in
-                userBlockView(block)
-            }
-        }
-    }
-    
-    @ViewBuilder
-    private func userBlockView(_ block: MessageBlock) -> some View {
-        switch block {
-        case .text(let text):
-            Text(text)
-                .font(.system(size: 13))
-                .foregroundColor(.primary)
-        case .code(let lang, let code):
-            NativeCodeBlockView(language: lang, code: code)
-        case .latex(let expression, _):
-            Text(LocalizedStringKey(expression))
-                .foregroundColor(.primary.opacity(0.9))
-        default:
-            EmptyView()
-        }
-    }
-    
-    // MARK: - AI Cell
-    
-    private var aiCell: some View {
-        VStack(alignment: .leading, spacing: 10) {
-            // Header Bar
-            HStack(spacing: 8) {
-                // Out badge
-                HStack(spacing: 4) {
-                    Image(systemName: "command")
-                        .font(.system(size: 9))
-                    Text("Out")
-                        .font(.system(size: 9, weight: .bold))
-                }
-                .foregroundColor(.purple)
-                .padding(.horizontal, 6)
-                .padding(.vertical, 2)
-                .background(Color.purple.opacity(0.1))
-                .cornerRadius(3)
-                
-                Text("MicroCode AI")
-                    .font(.system(size: 11, weight: .semibold, design: .monospaced))
-                    .foregroundColor(.primary)
-                
-                // Telemetry caching stats
-                HStack(spacing: 4) {
-                    Circle()
-                        .fill(Color.green)
-                        .frame(width: 4, height: 4)
-                    Text("Cached via BERT GPU: 94% Saved • VecDB Active • Metal GPU")
-                        .font(.system(size: 8, design: .monospaced))
-                        .foregroundColor(.green)
-                }
-                .padding(.horizontal, 6)
-                .padding(.vertical, 2)
-                .background(Color.green.opacity(0.08))
-                .cornerRadius(3)
-                
-                Spacer()
-                
-                Text(message.timestamp.formatted(date: .omitted, time: .shortened))
-                    .font(.caption2)
-                    .foregroundColor(.secondary)
-            }
-            .padding(.horizontal, 12)
-            .padding(.vertical, 8)
-            .background(Color.primary.opacity(0.04))
-            
-            // Content
-            aiCellContent
-                .padding(.horizontal, 12)
-                .padding(.bottom, 12)
-        }
-        .background(Color(nsColor: .controlBackgroundColor).opacity(0.6))
-        .cornerRadius(8)
-        .overlay(
-            RoundedRectangle(cornerRadius: 8)
-                .stroke(Color.purple.opacity(0.15), lineWidth: 1)
-        )
     }
     
     private var aiCellContent: some View {

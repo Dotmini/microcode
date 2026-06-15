@@ -391,6 +391,37 @@ class LSPClientService: ObservableObject {
     
     private var readTask: Task<Void, Never>?
     
+    // Thread-safe cache for resolved binaries
+    private static var resolvedBinariesCache: [String: String] = [:]
+    private static let cacheLock = NSLock()
+    
+    static func getCachedBinary(for name: String) -> String? {
+        cacheLock.lock()
+        defer { cacheLock.unlock() }
+        return resolvedBinariesCache[name]
+    }
+    
+    static func setCachedBinary(_ path: String, for name: String) {
+        cacheLock.lock()
+        defer { cacheLock.unlock() }
+        resolvedBinariesCache[name] = path
+    }
+    
+    static func resolveBinaryAsync(_ name: String, searchPaths: [String]) async -> String? {
+        if let cached = getCachedBinary(for: name) {
+            return cached
+        }
+        
+        let resolved = await Task.detached(priority: .userInitiated) {
+            LSPClientService.resolveBinary(name, searchPaths: searchPaths)
+        }.value
+        
+        if let resolved = resolved {
+            setCachedBinary(resolved, for: name)
+        }
+        return resolved
+    }
+    
     // MARK: - Initialization
     
     init(serverType: LanguageServer) {
@@ -411,7 +442,7 @@ class LSPClientService: ObservableObject {
         guard !isRunning else { return }
         
         // Find the server binary
-        guard let serverPath = findServerBinary() else {
+        guard let serverPath = await findServerBinary() else {
             throw LSPError.serverNotFound(serverType.rawValue)
         }
         
@@ -496,8 +527,8 @@ class LSPClientService: ObservableObject {
     
     // MARK: - Server Binary Detection
     
-    private func findServerBinary() -> String? {
-        return LSPClientService.resolveBinary(serverType.rawValue, searchPaths: serverType.searchPaths)
+    private func findServerBinary() async -> String? {
+        return await LSPClientService.resolveBinaryAsync(serverType.rawValue, searchPaths: serverType.searchPaths)
     }
 
     /// Resolve a language-server binary the user installed by ANY means.
@@ -505,7 +536,7 @@ class LSPClientService: ObservableObject {
     /// so a bare `which` misses most installs. Strategy: explicit known paths
     /// → user LOGIN shell `command -v` (honours their real PATH/version mgrs)
     /// → common version-manager dirs → plain which.
-    static func resolveBinary(_ name: String, searchPaths: [String]) -> String? {
+    nonisolated static func resolveBinary(_ name: String, searchPaths: [String]) -> String? {
         let fm = FileManager.default
         for path in searchPaths where fm.isExecutableFile(atPath: path) { return path }
 
@@ -559,15 +590,15 @@ class LSPClientService: ObservableObject {
     // MARK: - Response Reading
     
     private func startReadingResponses() {
-        readTask = Task { [weak self] in
-            guard let self = self, let stdout = self.stdout else { return }
-            
-            let handle = stdout.fileHandleForReading
+        guard let stdout = self.stdout else { return }
+        let handle = stdout.fileHandleForReading
+        
+        readTask = Task.detached(priority: .userInitiated) { [weak self] in
             var buffer = Data()
             
             while !Task.isCancelled {
                 do {
-                    // Read available data
+                    // Read available data (blocks the background thread, not the Main Actor!)
                     let newData = handle.availableData
                     if newData.isEmpty {
                         try await Task.sleep(nanoseconds: 10_000_000) // 10ms
@@ -576,8 +607,9 @@ class LSPClientService: ObservableObject {
                     buffer.append(newData)
                     
                     // Parse messages from buffer
-                    while let message = await self.extractMessage(from: &buffer) {
-                        await self.handleMessage(message)
+                    while let message = LSPClientService.extractMessage(from: &buffer) {
+                        guard let self = self else { break }
+                        await self.handleIncomingMessage(message)
                     }
                 } catch {
                     break
@@ -586,7 +618,12 @@ class LSPClientService: ObservableObject {
         }
     }
     
-    private func extractMessage(from buffer: inout Data) async -> Data? {
+    private func handleIncomingMessage(_ message: Data) async {
+        await handleMessage(message)
+    }
+    
+    // Non-isolated helper so it can be called from background thread
+    nonisolated static func extractMessage(from buffer: inout Data) -> Data? {
         guard let headerEnd = buffer.range(of: Data("\r\n\r\n".utf8)) else {
             return nil
         }
