@@ -103,3 +103,35 @@ pub async fn search_vectors(
         ))
     }
 }
+
+#[derive(Debug, serde::Deserialize)]
+pub struct EmbeddingRequest {
+    pub text: String,
+}
+
+#[derive(Debug, serde::Serialize)]
+pub struct EmbeddingResponse {
+    pub embedding: Vec<f32>,
+}
+
+pub async fn get_embedding(
+    State(state): State<Arc<RwLock<AppState>>>,
+    Json(req): Json<EmbeddingRequest>,
+) -> crate::error::Result<Json<EmbeddingResponse>> {
+    let rag_engine_ptr = {
+        let st = state.read().await;
+        st.rag_engine.clone()
+    };
+
+    let mut guard = rag_engine_ptr.lock().await;
+    if guard.is_none() {
+        let engine = crate::rag::RagEngine::new()?;
+        *guard = Some(engine);
+    }
+
+    let engine = guard.as_ref().unwrap();
+    let embedding = engine.get_embeddings(&req.text)?;
+
+    Ok(Json(EmbeddingResponse { embedding }))
+}
+

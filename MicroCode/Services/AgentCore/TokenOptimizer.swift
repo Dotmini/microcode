@@ -28,7 +28,7 @@ struct TokenBudget {
         case .moderate:
             return TokenBudget(maxSystemTokens: 3000, maxHistoryTokens: 6000, maxContextTokens: 5000, maxUserTokens: 3000, totalBudget: 18000)
         case .complex:
-            return TokenBudget(maxSystemTokens: 4000, maxHistoryTokens: 10000, maxContextTokens: 8000, maxUserTokens: 4000, totalBudget: 28000)
+            return TokenBudget(maxSystemTokens: 20000, maxHistoryTokens: 100000, maxContextTokens: 150000, maxUserTokens: 30000, totalBudget: 300000)
         case .chat:
             // Casual conversation needs much less context
             return TokenBudget(maxSystemTokens: 800, maxHistoryTokens: 3000, maxContextTokens: 500, maxUserTokens: 2000, totalBudget: 6500)

@@ -81,6 +81,7 @@ struct ProjectToolbar: View {
         .background(Color(nsColor: .controlBackgroundColor))
         .sheet(isPresented: $showingOutput) {
             ProjectOutputView()
+                .environmentObject(appState)
         }
     }
 
@@ -121,20 +122,35 @@ struct ActionButton: View {
 
 struct ProjectOutputView: View {
     @ObservedObject var projectManager = ProjectManager.shared
+    @EnvironmentObject var appState: AppState
     @Environment(\.dismiss) var dismiss
+    @State private var selectedTab = 0 // 0: Report, 1: Raw Log
     
     var body: some View {
+        let isXcode = appState.currentProjectType == .xcode
+        
         VStack(spacing: 0) {
             // Header
             HStack {
-                Text("Build Output")
-                    .font(.headline)
+                if isXcode {
+                    Picker("", selection: $selectedTab) {
+                        Text("Report").tag(0)
+                        Text("Raw Log").tag(1)
+                    }
+                    .pickerStyle(.segmented)
+                    .frame(width: 180)
+                } else {
+                    Text("Build Output")
+                        .font(.headline)
+                }
                 
                 Spacer()
                 
                 if projectManager.isRunning {
                     ProgressView()
                         .scaleEffect(0.8)
+                    
+                    Spacer().frame(width: 8)
                     
                     Button("Stop") {
                         projectManager.stopCurrentProcess()
@@ -144,6 +160,9 @@ struct ProjectOutputView: View {
                 
                 Button("Clear") {
                     projectManager.output = ""
+                    if isXcode {
+                        projectManager.buildParser.clear()
+                    }
                 }
                 .buttonStyle(.borderless)
                 
@@ -157,16 +176,20 @@ struct ProjectOutputView: View {
             
             Divider()
             
-            // Output
-            ScrollView {
-                Text(projectManager.output)
-                    .font(.system(size: 11, design: .monospaced))
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                    .padding()
-                    .textSelection(.enabled)
+            if isXcode && selectedTab == 0 {
+                BuildReportView(parser: projectManager.buildParser, isEmbedded: true)
+            } else {
+                // Output
+                ScrollView {
+                    Text(projectManager.output)
+                        .font(.system(size: 11, design: .monospaced))
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .padding()
+                        .textSelection(.enabled)
+                }
+                .background(Color(nsColor: .textBackgroundColor))
             }
-            .background(Color(nsColor: .textBackgroundColor))
         }
-        .frame(width: 700, height: 500)
+        .frame(width: 750, height: 500)
     }
 }

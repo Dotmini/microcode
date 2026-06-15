@@ -266,23 +266,39 @@ struct AuthenticFileTree: NSViewRepresentable {
             }
         }
         
-        // MARK: - Helpers
-        
         private func fileIconName(for name: String, isDirectory: Bool) -> String {
             if isDirectory { return "folder.fill" }
             let ext = (name as NSString).pathExtension.lowercased()
             switch ext {
             case "swift": return "swift"
-            case "py": return "chevron.left.forwardslash.chevron.right" // generic code
-            case "js": return "javascript" // if available or generic
+            case "py": return "curlybraces.square"
+            case "js", "ts": return "curlybraces"
+            case "rs": return "gearshape.2"
+            case "json": return "curlybraces.square"
+            case "md": return "doc.richtext"
+            case "plist": return "list.bullet.rectangle"
+            case "storyboard", "xib": return "square.grid.2x2"
+            case "entitlements": return "lock.doc"
             default: return "doc.text"
             }
         }
         
         private func iconColor(for name: String, isDirectory: Bool) -> NSColor {
-            if isDirectory { return .systemBlue }
-            // Basic logic, can be enhanced
-            return .labelColor
+            if isDirectory {
+                return NSColor(red: 0.96, green: 0.75, blue: 0.30, alpha: 1.0) // Xcode yellow folder
+            }
+            let ext = (name as NSString).pathExtension.lowercased()
+            switch ext {
+            case "swift": return .systemOrange
+            case "py": return .systemGreen
+            case "js": return .systemYellow
+            case "ts": return .systemBlue
+            case "rs": return .systemOrange
+            case "json": return .systemPurple
+            case "md": return .systemCyan
+            case "plist", "entitlements": return .systemGray
+            default: return .secondaryLabelColor
+            }
         }
     }
 }

@@ -348,7 +348,8 @@ enum LanguageServer: String, CaseIterable {
             "\(homeDir)/.local/bin",
             // Add flutter/dart path estimation
             "\(homeDir)/development/flutter/bin",
-            "/Applications/Xcode.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/bin"
+            "/Applications/Xcode.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/bin",
+            "/Library/Developer/CommandLineTools/usr/bin"
         ]
         return commonPaths.map { "\($0)/\(rawValue)" }
     }

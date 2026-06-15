@@ -125,6 +125,7 @@ class ProjectManager: ObservableObject {
     @Published var currentProcess: Process?
     @Published var output: String = ""
     @Published var buildConfiguration: BuildConfiguration = .debug
+    @Published var buildParser = XcodeBuildParser()
     
     private init() {}
     
@@ -495,6 +496,10 @@ class ProjectManager: ObservableObject {
             return
         }
         
+        if projectType == .xcode {
+            buildParser.clear()
+        }
+        
         isRunning = true
         output = "[\(projectType.rawValue)] \(action.rawValue)...\n"
         output += "$ \(command.executable) \(command.arguments.joined(separator: " "))\n\n"
@@ -508,11 +513,25 @@ class ProjectManager: ObservableObject {
         process.standardOutput = pipe
         process.standardError = pipe
         
+        var lineBuffer = ""
         pipe.fileHandleForReading.readabilityHandler = { [weak self] handle in
             let data = handle.availableData
             if let text = String(data: data, encoding: .utf8), !text.isEmpty {
                 DispatchQueue.main.async {
                     self?.output += text
+                    
+                    if projectType == .xcode {
+                        lineBuffer += text
+                        var lines = lineBuffer.components(separatedBy: "\n")
+                        if let last = lines.popLast() {
+                            lineBuffer = last
+                        } else {
+                            lineBuffer = ""
+                        }
+                        for line in lines {
+                            self?.buildParser.parseLine(line)
+                        }
+                    }
                 }
             }
         }
@@ -521,6 +540,12 @@ class ProjectManager: ObservableObject {
             DispatchQueue.main.async {
                 self?.isRunning = false
                 self?.currentProcess = nil
+                
+                if projectType == .xcode && !lineBuffer.isEmpty {
+                    self?.buildParser.parseLine(lineBuffer)
+                    lineBuffer = ""
+                }
+                
                 let success = proc.terminationStatus == 0
                 self?.output += "\n\(success ? "✅" : "❌") \(action.rawValue) \(success ? "succeeded" : "failed") (exit code: \(proc.terminationStatus))\n"
                 completion(success, self?.output ?? "")
