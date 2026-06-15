@@ -4357,18 +4357,15 @@ struct SettingsView: View {
             // ── Default Provider & Model ──
             VStack(alignment: .leading, spacing: 14) {
                 HStack(spacing: 8) {
-                    Image(systemName: "star.fill")
-                        .font(.system(size: 12))
-                        .foregroundColor(.yellow)
                     Text("Default Provider & Model")
-                        .font(.system(size: 13, weight: .bold))
+                        .font(.system(size: 13, weight: .semibold))
                 }
                 
                 Text("Choose which AI provider and model to use by default in the Agent and Chat.")
                     .font(.system(size: 12))
                     .foregroundColor(.secondary)
                 
-                HStack(spacing: 16) {
+                HStack(spacing: 20) {
                     // Provider picker
                     VStack(alignment: .leading, spacing: 4) {
                         Text("Provider")
@@ -4377,11 +4374,11 @@ struct SettingsView: View {
                             .textCase(.uppercase)
                         Picker("", selection: $selectedProvider) {
                             ForEach(aiProviders, id: \.id) { p in
-                                Label(p.name, systemImage: p.icon).tag(p.id)
+                                Text(p.name).tag(p.id)
                             }
                         }
                         .labelsHidden()
-                        .frame(width: 200)
+                        .frame(maxWidth: .infinity)
                         .onChange(of: selectedProvider) { newValue in
                             hasChanges = true
                             if let provider = aiProviders.first(where: { $0.id == newValue }),
@@ -4390,6 +4387,7 @@ struct SettingsView: View {
                             }
                         }
                     }
+                    .frame(maxWidth: .infinity, alignment: .leading)
                     
                     // Model picker (filtered by selected provider)
                     VStack(alignment: .leading, spacing: 4) {
@@ -4405,23 +4403,25 @@ struct SettingsView: View {
                                         if !m.badge.isEmpty {
                                             Text(m.badge)
                                                 .font(.system(size: 8, weight: .bold))
-                                                .foregroundColor(.white)
+                                                .foregroundColor(.secondary)
                                         }
                                     }.tag(m.id)
                                 }
                             }
                         }
                         .labelsHidden()
-                        .frame(width: 240)
+                        .frame(maxWidth: .infinity)
                         .onChange(of: selectedModel) { _ in hasChanges = true }
                     }
+                    .frame(maxWidth: .infinity, alignment: .leading)
                 }
+                .frame(maxWidth: .infinity)
                 
                 // Status pill
                 if selectedProvider == "local" {
                     if let server = LocalLLMService.shared.activeServer, server.isOnline {
                         HStack(spacing: 6) {
-                            Circle().fill(Color.green).frame(width: 7, height: 7)
+                            Circle().fill(Color.green).frame(width: 6, height: 6)
                             Text("Connected to \(server.type.rawValue)")
                                 .font(.system(size: 11, weight: .medium))
                                 .foregroundColor(.green)
@@ -4431,7 +4431,7 @@ struct SettingsView: View {
                         .cornerRadius(6)
                     } else {
                         HStack(spacing: 6) {
-                            Circle().fill(Color.orange).frame(width: 7, height: 7)
+                            Circle().fill(Color.orange).frame(width: 6, height: 6)
                             Text("No local server detected — click Scan below")
                                 .font(.system(size: 11, weight: .medium))
                                 .foregroundColor(.orange)
@@ -4445,7 +4445,7 @@ struct SettingsView: View {
                     let licenseKey = UserDefaults.standard.string(forKey: "dotminiLicenseKey") ?? ""
                     if !licenseKey.isEmpty {
                         HStack(spacing: 6) {
-                            Circle().fill(Color.green).frame(width: 7, height: 7)
+                            Circle().fill(Color.green).frame(width: 6, height: 6)
                             Text("Dotmini Cloud connected")
                                 .font(.system(size: 11, weight: .medium))
                                 .foregroundColor(.green)
@@ -4455,7 +4455,7 @@ struct SettingsView: View {
                         .cornerRadius(6)
                     } else {
                         HStack(spacing: 6) {
-                            Circle().fill(Color.orange).frame(width: 7, height: 7)
+                            Circle().fill(Color.orange).frame(width: 6, height: 6)
                             Text("Set License Key in Subscription tab")
                                 .font(.system(size: 11, weight: .medium))
                                 .foregroundColor(.orange)
@@ -4466,7 +4466,7 @@ struct SettingsView: View {
                     }
                 } else if let key = providerKeys[selectedProvider], !key.isEmpty {
                     HStack(spacing: 6) {
-                        Circle().fill(Color.green).frame(width: 7, height: 7)
+                        Circle().fill(Color.green).frame(width: 6, height: 6)
                         Text("API key configured")
                             .font(.system(size: 11, weight: .medium))
                             .foregroundColor(.green)
@@ -4476,7 +4476,7 @@ struct SettingsView: View {
                     .cornerRadius(6)
                 } else {
                     HStack(spacing: 6) {
-                        Circle().fill(Color.orange).frame(width: 7, height: 7)
+                        Circle().fill(Color.orange).frame(width: 6, height: 6)
                         Text("No API key — set one below")
                             .font(.system(size: 11, weight: .medium))
                             .foregroundColor(.orange)
@@ -4486,39 +4486,30 @@ struct SettingsView: View {
                     .cornerRadius(6)
                 }
             }
-            .padding(16)
+            .padding(20)
             .background(Color(nsColor: .controlBackgroundColor))
-            .cornerRadius(8)
-            .overlay(RoundedRectangle(cornerRadius: 8).stroke(Color.primary.opacity(0.1), lineWidth: 1))
+            .cornerRadius(10)
+            .overlay(RoundedRectangle(cornerRadius: 10).stroke(Color.primary.opacity(0.08), lineWidth: 1))
             
             // ── AI Connection Mode ──
             VStack(alignment: .leading, spacing: 14) {
                 HStack(spacing: 8) {
-                    Image(systemName: "network")
-                        .font(.system(size: 12))
-                        .foregroundColor(.secondary)
                     Text("API Connection Mode")
-                        .font(.system(size: 13, weight: .bold))
+                        .font(.system(size: 13, weight: .semibold))
                 }
                 
                 Picker("", selection: $aiKeyMode) {
-                    HStack(spacing: 6) {
-                        Image(systemName: "cloud.fill")
-                        Text("Dotmini Cloud")
-                    }.tag("cloud")
-                    HStack(spacing: 6) {
-                        Image(systemName: "key.fill")
-                        Text("Bring Your Own Key")
-                    }.tag("direct")
+                    Text("Dotmini Cloud").tag("cloud")
+                    Text("Bring Your Own Key").tag("direct")
                 }
                 .pickerStyle(.segmented)
                 .onChange(of: aiKeyMode) { _ in hasChanges = true }
                 
                 if aiKeyMode == "cloud" {
                     HStack(spacing: 8) {
-                        Image(systemName: "lock.shield.fill")
-                            .foregroundColor(.green)
-                            .font(.system(size: 14))
+                        Image(systemName: "info.circle")
+                            .foregroundColor(.secondary)
+                            .font(.system(size: 13))
                         VStack(alignment: .leading, spacing: 2) {
                             Text("All AI requests are routed through Dotmini Cloud.")
                                 .font(.system(size: 11, weight: .medium))
@@ -4532,9 +4523,9 @@ struct SettingsView: View {
                     .cornerRadius(6)
                 } else {
                     HStack(spacing: 8) {
-                        Image(systemName: "key.horizontal.fill")
-                            .foregroundColor(.orange)
-                            .font(.system(size: 14))
+                        Image(systemName: "info.circle")
+                            .foregroundColor(.secondary)
+                            .font(.system(size: 13))
                         VStack(alignment: .leading, spacing: 2) {
                             Text("API calls go directly to each provider.")
                                 .font(.system(size: 11, weight: .medium))
@@ -4548,20 +4539,17 @@ struct SettingsView: View {
                     .cornerRadius(6)
                 }
             }
-            .padding(16)
+            .padding(20)
             .background(Color(nsColor: .controlBackgroundColor))
-            .cornerRadius(8)
-            .overlay(RoundedRectangle(cornerRadius: 8).stroke(Color.primary.opacity(0.1), lineWidth: 1))
+            .cornerRadius(10)
+            .overlay(RoundedRectangle(cornerRadius: 10).stroke(Color.primary.opacity(0.08), lineWidth: 1))
             
             // ── Provider API Keys (Direct mode ONLY) ──
             if aiKeyMode == "direct" {
                 VStack(alignment: .leading, spacing: 14) {
                     HStack(spacing: 8) {
-                        Image(systemName: "key.fill")
-                            .font(.system(size: 12))
-                            .foregroundColor(.secondary)
                         Text("Your API Keys")
-                            .font(.system(size: 13, weight: .bold))
+                            .font(.system(size: 13, weight: .semibold))
                         
                         Spacer()
                         
@@ -4575,9 +4563,10 @@ struct SettingsView: View {
                         aiProviderKeyCard(provider)
                     }
                 }
-                .padding(16)
+                .padding(20)
                 .background(Color(nsColor: .controlBackgroundColor))
-                .cornerRadius(8)
+                .cornerRadius(10)
+                .overlay(RoundedRectangle(cornerRadius: 10).stroke(Color.primary.opacity(0.08), lineWidth: 1))
             }
             
             // ── Local LLM Section ──
@@ -4593,15 +4582,12 @@ struct SettingsView: View {
     private var mcpSettingsPanel: some View {
         VStack(alignment: .leading, spacing: 14) {
             HStack(spacing: 8) {
-                Image(systemName: "server.rack")
-                    .font(.system(size: 14))
-                    .foregroundColor(.secondary)
                 Text("MCP Protocol Server")
-                    .font(.system(size: 13, weight: .bold))
+                    .font(.system(size: 13, weight: .semibold))
                 Spacer()
                 
                 HStack(spacing: 4) {
-                    Circle().fill(mcpServer.isRunning ? .green : .secondary.opacity(0.3)).frame(width: 7, height: 7)
+                    Circle().fill(mcpServer.isRunning ? .green : .secondary.opacity(0.3)).frame(width: 6, height: 6)
                     Text(mcpServer.isRunning ? "Running" : "Stopped")
                         .font(.system(size: 10, weight: .medium))
                         .foregroundColor(mcpServer.isRunning ? .green : .secondary)
@@ -4659,14 +4645,14 @@ struct SettingsView: View {
                     .foregroundColor(.secondary)
                 
                 LazyVGrid(columns: [GridItem(.adaptive(minimum: 140))], spacing: 4) {
-                    mcpToolBadge("read_file", icon: "doc.text", color: .blue)
-                    mcpToolBadge("write_file", icon: "pencil.and.outline", color: .green)
-                    mcpToolBadge("edit_file", icon: "doc.text.fill", color: .orange)
-                    mcpToolBadge("search_files", icon: "magnifyingglass", color: .purple)
-                    mcpToolBadge("list_files", icon: "folder", color: .cyan)
-                    mcpToolBadge("run_terminal", icon: "terminal.fill", color: .mint)
-                    mcpToolBadge("git_status", icon: "point.3.filled.connected.trianglepath.dotted", color: .red)
-                    mcpToolBadge("get_diagnostics", icon: "exclamationmark.triangle", color: .yellow)
+                    mcpToolBadge("read_file", icon: "doc.text")
+                    mcpToolBadge("write_file", icon: "pencil.and.outline")
+                    mcpToolBadge("edit_file", icon: "doc.text.fill")
+                    mcpToolBadge("search_files", icon: "magnifyingglass")
+                    mcpToolBadge("list_files", icon: "folder")
+                    mcpToolBadge("run_terminal", icon: "terminal.fill")
+                    mcpToolBadge("git_status", icon: "point.3.filled.connected.trianglepath.dotted")
+                    mcpToolBadge("get_diagnostics", icon: "exclamationmark.triangle")
                 }
             }
             
@@ -4700,20 +4686,20 @@ struct SettingsView: View {
                 .cornerRadius(6)
             }
         }
-        .padding(16)
+        .padding(20)
         .background(Color(nsColor: .controlBackgroundColor))
-        .cornerRadius(12)
-        .overlay(RoundedRectangle(cornerRadius: 12).stroke(Color.purple.opacity(0.15), lineWidth: 1))
+        .cornerRadius(10)
+        .overlay(RoundedRectangle(cornerRadius: 10).stroke(Color.primary.opacity(0.08), lineWidth: 1))
     }
     
     @ViewBuilder
-    private func mcpToolBadge(_ name: String, icon: String, color: Color) -> some View {
+    private func mcpToolBadge(_ name: String, icon: String) -> some View {
         HStack(spacing: 5) {
-            Image(systemName: icon).font(.system(size: 9)).foregroundColor(color)
+            Image(systemName: icon).font(.system(size: 9)).foregroundColor(.secondary)
             Text(name).font(.system(size: 9, design: .monospaced)).foregroundColor(.primary.opacity(0.7))
         }
         .padding(.horizontal, 8).padding(.vertical, 4)
-        .background(color.opacity(0.06))
+        .background(Color.primary.opacity(0.03))
         .cornerRadius(4)
     }
     
@@ -4725,11 +4711,8 @@ struct SettingsView: View {
         VStack(alignment: .leading, spacing: 14) {
             // Header
             HStack(spacing: 8) {
-                Image(systemName: "desktopcomputer")
-                    .font(.system(size: 14))
-                    .foregroundColor(.mint)
                 Text("Local LLM")
-                    .font(.system(size: 13, weight: .bold))
+                    .font(.system(size: 13, weight: .semibold))
                 Spacer()
                 
                 Button(action: { showModelBrowser = true }) {
@@ -4737,7 +4720,6 @@ struct SettingsView: View {
                         .font(.system(size: 11, weight: .medium))
                 }
                 .buttonStyle(.bordered)
-                .tint(.purple)
                 
                 Button(action: { Task { await localLLM.scanForServers() } }) {
                     HStack(spacing: 4) {
@@ -4751,14 +4733,13 @@ struct SettingsView: View {
                     }
                 }
                 .buttonStyle(.borderedProminent)
-                .tint(.mint)
                 .disabled(localLLM.isScanning)
             }
             
             // Detected servers
             if localLLM.detectedServers.isEmpty {
                 HStack(spacing: 12) {
-                    Image(systemName: "magnifyingglass").font(.system(size: 24)).foregroundColor(.secondary.opacity(0.4))
+                    Image(systemName: "magnifyingglass").font(.system(size: 20)).foregroundColor(.secondary.opacity(0.4))
                     VStack(alignment: .leading, spacing: 4) {
                         Text("No servers detected").font(.system(size: 12, weight: .medium))
                         Text("Start LM Studio or Ollama, then click Scan.").font(.system(size: 11)).foregroundColor(.secondary)
@@ -4793,10 +4774,10 @@ struct SettingsView: View {
                 if let t = localLLM.lastScanTime { Text("Last: \(t, style: .relative) ago").font(.system(size: 10)).foregroundColor(.secondary) }
             }
         }
-        .padding(16)
+        .padding(20)
         .background(Color(nsColor: .controlBackgroundColor))
-        .cornerRadius(12)
-        .overlay(RoundedRectangle(cornerRadius: 12).stroke(Color.mint.opacity(0.2), lineWidth: 1))
+        .cornerRadius(10)
+        .overlay(RoundedRectangle(cornerRadius: 10).stroke(Color.primary.opacity(0.08), lineWidth: 1))
         .sheet(isPresented: $showModelBrowser) {
             ModelBrowserSheet(isPresented: $showModelBrowser)
         }
@@ -4806,14 +4787,14 @@ struct SettingsView: View {
         let isActive = localLLM.selectedServerIndex == index
         return HStack(spacing: 10) {
             ZStack {
-                RoundedRectangle(cornerRadius: 6).fill(server.isOnline ? Color.green.opacity(0.12) : Color.red.opacity(0.12)).frame(width: 28, height: 28)
-                Image(systemName: server.type.icon).font(.system(size: 13)).foregroundColor(server.isOnline ? .green : .red)
+                RoundedRectangle(cornerRadius: 6).fill(Color.primary.opacity(0.04)).frame(width: 28, height: 28)
+                Image(systemName: "server.rack").font(.system(size: 13)).foregroundColor(.secondary)
             }
             VStack(alignment: .leading, spacing: 2) {
                 HStack(spacing: 6) {
                     Text(server.type.rawValue).font(.system(size: 12, weight: .semibold))
-                    if server.isOnline { Text("ONLINE").font(.system(size: 8, weight: .bold)).foregroundColor(.white).padding(.horizontal, 5).padding(.vertical, 2).background(Color.green).cornerRadius(3) }
-                    if isActive { Text("ACTIVE").font(.system(size: 8, weight: .bold)).foregroundColor(.white).padding(.horizontal, 5).padding(.vertical, 2).background(Color.accentColor).cornerRadius(3) }
+                    if server.isOnline { Text("ONLINE").font(.system(size: 8, weight: .bold)).foregroundColor(.green).padding(.horizontal, 5).padding(.vertical, 2).background(Color.green.opacity(0.12)).cornerRadius(3) }
+                    if isActive { Text("ACTIVE").font(.system(size: 8, weight: .bold)).foregroundColor(.accentColor).padding(.horizontal, 5).padding(.vertical, 2).background(Color.accentColor.opacity(0.12)).cornerRadius(3) }
                 }
                 Text("\(server.host):\(server.port) — \(server.models.count) model(s)").font(.system(size: 10)).foregroundColor(.secondary)
             }
@@ -4829,24 +4810,24 @@ struct SettingsView: View {
             }
         }
         .padding(8)
-        .background(isActive ? Color.mint.opacity(0.06) : Color.clear)
+        .background(isActive ? Color.accentColor.opacity(0.04) : Color.clear)
         .cornerRadius(8)
-        .overlay(RoundedRectangle(cornerRadius: 8).stroke(isActive ? Color.mint.opacity(0.3) : Color.clear, lineWidth: 1))
+        .overlay(RoundedRectangle(cornerRadius: 8).stroke(isActive ? Color.accentColor.opacity(0.2) : Color.clear, lineWidth: 1))
     }
     
     private func installedModelRow(model: LocalLLMModel) -> some View {
         let isSelected = localLLM.selectedModelId == model.id
         return HStack(spacing: 8) {
             ZStack {
-                RoundedRectangle(cornerRadius: 6).fill(Color.purple.opacity(0.1)).frame(width: 28, height: 28)
-                Text(String(model.name.prefix(2)).uppercased()).font(.system(size: 9, weight: .bold, design: .rounded)).foregroundColor(.purple)
+                RoundedRectangle(cornerRadius: 6).fill(Color.primary.opacity(0.04)).frame(width: 28, height: 28)
+                Image(systemName: "cpu").font(.system(size: 12)).foregroundColor(.secondary)
             }
             VStack(alignment: .leading, spacing: 1) {
                 Text(model.name).font(.system(size: 11, weight: .medium)).lineLimit(1)
                 HStack(spacing: 4) {
-                    if let s = model.size { Text(s).font(.system(size: 9)).foregroundColor(.secondary).padding(.horizontal, 4).padding(.vertical, 1).background(Color.secondary.opacity(0.1)).cornerRadius(3) }
-                    if let q = model.quantization { Text(q).font(.system(size: 9)).foregroundColor(.blue).padding(.horizontal, 4).padding(.vertical, 1).background(Color.blue.opacity(0.1)).cornerRadius(3) }
-                    if let p = model.parameterSize { Text(p).font(.system(size: 9)).foregroundColor(.orange).padding(.horizontal, 4).padding(.vertical, 1).background(Color.orange.opacity(0.1)).cornerRadius(3) }
+                    if let s = model.size { Text(s).font(.system(size: 9)).foregroundColor(.secondary).padding(.horizontal, 4).padding(.vertical, 1).background(Color.primary.opacity(0.04)).cornerRadius(3) }
+                    if let q = model.quantization { Text(q).font(.system(size: 9)).foregroundColor(.secondary).padding(.horizontal, 4).padding(.vertical, 1).background(Color.primary.opacity(0.04)).cornerRadius(3) }
+                    if let p = model.parameterSize { Text(p).font(.system(size: 9)).foregroundColor(.secondary).padding(.horizontal, 4).padding(.vertical, 1).background(Color.primary.opacity(0.04)).cornerRadius(3) }
                 }
             }
             Spacer()
@@ -4858,7 +4839,7 @@ struct SettingsView: View {
             }
         }
         .padding(6)
-        .background(isSelected ? Color.purple.opacity(0.04) : Color.clear)
+        .background(isSelected ? Color.accentColor.opacity(0.04) : Color.clear)
         .cornerRadius(6)
     }
     
@@ -4876,11 +4857,11 @@ struct SettingsView: View {
             HStack(spacing: 8) {
                 ZStack {
                     RoundedRectangle(cornerRadius: 6)
-                        .fill(provider.color.opacity(0.12))
+                        .fill(Color.primary.opacity(0.04))
                         .frame(width: 28, height: 28)
                     Image(systemName: provider.icon)
                         .font(.system(size: 13))
-                        .foregroundColor(provider.color)
+                        .foregroundColor(.secondary)
                 }
                 
                 VStack(alignment: .leading, spacing: 1) {
@@ -4890,9 +4871,9 @@ struct SettingsView: View {
                         if isDefault {
                             Text("DEFAULT")
                                 .font(.system(size: 8, weight: .bold))
-                                .foregroundColor(.white)
+                                .foregroundColor(.accentColor)
                                 .padding(.horizontal, 5).padding(.vertical, 2)
-                                .background(Color.accentColor)
+                                .background(Color.accentColor.opacity(0.12))
                                 .cornerRadius(3)
                         }
                     }
