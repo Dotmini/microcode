@@ -26,10 +26,10 @@ struct MemoryEntry: Codable, Identifiable {
     let importance: Float  // 0.0 - 1.0
     let keywords: [String]
     
-    init(content: String, chatId: String, role: String, topic: String? = nil, importance: Float = 0.5) {
+    init(content: String, chatId: String, role: String, topic: String? = nil, importance: Float = 0.5, embedding: [Float]? = nil) {
         self.id = UUID().uuidString
         self.content = content
-        self.embedding = AgentMemoryService.textToEmbedding(content)
+        self.embedding = embedding ?? AgentMemoryService.textToEmbedding(content)
         self.timestamp = Date()
         self.chatId = chatId
         self.role = role
@@ -109,37 +109,38 @@ class AgentMemoryService: ObservableObject {
         
         // Calculate importance based on content
         let importance = calculateImportance(content, role: role)
-        let entry = MemoryEntry(content: content, chatId: chatId, role: role, importance: importance)
         
-        // Deduplicate: check if highly similar memory already exists
-        let embedding = entry.embedding
-        let isDuplicate = memories.suffix(20).contains { existing in
-            Self.cosineSimilarity(existing.embedding, embedding) > 0.85
-        }
-        
-        guard !isDuplicate else { return }
-        
-        memories.append(entry)
-        
-        // Update topic clusters
-        updateTopicClusters(entry)
-        
-        // Prune if exceeding max
-        if memories.count > maxMemories {
-            pruneMemories()
-        }
-        
-        Task.detached { [weak self] in
-            await self?.saveMemories()
+        Task {
+            let embedding = await fetchEmbeddingFromBackend(content)
+            let entry = MemoryEntry(content: content, chatId: chatId, role: role, importance: importance, embedding: embedding)
+            
+            // Deduplicate: check if highly similar memory already exists
+            let isDuplicate = memories.suffix(20).contains { existing in
+                Self.cosineSimilarity(existing.embedding, entry.embedding) > 0.85
+            }
+            
+            guard !isDuplicate else { return }
+            
+            memories.append(entry)
+            
+            // Update topic clusters
+            updateTopicClusters(entry)
+            
+            // Prune if exceeding max
+            if memories.count > maxMemories {
+                pruneMemories()
+            }
+            
+            await saveMemories()
         }
     }
     
     // MARK: - Recall Memories (Advanced)
     
-    func recallMemories(query: String, limit: Int = 5, excludeChatId: String? = nil, includeCurrentChat: Bool = true) -> [MemoryEntry] {
+    func recallMemories(query: String, queryEmbedding: [Float]? = nil, limit: Int = 5, excludeChatId: String? = nil, includeCurrentChat: Bool = true) -> [MemoryEntry] {
         guard !memories.isEmpty else { return [] }
         
-        let queryEmbedding = Self.textToEmbedding(query)
+        let queryVec = queryEmbedding ?? Self.textToEmbedding(query)
         let queryKeywords = Set(Self.extractKeywords(query))
         let now = Date()
         
@@ -149,7 +150,7 @@ class AgentMemoryService: ObservableObject {
             }
             
             // 1. Semantic similarity (cosine)
-            let semanticScore = Self.cosineSimilarity(queryEmbedding, entry.embedding)
+            let semanticScore = Self.cosineSimilarity(queryVec, entry.embedding)
             
             // 2. Keyword overlap boost
             let entryKeywords = Set(entry.keywords)
@@ -178,8 +179,42 @@ class AgentMemoryService: ObservableObject {
     // MARK: - Cross-Chat Recall
     
     /// Recall memories from OTHER chats that might be relevant
-    func recallCrossChatMemories(query: String, currentChatId: String, limit: Int = 3) -> [MemoryEntry] {
-        return recallMemories(query: query, limit: limit, excludeChatId: currentChatId, includeCurrentChat: false)
+    func recallCrossChatMemories(query: String, queryEmbedding: [Float]? = nil, currentChatId: String, limit: Int = 3) -> [MemoryEntry] {
+        return recallMemories(query: query, queryEmbedding: queryEmbedding, limit: limit, excludeChatId: currentChatId, includeCurrentChat: false)
+    }
+    
+    /// Fetch high-fidelity BERT embeddings from the Rust backend (with local DJB2 fallback)
+    func fetchEmbeddingFromBackend(_ text: String) async -> [Float]? {
+        guard let url = URL(string: "http://localhost:3000/api/ai/embedding") else { return nil }
+        
+        var request = URLRequest(url: url)
+        request.httpMethod = "POST"
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        request.timeoutInterval = 2.0 // Fast timeout to prevent blocking UI
+        
+        struct Req: Codable {
+            let text: String
+        }
+        
+        struct Resp: Codable {
+            let embedding: [Float]
+        }
+        
+        do {
+            let reqBody = Req(text: text)
+            request.httpBody = try JSONEncoder().encode(reqBody)
+            
+            let (data, response) = try await URLSession.shared.data(for: request)
+            guard let httpResponse = response as? HTTPURLResponse, httpResponse.statusCode == 200 else {
+                return nil
+            }
+            
+            let decoded = try JSONDecoder().decode(Resp.self, from: data)
+            return decoded.embedding
+        } catch {
+            print("[Memory] BERT embedding fetch failed (falling back to DJB2): \(error)")
+            return nil
+        }
     }
     
     /// Format memories for LLM context (token-efficient)

@@ -802,6 +802,7 @@ class NoIntrinsicScrollView: NSScrollView {
 }
 
 public struct SyntaxHighlightedCodeView: NSViewRepresentable {
+    @EnvironmentObject var appState: AppState
     @Binding public var text: String
     public let language: String
     public let fontSize: CGFloat
@@ -900,6 +901,7 @@ public struct SyntaxHighlightedCodeView: NSViewRepresentable {
         // Only set the delegate here — this does NOT trigger layout.
         textView.delegate = context.coordinator
         textView.textStorage?.delegate = context.coordinator
+        context.coordinator.textView = textView
 
         // Initialize engine and assign to coordinator NOW.
         let engine = SyntaxHighlightingEngine()
@@ -1073,6 +1075,9 @@ public struct SyntaxHighlightedCodeView: NSViewRepresentable {
         var isUpdating = false
         var isInvalidated = false // Prevents async callbacks after teardown
         
+        // Weak reference to the text view to insert completions
+        weak var textView: NSTextView?
+        
         // Engine is now owned by the Coordinator (PERSISTENT)
         var engine: SyntaxHighlightingEngine? // Changed to var and optional
         
@@ -1088,6 +1093,62 @@ public struct SyntaxHighlightedCodeView: NSViewRepresentable {
 
         init(_ parent: SyntaxHighlightedCodeView) {
             self.parent = parent
+            super.init()
+            NotificationCenter.default.addObserver(
+                self,
+                selector: #selector(handleInsertCompletionNotification(_:)),
+                name: Notification.Name("InsertLSPCompletionItem"),
+                object: nil
+            )
+            NotificationCenter.default.addObserver(
+                self,
+                selector: #selector(handleJumpToLineNotification(_:)),
+                name: Notification.Name("JumpToLineNotification"),
+                object: nil
+            )
+        }
+        
+        @objc private func handleInsertCompletionNotification(_ notification: Notification) {
+            guard let fileURL = parent.fileURL,
+                  parent.appState.currentFile?.path == fileURL.path,
+                  let userInfo = notification.userInfo,
+                  let item = userInfo["item"] as? CompletionItem,
+                  let tv = textView else {
+                return
+            }
+            
+            self.insertCompletion(item, into: tv)
+        }
+        
+        @objc private func handleJumpToLineNotification(_ notification: Notification) {
+            guard let fileURL = parent.fileURL,
+                  parent.appState.currentFile?.path == fileURL.path,
+                  let userInfo = notification.userInfo,
+                  let line = userInfo["line"] as? Int,
+                  let tv = textView else {
+                return
+            }
+            
+            let text = tv.string
+            let nsText = text as NSString
+            let lines = text.components(separatedBy: "\n")
+            
+            // line is 1-indexed in xcodebuild
+            let targetLine = max(0, line - 1)
+            guard targetLine < lines.count else { return }
+            
+            var charIndex = 0
+            for i in 0..<targetLine {
+                charIndex += lines[i].count + 1 // +1 for the newline character
+            }
+            
+            if let col = userInfo["column"] as? Int {
+                charIndex += max(0, col - 1)
+            }
+            
+            let finalIndex = min(nsText.length, charIndex)
+            tv.setSelectedRange(NSRange(location: finalIndex, length: 0))
+            tv.scrollRangeToVisible(NSRange(location: finalIndex, length: 0))
         }
 
         /// One-shot render self-test. Runs ~0.7s after content is applied and
@@ -1308,6 +1369,7 @@ public struct SyntaxHighlightedCodeView: NSViewRepresentable {
         }
         
         deinit {
+            NotificationCenter.default.removeObserver(self)
             // Mark as invalidated FIRST so async callbacks bail out
             isInvalidated = true
             // Cancel any in-flight highlighting task on deallocation
@@ -1344,6 +1406,51 @@ public struct SyntaxHighlightedCodeView: NSViewRepresentable {
                     let language = parent.language
                     Task {
                         await LSPManager.shared.documentChanged(uri: url.absoluteString, language: language, content: content)
+                    }
+                }
+                
+                // Trigger autocomplete check
+                if let layoutManager = textStorage.layoutManagers.first,
+                   let textContainer = layoutManager.textContainers.first,
+                   let textView = textContainer.textView {
+                    
+                    let insertedString = changeInLength > 0 && range.location + changeInLength <= textStorage.length
+                        ? (textStorage.string as NSString).substring(with: NSRange(location: range.location, length: changeInLength))
+                        : ""
+                    
+                    if changeInLength == 0 || insertedString.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                        // Dismiss if deleting or typing spaces
+                        Task { @MainActor in
+                            self.parent.appState.dismissCompletions()
+                        }
+                    } else if let lastChar = insertedString.last {
+                        let isWordChar = lastChar.isLetter || lastChar.isNumber || lastChar == "_"
+                        let isTriggerChar = lastChar == "." || lastChar == ":" || lastChar == ">"
+                        
+                        if isWordChar || isTriggerChar {
+                            let cursorLoc = textView.selectedRange().location
+                            let (line, charIndex) = self.getLSPPosition(for: cursorLoc, in: textStorage.string)
+                            
+                            // Calculate cursor bounds
+                            let glyphRange = layoutManager.glyphRange(forCharacterRange: NSRange(location: cursorLoc, length: 0), actualCharacterRange: nil)
+                            let rect = layoutManager.boundingRect(forGlyphRange: glyphRange, in: textContainer)
+                            let containerOrigin = textView.textContainerOrigin
+                            let cursorRect = rect.offsetBy(dx: containerOrigin.x, dy: containerOrigin.y)
+                            let rectInScrollView = textView.convert(cursorRect, to: textView.enclosingScrollView)
+                            
+                            // Convert to SwiftUI top-left coordinates:
+                            let scrollViewHeight = textView.enclosingScrollView?.bounds.height ?? 0
+                            let swiftuiY = scrollViewHeight - rectInScrollView.origin.y
+                            let swiftuiRect = CGRect(x: rectInScrollView.origin.x, y: swiftuiY + 4, width: rectInScrollView.width, height: rectInScrollView.height)
+                            
+                            Task {
+                                await self.parent.appState.requestCompletions(
+                                    line: line,
+                                    character: charIndex,
+                                    cursorRect: swiftuiRect
+                                )
+                            }
+                        }
                     }
                 }
                 
@@ -1450,11 +1557,85 @@ public struct SyntaxHighlightedCodeView: NSViewRepresentable {
         // MARK: - Auto Indentation
         
         public func textView(_ textView: NSTextView, doCommandBy commandSelector: Selector) -> Bool {
+            // Check if completions are showing
+            if parent.appState.showingCompletions {
+                if commandSelector == #selector(NSResponder.moveDown(_:)) {
+                    parent.appState.selectNextCompletion()
+                    return true
+                } else if commandSelector == #selector(NSResponder.moveUp(_:)) {
+                    parent.appState.selectPreviousCompletion()
+                    return true
+                } else if commandSelector == #selector(NSResponder.insertNewline(_:)) || commandSelector == #selector(NSResponder.insertTab(_:)) {
+                    if let selected = parent.appState.selectedCompletionItem {
+                        insertCompletion(selected, into: textView)
+                        return true
+                    }
+                } else if commandSelector == #selector(NSResponder.cancelOperation(_:)) {
+                    parent.appState.dismissCompletions()
+                    return true
+                }
+            }
+            
             if commandSelector == #selector(NSResponder.insertNewline(_:)) {
                 handleNewline(in: textView)
                 return true
             }
             return false
+        }
+        
+        private func insertCompletion(_ item: CompletionItem, into textView: NSTextView) {
+            guard let range = textView.selectedRanges.first?.rangeValue else { return }
+            let insertText = item.insertText ?? item.label
+            let text = textView.string as NSString
+            let cursorLocation = range.location
+            
+            // Find prefix word start
+            var wordStart = cursorLocation
+            let set = CharacterSet.alphanumerics.union(CharacterSet(charactersIn: "_"))
+            while wordStart > 0 {
+                let prevCharRange = NSRange(location: wordStart - 1, length: 1)
+                let prevChar = text.substring(with: prevCharRange)
+                if let char = prevChar.unicodeScalars.first, set.contains(char) {
+                    wordStart -= 1
+                } else {
+                    break
+                }
+            }
+            
+            let wordRange = NSRange(location: wordStart, length: cursorLocation - wordStart)
+            
+            // Avoid trigger loops since replacement will trigger textDidChange
+            isUpdating = true
+            defer { isUpdating = false }
+            
+            if textView.shouldChangeText(in: wordRange, replacementString: insertText) {
+                textView.replaceCharacters(in: wordRange, with: insertText)
+                textView.didChangeText()
+                
+                // Update parent Binding asynchronously
+                let newText = textView.string
+                DispatchQueue.main.async { [weak self] in
+                    self?.parent.text = newText
+                }
+            }
+            
+            // Dismiss autocomplete
+            parent.appState.dismissCompletions()
+        }
+        
+        private func getLSPPosition(for cursorLocation: Int, in text: String) -> (line: Int, character: Int) {
+            var line = 0
+            var character = 0
+            
+            let textNSString = text as NSString
+            if cursorLocation <= textNSString.length {
+                let prefix = textNSString.substring(to: cursorLocation)
+                let lines = prefix.components(separatedBy: "\n")
+                line = max(0, lines.count - 1)
+                character = lines.last?.count ?? 0
+            }
+            
+            return (line, character)
         }
         
         private func handleNewline(in textView: NSTextView) {

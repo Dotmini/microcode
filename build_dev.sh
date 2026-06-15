@@ -22,6 +22,7 @@ done
 echo "🏗️ Building Swift frontend..."
 swift build -c debug \
     -Xlinker -Lbackend/target/debug -Xlinker -lmicrocode_embedded \
+    -Xlinker -Lmicrocode_core/target/release \
     -Xlinker -Lmicrocode_core/target/aarch64-apple-darwin/release -Xlinker -lmicrocode_core
 
 # 2. Create Bundle

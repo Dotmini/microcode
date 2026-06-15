@@ -58,7 +58,7 @@ class AgentService: ObservableObject {
     
     // Agent configuration
     private let maxToolIterations = 25
-    private let maxContextChars = 80000
+    private let maxContextChars = 1200000
     
     // Token stats (read from optimizer)
     var tokenStats: TokenUsageStats { tokenOptimizer.stats }
@@ -108,7 +108,7 @@ class AgentService: ObservableObject {
     
     // MARK: - System Prompt (Dual Mode: Chat + Agent)
     
-    private func buildSystemPrompt(for message: String) -> String {
+    private func buildSystemPrompt(for message: String, queryEmbedding: [Float]? = nil) -> String {
         let complexity = tokenOptimizer.detectComplexity(message)
         let budget = TokenBudget.forTask(complexity)
         let isChatMode = complexity == .chat
@@ -229,8 +229,8 @@ class AgentService: ObservableObject {
         
         // Inject relevant memories (with cross-chat recall)
         if let chatId = activeChatId {
-            let currentChatMemories = memoryService.recallMemories(query: message, limit: 2, includeCurrentChat: true)
-            let crossChatMemories = memoryService.recallCrossChatMemories(query: message, currentChatId: chatId, limit: 2)
+            let currentChatMemories = memoryService.recallMemories(query: message, queryEmbedding: queryEmbedding, limit: 2, includeCurrentChat: true)
+            let crossChatMemories = memoryService.recallCrossChatMemories(query: message, queryEmbedding: queryEmbedding, currentChatId: chatId, limit: 2)
             let allMemories = currentChatMemories + crossChatMemories
             if !allMemories.isEmpty {
                 prompt += "\n\n## Memory\n\(memoryService.formatMemoriesForContext(allMemories, maxTokens: budget.maxContextTokens / 4))"
@@ -443,7 +443,8 @@ class AgentService: ObservableObject {
         let toolSchemas = isChatMode ? [] : toolBox.toolSchemas()  // No tools in chat mode
         
         // Build optimized system prompt
-        let optimizedSystemPrompt = buildSystemPrompt(for: content)
+        let queryEmbedding = await memoryService.fetchEmbeddingFromBackend(content)
+        let optimizedSystemPrompt = buildSystemPrompt(for: content, queryEmbedding: queryEmbedding)
         
         // Build and compress conversation history
         var rawHistory = buildConversationHistory()

@@ -28,6 +28,7 @@ pub mod ai_engine;
 mod ai_report;
 mod ai_ultra;
 mod cicd;
+mod cache_manager;
 mod code;
 pub mod crash_decoder;
 mod data;
@@ -133,6 +134,10 @@ async fn main() -> Result<()> {
         .route(
             "/api/ai/vector/index",
             post(ai_engine::handlers::index_workspace),
+        )
+        .route(
+            "/api/ai/embedding",
+            post(ai_engine::handlers::get_embedding),
         )
         // Git operations
         .route("/api/git/status", post(handlers::git_status))
@@ -316,6 +321,9 @@ async fn main() -> Result<()> {
             post(handlers::hotreload_rollback),
         )
         .route("/api/hotreload/version", get(handlers::hotreload_version))
+        // Cache Management
+        .route("/api/cache/derived_data", get(handlers::get_derived_data))
+        .route("/api/cache/derived_data/clear", post(handlers::clear_derived_data))
         // Remote X Support
         .route("/api/remote/connect", post(remote::remote_connect))
         .route("/api/remote/ping", post(remote::remote_ping))
@@ -1826,6 +1834,41 @@ mod handlers {
             ],
             "architecture": std::env::consts::ARCH
         }))
+    }
+    
+    // Cache Management Handlers
+    
+    pub async fn get_derived_data() -> impl IntoResponse {
+        match crate::cache_manager::get_derived_data_info() {
+            Ok(info) => Json(serde_json::json!({
+                "success": true,
+                "info": info
+            })).into_response(),
+            Err(e) => (
+                axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+                Json(serde_json::json!({ "success": false, "error": e.to_string() }))
+            ).into_response(),
+        }
+    }
+    
+    #[derive(Debug, Deserialize)]
+    pub struct ClearDerivedDataRequest {
+        pub project_pattern: Option<String>,
+    }
+    
+    pub async fn clear_derived_data(
+        Json(req): Json<ClearDerivedDataRequest>,
+    ) -> impl IntoResponse {
+        match crate::cache_manager::clear_derived_data(req.project_pattern) {
+            Ok(info) => Json(serde_json::json!({
+                "success": true,
+                "info": info
+            })).into_response(),
+            Err(e) => (
+                axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+                Json(serde_json::json!({ "success": false, "error": e.to_string() }))
+            ).into_response(),
+        }
     }
 
     // CI/CD Handlers

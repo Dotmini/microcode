@@ -759,7 +759,7 @@ class AppState: ObservableObject {
 
     @Published var fontSize: CGFloat = 13
     @Published var fontFamily: String = "Menlo"
-    @Published var appTheme: AppTheme = .system
+    @Published var appTheme: AppTheme = .transparent
     
     // Playground Font Settings
     @Published var playgroundFontName: String = "Menlo"
@@ -854,6 +854,17 @@ class AppState: ObservableObject {
     @Published var lspHoverText: String?
     @Published var showingCompletions: Bool = false
     @Published var showingHover: Bool = false
+    @Published var selectedCompletionIndex: Int = 0
+    @Published var autocompleteRect: CGRect = .zero
+    
+    // DerivedData Cache Control
+    @Published var derivedDataInfo: DerivedDataInfo?
+    @Published var isCheckingCache: Bool = false
+    
+    // User Cache Settings (stored in UserDefaults)
+    @Published var derivedDataQuotaLimitGB: Double = 10.0
+    @Published var enableDerivedDataAutoPurge: Bool = false
+    @Published var enableDerivedDataAlert: Bool = true
     
     // AI Chat
     @Published var aiChatVisible: Bool = false
@@ -999,7 +1010,7 @@ class AppState: ObservableObject {
         if let themeString = defaults.string(forKey: "appTheme"), let theme = AppTheme(rawValue: themeString) {
             appTheme = theme
         } else {
-            appTheme = .system
+            appTheme = .transparent
         }
         aiProvider = defaults.string(forKey: "aiProvider") ?? "gemini"
         aiModel = defaults.string(forKey: "aiModel") ?? "gemini-pro"
@@ -1031,6 +1042,10 @@ class AppState: ObservableObject {
         sidebarVisible = defaults.object(forKey: "sidebarVisible") == nil ? true : defaults.bool(forKey: "sidebarVisible")
         consoleVisible = defaults.object(forKey: "consoleVisible") == nil ? true : defaults.bool(forKey: "consoleVisible")
         
+        derivedDataQuotaLimitGB = defaults.object(forKey: "derivedDataQuotaLimitGB") == nil ? 10.0 : defaults.double(forKey: "derivedDataQuotaLimitGB")
+        enableDerivedDataAutoPurge = defaults.bool(forKey: "enableDerivedDataAutoPurge")
+        enableDerivedDataAlert = defaults.object(forKey: "enableDerivedDataAlert") == nil ? true : defaults.bool(forKey: "enableDerivedDataAlert")
+        
         // Start the backend server automatically
         Task {
             do {
@@ -1038,6 +1053,7 @@ class AppState: ObservableObject {
                 try await BackendService.shared.startBackend()
                 ArdiumLSPService.shared.start() // Start Ardium LSP
                 print("✅ Backend server started successfully on port 3000")
+                checkDerivedDataSize() // Initial check
             } catch {
                 print("⚠️ Failed to start backend server: \(error.localizedDescription)")
                 print("   Some features (.NET, ML Training) will not be available.")
@@ -1060,6 +1076,9 @@ class AppState: ObservableObject {
         }
         defaults.set(sidebarVisible, forKey: "sidebarVisible")
         defaults.set(consoleVisible, forKey: "consoleVisible")
+        defaults.set(derivedDataQuotaLimitGB, forKey: "derivedDataQuotaLimitGB")
+        defaults.set(enableDerivedDataAutoPurge, forKey: "enableDerivedDataAutoPurge")
+        defaults.set(enableDerivedDataAlert, forKey: "enableDerivedDataAlert")
         
         // Save GitHub Settings
         defaults.set(githubOwner, forKey: "githubOwner")
@@ -1550,6 +1569,9 @@ class AppState: ObservableObject {
             DispatchQueue.main.async {
                 self?.consoleOutput = output
                 self?.isExecuting = false
+                if success {
+                    self?.checkDerivedDataSize()
+                }
             }
         }
     }
@@ -2553,7 +2575,7 @@ class AppState: ObservableObject {
     // MARK: - LSP Operations
     
     /// Request completions at the current cursor position
-    func requestCompletions(line: Int, character: Int) async {
+    func requestCompletions(line: Int, character: Int, cursorRect: CGRect = .zero) async {
         guard let file = currentFile else { return }
         let uri = URL(fileURLWithPath: file.path).absoluteString
         
@@ -2565,6 +2587,8 @@ class AppState: ObservableObject {
         )
         
         self.lspCompletions = completions
+        self.selectedCompletionIndex = 0
+        self.autocompleteRect = cursorRect
         self.showingCompletions = !completions.isEmpty
     }
     
@@ -2619,6 +2643,22 @@ class AppState: ObservableObject {
     func dismissCompletions() {
         showingCompletions = false
         lspCompletions = []
+        selectedCompletionIndex = 0
+    }
+    
+    func selectNextCompletion() {
+        guard !lspCompletions.isEmpty else { return }
+        selectedCompletionIndex = (selectedCompletionIndex + 1) % lspCompletions.count
+    }
+    
+    func selectPreviousCompletion() {
+        guard !lspCompletions.isEmpty else { return }
+        selectedCompletionIndex = (selectedCompletionIndex - 1 + lspCompletions.count) % lspCompletions.count
+    }
+    
+    var selectedCompletionItem: CompletionItem? {
+        guard !lspCompletions.isEmpty && selectedCompletionIndex < lspCompletions.count else { return nil }
+        return lspCompletions[selectedCompletionIndex]
     }
     
     /// Apply a completion item
@@ -3458,6 +3498,68 @@ class AppState: ObservableObject {
         case "asm", "s": return "assembly"
         case "sol": return "solidity"
         default: return "text"
+        }
+    }
+    
+    // MARK: - Derived Data Cache Control
+    
+    func checkDerivedDataSize() {
+        guard !isCheckingCache else { return }
+        isCheckingCache = true
+        
+        Task {
+            do {
+                let info = try await BackendService.shared.getDerivedDataInfo()
+                DispatchQueue.main.async {
+                    self.derivedDataInfo = info
+                    self.isCheckingCache = false
+                    self.evaluateQuota(info: info)
+                }
+            } catch {
+                print("⚠️ Failed to check DerivedData: \(error.localizedDescription)")
+                DispatchQueue.main.async {
+                    self.isCheckingCache = false
+                }
+            }
+        }
+    }
+    
+    func clearDerivedData(projectPattern: String? = nil) {
+        Task {
+            do {
+                let info = try await BackendService.shared.clearDerivedData(projectPattern: projectPattern)
+                DispatchQueue.main.async {
+                    self.derivedDataInfo = info
+                    self.checkDerivedDataSize() // Update the UI state with new size
+                }
+            } catch {
+                print("⚠️ Failed to clear DerivedData: \(error.localizedDescription)")
+            }
+        }
+    }
+    
+    private func evaluateQuota(info: DerivedDataInfo) {
+        guard derivedDataQuotaLimitGB > 0 else { return } // 0 means Unlimited
+        
+        let sizeGB = Double(info.size_bytes) / 1_000_000_000.0
+        if sizeGB > derivedDataQuotaLimitGB {
+            if enableDerivedDataAutoPurge {
+                print("🧹 DerivedData size (\(sizeGB) GB) exceeds quota (\(derivedDataQuotaLimitGB) GB). Auto-purging...")
+                clearDerivedData(projectPattern: nil)
+            } else if enableDerivedDataAlert {
+                DispatchQueue.main.async {
+                    let alert = NSAlert()
+                    alert.messageText = "DerivedData Quota Exceeded"
+                    alert.informativeText = String(format: "DerivedData size (%.2f GB) exceeds your quota limit (%.1f GB).\nWould you like to clear it to free up disk space?", sizeGB, self.derivedDataQuotaLimitGB)
+                    alert.addButton(withTitle: "Clean Now")
+                    alert.addButton(withTitle: "Cancel")
+                    alert.alertStyle = .warning
+                    
+                    if alert.runModal() == .alertFirstButtonReturn {
+                        self.clearDerivedData(projectPattern: nil)
+                    }
+                }
+            }
         }
     }
 }

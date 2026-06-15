@@ -395,6 +395,11 @@ struct MainToolbar: View {
                 }
                 .help("Toggle Console (⌘J)")
                 
+                ToolbarButton(icon: "sidebar.right", isActive: appState.showingPreviewView) {
+                    appState.showingPreviewView.toggle()
+                }
+                .help("Toggle Canvas Preview (⌥⌘P)")
+                
                 Divider().frame(height: 16).padding(.horizontal, 6)
                 
                 ToolbarButton(icon: "iphone") {
@@ -616,7 +621,17 @@ struct NavigatorView: View {
                 EmptyNavigatorView()
             }
         }
-        .background(appState.appTheme == .extraClear ? Color.clear : Color.compat(nsColor: .controlBackgroundColor))
+        .background(
+            Group {
+                if appState.appTheme == .transparent {
+                    VisualEffectView(material: .sidebar, blendingMode: .behindWindow)
+                } else if appState.appTheme == .extraClear {
+                    Color.clear
+                } else {
+                    Color.compat(nsColor: .controlBackgroundColor)
+                }
+            }
+        )
     }
     
     private func handleAction(_ action: FileTreeAction) {
@@ -928,60 +943,365 @@ struct EditorArea: View {
                 IDEBrowserView()
                     .environmentObject(appState)
             case .code:
-                VStack(spacing: 0) {
-                    if !appState.openFiles.isEmpty {
-                        EditorTabBar()
-                    }
-                    
-                    if let file = appState.currentFile,
-                       appState.currentFileIndex >= 0,
-                       appState.currentFileIndex < appState.openFiles.count {
-                        let fileURL = URL(fileURLWithPath: file.path)
-                        let ext = fileURL.pathExtension.lowercased()
-                        let previewExtensions = ["png", "jpg", "jpeg", "pdf", "gif", "bmp", "tiff", "webp"]
+                CompatHSplitView {
+                    VStack(spacing: 0) {
+                        if !appState.openFiles.isEmpty {
+                            EditorTabBar()
+                        }
                         
-                        if previewExtensions.contains(ext) {
-                            UniversalFilePreview(url: fileURL)
-                                .frame(maxWidth: .infinity, maxHeight: .infinity)
+                        // Xcode Breadcrumb bar!
+                        if appState.currentFile != nil {
+                            EditorBreadcrumbBar()
+                        }
+                        
+                        if let file = appState.currentFile,
+                           appState.currentFileIndex >= 0,
+                           appState.currentFileIndex < appState.openFiles.count {
+                            let fileURL = URL(fileURLWithPath: file.path)
+                            let ext = fileURL.pathExtension.lowercased()
+                            let previewExtensions = ["png", "jpg", "jpeg", "pdf", "gif", "bmp", "tiff", "webp"]
+                            
+                            if previewExtensions.contains(ext) {
+                                UniversalFilePreview(url: fileURL)
+                                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+                            } else {
+                                CodeEditor(file: file)
+                                    .id(file.id) // Force fresh NSTextView per file to prevent stale highlight crash
+                            }
+                        } else if appState.workspaceFolder != nil {
+                            // Empty State (Folder open, no file selected)
+                            VStack(spacing: 16) {
+                                Spacer()
+                                Image(systemName: "doc.text.magnifyingglass")
+                                    .font(.system(size: 48))
+                                    .foregroundColor(.secondary.opacity(0.2))
+                                Text("Select a file to view")
+                                    .font(.system(size: 14))
+                                    .foregroundColor(.secondary.opacity(0.5))
+                                Spacer()
+                            }
+                            .frame(maxWidth: .infinity, maxHeight: .infinity)
                         } else {
-                            CodeEditor(file: file)
-                                .id(file.id) // Force fresh NSTextView per file to prevent stale highlight crash
+                            WelcomeScreen()
                         }
-                    } else if appState.workspaceFolder != nil {
-                        // Empty State (Folder open, no file selected)
-                        VStack(spacing: 16) {
-                            Spacer()
-                            Image(systemName: "doc.text.magnifyingglass")
-                                .font(.system(size: 48))
-                                .foregroundColor(.secondary.opacity(0.2))
-                            Text("Select a file to view")
-                                .font(.system(size: 14))
-                                .foregroundColor(.secondary.opacity(0.5))
-                            Spacer()
+                        
+                        if appState.consoleVisible {
+                            DebugArea()
                         }
-                        .frame(maxWidth: .infinity, maxHeight: .infinity)
-                    } else {
-                        WelcomeScreen()
                     }
+                    .background(
+                        Group {
+                            if appState.appTheme == .transparent {
+                                VisualEffectView(material: .hudWindow, blendingMode: .behindWindow)
+                            } else if appState.appTheme == .extraClear {
+                                Color.clear
+                            } else {
+                                Color.compat(nsColor: appState.appTheme.editorBackground)
+                            }
+                        }
+                    )
                     
-                    if appState.consoleVisible {
-                        DebugArea()
+                    // Live iPhone preview canvas on the right (collapsible)
+                    if appState.showingPreviewView {
+                        RightPreviewPanel()
                     }
                 }
-                .background(
-                    Group {
-                        if appState.appTheme == .transparent {
-                            VisualEffectView(material: .hudWindow, blendingMode: .behindWindow)
-                        } else if appState.appTheme == .extraClear {
-                            Color.clear
-                        } else {
-                            Color.compat(nsColor: appState.appTheme.editorBackground)
-                        }
-                    }
-                )
             }
         }
         .id(appState.editorMode.rawValue)  // Force re-render when mode changes
+    }
+}
+
+// MARK: - Xcode-style Editor Breadcrumbs
+
+struct EditorBreadcrumbBar: View {
+    @EnvironmentObject var appState: AppState
+    
+    var body: some View {
+        HStack(spacing: 6) {
+            if let file = appState.currentFile {
+                let segments = getBreadcrumbSegments(file: file)
+                
+                HStack(spacing: 6) {
+                    ForEach(0..<segments.count, id: \.self) { index in
+                        let seg = segments[index]
+                        
+                        if index > 0 {
+                            Image(systemName: "chevron.right")
+                                .font(.system(size: 9))
+                                .foregroundColor(.secondary.opacity(0.7))
+                        }
+                        
+                        HStack(spacing: 4) {
+                            Image(systemName: seg.icon)
+                                .font(.system(size: 11))
+                                .foregroundColor(seg.color)
+                            
+                            Text(seg.name)
+                                .font(.system(size: 11, weight: index == segments.count - 1 ? .medium : .regular))
+                                .foregroundColor(index == segments.count - 1 ? .primary : .secondary)
+                        }
+                    }
+                }
+            } else {
+                Text("No File Open")
+                    .font(.system(size: 11))
+                    .foregroundColor(.secondary)
+            }
+            Spacer()
+        }
+        .padding(.horizontal, 14)
+        .padding(.vertical, 6)
+        .background(
+            appState.appTheme == .extraClear 
+            ? Color.clear 
+            : Color.compat(nsColor: .windowBackgroundColor).opacity(0.8)
+        )
+        .overlay(
+            Rectangle()
+                .fill(Color.black.opacity(0.15))
+                .frame(height: 1),
+            alignment: .bottom
+        )
+    }
+    
+    struct Segment {
+        let name: String
+        let icon: String
+        let color: Color
+    }
+    
+    private func getBreadcrumbSegments(file: CodeFile) -> [Segment] {
+        var segments: [Segment] = []
+        
+        if let workspace = appState.workspaceFolder {
+            segments.append(Segment(name: workspace.lastPathComponent, icon: "folder.fill", color: .accentColor))
+            
+            let fileURL = URL(fileURLWithPath: file.path)
+            let workspaceURL = workspace
+            
+            let filePath = fileURL.path
+            let workspacePath = workspaceURL.path
+            
+            if filePath.hasPrefix(workspacePath) {
+                let relativePath = String(filePath.dropFirst(workspacePath.count))
+                let parts = relativePath.split(separator: "/").map { String($0) }
+                
+                for i in 0..<parts.count {
+                    let part = parts[i]
+                    if i == parts.count - 1 {
+                        segments.append(Segment(name: part, icon: iconForFile(part), color: colorForFile(part)))
+                    } else {
+                        let isTarget = i == 0
+                        segments.append(Segment(name: part, icon: isTarget ? "square.grid.3x1.below.line.grid.1x2" : "folder.fill", color: isTarget ? .orange : .secondary))
+                    }
+                }
+            } else {
+                segments.append(Segment(name: file.name, icon: iconForFile(file.name), color: colorForFile(file.name)))
+            }
+        } else {
+            segments.append(Segment(name: file.name, icon: iconForFile(file.name), color: colorForFile(file.name)))
+        }
+        
+        return segments
+    }
+    
+    private func iconForFile(_ name: String) -> String {
+        let ext = (name as NSString).pathExtension.lowercased()
+        switch ext {
+        case "swift": return "swift"
+        case "py": return "curlybraces.square"
+        case "js", "ts": return "curlybraces"
+        case "rs": return "gearshape.2"
+        case "json": return "curlybraces.square"
+        case "md": return "doc.richtext"
+        default: return "doc.text"
+        }
+    }
+    
+    private func colorForFile(_ name: String) -> Color {
+        let ext = (name as NSString).pathExtension.lowercased()
+        switch ext {
+        case "swift": return .orange
+        case "py": return .green
+        case "js": return .yellow
+        case "ts": return .blue
+        case "rs": return .orange
+        default: return .secondary
+        }
+    }
+}
+
+// MARK: - Right Preview Panel (Collapsible Simulator View)
+
+struct RightPreviewPanel: View {
+    @EnvironmentObject var appState: AppState
+    @State private var zoomLevel: CGFloat = 0.5
+    @State private var isLandscape: Bool = false
+    @State private var isDarkMode: Bool = false
+    @State private var refreshId: UUID = UUID()
+    
+    var body: some View {
+        VStack(spacing: 0) {
+            // Header toolbar
+            HStack(spacing: 12) {
+                Text("Canvas")
+                    .font(.system(size: 11, weight: .bold))
+                    .foregroundColor(.secondary)
+                
+                Spacer()
+                
+                // Refresh button
+                Button(action: { refreshId = UUID() }) {
+                    Image(systemName: "arrow.clockwise")
+                        .font(.system(size: 10))
+                }
+                .buttonStyle(.plain)
+                .help("Refresh Canvas")
+                
+                // Orientation toggle
+                Button(action: { isLandscape.toggle() }) {
+                    Image(systemName: isLandscape ? "ipad.landscape" : "iphone")
+                        .font(.system(size: 10))
+                        .foregroundColor(isLandscape ? .accentColor : .secondary)
+                }
+                .buttonStyle(.plain)
+                .help("Toggle Orientation")
+                
+                // Light/Dark mode toggle
+                Button(action: { isDarkMode.toggle() }) {
+                    Image(systemName: isDarkMode ? "moon.fill" : "sun.max.fill")
+                        .font(.system(size: 10))
+                        .foregroundColor(isDarkMode ? .purple : .orange)
+                }
+                .buttonStyle(.plain)
+                .help("Toggle Color Scheme")
+                
+                Divider()
+                    .frame(height: 12)
+                
+                // Zoom out
+                Button(action: { zoomLevel = max(0.2, zoomLevel - 0.1) }) {
+                    Image(systemName: "minus")
+                        .font(.system(size: 9))
+                }
+                .buttonStyle(.plain)
+                .disabled(zoomLevel <= 0.2)
+                
+                Text("\(Int(zoomLevel * 100))%")
+                    .font(.system(size: 10, design: .monospaced))
+                    .frame(width: 32)
+                
+                // Zoom in
+                Button(action: { zoomLevel = min(1.5, zoomLevel + 0.1) }) {
+                    Image(systemName: "plus")
+                        .font(.system(size: 9))
+                }
+                .buttonStyle(.plain)
+                .disabled(zoomLevel >= 1.5)
+            }
+            .padding(.horizontal, 12)
+            .padding(.vertical, 8)
+            .background(Color.black.opacity(0.15))
+            .overlay(
+                Rectangle()
+                    .fill(Color.black.opacity(0.2))
+                    .frame(height: 1),
+                alignment: .bottom
+            )
+            
+            // Preview viewport
+            ScrollView([.horizontal, .vertical]) {
+                ZStack {
+                    // Grid background
+                    CanvasGridBackground()
+                        .opacity(0.04)
+                    
+                    if let file = appState.currentFile {
+                        // iPhone device frame mockup
+                        DeviceFrameView(
+                            device: DeviceFrame.allDevices[0], // Default: iPhone 15 Pro
+                            isLandscape: isLandscape,
+                            isDarkMode: isDarkMode,
+                            scale: zoomLevel
+                        ) {
+                            // Live Interactive Code Preview Mockup
+                            VStack(spacing: 20) {
+                                Image(systemName: "swift")
+                                    .font(.system(size: 64))
+                                    .foregroundColor(.orange)
+                                    .shadow(color: .orange.opacity(0.4), radius: 10)
+                                
+                                Text(file.name)
+                                    .font(.title2)
+                                    .fontWeight(.bold)
+                                    .foregroundColor(isDarkMode ? .white : .black)
+                                
+                                Text("SwiftUI Live Preview Active")
+                                    .font(.subheadline)
+                                    .foregroundColor(.secondary)
+                                
+                                VStack(alignment: .leading, spacing: 10) {
+                                    HStack {
+                                        Circle().fill(Color.green).frame(width: 8, height: 8)
+                                        Text("Render Engine: CoreGraphics")
+                                            .font(.caption)
+                                            .foregroundColor(.secondary)
+                                    }
+                                    HStack {
+                                        Circle().fill(Color.blue).frame(width: 8, height: 8)
+                                        Text("Host: Apple Silicon Metal")
+                                            .font(.caption)
+                                            .foregroundColor(.secondary)
+                                    }
+                                }
+                                .padding(12)
+                                .background(Color.secondary.opacity(0.1))
+                                .cornerRadius(8)
+                            }
+                            .id(refreshId)
+                        }
+                        .padding(40)
+                    } else {
+                        VStack(spacing: 12) {
+                            Image(systemName: "iphone.slash")
+                                .font(.system(size: 32))
+                                .foregroundColor(.secondary)
+                            Text("No Swift File Active")
+                                .font(.system(size: 12))
+                                .foregroundColor(.secondary)
+                        }
+                    }
+                }
+                .frame(minWidth: 500, minHeight: 700)
+            }
+            .background(Color.black.opacity(0.1))
+        }
+        .frame(minWidth: 320, idealWidth: 380, maxWidth: 500)
+        .background(
+            VisualEffectView(material: .sidebar, blendingMode: .behindWindow)
+        )
+    }
+}
+
+struct CanvasGridBackground: View {
+    var body: some View {
+        GeometryReader { geometry in
+            Path { path in
+                let step: CGFloat = 20
+                // Vertical lines
+                for x in stride(from: 0, to: geometry.size.width, by: step) {
+                    path.move(to: CGPoint(x: x, y: 0))
+                    path.addLine(to: CGPoint(x: x, y: geometry.size.height))
+                }
+                // Horizontal lines
+                for y in stride(from: 0, to: geometry.size.height, by: step) {
+                    path.move(to: CGPoint(x: 0, y: y))
+                    path.addLine(to: CGPoint(x: geometry.size.width, y: y))
+                }
+            }
+            .stroke(Color.primary, lineWidth: 0.5)
+        }
     }
 }
 
@@ -1150,15 +1470,29 @@ struct CodeEditor: View {
             Divider()
             
             // Code Editor with Syntax Highlighting Engine
-            SyntaxHighlightedCodeView(
-                text: $text,
-                language: file.language,
-                fontSize: appState.fontSize,
-                isDark: appState.appTheme.isDark,
-                themeName: appState.appTheme.rawValue,
-                fileURL: URL(fileURLWithPath: file.path),
-                editorID: "file-\(file.id.uuidString)"
-            )
+            ZStack(alignment: .topLeading) {
+                SyntaxHighlightedCodeView(
+                    text: $text,
+                    language: file.language,
+                    fontSize: appState.fontSize,
+                    isDark: appState.appTheme.isDark,
+                    themeName: appState.appTheme.rawValue,
+                    fileURL: URL(fileURLWithPath: file.path),
+                    editorID: "file-\(file.id.uuidString)"
+                )
+                
+                if appState.showingCompletions {
+                    AutocompletePopupView(appState: appState) { item in
+                        NotificationCenter.default.post(
+                            name: Notification.Name("InsertLSPCompletionItem"),
+                            object: nil,
+                            userInfo: ["item": item]
+                        )
+                    }
+                    .offset(x: appState.autocompleteRect.origin.x, y: appState.autocompleteRect.origin.y + 15) // offset below the cursor line
+                    .zIndex(10)
+                }
+            }
             .frame(maxWidth: .infinity, maxHeight: .infinity)
         }
         .onAppear { text = file.content }
@@ -1702,126 +2036,52 @@ struct ConsoleTabButton: View {
 
 // MARK: - Welcome Screen
 
+enum WelcomeTab {
+    case projects
+    case templates
+    case aiArchitect
+    case settings
+}
+
 struct WelcomeScreen: View {
     @EnvironmentObject var appState: AppState
     @State private var recentProjects: [URL] = []
+    @State private var selectedTab: WelcomeTab = .projects
     @State private var aiPrompt: String = ""
     @State private var isHoveringAI: Bool = false
     
+    // For Clone Repository
+    @State private var showCloneSheet: Bool = false
+    @State private var gitCloneUrl: String = ""
+    @State private var isCloning: Bool = false
+    @State private var cloneError: String? = nil
+    
     var body: some View {
         if appState.openFiles.isEmpty && appState.workspaceFolder == nil {
-            // Restrained, professional palette derived from the theme.
-            let bg = Color(nsColor: appState.appTheme.editorBackground)
-            let fg = Color(nsColor: appState.appTheme.editorText)
-            let accent = Color(nsColor: appState.appTheme.keywordColor)
-            let cardBG = fg.opacity(0.04)
-            let stroke = fg.opacity(0.09)
-            let label = fg.opacity(0.42)
-
-            ZStack {
-                bg.ignoresSafeArea()
-
-                ScrollView {
-                    VStack(spacing: 0) {
-                        Spacer(minLength: 96)
-
-                        // Wordmark — clean, solid, Apple-like (no gradient/logo)
-                        Text("MicroCode")
-                            .font(.system(size: 34, weight: .semibold))
-                            .tracking(-0.5)
-                            .foregroundColor(fg)
-                        Text("The native AI-powered IDE for macOS")
-                            .font(.system(size: 12))
-                            .foregroundColor(fg.opacity(0.5))
-                            .padding(.top, 7)
-
-                        Rectangle()
-                            .fill(stroke)
-                            .frame(width: 380, height: 1)
-                            .padding(.top, 34)
-
-                        // Bootstrap via AI
-                        VStack(alignment: .leading, spacing: 9) {
-                            Text("BOOTSTRAP VIA AI AGENT")
-                                .font(.system(size: 10, weight: .semibold))
-                                .foregroundColor(label).tracking(1.0)
-
-                            HStack(spacing: 10) {
-                                Image(systemName: "sparkle")
-                                    .foregroundColor(fg.opacity(0.45))
-                                    .font(.system(size: 13))
-                                TextField("Describe the project architecture…", text: $aiPrompt)
-                                    .textFieldStyle(.plain)
-                                    .font(.system(size: 13))
-                                    .foregroundColor(fg)
-                                    .onSubmit { buildWithAI() }
-                                if !aiPrompt.isEmpty {
-                                    Button(action: buildWithAI) {
-                                        Image(systemName: "return")
-                                            .font(.system(size: 11, weight: .semibold))
-                                            .foregroundColor(accent)
-                                    }
-                                    .buttonStyle(.plain)
-                                }
-                            }
-                            .padding(.horizontal, 14)
-                            .padding(.vertical, 11)
-                            .background(RoundedRectangle(cornerRadius: 9, style: .continuous).fill(cardBG))
-                            .overlay(
-                                RoundedRectangle(cornerRadius: 9, style: .continuous)
-                                    .strokeBorder(isHoveringAI ? accent.opacity(0.45) : stroke, lineWidth: 1)
-                            )
-                            .onHover { isHoveringAI = $0 }
-                        }
-                        .frame(maxWidth: 560)
-                        .padding(.top, 30)
-
-                        // Two columns
-                        HStack(alignment: .top, spacing: 52) {
-                            VStack(alignment: .leading, spacing: 12) {
-                                Text("NEW WORKSPACE")
-                                    .font(.system(size: 10, weight: .semibold))
-                                    .foregroundColor(label).tracking(1.0)
-                                LazyVGrid(columns: [GridItem(.adaptive(minimum: 130, maximum: 150), spacing: 10)], spacing: 10) {
-                                    ProjectTemplateCard(title: "Vite + React", icon: "atom", color: fg.opacity(0.65)) { createProject("vite") }
-                                    ProjectTemplateCard(title: "Next.js", icon: "n.square", color: fg.opacity(0.65)) { createProject("nextjs") }
-                                    ProjectTemplateCard(title: "Express API", icon: "server.rack", color: fg.opacity(0.65)) { createProject("express") }
-                                    ProjectTemplateCard(title: "Spring Boot", icon: "leaf", color: fg.opacity(0.65)) { createProject("spring") }
-                                    ProjectTemplateCard(title: "React Native", icon: "iphone", color: fg.opacity(0.65)) { createProject("react-native") }
-                                    ProjectTemplateCard(title: "SwiftUI App", icon: "swift", color: fg.opacity(0.65)) { createProject("swift") }
-                                    ProjectTemplateCard(title: "Go Gin", icon: "g.circle", color: fg.opacity(0.65)) { createProject("go") }
-                                }
-                            }
-                            .frame(maxWidth: 360, alignment: .leading)
-
-                            VStack(alignment: .leading, spacing: 12) {
-                                Text("RECENT")
-                                    .font(.system(size: 10, weight: .semibold))
-                                    .foregroundColor(label).tracking(1.0)
-                                if recentProjects.isEmpty {
-                                    Text("No recent projects")
-                                        .foregroundColor(fg.opacity(0.4))
-                                        .font(.system(size: 12))
-                                } else {
-                                    VStack(alignment: .leading, spacing: 6) {
-                                        ForEach(recentProjects.prefix(6), id: \.self) { url in
-                                            RecentProjectRow(url: url) { appState.workspaceFolder = url }
-                                        }
-                                    }
-                                }
-                            }
-                            .frame(width: 220, alignment: .leading)
-                        }
-                        .frame(maxWidth: 560)
-                        .padding(.top, 34)
-
-                        Spacer(minLength: 96)
-                    }
-                    .frame(maxWidth: .infinity)
+            GeometryReader { geometry in
+                HStack(spacing: 0) {
+                    // Left Sidebar Panel (Translucent)
+                    leftSidebarView
+                    
+                    Divider()
+                        .background(Color.white.opacity(0.15))
+                    
+                    // Right Main Panel (Frosted Glass)
+                    rightMainView
                 }
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+                .background(
+                    VisualEffectView(material: .sidebar, blendingMode: .behindWindow)
+                )
             }
-            .onAppear { loadRecentProjects() }
-            .transition(.opacity.animation(.easeInOut(duration: 0.35)))
+            .onAppear {
+                loadRecentProjects()
+                appState.checkDerivedDataSize()
+            }
+            .sheet(isPresented: $showCloneSheet) {
+                cloneSheetView
+            }
+            .transition(.opacity.animation(.easeInOut(duration: 0.4)))
         }
     }
     
@@ -1861,10 +2121,579 @@ struct WelcomeScreen: View {
         }
         aiPrompt = ""
     }
+    
+    private func openFolder() {
+        let panel = NSOpenPanel()
+        panel.canChooseFiles = false
+        panel.canChooseDirectories = true
+        panel.canCreateDirectories = true
+        panel.title = "Open Project Folder"
+        panel.prompt = "Open"
+        
+        if panel.runModal() == .OK, let url = panel.url {
+            appState.workspaceFolder = url
+        }
+    }
+    
+    // MARK: - Left Sidebar View
+    
+    private var leftSidebarView: some View {
+        VStack(alignment: .leading, spacing: 20) {
+            // Glowing neon-tinted MicroCode 2.0 app header
+            HStack(spacing: 12) {
+                ZStack {
+                    RoundedRectangle(cornerRadius: 12, style: .continuous)
+                        .fill(
+                            LinearGradient(
+                                colors: [Color.blue, Color.purple],
+                                startPoint: .topLeading,
+                                endPoint: .bottomTrailing
+                            )
+                        )
+                        .frame(width: 44, height: 44)
+                        .shadow(color: Color.blue.opacity(0.5), radius: 6, x: 0, y: 2)
+                    
+                    Image(systemName: "chevron.left.forwardslash.chevron.right")
+                        .font(.system(size: 18, weight: .bold))
+                        .foregroundColor(.white)
+                }
+                
+                VStack(alignment: .leading, spacing: 2) {
+                    Text("MicroCode")
+                        .font(.system(size: 18, weight: .bold))
+                        .foregroundColor(.primary)
+                    
+                    Text("Version 2.0")
+                        .font(.system(size: 10, weight: .semibold))
+                        .foregroundColor(.secondary)
+                        .padding(.horizontal, 6)
+                        .padding(.vertical, 2)
+                        .background(Color.accentColor.opacity(0.15))
+                        .cornerRadius(4)
+                }
+            }
+            .padding(.horizontal)
+            .padding(.top, 30)
+            
+            // Sidebar Menu
+            VStack(spacing: 6) {
+                sidebarButton(title: "Projects", icon: "folder", tab: .projects)
+                sidebarButton(title: "Templates", icon: "square.grid.2x2", tab: .templates)
+                sidebarButton(title: "AI Architect", icon: "sparkles", tab: .aiArchitect)
+                sidebarButton(title: "Settings", icon: "gearshape", tab: .settings)
+            }
+            .padding(.horizontal, 10)
+            
+            Spacer()
+            
+            // Footer Info
+            VStack(alignment: .leading, spacing: 4) {
+                Text("Apple Silicon Native")
+                    .font(.system(size: 10, weight: .medium))
+                    .foregroundColor(.secondary)
+                
+                HStack(spacing: 4) {
+                    Circle()
+                        .fill(Color.green)
+                        .frame(width: 6, height: 6)
+                    Text("LSP Services Active")
+                        .font(.system(size: 9))
+                        .foregroundColor(.secondary)
+                }
+            }
+            .padding(.horizontal, 20)
+            .padding(.bottom, 25)
+        }
+        .frame(width: 210)
+        .background(VisualEffectView(material: .sidebar, blendingMode: .behindWindow).opacity(0.5))
+    }
+    
+    private func sidebarButton(title: String, icon: String, tab: WelcomeTab) -> some View {
+        Button(action: { selectedTab = tab }) {
+            HStack(spacing: 12) {
+                Image(systemName: icon)
+                    .font(.system(size: 14, weight: selectedTab == tab ? .semibold : .regular))
+                    .foregroundColor(selectedTab == tab ? .accentColor : .secondary)
+                    .frame(width: 20)
+                
+                Text(title)
+                    .font(.system(size: 13, weight: selectedTab == tab ? .semibold : .medium))
+                    .foregroundColor(selectedTab == tab ? .primary : .secondary)
+                
+                Spacer()
+            }
+            .padding(.horizontal, 14)
+            .padding(.vertical, 10)
+            .background(
+                selectedTab == tab
+                ? Color.accentColor.opacity(0.12)
+                : Color.clear
+            )
+            .cornerRadius(8)
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+    }
+    
+    // MARK: - Right Main View
+    
+    private var rightMainView: some View {
+        ZStack {
+            VisualEffectView(material: .hudWindow, blendingMode: .behindWindow)
+            
+            ScrollView {
+                VStack(alignment: .leading, spacing: 30) {
+                    switch selectedTab {
+                    case .projects:
+                        projectsTabContent
+                    case .templates:
+                        templatesTabContent
+                    case .aiArchitect:
+                        aiArchitectTabContent
+                    case .settings:
+                        settingsTabContent
+                    }
+                }
+                .padding(.horizontal, 40)
+                .padding(.vertical, 35)
+                .frame(maxWidth: .infinity, alignment: .leading)
+            }
+        }
+    }
+    
+    // MARK: - Projects Tab
+    
+    private var projectsTabContent: some View {
+        VStack(alignment: .leading, spacing: 24) {
+            VStack(alignment: .leading, spacing: 8) {
+                Text("Welcome to MicroCode")
+                    .font(.system(size: 28, weight: .bold))
+                    .foregroundColor(.primary)
+                
+                Text("Start a new project, open a workspace, or check out from git.")
+                    .font(.system(size: 14))
+                    .foregroundColor(.secondary)
+            }
+            .padding(.bottom, 10)
+            
+            LazyVGrid(columns: [GridItem(.flexible(), spacing: 16), GridItem(.flexible(), spacing: 16), GridItem(.flexible(), spacing: 16)], spacing: 16) {
+                QuickActionCard(
+                    title: "New Project",
+                    subtitle: "Choose from boilerplates",
+                    icon: "plus.circle.fill",
+                    gradient: Gradient(colors: [Color.blue, Color.cyan])
+                ) {
+                    selectedTab = .templates
+                }
+                
+                QuickActionCard(
+                    title: "Open Folder",
+                    subtitle: "Open an existing project",
+                    icon: "folder.fill.badge.plus",
+                    gradient: Gradient(colors: [Color.purple, Color.pink])
+                ) {
+                    openFolder()
+                }
+                
+                QuickActionCard(
+                    title: "Clone Repo",
+                    subtitle: "Checkout from Git remote",
+                    icon: "arrow.down.circle.fill",
+                    gradient: Gradient(colors: [Color.orange, Color.yellow])
+                ) {
+                    showCloneSheet = true
+                }
+            }
+            
+            VStack(alignment: .leading, spacing: 14) {
+                Text("Recent Workspaces")
+                    .font(.system(size: 14, weight: .semibold))
+                    .foregroundColor(.secondary)
+                
+                if recentProjects.isEmpty {
+                    VStack(spacing: 12) {
+                        Image(systemName: "folder.badge.questionmark")
+                            .font(.system(size: 24))
+                            .foregroundColor(.secondary.opacity(0.7))
+                        Text("No recent projects found")
+                            .font(.system(size: 12))
+                            .foregroundColor(.secondary)
+                    }
+                    .frame(maxWidth: .infinity)
+                    .padding(.vertical, 30)
+                    .background(Color.white.opacity(0.02))
+                    .cornerRadius(10)
+                    .overlay(
+                        RoundedRectangle(cornerRadius: 10)
+                            .stroke(Color.white.opacity(0.05), lineWidth: 1)
+                    )
+                } else {
+                    VStack(spacing: 8) {
+                        ForEach(recentProjects.prefix(6), id: \.self) { url in
+                            RecentProjectRow(url: url) {
+                                appState.workspaceFolder = url
+                            }
+                        }
+                    }
+                }
+            }
+            .padding(.top, 10)
+        }
+    }
+    
+    // MARK: - Templates Tab
+    
+    private var templatesTabContent: some View {
+        VStack(alignment: .leading, spacing: 24) {
+            VStack(alignment: .leading, spacing: 6) {
+                Text("Select a Template")
+                    .font(.system(size: 24, weight: .bold))
+                    .foregroundColor(.primary)
+                
+                Text("Bootstrap projects instantly using built-in command line presets.")
+                    .font(.system(size: 13))
+                    .foregroundColor(.secondary)
+            }
+            
+            LazyVGrid(columns: [GridItem(.flexible(), spacing: 14), GridItem(.flexible(), spacing: 14)], spacing: 14) {
+                TemplateDetailCard(title: "Vite + React", subtitle: "Fast modern frontend web application with Hot Module Replacement.", icon: "atom", color: .cyan) { createProject("vite") }
+                TemplateDetailCard(title: "Next.js App", subtitle: "Fullstack React framework with server-side rendering.", icon: "n.square.fill", color: .white) { createProject("nextjs") }
+                TemplateDetailCard(title: "Express API", subtitle: "Lightweight, high-performance Node.js backend api server.", icon: "server.rack", color: .green) { createProject("express") }
+                TemplateDetailCard(title: "Spring Boot", subtitle: "Production-ready Java service with Spring MVC and DI.", icon: "leaf.fill", color: .green) { createProject("spring") }
+                TemplateDetailCard(title: "React Native", subtitle: "Cross-platform mobile application builder for iOS and Android.", icon: "iphone", color: .blue) { createProject("react-native") }
+                TemplateDetailCard(title: "SwiftUI App", subtitle: "Native Apple platforms application using SwiftUI declarative framework.", icon: "swift", color: .orange) { createProject("swift") }
+                TemplateDetailCard(title: "Go Gin", subtitle: "Blazing fast HTTP web API microservice using Gin framework.", icon: "g.circle.fill", color: .cyan) { createProject("go") }
+            }
+        }
+    }
+    
+    // MARK: - AI Architect Tab
+    
+    private var aiArchitectTabContent: some View {
+        VStack(alignment: .leading, spacing: 24) {
+            VStack(alignment: .leading, spacing: 6) {
+                Text("AI Architect")
+                    .font(.system(size: 24, weight: .bold))
+                    .foregroundColor(.primary)
+                
+                Text("Describe your app, and our agent will structure the workspace and initialize files.")
+                    .font(.system(size: 13))
+                    .foregroundColor(.secondary)
+            }
+            
+            VStack(spacing: 14) {
+                ZStack(alignment: .topLeading) {
+                    if aiPrompt.isEmpty {
+                        Text("Example: Build a chat application using Node.js and WebSocket with a premium client landing page...")
+                            .foregroundColor(.secondary.opacity(0.6))
+                            .font(.system(size: 13))
+                            .padding(12)
+                    }
+                    
+                    TextEditor(text: $aiPrompt)
+                        .font(.system(size: 13))
+                        .frame(height: 120)
+                        .cornerRadius(6)
+                }
+                .padding(8)
+                .background(Color.black.opacity(0.2))
+                .cornerRadius(8)
+                .overlay(
+                    RoundedRectangle(cornerRadius: 8)
+                        .stroke(isHoveringAI ? Color.accentColor.opacity(0.5) : Color.white.opacity(0.1), lineWidth: 1)
+                )
+                .onHover { isHoveringAI = $0 }
+                
+                HStack {
+                    Spacer()
+                    
+                    Button(action: buildWithAI) {
+                        HStack {
+                            Image(systemName: "sparkles")
+                            Text("Generate Workspace")
+                        }
+                        .padding(.horizontal, 16)
+                        .padding(.vertical, 8)
+                        .background(aiPrompt.isEmpty ? Color.secondary.opacity(0.3) : Color.accentColor)
+                        .foregroundColor(.white)
+                        .cornerRadius(6)
+                    }
+                    .buttonStyle(.plain)
+                    .disabled(aiPrompt.isEmpty)
+                }
+            }
+            .padding(16)
+            .background(Color.white.opacity(0.02))
+            .cornerRadius(12)
+            .overlay(
+                RoundedRectangle(cornerRadius: 12)
+                    .stroke(Color.white.opacity(0.06), lineWidth: 1)
+            )
+        }
+    }
+    
+    // MARK: - Settings Tab
+    
+    // MARK: - Settings Tab Helpers
+    
+    private var settingsHeader: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            Text("Workspace & Cache Settings")
+                .font(.system(size: 24, weight: .bold))
+                .foregroundColor(.primary)
+            
+            Text("Manage temporary data, purge build caches, and configure disk quotas.")
+                .font(.system(size: 13))
+                .foregroundColor(.secondary)
+        }
+    }
+    
+    private var settingsCacheSection: some View {
+        HStack {
+            VStack(alignment: .leading, spacing: 4) {
+                Text("Derived Data Cache Size")
+                    .font(.system(size: 14, weight: .semibold))
+                if let info = appState.derivedDataInfo {
+                    Text("\(String(format: "%.2f", Double(info.size_bytes) / (1024*1024*1024))) GB (\(info.folder_count) projects)")
+                        .font(.system(size: 12))
+                        .foregroundColor(.secondary)
+                } else {
+                    Text("Calculating size...")
+                        .font(.system(size: 12))
+                        .foregroundColor(.secondary)
+                }
+            }
+            
+            Spacer()
+            
+            Button(action: { appState.clearDerivedData() }) {
+                Text("Purge Cache")
+                    .padding(.horizontal, 12)
+                    .padding(.vertical, 6)
+                    .background(Color.red.opacity(0.15))
+                    .foregroundColor(.red)
+                    .cornerRadius(6)
+            }
+            .buttonStyle(.plain)
+            
+            Button(action: { appState.checkDerivedDataSize() }) {
+                Image(systemName: "arrow.clockwise")
+                    .padding(6)
+                    .background(Color.white.opacity(0.06))
+                    .cornerRadius(6)
+            }
+            .buttonStyle(.plain)
+        }
+    }
+    
+    private var settingsQuotaSection: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            Text("Disk Quota Limits")
+                .font(.system(size: 13, weight: .semibold))
+                .foregroundColor(.secondary)
+            
+            HStack {
+                Text("DerivedData Quota:")
+                Spacer()
+                Slider(value: $appState.derivedDataQuotaLimitGB, in: 1...50, step: 1)
+                    .frame(width: 200)
+                Text("\(Int(appState.derivedDataQuotaLimitGB)) GB")
+                    .frame(width: 50, alignment: .trailing)
+            }
+            
+            Toggle("Enable Auto-Purge when quota is exceeded", isOn: $appState.enableDerivedDataAutoPurge)
+                .toggleStyle(.checkbox)
+            
+            Toggle("Show warning notification when quota is exceeded", isOn: $appState.enableDerivedDataAlert)
+                .toggleStyle(.checkbox)
+        }
+    }
+    
+    private var settingsTabContent: some View {
+        VStack(alignment: .leading, spacing: 24) {
+            settingsHeader
+            
+            VStack(alignment: .leading, spacing: 16) {
+                settingsCacheSection
+                
+                Divider()
+                    .background(Color.white.opacity(0.1))
+                
+                settingsQuotaSection
+            }
+            .padding(18)
+            .background(Color.white.opacity(0.03))
+            .cornerRadius(12)
+            .overlay(
+                RoundedRectangle(cornerRadius: 12)
+                    .stroke(Color.white.opacity(0.06), lineWidth: 1)
+            )
+        }
+    }
+    
+    // MARK: - Git Clone Modal Sheet View
+    
+    private var cloneSheetView: some View {
+        VStack(spacing: 20) {
+            HStack {
+                Text("Clone Repository")
+                    .font(.system(size: 16, weight: .bold))
+                Spacer()
+            }
+            
+            VStack(alignment: .leading, spacing: 8) {
+                Text("Git Repository URL")
+                    .font(.system(size: 12, weight: .semibold))
+                    .foregroundColor(.secondary)
+                
+                TextField("https://github.com/username/project.git", text: $gitCloneUrl)
+                    .textFieldStyle(.roundedBorder)
+            }
+            
+            if let error = cloneError {
+                Text(error)
+                    .foregroundColor(.red)
+                    .font(.system(size: 12))
+            }
+            
+            HStack {
+                Button("Cancel") {
+                    showCloneSheet = false
+                    gitCloneUrl = ""
+                    cloneError = nil
+                }
+                .keyboardShortcut(.cancelAction)
+                
+                Spacer()
+                
+                Button(action: performClone) {
+                    if isCloning {
+                        ProgressView()
+                            .scaleEffect(0.5)
+                            .frame(width: 14, height: 14)
+                    } else {
+                        Text("Clone")
+                    }
+                }
+                .keyboardShortcut(.defaultAction)
+                .disabled(gitCloneUrl.isEmpty || isCloning)
+            }
+        }
+        .padding()
+        .frame(width: 450)
+    }
+    
+    private func performClone() {
+        let panel = NSOpenPanel()
+        panel.canChooseFiles = false
+        panel.canChooseDirectories = true
+        panel.canCreateDirectories = true
+        panel.title = "Select parent directory for cloned repository"
+        panel.prompt = "Clone Here"
+        
+        if panel.runModal() == .OK, let parentUrl = panel.url {
+            isCloning = true
+            cloneError = nil
+            
+            let repoUrlStr = gitCloneUrl
+            Task {
+                do {
+                    let repoName = repoUrlStr.split(separator: "/").last?.replacingOccurrences(of: ".git", with: "") ?? "cloned_repo"
+                    let destUrl = parentUrl.appendingPathComponent(repoName)
+                    
+                    let process = Process()
+                    process.executableURL = URL(fileURLWithPath: "/usr/bin/git")
+                    process.arguments = ["clone", repoUrlStr, destUrl.path]
+                    
+                    try process.run()
+                    process.waitUntilExit()
+                    
+                    if process.terminationStatus == 0 {
+                        DispatchQueue.main.async {
+                            self.appState.workspaceFolder = destUrl
+                            self.showCloneSheet = false
+                            self.isCloning = false
+                            self.gitCloneUrl = ""
+                        }
+                    } else {
+                        DispatchQueue.main.async {
+                            self.cloneError = "Git clone failed with status \(process.terminationStatus)"
+                            self.isCloning = false
+                        }
+                    }
+                } catch {
+                    DispatchQueue.main.async {
+                        self.cloneError = error.localizedDescription
+                        self.isCloning = false
+                    }
+                }
+            }
+        }
+    }
 }
 
-struct ProjectTemplateCard: View {
+struct QuickActionCard: View {
     let title: String
+    let subtitle: String
+    let icon: String
+    let gradient: Gradient
+    let action: () -> Void
+    @State private var isHovering = false
+    
+    var body: some View {
+        Button(action: action) {
+            VStack(alignment: .leading, spacing: 12) {
+                HStack {
+                    ZStack {
+                        Circle()
+                            .fill(LinearGradient(gradient: gradient, startPoint: .topLeading, endPoint: .bottomTrailing))
+                            .frame(width: 38, height: 38)
+                        
+                        Image(systemName: icon)
+                            .font(.system(size: 18, weight: .medium))
+                            .foregroundColor(.white)
+                    }
+                    Spacer()
+                }
+                
+                VStack(alignment: .leading, spacing: 4) {
+                    Text(title)
+                        .font(.system(size: 14, weight: .semibold))
+                        .foregroundColor(.primary)
+                    
+                    Text(subtitle)
+                        .font(.system(size: 11))
+                        .foregroundColor(.secondary)
+                }
+            }
+            .padding(16)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .background(
+                Color.white.opacity(isHovering ? 0.08 : 0.04)
+            )
+            .cornerRadius(12)
+            .overlay(
+                RoundedRectangle(cornerRadius: 12)
+                    .stroke(
+                        LinearGradient(
+                            gradient: gradient,
+                            startPoint: .topLeading,
+                            endPoint: .bottomTrailing
+                        ).opacity(isHovering ? 0.4 : 0.1),
+                        lineWidth: 1
+                    )
+            )
+            .scaleEffect(isHovering ? 1.02 : 1.0)
+            .animation(.spring(response: 0.25, dampingFraction: 0.6, blendDuration: 0), value: isHovering)
+        }
+        .buttonStyle(.plain)
+        .onHover { isHovering = $0 }
+    }
+}
+
+struct TemplateDetailCard: View {
+    let title: String
+    let subtitle: String
     let icon: String
     let color: Color
     let action: () -> Void
@@ -1872,23 +2701,38 @@ struct ProjectTemplateCard: View {
     
     var body: some View {
         Button(action: action) {
-            VStack(alignment: .leading, spacing: 8) {
-                Image(systemName: icon)
-                    .font(.system(size: 16))
-                    .foregroundColor(isHovering ? .primary : color)
+            HStack(spacing: 16) {
+                ZStack {
+                    RoundedRectangle(cornerRadius: 10)
+                        .fill(color.opacity(0.12))
+                        .frame(width: 44, height: 44)
+                    
+                    Image(systemName: icon)
+                        .font(.system(size: 20))
+                        .foregroundColor(color)
+                }
                 
-                Text(title)
-                    .font(.system(size: 12, weight: .medium))
-                    .foregroundColor(isHovering ? .primary : .secondary)
+                VStack(alignment: .leading, spacing: 4) {
+                    Text(title)
+                        .font(.system(size: 14, weight: .semibold))
+                        .foregroundColor(.primary)
+                    
+                    Text(subtitle)
+                        .font(.system(size: 11))
+                        .foregroundColor(.secondary)
+                        .lineLimit(2)
+                }
+                Spacer()
             }
-            .padding(12)
-            .frame(maxWidth: .infinity, alignment: .leading)
-            .background(isHovering ? Color(nsColor: .windowBackgroundColor) : Color(nsColor: .controlBackgroundColor))
-            .cornerRadius(6)
+            .padding(14)
+            .background(Color.white.opacity(isHovering ? 0.08 : 0.04))
+            .cornerRadius(10)
             .overlay(
-                RoundedRectangle(cornerRadius: 6)
-                    .stroke(isHovering ? Color.secondary.opacity(0.4) : Color(nsColor: .separatorColor).opacity(0.3), lineWidth: 1)
+                RoundedRectangle(cornerRadius: 10)
+                    .stroke(Color.white.opacity(isHovering ? 0.15 : 0.06), lineWidth: 1)
             )
+            .scaleEffect(isHovering ? 1.015 : 1.0)
+            .animation(.easeInOut(duration: 0.15), value: isHovering)
         }
         .buttonStyle(.plain)
         .onHover { isHovering = $0 }

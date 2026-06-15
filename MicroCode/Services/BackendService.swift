@@ -598,6 +598,42 @@ class BackendService {
         let _: StatusResponse = try await post(url: url, body: request)
     }
 
+    // MARK: - Cache Operations
+
+    func getDerivedDataInfo() async throws -> DerivedDataInfo {
+        let url = URL(string: "\(baseURL)/api/cache/derived_data")!
+        let (data, response) = try await session.data(from: url)
+        
+        guard let httpResponse = response as? HTTPURLResponse else {
+            throw BackendError.invalidResponse
+        }
+        
+        guard httpResponse.statusCode == 200 else {
+            if let errorData = try? JSONDecoder().decode(ErrorResponse.self, from: data) {
+                throw BackendError.serverError(errorData.error)
+            }
+            throw BackendError.httpError(httpResponse.statusCode)
+        }
+        
+        let res = try JSONDecoder().decode(DerivedDataResponse.self, from: data)
+        if res.success, let info = res.info {
+            return info
+        } else {
+            throw BackendError.serverError(res.error ?? "Failed to fetch derived data info")
+        }
+    }
+
+    func clearDerivedData(projectPattern: String? = nil) async throws -> DerivedDataInfo {
+        let url = URL(string: "\(baseURL)/api/cache/derived_data/clear")!
+        let request = ClearDerivedDataRequest(project_pattern: projectPattern)
+        let res: DerivedDataResponse = try await post(url: url, body: request)
+        if res.success, let info = res.info {
+            return info
+        } else {
+            throw BackendError.serverError(res.error ?? "Failed to clear derived data")
+        }
+    }
+
     // MARK: - HTTP Helpers
 
     private func post<T: Encodable, R: Decodable>(url: URL, body: T) async throws -> R {
@@ -748,6 +784,23 @@ struct SelectNodeVersionRequest: Codable {
 }
 
 // MARK: - Request/Response Models
+
+struct DerivedDataInfo: Codable {
+    let path: String
+    let size_bytes: UInt64
+    let folder_count: Int
+    let files_cleaned: Int?
+}
+
+struct DerivedDataResponse: Codable {
+    let success: Bool
+    let info: DerivedDataInfo?
+    let error: String?
+}
+
+struct ClearDerivedDataRequest: Codable {
+    let project_pattern: String?
+}
 
 struct StatusResponse: Codable {
     let success: Bool
