@@ -50,12 +50,8 @@ class LSPManager: ObservableObject {
             return existing
         }
         
-        // FIX: Check if the server binary actually exists before trying to start
-        // This prevents indefinite hangs when opening .cpp, .txt, .json etc.
-        // where no language server is installed on the system
-        let serverExists = serverType.searchPaths.contains { FileManager.default.isExecutableFile(atPath: $0) }
-        guard serverExists else {
-            // Server binary not found — don't attempt to start, return nil silently
+        // Check if the server binary exists asynchronously (non-blocking)
+        guard let _ = await LSPClientService.resolveBinaryAsync(serverType.rawValue, searchPaths: serverType.searchPaths) else {
             return nil
         }
         
@@ -79,10 +75,8 @@ class LSPManager: ObservableObject {
     
     /// Notify that a document was opened
     func documentOpened(uri: String, language: String, content: String) async {
-        // FIX: Early exit if no server is configured or installed
         guard let serverType = LanguageServer.serverFor(language: language) else { return }
-        let serverExists = serverType.searchPaths.contains { FileManager.default.isExecutableFile(atPath: $0) }
-        guard serverExists else { return }
+        guard let _ = await LSPClientService.resolveBinaryAsync(serverType.rawValue, searchPaths: serverType.searchPaths) else { return }
         
         documentVersions[uri] = 1
         
@@ -97,11 +91,8 @@ class LSPManager: ObservableObject {
     
     /// Notify that a document was changed
     func documentChanged(uri: String, language: String, content: String) async {
-        // FIX: Skip LSP notification if no server is configured or installed for this language
-        // This prevents freezes when typing in files without a matching LSP server
         guard let serverType = LanguageServer.serverFor(language: language) else { return }
-        let serverExists = serverType.searchPaths.contains { FileManager.default.isExecutableFile(atPath: $0) }
-        guard serverExists else { return }
+        guard let _ = await LSPClientService.resolveBinaryAsync(serverType.rawValue, searchPaths: serverType.searchPaths) else { return }
         
         let version = (documentVersions[uri] ?? 0) + 1
         documentVersions[uri] = version
