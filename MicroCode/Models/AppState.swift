@@ -14,6 +14,15 @@ import MicroCodeKernel
 import AppKit
 import CryptoKit
 
+private struct SafeFileLoadResult: Sendable {
+    let content: String
+    let originalByteSize: Int
+    let isReadOnly: Bool
+    let isTruncated: Bool
+    let shouldUsePlainTextMode: Bool
+    let errorMessage: String?
+}
+
 struct ChatMessage: Identifiable {
     let id = UUID()
     let role: ChatRole
@@ -105,11 +114,44 @@ enum AppTheme: String, CaseIterable {
     case crystalClear = "crystalClear"
     case obsidianGlass = "obsidianGlass"
 
+    var isGlass: Bool {
+        switch self {
+        case .transparent, .extraClear, .crystalClear, .obsidianGlass:
+            return true
+        default:
+            return false
+        }
+    }
+
+    /// Opaque workspace colors used by native panes. Only glass themes are
+    /// allowed to expose the desktop through the app window.
+    var workspaceBackground: NSColor {
+        if isGlass { return editorBackground }
+        if self == .dark { return NSColor(red: 0.035, green: 0.039, blue: 0.047, alpha: 1.0) }
+        return editorBackground.withAlphaComponent(1.0)
+    }
+
+    var panelBackground: NSColor {
+        if isGlass { return editorBackground }
+        if self == .dark { return NSColor(red: 0.055, green: 0.059, blue: 0.067, alpha: 1.0) }
+        let target: NSColor = isDark ? .white : .black
+        return (editorBackground.blended(withFraction: isDark ? 0.035 : 0.025, of: target) ?? editorBackground)
+            .withAlphaComponent(1.0)
+    }
+
+    var elevatedBackground: NSColor {
+        if isGlass { return editorBackground }
+        if self == .dark { return NSColor(red: 0.075, green: 0.078, blue: 0.086, alpha: 1.0) }
+        let target: NSColor = isDark ? .white : .black
+        return (editorBackground.blended(withFraction: isDark ? 0.07 : 0.045, of: target) ?? editorBackground)
+            .withAlphaComponent(1.0)
+    }
+
     var displayName: String {
         switch self {
         case .system: return "System"
         case .light: return "Light"
-        case .dark: return "Dark"
+        case .dark: return "Dark (Near Black)"
         case .navy: return "Navy"
         case .lightBlue: return "Light Blue"
         case .xcodeLight: return "Xcode (Light)"
@@ -177,7 +219,7 @@ enum AppTheme: String, CaseIterable {
         case .system: 
             return NSApp?.effectiveAppearance.name == .darkAqua ? NSColor(red: 0.118, green: 0.118, blue: 0.118, alpha: 1.0) : NSColor(white: 1.0, alpha: 1.0)
         case .light, .xcodeLight: return NSColor(red: 1.0, green: 1.0, blue: 1.0, alpha: 1.0)
-        case .dark: return NSColor(red: 0.118, green: 0.118, blue: 0.118, alpha: 1.0) // #1E1E1E
+        case .dark: return NSColor(red: 0.035, green: 0.039, blue: 0.047, alpha: 1.0) // Near-black #090A0C
         case .navy: return NSColor(red: 0.051, green: 0.106, blue: 0.165, alpha: 1.0) // #0D1B2A
         case .lightBlue: return NSColor(red: 0.890, green: 0.949, blue: 0.992, alpha: 1.0) // #E3F2FD
         case .xcodeDark: return NSColor(red: 0.118, green: 0.125, blue: 0.157, alpha: 1.0) // #1F2028
@@ -505,8 +547,6 @@ enum AppTheme: String, CaseIterable {
         case .oneDarkPro: return NSColor(red: 0.380, green: 0.655, blue: 0.871, alpha: 1.0) // #61AFEF (Blue)
         case .nord: return NSColor(red: 0.533, green: 0.655, blue: 0.812, alpha: 1.0) // #88C0D0 (Blue)
         case .tokyoNight: return NSColor(red: 0.490, green: 0.690, blue: 0.941, alpha: 1.0) // #7DCFFF (Blue)
-        case .catppuccin: return NSColor(red: 0.553, green: 0.878, blue: 0.353, alpha: 1.0) // #CBA6F7 -> Repurposed Blue for functions usually
-        // Note: For Catppuccin, Function is usually Blue (#89B4FA), correcting here:
         case .catppuccin: return NSColor(red: 0.537, green: 0.706, blue: 0.980, alpha: 1.0) // #89B4FA (Blue)
         case .cyberPunk: return NSColor(red: 1.0, green: 0.0, blue: 0.886, alpha: 1.0) // #FF00E2 (Pink)
         case .synthWave: return NSColor(red: 1.0, green: 0.082, blue: 0.435, alpha: 1.0) // #FF156F (Pink)
@@ -651,6 +691,7 @@ enum AppTheme: String, CaseIterable {
 
 enum EditorMode: String, CaseIterable, Identifiable {
     case code = "code"
+    case science = "science"
     case playground = "playground"
     case notebook = "notebook"
     case scenario = "scenario"
@@ -665,6 +706,7 @@ enum EditorMode: String, CaseIterable, Identifiable {
     var displayName: String {
         switch self {
         case .code: return "Code Editor"
+        case .science: return "Science Mode"
         case .playground: return "Playground"
         case .remoteX: return "Remote Explorer"
         case .notebook: return "Notebook"
@@ -679,6 +721,7 @@ enum EditorMode: String, CaseIterable, Identifiable {
     var icon: String {
         switch self {
         case .code: return "doc.text"
+        case .science: return "atom"
         case .playground: return "play.rectangle"
         case .remoteX: return "server.rack"
         case .notebook: return "book.pages"
@@ -718,12 +761,15 @@ class AppState: ObservableObject {
     @Published var sidebarVisible: Bool = true
     @Published var consoleVisible: Bool = true
     @Published var gitPanelVisible: Bool = false
+    @Published var agenticContextVisible: Bool = true
 
     @Published var consoleOutput: String = ""
     @Published var isExecuting: Bool = false
 
     @Published var workspaceFolder: URL?
     @Published var fileTree: [FileNode] = []
+    @Published private(set) var fileTreeRevision: UInt64 = 0
+    @Published var fileTreeLimitWarning: String?
 
     @Published var gitStatus: GitStatus?
     @Published var gitCommits: [GitCommit] = []
@@ -759,7 +805,10 @@ class AppState: ObservableObject {
 
     @Published var fontSize: CGFloat = 13
     @Published var fontFamily: String = "Menlo"
-    @Published var appTheme: AppTheme = .transparent
+    @Published var appTheme: AppTheme = .dark
+    /// Disabled by default. The editor uses a non-ruler overlay when enabled
+    /// so this preference never changes NSScrollView's intrinsic layout.
+    @Published var showLineNumbers: Bool = false
     
     // Playground Font Settings
     @Published var playgroundFontName: String = "Menlo"
@@ -839,7 +888,7 @@ class AppState: ObservableObject {
 
     // AI Settings
     @Published var aiProvider: String = "gemini"
-    @Published var aiModel: String = "gemini-2.5-flash"
+    @Published var aiModel: String = "gemini-3.6-flash"
     @Published var mixMode: Bool = false  // Use multiple AI providers
     @Published var autoFormatOnSave: Bool = false
     @Published var apiKeys: [String: String] = [:]
@@ -912,6 +961,17 @@ class AppState: ObservableObject {
 
     private let backend = BackendService.shared
     private var cancellables = Set<AnyCancellable>()
+    private var workspaceLoadGeneration = UUID()
+    private var rootScanGeneration = UUID()
+    private var activeFileLoadGeneration = UUID()
+    private var loadingDirectoryPaths = Set<String>()
+    private var loadedDirectoryPaths = Set<String>()
+
+    nonisolated private static let maximumDirectoryEntries = 2_000
+    nonisolated private static let maximumEditableFileBytes = 2 * 1_024 * 1_024
+    nonisolated private static let maximumLargeFilePreviewBytes = 1 * 1_024 * 1_024
+    nonisolated private static let syntaxHighlightByteLimit = 512 * 1_024
+    nonisolated private static let lspContentByteLimit = 512 * 1_024
 
     // MARK: - Initialization
 
@@ -1007,13 +1067,34 @@ class AppState: ObservableObject {
         let defaults = UserDefaults.standard
         fontSize = CGFloat(defaults.double(forKey: "fontSize")) == 0 ? 13 : CGFloat(defaults.double(forKey: "fontSize"))
         fontFamily = defaults.string(forKey: "fontFamily") ?? "Menlo"
-        if let themeString = defaults.string(forKey: "appTheme"), let theme = AppTheme(rawValue: themeString) {
-            appTheme = theme
+        // One-time migration: older Settings UI displayed a hard-coded ON
+        // checkbox even though line numbers were disabled internally. Do not
+        // treat that stale preference as a real user choice.
+        let lineNumberMigrationKey = "lineNumbersOverlayPreferenceInitialized"
+        if defaults.bool(forKey: lineNumberMigrationKey) {
+            showLineNumbers = defaults.bool(forKey: "showLineNumbers")
         } else {
-            appTheme = .transparent
+            showLineNumbers = false
+            defaults.set(false, forKey: "showLineNumbers")
+            defaults.set(true, forKey: lineNumberMigrationKey)
+        }
+        let opaqueDefaultMigrationKey = "opaqueDarkThemeDefaultMigrationV1"
+        let savedTheme = defaults.string(forKey: "appTheme").flatMap(AppTheme.init(rawValue:))
+        if !defaults.bool(forKey: opaqueDefaultMigrationKey), savedTheme == .transparent {
+            // Transparent used to be the implicit default. Migrate that legacy
+            // default once so existing installs receive the new opaque Dark UI.
+            appTheme = .dark
+            defaults.set(AppTheme.dark.rawValue, forKey: "appTheme")
+            defaults.set(true, forKey: opaqueDefaultMigrationKey)
+        } else {
+            appTheme = savedTheme ?? .dark
+            defaults.set(true, forKey: opaqueDefaultMigrationKey)
         }
         aiProvider = defaults.string(forKey: "aiProvider") ?? "gemini"
-        aiModel = defaults.string(forKey: "aiModel") ?? "gemini-pro"
+        aiModel = defaults.string(forKey: "aiModel") ?? "gemini-3.6-flash"
+        let normalizedAI = AIModelCatalog.shared.normalizedSelection(provider: aiProvider, model: aiModel)
+        aiProvider = normalizedAI.provider
+        aiModel = normalizedAI.model
         
         // MicroRent AI Proxy setup
         let microToken = defaults.string(forKey: "microRentToken") ?? ""
@@ -1041,6 +1122,7 @@ class AppState: ObservableObject {
         // Use object check to properly default booleans
         sidebarVisible = defaults.object(forKey: "sidebarVisible") == nil ? true : defaults.bool(forKey: "sidebarVisible")
         consoleVisible = defaults.object(forKey: "consoleVisible") == nil ? true : defaults.bool(forKey: "consoleVisible")
+        agenticContextVisible = defaults.object(forKey: "agenticContextVisible") == nil ? true : defaults.bool(forKey: "agenticContextVisible")
         
         derivedDataQuotaLimitGB = defaults.object(forKey: "derivedDataQuotaLimitGB") == nil ? 10.0 : defaults.double(forKey: "derivedDataQuotaLimitGB")
         enableDerivedDataAutoPurge = defaults.bool(forKey: "enableDerivedDataAutoPurge")
@@ -1048,6 +1130,13 @@ class AppState: ObservableObject {
         
         // Start the backend server automatically
         Task {
+            await AIModelCatalog.shared.refreshIfNeeded()
+            let refreshedAI = AIModelCatalog.shared.normalizedSelection(provider: aiProvider, model: aiModel)
+            if refreshedAI.provider != aiProvider || refreshedAI.model != aiModel {
+                aiProvider = refreshedAI.provider
+                aiModel = refreshedAI.model
+                saveSettings()
+            }
             do {
                 print("🚀 Starting backend server...")
                 try await BackendService.shared.startBackend()
@@ -1067,6 +1156,7 @@ class AppState: ObservableObject {
         defaults.set(Double(fontSize), forKey: "fontSize")
         defaults.set(fontFamily, forKey: "fontFamily")
         defaults.set(appTheme.rawValue, forKey: "appTheme")
+        defaults.set(showLineNumbers, forKey: "showLineNumbers")
         defaults.set(aiProvider, forKey: "aiProvider")
         defaults.set(aiModel, forKey: "aiModel")
         
@@ -1076,6 +1166,7 @@ class AppState: ObservableObject {
         }
         defaults.set(sidebarVisible, forKey: "sidebarVisible")
         defaults.set(consoleVisible, forKey: "consoleVisible")
+        defaults.set(agenticContextVisible, forKey: "agenticContextVisible")
         defaults.set(derivedDataQuotaLimitGB, forKey: "derivedDataQuotaLimitGB")
         defaults.set(enableDerivedDataAutoPurge, forKey: "enableDerivedDataAutoPurge")
         defaults.set(enableDerivedDataAlert, forKey: "enableDerivedDataAlert")
@@ -1289,6 +1380,24 @@ class AppState: ObservableObject {
     
     /// Optimized folder loading with lazy background services
     private func loadFolderOptimized(url: URL) async {
+        // Invalidate every in-flight folder/file result from the previous
+        // workspace before publishing the new root. This prevents a slow scan
+        // from an old folder replacing the new folder's UI later.
+        let loadGeneration = UUID()
+        workspaceLoadGeneration = loadGeneration
+        rootScanGeneration = UUID()
+        activeFileLoadGeneration = UUID()
+        loadingDirectoryPaths.removeAll(keepingCapacity: true)
+        loadedDirectoryPaths.removeAll(keepingCapacity: true)
+        fileTreeLimitWarning = nil
+        fileTree = []
+        fileTreeRevision &+= 1
+
+        fileMonitorSource?.cancel()
+        fileMonitorSource = nil
+        fileRefreshTimer?.invalidate()
+        fileRefreshTimer = nil
+
         // SECURITY SCOPED ACCESS (Critical for Sandboxed App)
         let isSecured = url.startAccessingSecurityScopedResource()
         print("🔐 Security Scoped Access for \(url.path): \(isSecured)")
@@ -1311,6 +1420,9 @@ class AppState: ObservableObject {
         
         // Step 2: Load file tree (main operation, already optimized)
         await self.refreshFileTree()
+
+        guard workspaceLoadGeneration == loadGeneration,
+              workspaceFolder?.standardizedFileURL == url.standardizedFileURL else { return }
         
         // Step 3: Lazy-load background services with delays to prevent CPU spike
         
@@ -1318,6 +1430,7 @@ class AppState: ObservableObject {
         Task.detached(priority: .utility) {
             let type = ProjectManager.shared.detectProjectType(at: url)
             await MainActor.run {
+                guard self.workspaceLoadGeneration == loadGeneration else { return }
                 self.currentProjectType = type
             }
         }
@@ -1326,6 +1439,7 @@ class AppState: ObservableObject {
         Task.detached(priority: .utility) {
             try? await Task.sleep(nanoseconds: 1_000_000_000) // 1 second delay
             await MainActor.run {
+                guard self.workspaceLoadGeneration == loadGeneration else { return }
                 self.startFileWatcher()
             }
         }
@@ -1334,6 +1448,7 @@ class AppState: ObservableObject {
         Task.detached(priority: .background) {
             try? await Task.sleep(nanoseconds: 3_000_000_000) // 3 second delay
             await MainActor.run {
+                guard self.workspaceLoadGeneration == loadGeneration else { return }
                 self.gitRefresh()
             }
         }
@@ -1345,6 +1460,7 @@ class AppState: ObservableObject {
         Task.detached(priority: .background) {
             try? await Task.sleep(nanoseconds: 2_000_000_000) // 2 second delay
             await MainActor.run {
+                guard self.workspaceLoadGeneration == loadGeneration else { return }
                 // Only change directory if terminal is already running
                 if self.terminalService.isRunning {
                     self.terminalService.sendCommand("cd '\(url.path)'")
@@ -1464,76 +1580,150 @@ class AppState: ObservableObject {
     }
 
     func loadFile(url: URL) async {
+        let normalizedURL = url.standardizedFileURL
+
+        // Selecting an already-open tab must be instant and must not start a
+        // second disk read, lexer, or LSP request.
+        if let existingIndex = openFiles.firstIndex(where: { $0.path == normalizedURL.path }) {
+            currentFileIndex = existingIndex
+            return
+        }
+
+        let loadGeneration = UUID()
+        activeFileLoadGeneration = loadGeneration
         isLoading = true
-        defer { isLoading = false }
+        defer {
+            if activeFileLoadGeneration == loadGeneration { isLoading = false }
+        }
 
-        do {
-            // Check for binary/previewable files
-            let ext = url.pathExtension.lowercased()
-            let binaryExtensions = ["png", "jpg", "jpeg", "pdf", "gif", "bmp", "tiff", "webp"]
-            
-            let content: String
-            if binaryExtensions.contains(ext) {
-                content = "[Binary File]"
-            } else {
-                // CRITICAL: AppState is @MainActor, so reading the file here
-                // would block the MAIN THREAD for the whole read — large files
-                // froze the UI on open ("Loading นานค้าง"). Read off-thread and
-                // await; the main actor stays responsive while the spinner shows.
-                content = await Task.detached(priority: .userInitiated) { () -> String in
-                    if let utf8 = try? String(contentsOf: url, encoding: .utf8) { return utf8 }
-                    if let latin1 = try? String(contentsOf: url, encoding: .isoLatin1) { return latin1 }
-                    return "[Unable to decode file — unsupported encoding]"
-                }.value
-            }
-            let language = detectLanguage(from: url)
+        let ext = normalizedURL.pathExtension.lowercased()
+        let previewExtensions = Set(["png", "jpg", "jpeg", "pdf", "gif", "bmp", "tiff", "webp"])
+        let scienceExtensions = Set(["pdb", "ent", "cif", "mmcif", "fasta", "fa", "faa", "fna", "a3m", "json", "csv", "tsv", "png", "jpg", "jpeg", "gif", "webp", "svg", "html", "htm", "pdf", "tex", "bib", "md"])
+        let result: SafeFileLoadResult
 
-            // Check if file is already open
-            if let existingIndex = openFiles.firstIndex(where: { $0.path == url.path }) {
-                currentFileIndex = existingIndex
-                return
-            }
-
-            let file = CodeFile(
-                id: UUID(),
-                name: url.lastPathComponent,
-                path: url.path,
-                content: content,
-                language: language,
-                isUnsaved: false
+        if previewExtensions.contains(ext) {
+            result = SafeFileLoadResult(
+                content: "[Binary File]",
+                originalByteSize: 0,
+                isReadOnly: true,
+                isTruncated: false,
+                shouldUsePlainTextMode: true,
+                errorMessage: nil
             )
+        } else {
+            result = await Task.detached(priority: .userInitiated) {
+                Self.readFileSafely(at: normalizedURL)
+            }.value
+        }
 
-            openFiles.append(file)
-            currentFileIndex = openFiles.count - 1
-            // currentFile is set by the $currentFileIndex sink — do NOT set here to avoid race
-            
-            // Auto-Switch to Editor
-            Task { @MainActor in
-                self.editorMode = .code
-                self.sidebarVisible = true
-            }
-            
-            // LSP: Notify language server that document was opened
-            // FIX: Use a detached task with timeout to prevent hanging on files
-            // where no LSP server is installed (e.g. .cpp, .txt, .json)
-            let fileUri = url.absoluteString
+        guard activeFileLoadGeneration == loadGeneration else { return }
+        if let errorMessage = result.errorMessage {
+            alertMessage = errorMessage
+            return
+        }
+
+        let language = detectLanguage(from: normalizedURL)
+        let file = CodeFile(
+            id: UUID(),
+            name: normalizedURL.lastPathComponent,
+            path: normalizedURL.path,
+            content: result.content,
+            language: language,
+            isUnsaved: false,
+            isReadOnly: result.isReadOnly,
+            usesPlainTextMode: result.shouldUsePlainTextMode,
+            originalByteSize: result.originalByteSize,
+            isTruncated: result.isTruncated
+        )
+
+        openFiles.append(file)
+        currentFileIndex = openFiles.count - 1
+        // Keep Science Mode active when opening a scientific artifact from its
+        // navigator. Other file types retain the editor's established behavior.
+        if !(editorMode == .science && scienceExtensions.contains(ext)) {
+            editorMode = .code
+        }
+        sidebarVisible = true
+
+        // Large/minified files deliberately skip LSP. Sending megabytes to a
+        // language server can duplicate memory several times and stall both
+        // processes even though the editor itself remains responsive.
+        if !result.isReadOnly,
+           !result.shouldUsePlainTextMode,
+           result.originalByteSize <= Self.lspContentByteLimit {
+            let content = result.content
+            let fileUri = normalizedURL.absoluteString
             Task.detached(priority: .utility) {
-                // 3-second timeout to prevent indefinite hang
                 let lspTask = Task.detached(priority: .utility) {
                     await LSPManager.shared.documentOpened(uri: fileUri, language: language, content: content)
                 }
-                
-                // Race against timeout
                 let timeoutTask = Task.detached(priority: .utility) {
                     try? await Task.sleep(nanoseconds: 3_000_000_000)
                     lspTask.cancel()
                 }
-                
                 await lspTask.value
                 timeoutTask.cancel()
             }
+        }
+    }
+
+    nonisolated private static func readFileSafely(at url: URL) -> SafeFileLoadResult {
+        do {
+            let values = try url.resourceValues(forKeys: [.fileSizeKey, .isRegularFileKey])
+            guard values.isRegularFile != false else {
+                return SafeFileLoadResult(
+                    content: "", originalByteSize: 0, isReadOnly: true,
+                    isTruncated: false, shouldUsePlainTextMode: true,
+                    errorMessage: "Cannot open a non-regular file."
+                )
+            }
+
+            let reportedSize = max(0, values.fileSize ?? 0)
+            let isReportedLarge = reportedSize > maximumEditableFileBytes
+            let readLimit = isReportedLarge ? maximumLargeFilePreviewBytes : maximumEditableFileBytes + 1
+            let handle = try FileHandle(forReadingFrom: url)
+            defer { try? handle.close() }
+            let data = try handle.read(upToCount: readLimit) ?? Data()
+
+            let isLarge = isReportedLarge || data.count > maximumEditableFileBytes
+            let visibleData = isLarge ? data.prefix(maximumLargeFilePreviewBytes) : data[...]
+            let hasNullByte = visibleData.prefix(8_192).contains(0)
+
+            if hasNullByte {
+                return SafeFileLoadResult(
+                    content: "[Binary file — preview unavailable]",
+                    originalByteSize: reportedSize,
+                    isReadOnly: true,
+                    isTruncated: false,
+                    shouldUsePlainTextMode: true,
+                    errorMessage: nil
+                )
+            }
+
+            let visible = Data(visibleData)
+            let decoded = String(data: visible, encoding: .utf8)
+                ?? String(data: visible, encoding: .isoLatin1)
+                ?? "[Unable to decode file — unsupported encoding]"
+            let content = isLarge
+                ? decoded + "\n\n[Large-file preview truncated. The original file is read-only in MicroCode.]"
+                : decoded
+            let longUnbrokenLine = content.count > 50_000 && !content.prefix(50_000).contains("\n")
+            let plainMode = isLarge || visible.count > syntaxHighlightByteLimit || longUnbrokenLine
+
+            return SafeFileLoadResult(
+                content: content,
+                originalByteSize: max(reportedSize, data.count),
+                isReadOnly: isLarge,
+                isTruncated: isLarge,
+                shouldUsePlainTextMode: plainMode,
+                errorMessage: nil
+            )
         } catch {
-            alertMessage = "Failed to open file: \(error.localizedDescription)"
+            return SafeFileLoadResult(
+                content: "", originalByteSize: 0, isReadOnly: true,
+                isTruncated: false, shouldUsePlainTextMode: true,
+                errorMessage: "Failed to open file: \(error.localizedDescription)"
+            )
         }
     }
 
@@ -1848,6 +2038,68 @@ class AppState: ObservableObject {
             openFiles[index].language = language
             // objectWillChange.send() // Might be needed if published property doesn't trigger deep change
         }
+    }
+
+    // MARK: - Omni AI & Direct Execution Bridge
+
+    func openSnippetFromOmniAI(code: String, language: String, shouldRun: Bool = true) {
+        let cleanLang = language.isEmpty ? "python" : language.lowercased().trimmingCharacters(in: .whitespacesAndNewlines)
+        let ext: String
+        switch cleanLang {
+        case "swift": ext = "swift"
+        case "python", "py": ext = "py"
+        case "javascript", "js": ext = "js"
+        case "typescript", "ts": ext = "ts"
+        case "go", "golang": ext = "go"
+        case "rust", "rs": ext = "rs"
+        case "cpp", "c++": ext = "cpp"
+        case "c": ext = "c"
+        case "java": ext = "java"
+        case "kotlin", "kt": ext = "kt"
+        case "sql": ext = "sql"
+        case "html": ext = "html"
+        case "css": ext = "css"
+        default: ext = "txt"
+        }
+        
+        let fileName = "OmniAI_Snippet.\(ext)"
+        let tempPath = FileManager.default.temporaryDirectory.appendingPathComponent(fileName).path
+        
+        let newFile = CodeFile(
+            id: UUID(),
+            name: fileName,
+            path: tempPath,
+            content: code,
+            language: cleanLang,
+            isUnsaved: true,
+            isReadOnly: false,
+            usesPlainTextMode: false,
+            originalByteSize: code.utf8.count,
+            isTruncated: false
+        )
+        
+        if let existingIdx = openFiles.firstIndex(where: { $0.name == fileName }) {
+            openFiles[existingIdx] = newFile
+            currentFileIndex = existingIdx
+        } else {
+            openFiles.append(newFile)
+            currentFileIndex = openFiles.count - 1
+        }
+        currentFile = newFile
+        
+        // Bring editor and console to focus
+        consoleVisible = true
+        
+        if shouldRun {
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.15) {
+                self.runCode()
+            }
+        }
+    }
+
+    func syncGoogleOrDotminiAccount(email: String, token: String = "", displayName: String = "") {
+        AuthService.shared.syncWithWebSession(email: email, token: token, displayName: displayName)
+        ReportLogManager.shared.log("Omni AI Sync: Account authenticated as \(email)", type: .info)
     }
 
     // MARK: - Code Execution
@@ -2283,6 +2535,18 @@ class AppState: ObservableObject {
         Task {
             if agentMode {
                 // Agent Streaming Mode
+                let keyMode = UserDefaults.standard.string(forKey: "aiKeyMode") ?? "cloud"
+                let agentAPIKey: String?
+                if keyMode == "cloud" {
+                    // The local agent backend forwards model calls through the
+                    // Dotmini proxy, so it needs the same cloud credential as
+                    // AIClient (not the provider's direct API key).
+                    agentAPIKey = UserDefaults.standard.string(forKey: "dotminiLicenseKey")
+                        ?? UserDefaults.standard.string(forKey: "microRentToken")
+                } else {
+                    agentAPIKey = apiKeys[aiProvider]
+                }
+
                 let request = AgentChatRequest(
                     session_id: agentSessionId ?? "default-session",
                     message: message,
@@ -2295,7 +2559,7 @@ class AppState: ObservableObject {
                     ),
                     provider: aiProvider,
                     model: aiModel,
-                    api_key: apiKeys[aiProvider],
+                    api_key: agentAPIKey,
                     auto_execute: true
                 )
                 
@@ -3041,75 +3305,58 @@ class AppState: ObservableObject {
     @MainActor
     public func reloadFileTree() async {
         guard let folder = workspaceFolder else { return }
-        
-        // FolderFreezeDebugger.shared.logRefreshStart()
-        
-        let folderURL = folder
-        
-        // Use Authentic Native Backend (Obj-C++)
-        let rootNodes = await Task.detached(priority: .userInitiated) { () -> [FileNode] in
-            let controller = AuthenticFileTreeController.shared() // shared() might be inferred as sharedController()
-            
-            do {
-                // Swift renamed 'contentsOfDirectory:error:' to 'contents(ofDirectory:)'
-                let authenticNodes = try controller.contents(ofDirectory: folderURL.path)
-                
-                return authenticNodes.map { authNode in
-                    FileNode(
-                        name: authNode.name,
-                        path: authNode.path,
-                        isDirectory: authNode.isDirectory,
-                        children: [],
-                        hasLoadedChildren: false
-                    )
-                }
-            } catch {
-                print("Error scanning folder (Native): \(error.localizedDescription)")
-                return []
-            }
+
+        let folderURL = folder.standardizedFileURL
+        let loadGeneration = workspaceLoadGeneration
+        let scanGeneration = UUID()
+        rootScanGeneration = scanGeneration
+        let result = await Task.detached(priority: .userInitiated) {
+            Self.scanDirectoryBounded(at: folderURL, limit: Self.maximumDirectoryEntries)
         }.value
-        
-        // Update UI on MainActor
-        self.fileTree = rootNodes
-        
-        // FolderFreezeDebugger.shared.logRefreshEnd(nodeCount: self.fileTree.count)
+
+        guard workspaceLoadGeneration == loadGeneration,
+              rootScanGeneration == scanGeneration,
+              workspaceFolder?.standardizedFileURL == folderURL else { return }
+
+        loadingDirectoryPaths.removeAll(keepingCapacity: true)
+        loadedDirectoryPaths.removeAll(keepingCapacity: true)
+        fileTree = result.nodes
+        fileTreeRevision &+= 1
+        fileTreeLimitWarning = result.wasTruncated
+            ? "Showing the first \(Self.maximumDirectoryEntries) items in \(folderURL.lastPathComponent)."
+            : nil
     }
     
     @MainActor
     func loadChildren(for nodeId: String) async {
-        // Check if node exists and avoids unnecessary reload if already loaded
-        guard let node = findNode(id: nodeId, in: fileTree) else { return }
-        
-        // Prevent re-loading if already loaded
-        if node.hasLoadedChildren { return }
-        
-        let path = node.path
-        // let url = URL(fileURLWithPath: path) // Unused now
-        
-        // Run I/O in background using Authentic Backend
-        let children = await Task.detached(priority: .userInitiated) { () -> [FileNode] in
-             let controller = AuthenticFileTreeController.shared()
-             
-             do {
-                 let authenticNodes = try controller.contents(ofDirectory: path)
-                 return authenticNodes.map { authNode in
-                     FileNode(
-                         name: authNode.name,
-                         path: authNode.path,
-                         isDirectory: authNode.isDirectory,
-                         children: [],
-                         hasLoadedChildren: false
-                     )
-                 }
-             } catch {
-                 return []
-             }
+        let path = URL(fileURLWithPath: nodeId).standardizedFileURL.path
+        guard !loadedDirectoryPaths.contains(path),
+              !loadingDirectoryPaths.contains(path),
+              let workspacePath = workspaceFolder?.standardizedFileURL.path,
+              path == workspacePath || path.hasPrefix(workspacePath + "/") else { return }
+
+        let loadGeneration = workspaceLoadGeneration
+        loadingDirectoryPaths.insert(path)
+
+        let result = await Task.detached(priority: .userInitiated) {
+            Self.scanDirectoryBounded(
+                at: URL(fileURLWithPath: path, isDirectory: true),
+                limit: Self.maximumDirectoryEntries
+            )
         }.value
-        
-        // Update tree on MainActor
+
+        loadingDirectoryPaths.remove(path)
+        guard workspaceLoadGeneration == loadGeneration,
+              workspaceFolder?.standardizedFileURL.path == workspacePath else { return }
+
         updateNode(id: nodeId) { node in
-            node.children = children
+            node.children = result.nodes
             node.hasLoadedChildren = true
+        }
+        loadedDirectoryPaths.insert(path)
+
+        if result.wasTruncated {
+            fileTreeLimitWarning = "Showing the first \(Self.maximumDirectoryEntries) items in \(URL(fileURLWithPath: path).lastPathComponent)."
         }
     }
     
@@ -3118,8 +3365,51 @@ class AppState: ObservableObject {
         // Optimization: Removed MicroVM.executeSafe as it introduced significant overhead
         // resulting in UI freezes during folder expansion. Standard Swift mutation is sufficient.
         if self.updateNodeRecursive(nodes: &self.fileTree, id: id, transform: transform) {
-            self.objectWillChange.send()
+            fileTreeRevision &+= 1
         }
+    }
+
+    /// Stream one directory level and stop at a hard limit. Unlike
+    /// `contentsOfDirectory`, this does not first allocate an array containing
+    /// every entry in directories with hundreds of thousands of files.
+    nonisolated private static func scanDirectoryBounded(at url: URL, limit: Int) -> (nodes: [FileNode], wasTruncated: Bool) {
+        let keys: [URLResourceKey] = [.isDirectoryKey, .isRegularFileKey, .isSymbolicLinkKey]
+        guard let enumerator = FileManager.default.enumerator(
+            at: url,
+            includingPropertiesForKeys: keys,
+            options: [.skipsHiddenFiles],
+            errorHandler: { _, _ in true }
+        ) else { return ([], false) }
+
+        var nodes: [FileNode] = []
+        nodes.reserveCapacity(min(limit, 256))
+        var wasTruncated = false
+
+        while let child = enumerator.nextObject() as? URL {
+            let values = try? child.resourceValues(forKeys: Set(keys))
+            let isDirectory = values?.isDirectory == true
+            if isDirectory { enumerator.skipDescendants() }
+
+            guard child.lastPathComponent.hasPrefix("._") == false else { continue }
+            if nodes.count >= limit {
+                wasTruncated = true
+                break
+            }
+
+            nodes.append(FileNode(
+                name: child.lastPathComponent,
+                path: child.standardizedFileURL.path,
+                isDirectory: isDirectory,
+                children: [],
+                hasLoadedChildren: false
+            ))
+        }
+
+        nodes.sort {
+            if $0.isDirectory != $1.isDirectory { return $0.isDirectory }
+            return $0.name.localizedStandardCompare($1.name) == .orderedAscending
+        }
+        return (nodes, wasTruncated)
     }
     
     // Recursive is fine for standard usage, but if we want "Advanced Fix",
@@ -3241,6 +3531,11 @@ class AppState: ObservableObject {
 
     func toggleGitPanel() {
         gitPanelVisible.toggle()
+    }
+
+    func toggleAgenticContext() {
+        agenticContextVisible.toggle()
+        saveSettings()
     }
     
     // MARK: - Editor Mode
@@ -3573,6 +3868,10 @@ struct CodeFile: Identifiable, Equatable {
     var content: String
     var language: String
     var isUnsaved: Bool
+    var isReadOnly: Bool = false
+    var usesPlainTextMode: Bool = false
+    var originalByteSize: Int = 0
+    var isTruncated: Bool = false
 
     static func == (lhs: CodeFile, rhs: CodeFile) -> Bool {
         lhs.id == rhs.id
