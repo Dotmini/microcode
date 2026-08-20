@@ -11,6 +11,11 @@ import SwiftUI
 import Combine
 import MicroCodeSupport
 
+enum AgentDomain: String {
+    case software
+    case science
+}
+
 // MARK: - Agent Service
 
 @MainActor
@@ -22,6 +27,9 @@ class AgentService: ObservableObject {
     @Published var pendingChanges: [PendingChangeModel] = []
     @Published var editorContext: EditorContextModel?
     @Published var currentToolExecution: String? = nil
+    @Published var domain: AgentDomain = .software
+    @Published private(set) var scienceProjectContext: ScienceProjectContext?
+    @Published private(set) var isIndexingScienceProject = false
     
     // Stop / Cancel
     @Published var isCancelled = false
@@ -45,9 +53,6 @@ class AgentService: ObservableObject {
     @Published var activeChatId: String?
     @Published var showChatSidebar: Bool = false
     
-    // Model selection
-    @Published var selectedModel: String = ""
-    
     // Services
     private let aiClient = AIClient.shared
     private let toolBox = AgentToolBox.shared
@@ -59,6 +64,10 @@ class AgentService: ObservableObject {
     // Agent configuration
     private let maxToolIterations = 25
     private let maxContextChars = 1200000
+    private var cachedSemanticContext: (workspace: String, value: String, date: Date)?
+    private let semanticContextTTL: TimeInterval = 120
+    private var lastProvider = "gemini"
+    private var lastModel = "gemini-3.6-flash"
     
     // Token stats (read from optimizer)
     var tokenStats: TokenUsageStats { tokenOptimizer.stats }
@@ -67,6 +76,7 @@ class AgentService: ObservableObject {
     
     func stopGeneration() {
         isCancelled = true
+        aiClient.cancelStream()
         isLoading = false
         agentPhase = .idle
         currentToolExecution = nil
@@ -111,11 +121,44 @@ class AgentService: ObservableObject {
     private func buildSystemPrompt(for message: String, queryEmbedding: [Float]? = nil) -> String {
         let complexity = tokenOptimizer.detectComplexity(message)
         let budget = TokenBudget.forTask(complexity)
-        let isChatMode = complexity == .chat
+        let isChatMode = domain == .software && complexity == .chat
         
         var prompt: String
         
-        if isChatMode {
+        if domain == .science {
+            prompt = """
+            You are MicroCode Science Agent — a rigorous scientific computing and research engineering assistant.
+
+            ## Scope
+            - Structural biology, bioinformatics, genomics, single-cell analysis, cheminformatics, medical AI, statistics, Python/R/Julia and reproducible pipelines.
+            - Inspect PDB/PDBx-mmCIF, FASTA/A3M and AlphaFold 3 JSON with local tools before drawing conclusions.
+            - Work with MedGemma as a developer research model and AlphaFold outputs as predictions, not ground truth.
+
+            ## Scientific method
+            1. Separate observations, inferences and hypotheses explicitly.
+            2. Preserve units, sample sizes, model/software versions, random seeds and data provenance.
+            3. Check assumptions, controls, uncertainty, leakage, confounding and statistical validity.
+            4. Prefer primary literature and authoritative databases; include identifiers such as DOI, PMID, PDB or UniProt when available.
+            5. Never invent citations, measurements, confidence scores or experimental results.
+            6. For structure predictions, report confidence and limitations; do not equate predicted structure with experimental validation.
+            7. Make analyses reproducible: record exact commands, environment, inputs and output paths.
+
+            ## Tool workflow
+            - Use science_inspect before interpreting a scientific artifact.
+            - Use alphafold_input_validate before recommending an AlphaFold 3 run.
+            - Treat the indexed workspace below as the source map for project Context/RAG. Inspect relevant files before answering.
+            - You can prepare reproducible Python/R/Julia analyses for Cell Mode and generate LaTeX papers grounded in project artifacts.
+            - For papers, distinguish project evidence from literature evidence and never fabricate citations.
+            - Read files before modifying them and verify generated scripts or data products.
+            - Keep large arrays and structure coordinates out of the conversation when a compact summary is sufficient.
+
+            ## Medical safety
+            - This workspace supports research and development, not autonomous diagnosis or treatment.
+            - Do not present model output as clinical-grade. State when expert review and task-specific validation are required.
+
+            Respond in the user's language. Be concise, precise and explicit about uncertainty.
+            """
+        } else if isChatMode {
             // CHAT MODE: Professional, knowledgeable conversationalist
             prompt = """
             You are MicroCode AI — a professional software engineering assistant integrated into the MicroCode IDE.
@@ -216,15 +259,14 @@ class AgentService: ObservableObject {
         if let root = toolBox.workspaceRoot {
             prompt += "\n\nWorkspace: \(root)"
         }
+
+        if domain == .science, let scienceProjectContext {
+            prompt += "\n\n## Science Project Context / Local RAG Index\n\(scienceProjectContext.compactDescription)"
+        }
         
         // Inject semantic context (if available)
-        if !isChatMode {
-            if let smartContext = try? AuthenticLanguageCore.shared()?.aiContext() {
-                if let desc = smartContext.llmContextDescription() {
-                    let compressed = tokenOptimizer.compressText(desc, targetTokens: 500)
-                    prompt += "\n\n## Semantic Context\n\(compressed)"
-                }
-            }
+        if !isChatMode, let semanticContext = semanticContext() {
+            prompt += "\n\n## Semantic Context\n\(semanticContext)"
         }
         
         // Inject relevant memories (with cross-chat recall)
@@ -269,11 +311,42 @@ class AgentService: ObservableObject {
     // MARK: - Set Workspace
     
     func setWorkspace(_ path: String) {
+        if toolBox.workspaceRoot != path { cachedSemanticContext = nil }
         toolBox.workspaceRoot = path
         loadAgentWorkspaceFiles(path)
         
         // Start MCP Client to connect to mcp-server.py
         MCPClient.shared.start(workspacePath: path)
+        if domain == .science { refreshScienceProjectContext() }
+    }
+
+    func refreshScienceProjectContext() {
+        guard let path = toolBox.workspaceRoot else { return }
+        isIndexingScienceProject = true
+        Task {
+            let context = await Task.detached(priority: .utility) {
+                ScienceService.indexWorkspace(at: URL(fileURLWithPath: path))
+            }.value
+            guard self.toolBox.workspaceRoot == path else { return }
+            self.scienceProjectContext = context
+            self.isIndexingScienceProject = false
+        }
+    }
+
+    private func semanticContext() -> String? {
+        let workspace = toolBox.workspaceRoot ?? ""
+        if let cachedSemanticContext,
+           cachedSemanticContext.workspace == workspace,
+           Date().timeIntervalSince(cachedSemanticContext.date) < semanticContextTTL {
+            tokenOptimizer.recordContextCache(hit: true, tokens: tokenOptimizer.estimateTokens(cachedSemanticContext.value))
+            return cachedSemanticContext.value
+        }
+        tokenOptimizer.recordContextCache(hit: false, tokens: 0)
+        guard let smartContext = try? AuthenticLanguageCore.shared()?.aiContext(),
+              let description = smartContext.llmContextDescription() else { return nil }
+        let compressed = tokenOptimizer.compressText(description, targetTokens: 500)
+        cachedSemanticContext = (workspace, compressed, Date())
+        return compressed
     }
     
     // MARK: - Load agent.md / task.md / AI.arx
@@ -385,7 +458,7 @@ class AgentService: ObservableObject {
         guard let root = toolBox.workspaceRoot else { return }
         let arxPath = (root as NSString).appendingPathComponent(".microcode/AI.arx")
         let arxData = AIArxData(
-            models: [AIArxData.ModelUsage(provider: "current", model: "active", lastUsed: Date())],
+            models: [AIArxData.ModelUsage(provider: lastProvider, model: lastModel, lastUsed: Date())],
             memory: activityLog.suffix(50).map { AIArxData.MemoryEntry(content: $0.message, timestamp: $0.timestamp, role: "agent") },
             artifacts: filesModified.map { AIArxData.Artifact(path: $0, type: "modified", timestamp: Date()) },
             lastUpdated: Date()
@@ -400,7 +473,7 @@ class AgentService: ObservableObject {
     func sendMessage(
         _ content: String,
         provider: String = "gemini",
-        model: String = "gemini-2.5-flash",
+        model: String = "gemini-3.6-flash",
         apiKey: String = "",
         attachments: [AIAttachment] = []
     ) async {
@@ -437,9 +510,11 @@ class AgentService: ObservableObject {
         // Detect task complexity and choose budget
         let complexity = tokenOptimizer.detectComplexity(content)
         let budget = TokenBudget.forTask(complexity)
-        let isChatMode = complexity == .chat
+        let isChatMode = domain == .software && complexity == .chat
         
         let detectedProvider = StreamableAIProvider(rawValue: provider) ?? StreamableAIProvider.detect(from: model)
+        lastProvider = detectedProvider.rawValue
+        lastModel = model
         let toolSchemas = isChatMode ? [] : toolBox.toolSchemas()  // No tools in chat mode
         
         // Build optimized system prompt
@@ -457,8 +532,10 @@ class AgentService: ObservableObject {
         var finalText = ""
         var allToolResults: [ToolResultModel] = []
         var allChanges: [PendingChangeModel] = []
+        var completedToolCalls: [String: (output: String, success: Bool)] = [:]
         
         while iteration < maxToolIterations {
+            if isCancelled || Task.isCancelled { break }
             iteration += 1
             
             // Stream the response
@@ -540,6 +617,20 @@ class AgentService: ObservableObject {
             var batchResults: [(name: String, output: String, success: Bool)] = []
             
             for toolCall in receivedToolCalls {
+                if isCancelled || Task.isCancelled { break }
+                let signature = toolCallSignature(toolCall)
+                if let completed = completedToolCalls[signature] {
+                    allToolResults.append(ToolResultModel(
+                        toolCallId: toolCall.id,
+                        toolName: toolCall.name,
+                        success: completed.success,
+                        output: completed.output,
+                        error: completed.success ? nil : completed.output
+                    ))
+                    batchResults.append((name: toolCall.name, output: completed.output, success: completed.success))
+                    logActivity(.info, "\(toolCall.name) reused cached result")
+                    continue
+                }
                 currentToolExecution = "Running \(toolCall.name)..."
                 agentPhase = .executing(toolCall.name)
                 logActivity(.tool, "\(toolCall.name)", detail: truncateArgs(toolCall.arguments))
@@ -566,6 +657,7 @@ class AgentService: ObservableObject {
                     ))
                     
                     batchResults.append((name: toolCall.name, output: output, success: true))
+                    completedToolCalls[signature] = (output, true)
                     logActivity(.success, "\(toolCall.name) ✓")
                     
                     // Track file changes with diff
@@ -610,6 +702,7 @@ class AgentService: ObservableObject {
                     ))
                     
                     batchResults.append((name: toolCall.name, output: error.localizedDescription, success: false))
+                    completedToolCalls[signature] = (error.localizedDescription, false)
                     logActivity(.error, "\(toolCall.name) failed: \(error.localizedDescription)")
                 }
                 
@@ -664,11 +757,7 @@ class AgentService: ObservableObject {
         // Update token stats
         let inputTokens = tokenOptimizer.estimateTokens(optimizedSystemPrompt) + history.reduce(0) { $0 + tokenOptimizer.estimateTokens($1.content) }
         let outputTokens = tokenOptimizer.estimateTokens(finalText)
-        tokenOptimizer.stats.inputTokens += inputTokens
-        tokenOptimizer.stats.outputTokens += outputTokens
-        tokenOptimizer.stats.totalRequests += 1
-        tokenOptimizer.stats.totalCost += tokenOptimizer.estimateCost(inputTokens: inputTokens, outputTokens: outputTokens, model: model)
-        tokenOptimizer.stats.compressionRatio = Double(tokenOptimizer.stats.savedTokens) / max(1, Double(tokenOptimizer.stats.inputTokens + tokenOptimizer.stats.savedTokens))
+        tokenOptimizer.recordUsage(provider: detectedProvider.rawValue, model: model, inputTokens: inputTokens, outputTokens: outputTokens)
         
         logActivity(.done, "Completed (\(iteration) iterations, \(allToolResults.count) tools, ~\(inputTokens + outputTokens) tokens)")
         agentPhase = .done
@@ -694,6 +783,11 @@ class AgentService: ObservableObject {
         } else {
             messages.append(streamMsg)
         }
+    }
+
+    private func toolCallSignature(_ call: AIToolCall) -> String {
+        let data = try? JSONSerialization.data(withJSONObject: call.arguments, options: [.sortedKeys])
+        return call.name + ":" + (data.flatMap { String(data: $0, encoding: .utf8) } ?? String(describing: call.arguments))
     }
     
     // MARK: - History Building

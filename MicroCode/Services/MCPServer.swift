@@ -780,6 +780,14 @@ class MCPServer: ObservableObject {
                     output = String(output.prefix(50000)) + "\n...[truncated]"
                 }
                 
+                continuation.resume(returning: output)
+            } catch {
+                timer.cancel()
+                continuation.resume(throwing: error)
+            }
+        }
+    }
+    
     // MARK: - Omni AI & Playground Direct Execution
 
     private func executeRunPlayground(_ args: [String: Any]) async throws -> String {
@@ -921,7 +929,7 @@ class MCPServer: ObservableObject {
         httpListener = nil
     }
 
-    private func handleIncomingConnection(_ connection: NWConnection) {
+    nonisolated private func handleIncomingConnection(_ connection: NWConnection) {
         connection.start(queue: DispatchQueue.global(qos: .userInitiated))
         connection.receive(minimumIncompleteLength: 1, maximumLength: 65536) { [weak self] content, _, isComplete, _ in
             guard let self = self, let content = content, let requestString = String(data: content, encoding: .utf8) else {
@@ -929,7 +937,7 @@ class MCPServer: ObservableObject {
                 return
             }
             
-            Task {
+            Task { @MainActor in
                 let responseData = await self.processHttpRequest(requestString)
                 connection.send(content: responseData, completion: .contentProcessed({ _ in
                     connection.cancel()

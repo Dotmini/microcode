@@ -769,6 +769,8 @@ import SwiftUI
 // based on the length of the code inside the NSTextView. This definitively breaks
 // the AppKit layout recursion loop (_FlexFrameLayout) that causes EXC_BREAKPOINT.
 class NoIntrinsicScrollView: NSScrollView {
+    private(set) var lineNumberGutter: EditorLineNumberGutterView?
+
     // Returning noIntrinsicMetric prevents the scroll view from bubbling the
     // text view's content size up to SwiftUI, which is what triggered the
     // _FlexFrameLayout recursion crash. sizeThatFits returning the proposal
@@ -789,6 +791,14 @@ class NoIntrinsicScrollView: NSScrollView {
     // container while horizontally resizable.
     override func layout() {
         super.layout()
+        if let gutter = lineNumberGutter {
+            gutter.frame = NSRect(
+                x: 0,
+                y: 0,
+                width: EditorLineNumberGutterView.preferredWidth,
+                height: bounds.height
+            )
+        }
         guard let tv = documentView as? NSTextView else { return }
         let w = contentSize.width
         let h = contentSize.height
@@ -798,6 +808,36 @@ class NoIntrinsicScrollView: NSScrollView {
         } else if tv.frame.height < h {
             tv.setFrameSize(NSSize(width: tv.frame.width, height: h))
         }
+    }
+
+    func configureLineNumbers(
+        visible: Bool,
+        textView: NSTextView,
+        themeManager: ThemeManager
+    ) {
+        if visible {
+            if let gutter = lineNumberGutter {
+                gutter.updateAppearance(themeManager: themeManager)
+            } else {
+                let gutter = EditorLineNumberGutterView(
+                    textView: textView,
+                    clipView: contentView,
+                    themeManager: themeManager
+                )
+                addSubview(gutter, positioned: .above, relativeTo: contentView)
+                lineNumberGutter = gutter
+            }
+            textView.textContainerInset = NSSize(
+                width: EditorLineNumberGutterView.preferredWidth + 5,
+                height: 8
+            )
+        } else {
+            lineNumberGutter?.detach()
+            lineNumberGutter?.removeFromSuperview()
+            lineNumberGutter = nil
+            textView.textContainerInset = NSSize(width: 5, height: 8)
+        }
+        needsLayout = true
     }
 }
 
@@ -813,6 +853,9 @@ public struct SyntaxHighlightedCodeView: NSViewRepresentable {
     public let fileURL: URL?
     public let isScrollEnabled: Bool
     public let isTransparent: Bool
+    public let isEditable: Bool
+    public let enableHighlighting: Bool
+    public let showLineNumbers: Bool
     /// Stable identity for this logical editor (file id / "playground" / cell
     /// id). SwiftUI churns this representable's identity (it recreates the
     /// NSView via makeNSView repeatedly), and the freshly-created EMPTY view
@@ -825,7 +868,7 @@ public struct SyntaxHighlightedCodeView: NSViewRepresentable {
     /// (SyntaxHighlightedCodeView is always used from SwiftUI/main).
     @MainActor private static var viewCache: [String: NSScrollView] = [:]
 
-    public init(text: Binding<String>, language: String, fontSize: CGFloat = 13, isDark: Bool = true, themeName: String? = nil, fontName: String = "Menlo", fontWeight: Int = 2, fileURL: URL? = nil, isScrollEnabled: Bool = true, isTransparent: Bool = false, editorID: String? = nil) {
+    public init(text: Binding<String>, language: String, fontSize: CGFloat = 13, isDark: Bool = true, themeName: String? = nil, fontName: String = "Menlo", fontWeight: Int = 2, fileURL: URL? = nil, isScrollEnabled: Bool = true, isTransparent: Bool = false, isEditable: Bool = true, enableHighlighting: Bool = true, showLineNumbers: Bool = false, editorID: String? = nil) {
         self._text = text
         self.language = language
         self.fontSize = fontSize
@@ -836,6 +879,9 @@ public struct SyntaxHighlightedCodeView: NSViewRepresentable {
         self.fileURL = fileURL
         self.isScrollEnabled = isScrollEnabled
         self.isTransparent = isTransparent
+        self.isEditable = isEditable
+        self.enableHighlighting = enableHighlighting
+        self.showLineNumbers = showLineNumbers
         self.editorID = editorID
     }
 
@@ -922,7 +968,7 @@ public struct SyntaxHighlightedCodeView: NSViewRepresentable {
 
             // ── Text view behaviour ──────────────────────────────────────
             tv.isRichText = true
-            tv.isEditable = true
+            tv.isEditable = isEditable
             tv.isSelectable = true
             tv.allowsUndo = true
             tv.usesFindBar = true
@@ -983,20 +1029,17 @@ public struct SyntaxHighlightedCodeView: NSViewRepresentable {
             // ── Layout ───────────────────────────────────────────────────
             coordinator.configureTextGeometry(for: tv, in: scrollView)
 
-            // ── Line Numbers DISABLED ────────────────────────────────────
-            // ROOT CAUSE of the blank editor (proven by RENDER SELF-TEST in
-            // v2.5.9): attaching an NSRulerView (LineNumberRulerView,
-            // ruleThickness 40) to this custom NoIntrinsicScrollView forces the
-            // NSClipView to bounds.origin.x = -40 (== ruler width, identical in
-            // every editor instance). The document text is shifted into the
-            // clipped region and AppKit's _NSScrollViewContentBackgroundView
-            // covers it, so glyphs never show while the ruler (drawn in its own
-            // area) still does. Removing the ruler restores a normal clip
-            // (origin 0,0) so text renders. Line numbers will be reintroduced
-            // later WITHOUT NSRulerView (e.g. an in-text-view gutter).
+            // Never attach an NSRulerView here. It shifts the clip-view origin
+            // and previously caused blank editors/layout recursion. The safe
+            // gutter is a visual overlay managed by NoIntrinsicScrollView.
             scrollView.verticalRulerView = nil
             scrollView.hasVerticalRuler  = false
             scrollView.rulersVisible     = false
+            scrollView.configureLineNumbers(
+                visible: coordinator.parent.showLineNumbers,
+                textView: tv,
+                themeManager: engine.themeManager
+            )
             scrollView.hasVerticalScroller   = coordinator.parent.isScrollEnabled
             scrollView.hasHorizontalScroller = coordinator.parent.isScrollEnabled
             scrollView.autohidesScrollers    = true
@@ -1017,16 +1060,9 @@ public struct SyntaxHighlightedCodeView: NSViewRepresentable {
             _ = fgColor; _ = customFont
             CrashReporter.shared.breadcrumb("SHCV.makeNSView config (sync) done")
 
-            // ── LSP notification ─────────────────────────────────────────
-            let lang = coordinator.parent.language
-            if let url = coordinator.parent.fileURL {
-                let content = tv.textStorage?.string ?? ""
-                Task.detached(priority: .utility) {
-                    await LSPManager.shared.documentOpened(uri: url.absoluteString,
-                                                          language: lang,
-                                                          content: content)
-                }
-            }
+            // AppState owns document-open notifications and applies file-size
+            // limits. Sending a second notification here duplicated large
+            // strings and could wake the LSP twice for every opened file.
         }
 
         // Push initial content + highlighting NOW (synchronous) so the editor
@@ -1039,12 +1075,12 @@ public struct SyntaxHighlightedCodeView: NSViewRepresentable {
             Self.viewCache[id] = scrollView
             // Bound the cache so long sessions with many files don't grow
             // without limit.
-            if Self.viewCache.count > 24 {
+            if Self.viewCache.count > 12 {
                 for key in Self.viewCache.keys where key != id {
                     if (Self.viewCache[key]?.window) == nil {
                         Self.viewCache.removeValue(forKey: key)
                     }
-                    if Self.viewCache.count <= 24 { break }
+                    if Self.viewCache.count <= 12 { break }
                 }
             }
         }
@@ -1072,6 +1108,7 @@ public struct SyntaxHighlightedCodeView: NSViewRepresentable {
     public class Coordinator: NSObject, NSTextViewDelegate, @preconcurrency NSTextStorageDelegate {
         var parent: SyntaxHighlightedCodeView
         var highlightTimer: Timer?
+        var lspChangeTask: Task<Void, Never>?
         var isUpdating = false
         var isInvalidated = false // Prevents async callbacks after teardown
         
@@ -1088,6 +1125,9 @@ public struct SyntaxHighlightedCodeView: NSViewRepresentable {
         var lastFontSize: CGFloat = 0
         var lastIsDark: Bool = false
         var lastIsTransparent: Bool = false  // FIX: track transparent mode
+        var lastIsEditable: Bool = true
+        var lastEnableHighlighting: Bool = true
+        var lastShowLineNumbers: Bool = false
         var lastFileURL: URL? = nil // Added fileURL to cache
         var didRenderSelfTest = false
 
@@ -1236,9 +1276,13 @@ public struct SyntaxHighlightedCodeView: NSViewRepresentable {
             let fontChanged = lastFontSize != p.fontSize
             let darkChanged = lastIsDark != p.isDark
             let transparentChanged = lastIsTransparent != p.isTransparent
+            let editableChanged = lastIsEditable != p.isEditable
+            let highlightingChanged = lastEnableHighlighting != p.enableHighlighting
+            let lineNumbersChanged = lastShowLineNumbers != p.showLineNumbers
 
             if !force && !textChanged && !langChanged && !themeNameChanged
-                && !fontChanged && !darkChanged && !transparentChanged {
+                && !fontChanged && !darkChanged && !transparentChanged
+                && !editableChanged && !highlightingChanged && !lineNumbersChanged {
                 return
             }
 
@@ -1248,6 +1292,9 @@ public struct SyntaxHighlightedCodeView: NSViewRepresentable {
             lastFontSize = p.fontSize
             lastIsDark = p.isDark
             lastIsTransparent = p.isTransparent
+            lastIsEditable = p.isEditable
+            lastEnableHighlighting = p.enableHighlighting
+            lastShowLineNumbers = p.showLineNumbers
 
             // Theme + colours
             if force || themeNameChanged || darkChanged || transparentChanged {
@@ -1299,6 +1346,16 @@ public struct SyntaxHighlightedCodeView: NSViewRepresentable {
                 customFont = textView.font ?? NSFont.monospacedSystemFont(ofSize: p.fontSize, weight: .regular)
             }
             textView.typingAttributes[.ligature] = 0
+            textView.isEditable = p.isEditable
+
+            if force || lineNumbersChanged || themeNameChanged || darkChanged || fontChanged,
+               let editorScrollView = scrollView as? NoIntrinsicScrollView {
+                editorScrollView.configureLineNumbers(
+                    visible: p.showLineNumbers,
+                    textView: textView,
+                    themeManager: engine.themeManager
+                )
+            }
 
             // Content
             if textView.string != normalizedText {
@@ -1312,10 +1369,15 @@ public struct SyntaxHighlightedCodeView: NSViewRepresentable {
                     textView.textStorage?.setAttributedString(NSAttributedString(string: ""))
                 }
                 isUpdating = false
+                (scrollView as? NoIntrinsicScrollView)?.lineNumberGutter?.refreshContentIndex()
             }
 
-            engine.setDocument(textView.string, language: p.language)
-            if let ts = textView.textStorage, ts.length > 0 {
+            if p.enableHighlighting {
+                engine.setDocument(textView.string, language: p.language)
+            } else {
+                engine.cancelHighlighting()
+            }
+            if p.enableHighlighting, let ts = textView.textStorage, ts.length > 0 {
                 // Single highlight pass. The debounced pass is ONLY for live
                 // typing (Coordinator.textDidChange); doing both here doubled
                 // every retokenization and compounded the open-file freeze.
@@ -1374,6 +1436,7 @@ public struct SyntaxHighlightedCodeView: NSViewRepresentable {
             isInvalidated = true
             // Cancel any in-flight highlighting task on deallocation
             highlightTimer?.invalidate()
+            lspChangeTask?.cancel()
             engine?.cancelHighlighting()
             
             // Break possible retain cycles
@@ -1397,14 +1460,20 @@ public struct SyntaxHighlightedCodeView: NSViewRepresentable {
             
             // Only process character changes (typing, pasting), not attribute changes
             if editedMask.contains(.editedCharacters) {
+                guard parent.enableHighlighting else { return }
+
                 // Synchronously update the engine's model to keep it in sync
                 engine?.processEdit(range: range, changeInLength: changeInLength, newContent: textStorage.string)
                 
-                // Notify LSP of change
+                // Debounce full-document LSP synchronization. Previously every
+                // keystroke copied and sent the entire document immediately.
                 if let url = parent.fileURL {
                     let content = textStorage.string
                     let language = parent.language
-                    Task {
+                    lspChangeTask?.cancel()
+                    lspChangeTask = Task {
+                        try? await Task.sleep(nanoseconds: 300_000_000)
+                        guard !Task.isCancelled else { return }
                         await LSPManager.shared.documentChanged(uri: url.absoluteString, language: language, content: content)
                     }
                 }
@@ -1543,6 +1612,7 @@ public struct SyntaxHighlightedCodeView: NSViewRepresentable {
         }
 
         func triggerDebouncedHighlight(for textView: NSTextView?) {
+            guard parent.enableHighlighting else { return }
             highlightTimer?.invalidate()
             highlightTimer = Timer.scheduledTimer(withTimeInterval: 0.15, repeats: false) { [weak self] _ in
                 Task { @MainActor in
@@ -1698,6 +1768,7 @@ public struct SyntaxHighlightedCodeView: NSViewRepresentable {
         }
         
         private func applyHighlighting(to textView: NSTextView) {
+            guard parent.enableHighlighting else { return }
             guard let textStorage = textView.textStorage,
                   let engine = engine else { return }
             

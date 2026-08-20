@@ -17,8 +17,8 @@ import UniformTypeIdentifiers
 
 struct DataFile: Identifiable {
     let id = UUID()
-    let name: String
-    let url: URL
+    var name: String
+    var url: URL
     let type: DataFileType
     let size: Int64
     
@@ -28,6 +28,12 @@ struct DataFile: Identifiable {
         case json = "JSON"
         case sql = "SQL"
         case parquet = "Parquet"
+        case structure = "Structure"
+        case sequence = "Sequence"
+        case image = "Figure"
+        case document = "Paper"
+        case latex = "LaTeX"
+        case scientific = "Scientific"
         case unknown = "File"
         
         var icon: String {
@@ -37,6 +43,12 @@ struct DataFile: Identifiable {
             case .json: return "curlybraces"
             case .sql: return "cylinder"
             case .parquet: return "doc.zipper"
+            case .structure: return "atom"
+            case .sequence: return "text.line.first.and.arrowtriangle.forward"
+            case .image: return "photo"
+            case .document: return "doc.richtext"
+            case .latex: return "textformat"
+            case .scientific: return "waveform.path.ecg"
             case .unknown: return "doc"
             }
         }
@@ -48,6 +60,12 @@ struct DataFile: Identifiable {
             case .json: return .orange
             case .sql: return .blue
             case .parquet: return .purple
+            case .structure: return .cyan
+            case .sequence: return .mint
+            case .image: return .indigo
+            case .document: return .red
+            case .latex: return .orange
+            case .scientific: return .teal
             case .unknown: return .gray
             }
         }
@@ -59,6 +77,12 @@ struct DataFile: Identifiable {
             case "json": return .json
             case "sql", "sqlite", "db": return .sql
             case "parquet": return .parquet
+            case "pdb", "ent", "cif", "mmcif": return .structure
+            case "fasta", "fa", "faa", "fna", "a3m": return .sequence
+            case "png", "jpg", "jpeg", "gif", "webp", "svg", "tiff": return .image
+            case "pdf": return .document
+            case "tex", "bib": return .latex
+            case "h5", "hdf5", "h5ad", "npy", "npz", "sdf", "mol", "mol2": return .scientific
             default: return .unknown
             }
         }
@@ -399,12 +423,17 @@ final class NotebookViewModel: ObservableObject {
     @Published var showingDataFilePicker: Bool = false
     @Published var isEditingName: Bool = false
     @Published var workingDirectory: URL
+    @Published private(set) var scientificProjectURL: URL?
     @Published var selectedPythonPath: String = "python3"  // Can be set from UI
     /// The .mic file this notebook is bound to (Quick Save target). nil → not
     /// yet saved to a user-chosen file (autosave still protects the work).
     @Published var currentFileURL: URL?
     @Published var lastAutoSave: Date?
     private var autoSaveWork: DispatchWorkItem?
+
+    private var dataDirectory: URL {
+        (scientificProjectURL ?? workingDirectory).appendingPathComponent("data", isDirectory: true)
+    }
 
     /// Realtime autosave: debounced so rapid typing/runs don't thrash disk.
     /// Always writes the UserDefaults crash-recovery snapshot AND a real .mic
@@ -1637,35 +1666,175 @@ final class NotebookViewModel: ObservableObject {
     func addDataFile(_ url: URL) {
         guard let notebook = activeNotebook else { return }
         
-        // Prepare data directory in workspace
-        let dataDir = workingDirectory.appendingPathComponent("data")
+        // When a Science project is open, imported data belongs to that
+        // project's data directory so Science Mode, Cells and the Agent share
+        // one durable source of truth. The notebook workspace is a fallback.
+        let dataDir = dataDirectory
         try? FileManager.default.createDirectory(at: dataDir, withIntermediateDirectories: true)
-        let destURL = dataDir.appendingPathComponent(url.lastPathComponent)
-        
-        // Remove existing mock file if any
-        try? FileManager.default.removeItem(at: destURL)
-        
-        // Copy file to workspace data folder to allow access via "data/filename"
-        do {
-            try FileManager.default.copyItem(at: url, to: destURL)
-        } catch {
-            print("Failed to copy data file: \(error)")
+        let destURL = url.deletingLastPathComponent().standardizedFileURL == dataDir.standardizedFileURL
+            ? url.standardizedFileURL
+            : uniqueDataDestination(for: url.lastPathComponent, in: dataDir)
+
+        if url.standardizedFileURL != destURL.standardizedFileURL {
+            do {
+                try FileManager.default.copyItem(at: url, to: destURL)
+            } catch {
+                print("Failed to copy data file: \(error)")
+                return
+            }
         }
         
-        let attributes = try? FileManager.default.attributesOfItem(atPath: url.path)
+        let attributes = try? FileManager.default.attributesOfItem(atPath: destURL.path)
         let size = (attributes?[.size] as? Int64) ?? 0
         let dataFile = DataFile(
-            name: url.lastPathComponent,
-            url: url,
-            type: DataFile.DataFileType.from(extension: url.pathExtension),
+            name: destURL.lastPathComponent,
+            url: destURL,
+            type: DataFile.DataFileType.from(extension: destURL.pathExtension),
             size: size
         )
-        notebook.dataFiles.append(dataFile)
+        if let index = notebook.dataFiles.firstIndex(where: { $0.url.standardizedFileURL.path == destURL.standardizedFileURL.path }) {
+            notebook.dataFiles[index] = dataFile
+        } else {
+            notebook.dataFiles.append(dataFile)
+        }
+        scheduleAutoSave()
+        notifyScienceContextChanged()
+    }
+
+    func configureScientificProject(_ workspace: URL?) {
+        let normalized = workspace?.standardizedFileURL
+        guard scientificProjectURL?.path != normalized?.path else { return }
+        scientificProjectURL = normalized
+        guard let normalized else { return }
+        try? FileManager.default.createDirectory(at: normalized.appendingPathComponent("data", isDirectory: true), withIntermediateDirectories: true)
+    }
+
+    func syncScientificFiles(from workspace: URL) {
+        let expectedPath = workspace.standardizedFileURL.path
+        Task {
+            let context = await Task.detached(priority: .utility) {
+                ScienceService.indexWorkspace(at: workspace)
+            }.value
+            guard let notebook = self.activeNotebook else { return }
+            let paths = context.structures + context.sequences + context.results + context.papers + context.datasets
+            for relative in paths.prefix(1_000) {
+                let url = workspace.appendingPathComponent(relative).standardizedFileURL
+                guard url.path.hasPrefix(expectedPath + "/"),
+                      !notebook.dataFiles.contains(where: { $0.url.standardizedFileURL.path == url.path }) else { continue }
+                let attributes = try? FileManager.default.attributesOfItem(atPath: url.path)
+                notebook.dataFiles.append(DataFile(name: url.lastPathComponent, url: url, type: DataFile.DataFileType.from(extension: url.pathExtension), size: (attributes?[.size] as? Int64) ?? 0))
+            }
+            self.scheduleAutoSave()
+            self.notifyScienceContextChanged()
+        }
+    }
+
+    func createDataFile() {
+        guard let notebook = activeNotebook else { return }
+        let dataDir = dataDirectory
+        try? FileManager.default.createDirectory(at: dataDir, withIntermediateDirectories: true)
+        var index = 1
+        var url = dataDir.appendingPathComponent("dataset.csv")
+        while FileManager.default.fileExists(atPath: url.path) {
+            index += 1
+            url = dataDir.appendingPathComponent("dataset_\(index).csv")
+        }
+        do {
+            try "column,value\n".write(to: url, atomically: true, encoding: .utf8)
+            notebook.dataFiles.append(DataFile(name: url.lastPathComponent, url: url, type: .csv, size: 13))
+            scheduleAutoSave()
+            notifyScienceContextChanged()
+        } catch { print("Failed to create data file: \(error)") }
+    }
+
+    func renameDataFile(_ file: DataFile, to proposedName: String) {
+        guard let notebook = activeNotebook,
+              let index = notebook.dataFiles.firstIndex(where: { $0.id == file.id }) else { return }
+        let safeName = URL(fileURLWithPath: proposedName).lastPathComponent.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !safeName.isEmpty, safeName != ".", safeName != ".." else { return }
+        let destination = file.url.deletingLastPathComponent().appendingPathComponent(safeName)
+        guard !FileManager.default.fileExists(atPath: destination.path) else { return }
+        do {
+            try FileManager.default.moveItem(at: file.url, to: destination)
+            notebook.dataFiles[index].name = destination.lastPathComponent
+            notebook.dataFiles[index].url = destination
+            scheduleAutoSave()
+            notifyScienceContextChanged()
+        } catch { print("Failed to rename data file: \(error)") }
     }
     
     func removeDataFile(_ file: DataFile) {
         guard let notebook = activeNotebook else { return }
         notebook.dataFiles.removeAll { $0.id == file.id }
+        SharedMemoryService.shared.removeArtifact(file.url)
+        scheduleAutoSave()
+    }
+
+    func deleteDataFile(_ file: DataFile) {
+        do {
+            if FileManager.default.fileExists(atPath: file.url.path) {
+                try FileManager.default.trashItem(at: file.url, resultingItemURL: nil)
+            }
+            removeDataFile(file)
+            notifyScienceContextChanged()
+        } catch { print("Failed to move data file to Trash: \(error)") }
+    }
+
+    func insertLoaderCell(for file: DataFile) {
+        let path = file.url.path.replacingOccurrences(of: "\\", with: "\\\\").replacingOccurrences(of: "\"", with: "\\\"")
+        let code: String
+        switch file.type {
+        case .structure:
+            code = """
+            from pathlib import Path
+            structure_path = Path(r"\(path)")
+            print(f"Structure: {structure_path.name}")
+            # Optional: pip install biopython
+            from Bio.PDB import PDBParser, MMCIFParser
+            parser = MMCIFParser(QUIET=True) if structure_path.suffix.lower() in {".cif", ".mmcif"} else PDBParser(QUIET=True)
+            structure = parser.get_structure(structure_path.stem, structure_path)
+            print("Models:", len(list(structure.get_models())))
+            print("Chains:", [chain.id for chain in structure.get_chains()])
+            """
+        case .sequence:
+            code = """
+            from pathlib import Path
+            fasta_path = Path(r"\(path)")
+            from Bio import SeqIO
+            records = list(SeqIO.parse(fasta_path, "fasta"))
+            print(f"{len(records)} sequences", [len(r.seq) for r in records[:20]])
+            """
+        case .csv:
+            code = "import pandas as pd\ndata = pd.read_csv(r\"\(path)\")\ndisplay(data.head())"
+        case .parquet:
+            code = "import pandas as pd\ndata = pd.read_parquet(r\"\(path)\")\ndisplay(data.head())"
+        case .json:
+            code = "import json\nwith open(r\"\(path)\") as f:\n    data = json.load(f)\nprint(type(data), data if isinstance(data, dict) else f\"{len(data)} records\")"
+        default:
+            code = "from pathlib import Path\nartifact = Path(r\"\(path)\")\nprint(artifact, artifact.stat().st_size, \"bytes\")"
+        }
+        addCell(type: .code, language: .python)
+        if let cell = activeNotebook?.cells.first(where: { $0.id == selectedCellId }) { cell.content = code }
+        scheduleAutoSave()
+    }
+
+    private func uniqueDataDestination(for originalName: String, in directory: URL) -> URL {
+        let cleanName = URL(fileURLWithPath: originalName).lastPathComponent
+        let stem = (cleanName as NSString).deletingPathExtension
+        let ext = (cleanName as NSString).pathExtension
+        var candidate = directory.appendingPathComponent(cleanName)
+        var index = 2
+        while FileManager.default.fileExists(atPath: candidate.path) {
+            let name = ext.isEmpty ? "\(stem) \(index)" : "\(stem) \(index).\(ext)"
+            candidate = directory.appendingPathComponent(name)
+            index += 1
+        }
+        return candidate
+    }
+
+    private func notifyScienceContextChanged() {
+        guard scientificProjectURL != nil else { return }
+        AgentService.shared.refreshScienceProjectContext()
     }
     
     func saveNotebook() {
@@ -1737,6 +1906,7 @@ final class NotebookViewModel: ObservableObject {
             "created_at": ISO8601DateFormatter().string(from: notebook.createdAt),
             "modified_at": ISO8601DateFormatter().string(from: Date()),
             "cells": cellsArray,
+            "data_files": notebook.dataFiles.map { ["name": $0.name, "path": $0.url.path, "type": $0.type.rawValue, "size": $0.size] as [String: Any] },
             "metadata": [
                 "app": "MicroCode",
                 "app_version": "1.0.1",
@@ -1825,6 +1995,7 @@ final class NotebookViewModel: ObservableObject {
         if let createdStr = dict["created_at"] as? String {
             notebook.createdAt = ISO8601DateFormatter().date(from: createdStr) ?? Date()
         }
+        restoreDataFiles(from: dict["data_files"], into: notebook)
         
         notebooks.append(notebook)
         activeNotebookId = notebook.id
@@ -2016,6 +2187,7 @@ final class NotebookViewModel: ObservableObject {
                 "id": notebook.id.uuidString,
                 "name": notebook.name,
                 "cells": cellsArray,
+                "data_files": notebook.dataFiles.map { ["name": $0.name, "path": $0.url.path, "type": $0.type.rawValue, "size": $0.size] as [String: Any] },
                 "created_at": ISO8601DateFormatter().string(from: notebook.createdAt),
                 "modified_at": ISO8601DateFormatter().string(from: Date())
             ])
@@ -2069,6 +2241,7 @@ final class NotebookViewModel: ObservableObject {
                     notebook.cells.append(cell)
                 }
             }
+            restoreDataFiles(from: nbDict["data_files"], into: notebook)
             
             notebooks.append(notebook)
         }
@@ -2078,6 +2251,21 @@ final class NotebookViewModel: ObservableObject {
         selectedCellId = activeNotebook?.cells.first?.id
         
         print("✅ Restored \(notebooks.count) notebook(s) from auto-save")
+    }
+
+    private func restoreDataFiles(from value: Any?, into notebook: NotebookModel) {
+        guard let rows = value as? [[String: Any]] else { return }
+        for row in rows {
+            guard let path = row["path"] as? String else { continue }
+            let url = URL(fileURLWithPath: path)
+            guard FileManager.default.fileExists(atPath: url.path) else { continue }
+            notebook.dataFiles.append(DataFile(
+                name: row["name"] as? String ?? url.lastPathComponent,
+                url: url,
+                type: DataFile.DataFileType.from(extension: url.pathExtension),
+                size: (row["size"] as? NSNumber)?.int64Value ?? 0
+            ))
+        }
     }
 }
 
@@ -2091,6 +2279,7 @@ struct NotebookView: View {
     @State private var isReady = false
     @State private var showAIPanel = false
     @State private var showingHPCSettings = false
+    private let notebookHeaderHeight: CGFloat = 34
     
     private var panelBackground: Color {
         appState.appTheme == .transparent ? Color.white.opacity(0.05) : Color(nsColor: .windowBackgroundColor)
@@ -2166,6 +2355,10 @@ struct NotebookView: View {
             }
             // Sync Python version with appState
             viewModel.selectedPythonPath = appState.selectedPythonVersion
+            if let workspace = appState.workspaceFolder {
+                viewModel.configureScientificProject(workspace)
+                viewModel.syncScientificFiles(from: workspace)
+            }
             
             // Check if code was exported from AI Agent
             if let exportedCode = appState.aiExportedCode, !exportedCode.isEmpty {
@@ -2176,6 +2369,12 @@ struct NotebookView: View {
                 }
                 appState.aiExportedCode = nil // Clear after consuming
                 print("🚀 NotebookView: Loaded code from AI Agent into new cell")
+            }
+        }
+        .onChange(of: appState.workspaceFolder?.path) { _ in
+            viewModel.configureScientificProject(appState.workspaceFolder)
+            if let workspace = appState.workspaceFolder {
+                viewModel.syncScientificFiles(from: workspace)
             }
         }
         .onReceive(NotificationCenter.default.publisher(for: Notification.Name("ApplyCodeToCell"))) { notification in
@@ -2217,6 +2416,25 @@ struct NotebookView: View {
             viewModel.loadNotebook(from: url)
         }
     }
+
+    private func insertSharedArtifactCell(_ url: URL) {
+        let attributes = try? FileManager.default.attributesOfItem(atPath: url.path)
+        let file = DataFile(name: url.lastPathComponent, url: url, type: DataFile.DataFileType.from(extension: url.pathExtension), size: (attributes?[.size] as? Int64) ?? 0)
+        viewModel.insertLoaderCell(for: file)
+    }
+
+    private func insertSharedDataFrameCell(_ name: String) {
+        viewModel.addCell(type: .code, language: .python)
+        if let cell = viewModel.activeNotebook?.cells.first(where: { $0.id == viewModel.selectedCellId }) {
+            cell.content = """
+            # Load shared dataframe from MicroCode SHM
+            \(SharedMemoryService.shared.getPythonBridgeCode())
+            data = shm.get("\(name)")
+            display(data.head())
+            """
+            viewModel.scheduleAutoSave()
+        }
+    }
     
     // MARK: - Sidebar
     
@@ -2235,7 +2453,8 @@ struct NotebookView: View {
                 }
                 .buttonStyle(.plain)
             }
-            .padding()
+            .padding(.horizontal, 14)
+            .frame(height: notebookHeaderHeight)
             .background(controlBackground)
             
             Divider()
@@ -2325,18 +2544,37 @@ struct NotebookView: View {
                                     .font(.caption.weight(.semibold))
                                     .foregroundColor(.secondary)
                                 Spacer()
-                                Button(action: { viewModel.showingDataFilePicker = true }) {
-                                    Image(systemName: "plus.circle")
-                                        .font(.caption)
+                                if let workspace = appState.workspaceFolder {
+                                    Button(action: { viewModel.syncScientificFiles(from: workspace) }) {
+                                        Image(systemName: "arrow.triangle.2.circlepath").font(.caption)
+                                    }
+                                    .buttonStyle(.plain).help("Sync scientific artifacts from project")
+                                }
+                                Menu {
+                                    Button("Import Files…") { viewModel.showingDataFilePicker = true }
+                                    Button("New CSV File") { viewModel.createDataFile() }
+                                } label: {
+                                    Image(systemName: "plus.circle").font(.caption)
                                 }
                                 .buttonStyle(.plain)
                             }
                             
                             if let notebook = viewModel.activeNotebook, !notebook.dataFiles.isEmpty {
                                 ForEach(notebook.dataFiles) { file in
-                                    DataFileRow(file: file, onRemove: {
-                                        viewModel.removeDataFile(file)
-                                    })
+                                    DataFileRow(
+                                        file: file,
+                                        onInsertCell: { viewModel.insertLoaderCell(for: file) },
+                                        onPreviewScience: {
+                                            Task {
+                                                await appState.loadFile(url: file.url)
+                                                appState.setEditorMode(.science)
+                                            }
+                                        },
+                                        onShare: { SharedMemoryService.shared.shareArtifact(file.url) },
+                                        onRename: { viewModel.renameDataFile(file, to: $0) },
+                                        onRemove: { viewModel.removeDataFile(file) },
+                                        onDelete: { viewModel.deleteDataFile(file) }
+                                    )
                                 }
                             } else {
                                 HStack {
@@ -2360,7 +2598,7 @@ struct NotebookView: View {
                     GroupBox {
                         VStack(alignment: .leading, spacing: 8) {
                             HStack {
-                                Text("Shared Memory (SHM)")
+                                Text("Shared Data")
                                     .font(.caption.weight(.semibold))
                                     .foregroundColor(.secondary)
                                 Spacer()
@@ -2380,20 +2618,38 @@ struct NotebookView: View {
                                             .font(.system(size: 11))
                                         Spacer()
                                         Button(action: {
-                                            // Action to inspect/add cell to load
+                                            insertSharedDataFrameCell(name)
                                         }) {
-                                            Image(systemName: "info.circle")
+                                            Image(systemName: "arrow.down.to.line")
                                                 .font(.caption2)
                                         }
                                         .buttonStyle(.plain)
+                                        .help("Insert into cell")
                                     }
                                 }
                             } else {
-                                Text("No shared data")
+                                if SharedMemoryService.shared.sharedArtifacts.isEmpty {
+                                    Text("No shared data")
                                     .font(.caption2)
                                     .foregroundColor(.secondary)
                                     .frame(maxWidth: .infinity, alignment: .center)
                                     .padding(.vertical, 8)
+                                }
+                            }
+
+                            ForEach(SharedMemoryService.shared.sharedArtifacts, id: \.path) { url in
+                                HStack(spacing: 7) {
+                                    Image(systemName: DataFile.DataFileType.from(extension: url.pathExtension).icon)
+                                        .foregroundColor(DataFile.DataFileType.from(extension: url.pathExtension).color)
+                                    Text(url.lastPathComponent).font(.system(size: 10)).lineLimit(1)
+                                    Spacer()
+                                    Button { insertSharedArtifactCell(url) } label: {
+                                        Image(systemName: "arrow.down.to.line").font(.caption2)
+                                    }.buttonStyle(.plain).help("Insert into cell")
+                                    Button { SharedMemoryService.shared.removeArtifact(url) } label: {
+                                        Image(systemName: "xmark").font(.caption2)
+                                    }.buttonStyle(.plain)
+                                }
                             }
                         }
                     }
@@ -2770,7 +3026,7 @@ struct NotebookView: View {
         }
         .padding(.horizontal, 10)
         .padding(.vertical, 6)
-        .frame(height: 34)
+        .frame(height: notebookHeaderHeight)
         .background(Color(nsColor: .controlBackgroundColor))
     }
     
@@ -2838,12 +3094,21 @@ struct NotebookView: View {
                     .foregroundColor(.green)
                 Text(currentPythonDisplay)
                     .font(.system(size: 12))
+                    .lineLimit(1)
+                Spacer(minLength: 8)
+                Image(systemName: "chevron.down")
+                    .font(.system(size: 8, weight: .semibold))
+                    .foregroundColor(.secondary)
             }
             .padding(.horizontal, 8)
-            .padding(.vertical, 4)
+            .frame(minWidth: 190, minHeight: 28, maxHeight: 28)
+            .contentShape(Rectangle())
             .background(controlBackground)
-            .cornerRadius(4)
+            .clipShape(RoundedRectangle(cornerRadius: 5))
         }
+        .menuIndicator(.hidden)
+        .menuStyle(.borderlessButton)
+        .fixedSize(horizontal: true, vertical: false)
     }
     
     private var currentPythonDisplay: String {
@@ -2908,9 +3173,17 @@ struct NotebookListItem: View {
 
 struct DataFileRow: View {
     let file: DataFile
+    let onInsertCell: () -> Void
+    let onPreviewScience: () -> Void
+    let onShare: () -> Void
+    let onRename: (String) -> Void
     let onRemove: () -> Void
+    let onDelete: () -> Void
     
     @State private var isHovering = false
+    @State private var isRenaming = false
+    @State private var draftName = ""
+    @State private var confirmsDelete = false
     
     var body: some View {
         HStack(spacing: 8) {
@@ -2919,9 +3192,13 @@ struct DataFileRow: View {
                 .frame(width: 16)
             
             VStack(alignment: .leading, spacing: 1) {
-                Text(file.name)
-                    .font(.system(size: 11))
-                    .lineLimit(1)
+                if isRenaming {
+                    TextField("File name", text: $draftName)
+                        .textFieldStyle(.plain).font(.system(size: 11))
+                        .onSubmit { onRename(draftName); isRenaming = false }
+                } else {
+                    Text(file.name).font(.system(size: 11)).lineLimit(1)
+                }
                 
                 Text(ByteCountFormatter.string(fromByteCount: file.size, countStyle: .file))
                     .font(.caption2)
@@ -2938,43 +3215,36 @@ struct DataFileRow: View {
                 .cornerRadius(3)
             
             if isHovering {
-                Button(action: onRemove) {
-                    Image(systemName: "xmark.circle.fill")
-                        .font(.caption)
-                        .foregroundColor(.secondary)
-                }
-                .buttonStyle(.plain)
+                Button(action: onInsertCell) { Image(systemName: "arrow.down.to.line").font(.caption).foregroundColor(.secondary) }
+                    .buttonStyle(.plain).help("Insert loader cell")
             }
         }
         .padding(.vertical, 4)
         .contentShape(Rectangle())
         .onHover { isHovering = $0 }
-        .onTapGesture {
-            // Copy mock path to clipboard
-            let mockPath = "data/\(file.name)"
-            NSPasteboard.general.clearContents()
-            NSPasteboard.general.setString(mockPath, forType: .string)
-            
-            // Show toast or feedback (here just printing to console for simplicity, ideally visual feedback)
-            print("Copied path: \(mockPath)")
-        }
+        .onTapGesture(perform: onInsertCell)
         .contextMenu {
+            Button("Insert Loader Cell", action: onInsertCell)
+            Button("Preview in Science Mode", action: onPreviewScience)
+            Button("Share Data", action: onShare)
+            Divider()
             Button("Copy Path") {
-                let mockPath = "data/\(file.name)"
-                NSPasteboard.general.clearContents()
-                NSPasteboard.general.setString(mockPath, forType: .string)
-            }
-            
-            Button("Copy Full Path") {
                 NSPasteboard.general.clearContents()
                 NSPasteboard.general.setString(file.url.path, forType: .string)
             }
-            
-            Divider()
-            
-            Button("Remove") {
-                onRemove()
+            Button("Rename…") {
+                draftName = file.name
+                isRenaming = true
             }
+            Divider()
+            Button("Remove Reference", action: onRemove)
+            Button("Move File to Trash", role: .destructive) { confirmsDelete = true }
+        }
+        .alert("Move \(file.name) to Trash?", isPresented: $confirmsDelete) {
+            Button("Cancel", role: .cancel) {}
+            Button("Move to Trash", role: .destructive, action: onDelete)
+        } message: {
+            Text("The file will be moved to the macOS Trash and removed from this notebook.")
         }
     }
 }
@@ -3129,6 +3399,7 @@ struct NotebookCellView: View {
                             themeName: appState.appTheme.rawValue,
                             fontName: appState.cellFontName,
                             fontWeight: appState.cellFontWeight,
+                            showLineNumbers: appState.showLineNumbers,
                             editorID: "cell-\(cell.id.uuidString)"
                         )
                         .frame(height: max(50, min(calculatedHeight, 500)))

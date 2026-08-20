@@ -11,8 +11,8 @@ struct ThemePickerView: View {
     @Binding var selectedTheme: AppTheme
     
     // Group themes by category
-    private let modernThemes: [AppTheme] = [.vscodeDefault, .xcodeDark, .githubDark, .dracula, .navy, .doki, .monokaiPro, .oneDarkPro, .nord, .tokyoNight, .catppuccin]
-    private let classicThemes: [AppTheme] = [.light, .dark, .xcodeLight, .visualStudio, .githubLight, .lightBlue, .solarizedDark, .solarizedLight, .gruvboxDark]
+    private let modernThemes: [AppTheme] = [.dark, .vscodeDefault, .xcodeDark, .githubDark, .dracula, .navy, .doki, .monokaiPro, .oneDarkPro, .nord, .tokyoNight, .catppuccin]
+    private let classicThemes: [AppTheme] = [.light, .xcodeLight, .visualStudio, .githubLight, .lightBlue, .solarizedDark, .solarizedLight, .gruvboxDark]
     private let retroThemes: [AppTheme] = [.cyberPunk, .synthWave, .powershell]
     private let festiveThemes: [AppTheme] = [.happyNewYear2026, .happyNewYear2026Light, .christmas, .christmasLight]
     private let specialThemes: [AppTheme] = [.transparent, .crystalClear, .obsidianGlass, .extraClear, .wwdc, .wwdcLight, .keynote, .keynoteLight, .xnuDark]

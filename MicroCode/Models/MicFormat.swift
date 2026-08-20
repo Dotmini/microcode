@@ -18,6 +18,7 @@ struct MicNotebook: Codable {
     var createdAt: Date
     var modifiedAt: Date
     var cells: [MicCell]
+    var dataFiles: [MicDataFile]?
     
     // Convert from UI Model
     init(from model: NotebookModel) {
@@ -26,6 +27,7 @@ struct MicNotebook: Codable {
         self.createdAt = model.createdAt
         self.modifiedAt = model.modifiedAt
         self.cells = model.cells.map { MicCell(from: $0) }
+        self.dataFiles = model.dataFiles.map { MicDataFile(from: $0) }
     }
     
     // Convert to UI Model
@@ -34,7 +36,28 @@ struct MicNotebook: Codable {
         model.createdAt = self.createdAt
         model.modifiedAt = self.modifiedAt
         model.cells = self.cells.map { $0.toModel() }
+        model.dataFiles = (self.dataFiles ?? []).compactMap { $0.toModel() }
         return model
+    }
+}
+
+struct MicDataFile: Codable {
+    var name: String
+    var path: String
+    var type: String
+    var size: Int64
+
+    init(from model: DataFile) {
+        name = model.name
+        path = model.url.path
+        type = model.type.rawValue
+        size = model.size
+    }
+
+    func toModel() -> DataFile? {
+        let url = URL(fileURLWithPath: path)
+        guard FileManager.default.fileExists(atPath: url.path) else { return nil }
+        return DataFile(name: name, url: url, type: DataFile.DataFileType.from(extension: url.pathExtension), size: size)
     }
 }
 

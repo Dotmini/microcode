@@ -33,6 +33,9 @@ class AgentToolBox: ObservableObject {
     
     @Published var tools: [String: any AgentTool] = [:]
     @Published var executionHistory: [ToolExecution] = []
+    private var readCache: [String: (value: String, date: Date)] = [:]
+    private let readCacheTTL: TimeInterval = 3
+    private let defaultToolTimeout: UInt64 = 45_000_000_000
     
     /// Workspace root — all file operations are sandboxed to this path
     var workspaceRoot: String? = nil
@@ -57,6 +60,8 @@ class AgentToolBox: ObservableObject {
         register(PatchFileTool())
         register(MultiFileReadTool())
         register(GetDiagnosticsTool())
+        register(ScienceInspectTool())
+        register(AlphaFoldInputValidateTool())
     }
     
     func register(_ tool: any AgentTool) {
@@ -91,18 +96,30 @@ class AgentToolBox: ObservableObject {
         }
         
         // Sandbox validation for file operations
-        if ["file_read", "file_write", "replace_in_file", "grep_search", "list_directory_tree", "patch_file", "multi_file_read"].contains(toolName) {
+        if ["file_read", "file_write", "replace_in_file", "grep_search", "list_directory_tree", "patch_file", "multi_file_read", "science_inspect", "alphafold_input_validate"].contains(toolName) {
             if let path = resolvedParams["path"] as? String ?? resolvedParams["directory"] as? String {
                 try validateSandbox(path)
             }
         }
         
         let startTime = Date()
+        let cacheKey = executionCacheKey(toolName: toolName, params: resolvedParams)
+        let cacheable = ["file_read", "grep_search", "list_directory_tree", "git_status", "find_symbol", "multi_file_read", "get_diagnostics", "science_inspect", "alphafold_input_validate"].contains(toolName)
+        if cacheable, let cached = readCache[cacheKey], Date().timeIntervalSince(cached.date) < readCacheTTL {
+            TokenOptimizer.shared.recordContextCache(hit: true, tokens: TokenOptimizer.shared.estimateTokens(cached.value))
+            return cached.value
+        }
+        if cacheable { TokenOptimizer.shared.recordContextCache(hit: false, tokens: 0) }
         
         do {
-            let result = try await tool.execute(params: resolvedParams)
+            let result = try await executeWithTimeout(tool: tool, params: resolvedParams)
             let execution = ToolExecution(toolName: toolName, params: resolvedParams, result: result, success: true, duration: Date().timeIntervalSince(startTime))
             executionHistory.append(execution)
+            if executionHistory.count > 300 { executionHistory.removeFirst(executionHistory.count - 300) }
+            if cacheable { readCache[cacheKey] = (result, Date()) }
+            if ["file_write", "replace_in_file", "patch_file", "rename_file", "create_directory", "shell"].contains(toolName) {
+                readCache.removeAll(keepingCapacity: true)
+            }
             
             // Truncate very large outputs
             if result.count > 15000 {
@@ -114,6 +131,26 @@ class AgentToolBox: ObservableObject {
             executionHistory.append(execution)
             throw error
         }
+    }
+
+    private func executeWithTimeout(tool: any AgentTool, params: [String: Any]) async throws -> String {
+        try await withThrowingTaskGroup(of: String.self) { group in
+            group.addTask { try await tool.execute(params: params) }
+            group.addTask {
+                try await Task.sleep(nanoseconds: self.defaultToolTimeout)
+                throw ToolBoxError.executionFailed("Tool timed out after 45 seconds")
+            }
+            guard let first = try await group.next() else {
+                throw ToolBoxError.executionFailed("Tool returned no result")
+            }
+            group.cancelAll()
+            return first
+        }
+    }
+
+    private func executionCacheKey(toolName: String, params: [String: Any]) -> String {
+        let data = try? JSONSerialization.data(withJSONObject: params, options: [.sortedKeys])
+        return toolName + ":" + (data.flatMap { String(data: $0, encoding: .utf8) } ?? String(describing: params))
     }
     
     // MARK: - Sandbox Validation
@@ -755,6 +792,8 @@ class MCPClient: ObservableObject {
     private var process: Process?
     private var stdinPipe: Pipe?
     private var stdoutPipe: Pipe?
+    private var stdoutBuffer = ""
+    private var activeWorkspacePath: String?
     
     @Published var isConnected = false
     @Published var availableTools: [MCPToolSchema] = []
@@ -769,13 +808,14 @@ class MCPClient: ObservableObject {
     }
     
     func start(workspacePath: String) {
-        guard !isConnected else { return }
+        if isConnected, activeWorkspacePath == workspacePath { return }
+        if isConnected { stop() }
         
         let process = Process()
         
         var scriptPath = Bundle.main.path(forResource: "mcp-server", ofType: "py")
         if scriptPath == nil {
-            scriptPath = "/Users/dotmini/Documents/SX/microcode-native/mcp-server.py"
+            scriptPath = FileManager.default.currentDirectoryPath + "/mcp-server.py"
         }
         
         guard let path = scriptPath, FileManager.default.fileExists(atPath: path) else {
@@ -799,6 +839,8 @@ class MCPClient: ObservableObject {
         self.process = process
         self.stdinPipe = stdin
         self.stdoutPipe = stdout
+        self.activeWorkspacePath = workspacePath
+        self.stdoutBuffer = ""
         
         stdout.fileHandleForReading.readabilityHandler = { [weak self] handle in
             let data = handle.availableData
@@ -829,6 +871,10 @@ class MCPClient: ObservableObject {
     }
     
     func stop() {
+        let shutdownError = NSError(domain: "MCP", code: -2, userInfo: [NSLocalizedDescriptionKey: "MCP connection closed"])
+        let callbacks = pendingRequests.values
+        pendingRequests.removeAll()
+        callbacks.forEach { $0(.failure(shutdownError)) }
         process?.terminate()
         isConnected = false
         process = nil
@@ -836,11 +882,16 @@ class MCPClient: ObservableObject {
         stdoutPipe?.fileHandleForReading.readabilityHandler = nil
         stdoutPipe = nil
         availableTools = []
+        activeWorkspacePath = nil
+        stdoutBuffer = ""
     }
     
     private func handleOutput(_ data: Data) {
         guard let string = String(data: data, encoding: .utf8) else { return }
-        let lines = string.components(separatedBy: "\n").filter { !$0.isEmpty }
+        stdoutBuffer += string
+        let components = stdoutBuffer.components(separatedBy: "\n")
+        stdoutBuffer = components.last ?? ""
+        let lines = components.dropLast().filter { !$0.isEmpty }
         
         for line in lines {
             guard let jsonData = line.data(using: .utf8),
@@ -861,7 +912,7 @@ class MCPClient: ObservableObject {
         }
     }
     
-    private func sendRequest(method: String, params: [String: Any] = [:], completion: @escaping (Result<Any, Error>) -> Void) {
+    private func sendRequest(method: String, params: [String: Any] = [:], timeout: TimeInterval = 30, completion: @escaping (Result<Any, Error>) -> Void) {
         let reqId = requestIdCounter
         requestIdCounter += 1
         pendingRequests[reqId] = completion
@@ -873,6 +924,16 @@ class MCPClient: ObservableObject {
             "params": params
         ]
         sendRaw(request)
+
+        Task { @MainActor [weak self] in
+            try? await Task.sleep(nanoseconds: UInt64(timeout * 1_000_000_000))
+            guard let self, let callback = self.pendingRequests.removeValue(forKey: reqId) else { return }
+            callback(.failure(NSError(
+                domain: "MCP",
+                code: -3,
+                userInfo: [NSLocalizedDescriptionKey: "MCP request '\(method)' timed out after \(Int(timeout)) seconds"]
+            )))
+        }
     }
     
     private func sendNotification(method: String, params: [String: Any] = [:]) {
@@ -940,7 +1001,7 @@ class MCPClient: ObservableObject {
                 "arguments": arguments
             ]
             
-            sendRequest(method: "tools/call", params: params) { result in
+            sendRequest(method: "tools/call", params: params, timeout: 45) { result in
                 switch result {
                 case .success(let res):
                     if let dict = res as? [String: Any],

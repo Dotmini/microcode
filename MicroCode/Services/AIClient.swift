@@ -51,13 +51,13 @@ enum StreamableAIProvider: String, CaseIterable {
     
     var defaultModel: String {
         switch self {
-        case .gemini: return "gemini-2.5-flash"
-        case .openai: return "gpt-4o"
-        case .anthropic: return "claude-3-7-sonnet-20250219"
-        case .deepseek: return "deepseek-chat"
-        case .grok: return "grok-3"
-        case .qwen: return "qwen-max"
-        case .glm: return "glm-4-plus"
+        case .gemini: return "gemini-3.6-flash"
+        case .openai: return "gpt-5.1-codex"
+        case .anthropic: return "claude-sonnet-5"
+        case .deepseek: return "deepseek-v4-flash"
+        case .grok: return "grok-4.5"
+        case .qwen: return "qwen3.7-plus"
+        case .glm: return "glm-5"
         case .local: return LocalLLMService.cachedModel
         }
     }
@@ -80,7 +80,7 @@ enum StreamableAIProvider: String, CaseIterable {
     
     static func detect(from model: String) -> StreamableAIProvider {
         if model.contains("gemini") || model.contains("gemma") { return .gemini }
-        if model.contains("gpt") || model.hasPrefix("o1") || model.hasPrefix("o3") || model.hasPrefix("o4") { return .openai }
+        if model.contains("gpt") || model.contains("codex") || model.hasPrefix("o1") || model.hasPrefix("o3") || model.hasPrefix("o4") { return .openai }
         if model.contains("claude") { return .anthropic }
         if model.contains("deepseek") { return .deepseek }
         if model.contains("grok") { return .grok }

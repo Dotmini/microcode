@@ -115,6 +115,7 @@ struct PlaygroundCellView: View {
                     fontName: appState.playgroundFontName,
                     fontWeight: appState.playgroundFontWeight,
                     isScrollEnabled: false, // FIX JITTER: Disable internal scrolling
+                    showLineNumbers: appState.showLineNumbers,
                     editorID: "pgcell-\(cell.id.uuidString)"
                 )
                 .frame(height: max(60, min(calculatedHeight, 600)))

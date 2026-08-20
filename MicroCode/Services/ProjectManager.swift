@@ -483,6 +483,38 @@ class ProjectManager: ObservableObject {
     }
     
     // MARK: - Execute Action
+
+    /// Build products and package caches are stored on the external SSD when
+    /// it is mounted. CODETUNER_BUILD_ROOT can override the default location.
+    private func externalBuildRoot(for projectPath: URL) -> URL? {
+        let environment = ProcessInfo.processInfo.environment
+        let defaultRoot = "/Volumes/MAC/CodeTunerBuild"
+        let rootPath: String
+
+        if let configuredRoot = environment["CODETUNER_BUILD_ROOT"], !configuredRoot.isEmpty {
+            rootPath = configuredRoot
+        } else if FileManager.default.fileExists(atPath: "/Volumes/MAC") {
+            rootPath = defaultRoot
+        } else {
+            return nil
+        }
+
+        let root = URL(fileURLWithPath: rootPath, isDirectory: true)
+        let projectName = projectPath.deletingPathExtension().lastPathComponent
+            .replacingOccurrences(of: " ", with: "-")
+
+        do {
+            try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+            try FileManager.default.createDirectory(at: root.appendingPathComponent("cargo-home"), withIntermediateDirectories: true)
+            try FileManager.default.createDirectory(at: root.appendingPathComponent("cargo-target"), withIntermediateDirectories: true)
+            try FileManager.default.createDirectory(at: root.appendingPathComponent("rustup-home"), withIntermediateDirectories: true)
+            try FileManager.default.createDirectory(at: root.appendingPathComponent("swiftpm"), withIntermediateDirectories: true)
+            try FileManager.default.createDirectory(at: root.appendingPathComponent("derived-data"), withIntermediateDirectories: true)
+            return root.appendingPathComponent(projectName, isDirectory: true)
+        } catch {
+            return nil
+        }
+    }
     
     func execute(action: ProjectAction, projectPath: URL, completion: @escaping (Bool, String) -> Void) {
         guard !isRunning else {
@@ -491,9 +523,22 @@ class ProjectManager: ObservableObject {
         }
         
         let projectType = detectProjectType(at: projectPath)
-        guard let command = getBuildCommand(for: projectType, action: action, config: buildConfiguration, projectPath: projectPath.path) else {
+        guard let baseCommand = getBuildCommand(for: projectType, action: action, config: buildConfiguration, projectPath: projectPath.path) else {
             completion(false, "Action '\(action.rawValue)' not supported for \(projectType.rawValue) projects")
             return
+        }
+
+        var command = baseCommand
+        let buildRoot = externalBuildRoot(for: projectPath)
+        if let buildRoot {
+            switch projectType {
+            case .xcode:
+                command.arguments += ["-derivedDataPath", buildRoot.appendingPathComponent("derived-data").path]
+            case .swift:
+                command.arguments += ["--scratch-path", buildRoot.appendingPathComponent("swiftpm").path]
+            default:
+                break
+            }
         }
         
         if projectType == .xcode {
@@ -508,6 +553,14 @@ class ProjectManager: ObservableObject {
         process.currentDirectoryURL = projectPath
         process.executableURL = URL(fileURLWithPath: findExecutable(command.executable))
         process.arguments = command.arguments
+
+        if let buildRoot {
+            var environment = ProcessInfo.processInfo.environment
+            environment["CARGO_HOME"] = buildRoot.deletingLastPathComponent().appendingPathComponent("cargo-home").path
+            environment["CARGO_TARGET_DIR"] = buildRoot.deletingLastPathComponent().appendingPathComponent("cargo-target").path
+            environment["RUSTUP_HOME"] = buildRoot.deletingLastPathComponent().appendingPathComponent("rustup-home").path
+            process.environment = environment
+        }
         
         let pipe = Pipe()
         process.standardOutput = pipe

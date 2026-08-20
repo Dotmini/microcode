@@ -1878,6 +1878,14 @@ REMEMBER: You are building the future of coding. Make it look magic."#,
         actual_config.api_key = k.clone();
     }
 
+    // When the desktop app has configured the Dotmini cloud proxy, use the
+    // OpenAI-compatible gateway for the agent's model calls while keeping all
+    // file and command tools local to this backend.
+    if std::env::var("DOTMINI_API_BASE_URL").is_ok() && !actual_config.api_key.is_empty() {
+        actual_config.use_microrent_proxy = true;
+        actual_config.microrent_token = Some(actual_config.api_key.clone());
+    }
+
     let provider = crate::ai::get_provider(&actual_config.provider)?;
 
     while loop_count < max_loops {
@@ -2097,6 +2105,11 @@ INSTRUCTIONS:
         }
         if let Some(k) = &request.api_key {
             actual_config.api_key = k.clone();
+        }
+
+        if std::env::var("DOTMINI_API_BASE_URL").is_ok() && !actual_config.api_key.is_empty() {
+            actual_config.use_microrent_proxy = true;
+            actual_config.microrent_token = Some(actual_config.api_key.clone());
         }
 
         let provider = match crate::ai::get_provider(&actual_config.provider) {
