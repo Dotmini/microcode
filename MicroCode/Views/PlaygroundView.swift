@@ -469,6 +469,7 @@ struct PlaygroundView: View {
             themeName: appState.appTheme.rawValue,
             fontName: appState.playgroundFontName,
             fontWeight: appState.playgroundFontWeight,
+            showLineNumbers: appState.showLineNumbers,
             editorID: "playground-main"
         )
         .frame(maxWidth: .infinity, maxHeight: .infinity)

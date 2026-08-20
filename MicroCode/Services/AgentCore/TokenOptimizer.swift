@@ -42,13 +42,18 @@ struct TokenBudget {
 
 // MARK: - Token Usage Stats
 
-struct TokenUsageStats {
+struct TokenUsageStats: Codable {
     var inputTokens: Int = 0
     var outputTokens: Int = 0
     var savedTokens: Int = 0
     var compressionRatio: Double = 1.0
     var totalRequests: Int = 0
     var totalCost: Double = 0.0  // Estimated cost in USD
+    var cacheHits: Int = 0
+    var cacheMisses: Int = 0
+    var cachedTokens: Int = 0
+    var activeProvider: String = ""
+    var activeModel: String = ""
     
     var formattedSavings: String {
         let pct = savedTokens > 0 ? Double(savedTokens) / Double(inputTokens + savedTokens) * 100 : 0
@@ -93,6 +98,15 @@ class TokenOptimizer: ObservableObject {
         "build", "run", "test", "deploy", "install", "remove", "add",
         "fix", "bug", "feature", "refactor", "optimize", "debug"
     ]
+
+    private let statsKey = "microcode.agentUsage.v2"
+
+    private init() {
+        if let data = UserDefaults.standard.data(forKey: statsKey),
+           let saved = try? JSONDecoder().decode(TokenUsageStats.self, from: data) {
+            stats = saved
+        }
+    }
     
     // MARK: - Estimate Token Count (fast approximation)
     
@@ -471,6 +485,33 @@ class TokenOptimizer: ObservableObject {
     
     func resetStats() {
         stats = TokenUsageStats()
+        persistStats()
+    }
+
+    func recordUsage(provider: String, model: String, inputTokens: Int, outputTokens: Int) {
+        stats.inputTokens += inputTokens
+        stats.outputTokens += outputTokens
+        stats.totalRequests += 1
+        stats.totalCost += estimateCost(inputTokens: inputTokens, outputTokens: outputTokens, model: model)
+        stats.compressionRatio = Double(stats.savedTokens) / max(1, Double(stats.inputTokens + stats.savedTokens))
+        stats.activeProvider = provider
+        stats.activeModel = model
+        persistStats()
+    }
+
+    func recordContextCache(hit: Bool, tokens: Int) {
+        if hit {
+            stats.cacheHits += 1
+            stats.cachedTokens += max(0, tokens)
+        } else {
+            stats.cacheMisses += 1
+        }
+        persistStats()
+    }
+
+    private func persistStats() {
+        guard let data = try? JSONEncoder().encode(stats) else { return }
+        UserDefaults.standard.set(data, forKey: statsKey)
     }
     
     // MARK: - Token Cost Estimation

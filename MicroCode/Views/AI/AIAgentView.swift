@@ -17,6 +17,9 @@ import WebKit
 struct AIAgentView: View {
     @EnvironmentObject var appState: AppState
     @StateObject private var agent = AgentService.shared
+    @StateObject private var modelCatalog = AIModelCatalog.shared
+    @StateObject private var tokenOptimizer = TokenOptimizer.shared
+    var allowsChatSidebar: Bool = true
     
     @State private var inputText = ""
     @State private var attachments: [AIAttachment] = []
@@ -31,13 +34,13 @@ struct AIAgentView: View {
     
     // Aesthetic Constants
     private let borderColor = Color.white.opacity(0.1)
-    private let paneColor = Color(nsColor: .controlBackgroundColor)
+    private var paneColor: Color { Color(nsColor: appState.appTheme.panelBackground) }
     private let accentColor = Color.accentColor
     
     var body: some View {
         HStack(spacing: 0) {
             // Chat Sidebar (Collapsible)
-            if agent.showChatSidebar {
+            if allowsChatSidebar && agent.showChatSidebar {
                 chatSidebar
                     .frame(width: 220)
                 Divider()
@@ -78,7 +81,7 @@ struct AIAgentView: View {
                         
                         ZStack(alignment: .bottom) {
                             // Chat Scroll
-                            AgentChatStage(messages: agent.messages, isLoading: agent.isLoading, currentToolExecution: agent.currentToolExecution, onApplyChange: { change in applyChange(change) }, onRejectChange: { change in rejectChange(change) }, onSuggestionTap: { suggestion in inputText = suggestion; sendMessage() })
+                            AgentChatStage(messages: agent.messages, isLoading: agent.isLoading, domain: agent.domain, currentToolExecution: agent.currentToolExecution, onApplyChange: { change in applyChange(change) }, onRejectChange: { change in rejectChange(change) }, onSuggestionTap: { suggestion in inputText = suggestion; sendMessage() })
                             
                             VStack(spacing: 0) {
                                 // Suggested Action (after completion)
@@ -99,7 +102,7 @@ struct AIAgentView: View {
                 }
             }
         }
-        .background(appState.appTheme == .transparent || appState.appTheme == .extraClear ? Color.clear : Color(nsColor: .windowBackgroundColor))
+        .background(appState.appTheme.isGlass ? Color.clear : Color(nsColor: appState.appTheme.workspaceBackground))
         .onAppear {
             if let workspace = appState.workspaceFolder {
                 agent.setWorkspace(workspace.path)
@@ -123,8 +126,9 @@ struct AIAgentView: View {
                     .foregroundColor(.secondary)
                 Spacer()
                 Button(action: { _ = agent.createNewChat() }) {
-                    Image(systemName: "plus.circle.fill")
-                        .foregroundColor(.accentColor)
+                    Text("New")
+                        .font(.system(size: 10))
+                        .foregroundColor(.secondary)
                 }
                 .buttonStyle(.plain)
                 .help("New Chat")
@@ -159,23 +163,25 @@ struct AIAgentView: View {
             GeometryReader { geo in
                 let isCompact = geo.size.width < 320
                 
-                HStack(spacing: 4) {
+                HStack(spacing: 10) {
                     // Sidebar Toggle
-                    Button(action: { agent.showChatSidebar.toggle() }) {
-                        Image(systemName: "sidebar.left")
-                            .font(.system(size: 11))
-                            .foregroundColor(agent.showChatSidebar ? .accentColor : .secondary)
-                            .frame(width: 26, height: 26)
+                    if allowsChatSidebar {
+                        Button(action: { agent.showChatSidebar.toggle() }) {
+                            Text("History")
+                                .font(.system(size: 10, weight: agent.showChatSidebar ? .semibold : .regular))
+                                .foregroundColor(agent.showChatSidebar ? .primary : .secondary)
+                                .frame(height: 26)
+                        }
+                        .buttonStyle(.plain)
+                        .help("Chat History")
                     }
-                    .buttonStyle(.plain)
-                    .help("Chat History")
                     
                     // New Chat
                     Button(action: { _ = agent.createNewChat() }) {
-                        Image(systemName: "plus.message")
-                            .font(.system(size: 11))
+                        Text("New")
+                            .font(.system(size: 10))
                             .foregroundColor(.secondary)
-                            .frame(width: 26, height: 26)
+                            .frame(height: 26)
                     }
                     .buttonStyle(.plain)
                     .help("New Chat")
@@ -185,25 +191,23 @@ struct AIAgentView: View {
                     // Mode Tabs — responsive: icon-only when compact
                     ScrollView(.horizontal, showsIndicators: false) {
                         HStack(spacing: 1) {
-                            modePill("Chat", icon: "bubble.left.fill", isActive: !isPaperMode && !isCellMode && !isPlanMode && !isTaskMode, compact: isCompact) {
+                            modePill("Chat", isActive: !isPaperMode && !isCellMode && !isPlanMode && !isTaskMode, compact: isCompact) {
                                 isPaperMode = false; isCellMode = false; isPlanMode = false; isTaskMode = false
                             }
-                            modePill("Plan", icon: "list.clipboard.fill", isActive: isPlanMode, compact: isCompact) {
+                            modePill("Plan", isActive: isPlanMode, compact: isCompact) {
                                 isPlanMode = true; isPaperMode = false; isCellMode = false; isTaskMode = false
                             }
-                            modePill("Task", icon: "checkmark.circle.fill", isActive: isTaskMode, compact: isCompact) {
+                            modePill("Task", isActive: isTaskMode, compact: isCompact) {
                                 isTaskMode = true; isPlanMode = false; isPaperMode = false; isCellMode = false
                             }
-                            modePill("Report", icon: "doc.text.fill", isActive: isPaperMode, compact: isCompact) {
+                            modePill("Report", isActive: isPaperMode, compact: isCompact) {
                                 isPaperMode = true; isCellMode = false; isPlanMode = false; isTaskMode = false
                             }
-                            modePill("Cells", icon: "rectangle.grid.1x2.fill", isActive: isCellMode, compact: isCompact) {
+                            modePill("Cells", isActive: isCellMode, compact: isCompact) {
                                 isCellMode = true; isPaperMode = false; isPlanMode = false; isTaskMode = false
                             }
                         }
                         .padding(2)
-                        .background(Color.white.opacity(0.04))
-                        .cornerRadius(6)
                     }
                     
                     Spacer(minLength: 4)
@@ -228,15 +232,12 @@ struct AIAgentView: View {
                                 attachments.removeAll()
                             } label: { Label("Clear Chat", systemImage: "trash") }
                         } label: {
-                            Image(systemName: "ellipsis")
+                            Text("More")
                                 .font(.system(size: 10))
                                 .foregroundColor(.secondary)
-                                .frame(width: 24, height: 24)
-                                .background(Color.white.opacity(0.04))
-                                .cornerRadius(4)
+                                .frame(height: 24)
                         }
                         .menuStyle(.borderlessButton)
-                        .frame(width: 24)
                     }
                 }
                 .padding(.horizontal, 8)
@@ -245,27 +246,19 @@ struct AIAgentView: View {
             .frame(height: 36)
             .background(paneColor)
             
-            Rectangle()
-                .fill(LinearGradient(colors: [.purple.opacity(0.4), .blue.opacity(0.3), .cyan.opacity(0.2)], startPoint: .leading, endPoint: .trailing))
-                .frame(height: 1)
+            Divider()
         }
     }
     
-    private func modePill(_ label: String, icon: String, isActive: Bool, compact: Bool = false, action: @escaping () -> Void) -> some View {
+    private func modePill(_ label: String, isActive: Bool, compact: Bool = false, action: @escaping () -> Void) -> some View {
         Button(action: { withAnimation(.easeInOut(duration: 0.2)) { action() } }) {
-            HStack(spacing: compact ? 0 : 3) {
-                Image(systemName: icon)
-                    .font(.system(size: 9))
-                if !compact {
-                    Text(label)
-                        .font(.system(size: 9, weight: .medium))
-                }
-            }
-            .foregroundColor(isActive ? .white : .secondary)
-            .padding(.horizontal, compact ? 6 : 8)
+            Text(compact ? String(label.prefix(1)) : label)
+                .font(.system(size: 10, weight: isActive ? .semibold : .regular))
+            .foregroundColor(isActive ? .primary : .secondary)
+            .padding(.horizontal, compact ? 7 : 8)
             .padding(.vertical, 4)
-            .background(isActive ? Color.accentColor.opacity(0.8) : Color.clear)
-            .cornerRadius(4)
+            .background(isActive ? Color.primary.opacity(0.09) : Color.clear)
+            .cornerRadius(3)
         }
         .buttonStyle(.plain)
         .help(label)
@@ -278,17 +271,9 @@ struct AIAgentView: View {
             VStack(alignment: .leading, spacing: 16) {
                 // Header
                 HStack(spacing: 10) {
-                    ZStack {
-                        Circle()
-                            .fill(LinearGradient(colors: [.blue.opacity(0.15), .purple.opacity(0.1)], startPoint: .topLeading, endPoint: .bottomTrailing))
-                            .frame(width: 40, height: 40)
-                        Image(systemName: "list.bullet.clipboard.fill")
-                            .font(.system(size: 18))
-                            .foregroundStyle(LinearGradient(colors: [.blue, .purple], startPoint: .topLeading, endPoint: .bottomTrailing))
-                    }
                     VStack(alignment: .leading, spacing: 2) {
                         Text("Implementation Plan")
-                            .font(.system(size: 16, weight: .bold, design: .rounded))
+                            .font(.system(size: 16, weight: .semibold))
                         Text("AI-generated execution steps for the current task")
                             .font(.system(size: 11))
                             .foregroundColor(.secondary)
@@ -303,9 +288,6 @@ struct AIAgentView: View {
                 if planSteps.isEmpty {
                     VStack(spacing: 12) {
                         Spacer().frame(height: 60)
-                        Image(systemName: "doc.text.magnifyingglass")
-                            .font(.system(size: 40))
-                            .foregroundColor(.secondary.opacity(0.3))
                         Text("No plan generated yet")
                             .font(.system(size: 13))
                             .foregroundColor(.secondary)
@@ -319,21 +301,10 @@ struct AIAgentView: View {
                     VStack(alignment: .leading, spacing: 6) {
                         ForEach(Array(planSteps.enumerated()), id: \.offset) { idx, step in
                             HStack(alignment: .top, spacing: 10) {
-                                // Step number circle
-                                ZStack {
-                                    Circle()
-                                        .fill(step.isDone ? Color.green.opacity(0.15) : Color.blue.opacity(0.1))
-                                        .frame(width: 24, height: 24)
-                                    if step.isDone {
-                                        Image(systemName: "checkmark")
-                                            .font(.system(size: 10, weight: .bold))
-                                            .foregroundColor(.green)
-                                    } else {
-                                        Text("\(idx + 1)")
-                                            .font(.system(size: 10, weight: .bold, design: .monospaced))
-                                            .foregroundColor(.blue)
-                                    }
-                                }
+                                Text(String(format: "%02d", idx + 1))
+                                    .font(.system(size: 10, weight: .medium, design: .monospaced))
+                                    .foregroundColor(.secondary)
+                                    .frame(width: 24, alignment: .leading)
                                 
                                 VStack(alignment: .leading, spacing: 2) {
                                     Text(step.title)
@@ -351,10 +322,7 @@ struct AIAgentView: View {
                             }
                             .padding(.horizontal, 16)
                             .padding(.vertical, 6)
-                            .background(
-                                RoundedRectangle(cornerRadius: 8)
-                                    .fill(step.isDone ? Color.green.opacity(0.03) : Color.clear)
-                            )
+                            .background(step.isDone ? Color.primary.opacity(0.025) : Color.clear)
                         }
                     }
                 }
@@ -401,23 +369,19 @@ struct AIAgentView: View {
         VStack(spacing: 0) {
             // Tab bar
             HStack(spacing: 0) {
-                taskEditorTab("task.md", icon: "checklist", idx: 0)
-                taskEditorTab("agent.md", icon: "brain", idx: 1)
+                taskEditorTab("task.md", idx: 0)
+                taskEditorTab("agent.md", idx: 1)
                 Spacer()
                 
                 // Save button
                 Button(action: saveTaskFiles) {
-                    HStack(spacing: 4) {
-                        Image(systemName: "square.and.arrow.down")
-                            .font(.system(size: 10))
-                        Text("Save")
-                            .font(.system(size: 10, weight: .medium))
-                    }
-                    .foregroundColor(.white)
+                    Text("Save")
+                    .font(.system(size: 10, weight: .medium))
+                    .foregroundColor(.primary)
                     .padding(.horizontal, 10)
                     .padding(.vertical, 4)
-                    .background(LinearGradient(colors: [.blue, .purple], startPoint: .leading, endPoint: .trailing))
-                    .cornerRadius(5)
+                    .background(Color.primary.opacity(0.09))
+                    .cornerRadius(4)
                 }
                 .buttonStyle(.plain)
                 .padding(.trailing, 12)
@@ -444,19 +408,15 @@ struct AIAgentView: View {
         .onAppear { loadTaskFiles() }
     }
     
-    private func taskEditorTab(_ label: String, icon: String, idx: Int) -> some View {
+    private func taskEditorTab(_ label: String, idx: Int) -> some View {
         Button(action: { withAnimation { activeTaskTab = idx } }) {
-            HStack(spacing: 4) {
-                Image(systemName: icon)
-                    .font(.system(size: 9))
-                Text(label)
-                    .font(.system(size: 10, weight: .medium, design: .monospaced))
-            }
-            .foregroundColor(activeTaskTab == idx ? .white : .secondary)
+            Text(label)
+                .font(.system(size: 10, weight: .medium, design: .monospaced))
+            .foregroundColor(activeTaskTab == idx ? .primary : .secondary)
             .padding(.horizontal, 10)
             .padding(.vertical, 5)
-            .background(activeTaskTab == idx ? Color.accentColor.opacity(0.7) : Color.clear)
-            .cornerRadius(5)
+            .background(activeTaskTab == idx ? Color.primary.opacity(0.09) : Color.clear)
+            .cornerRadius(4)
         }
         .buttonStyle(.plain)
     }
@@ -492,10 +452,7 @@ struct AIAgentView: View {
     
     private var inputArea: some View {
         VStack(spacing: 0) {
-            // Subtle top separator
-            Rectangle()
-                .fill(LinearGradient(colors: [.purple.opacity(0.15), .blue.opacity(0.1), .clear], startPoint: .leading, endPoint: .trailing))
-                .frame(height: 1)
+            Divider()
             
             // Attachment Pills
             if !attachments.isEmpty {
@@ -505,23 +462,20 @@ struct AIAgentView: View {
                             if index < attachments.count {
                                 let file = attachments[index]
                                 HStack(spacing: 4) {
-                                    Image(systemName: fileIcon(for: file.type))
-                                        .font(.system(size: 9))
-                                        .foregroundColor(.purple)
                                     Text(file.name)
                                         .font(.system(size: 10))
                                         .lineLimit(1)
                                     Button(action: { attachments.remove(at: index) }) {
-                                        Image(systemName: "xmark.circle.fill")
-                                            .font(.system(size: 9))
+                                        Text("×")
+                                            .font(.system(size: 11))
                                             .foregroundColor(.secondary)
                                     }
                                     .buttonStyle(.plain)
                                 }
                                 .padding(.horizontal, 8)
                                 .padding(.vertical, 4)
-                                .background(Color.purple.opacity(0.08))
-                                .cornerRadius(6)
+                                .background(Color.primary.opacity(0.06))
+                                .cornerRadius(4)
                             }
                         }
                     }
@@ -534,21 +488,17 @@ struct AIAgentView: View {
             HStack(alignment: .bottom, spacing: 8) {
                 // Attach
                 Button(action: pickFile) {
-                    Image(systemName: "paperclip")
-                        .font(.system(size: 13))
+                    Text("Attach")
+                        .font(.system(size: 10))
                         .foregroundColor(.secondary)
-                        .frame(width: 28, height: 28)
+                        .frame(height: 28)
                 }
                 .buttonStyle(.plain)
                 
                 // Context file pill
                 if let file = appState.currentFile {
-                    HStack(spacing: 3) {
-                        Image(systemName: "doc.text")
-                            .font(.system(size: 8))
-                        Text(file.name)
-                            .font(.system(size: 9))
-                    }
+                    Text(file.name)
+                        .font(.system(size: 9))
                     .foregroundColor(.secondary)
                     .padding(.horizontal, 6)
                     .padding(.vertical, 3)
@@ -556,9 +506,9 @@ struct AIAgentView: View {
                     .cornerRadius(4)
                 }
                 
-                // Text Field — Premium rounded
+                // Text Field
                 if #available(macOS 13.0, *) {
-                    TextField("Ask anything or give instructions...", text: $inputText, axis: .vertical)
+                    TextField(agent.domain == .science ? "Ask about this project, structure, dataset, or paper…" : "Ask anything or give instructions...", text: $inputText, axis: .vertical)
                         .textFieldStyle(.plain)
                         .font(.system(size: 13))
                         .lineLimit(1...6)
@@ -566,15 +516,10 @@ struct AIAgentView: View {
                         .padding(.horizontal, 12)
                         .padding(.vertical, 8)
                         .background(Color(nsColor: .textBackgroundColor))
-                        .cornerRadius(10)
+                        .cornerRadius(6)
                         .overlay(
-                            RoundedRectangle(cornerRadius: 10)
-                                .stroke(
-                                    isInputFocused
-                                        ? LinearGradient(colors: [.purple.opacity(0.5), .blue.opacity(0.4)], startPoint: .topLeading, endPoint: .bottomTrailing)
-                                        : LinearGradient(colors: [borderColor, borderColor], startPoint: .leading, endPoint: .trailing),
-                                    lineWidth: 1
-                                )
+                            RoundedRectangle(cornerRadius: 6)
+                                .stroke(isInputFocused ? Color.primary.opacity(0.35) : borderColor, lineWidth: 1)
                         )
                         .onSubmit {
                             if !inputText.isEmpty { sendMessage() }
@@ -587,10 +532,10 @@ struct AIAgentView: View {
                         .padding(.horizontal, 12)
                         .padding(.vertical, 8)
                         .background(Color(nsColor: .textBackgroundColor))
-                        .cornerRadius(10)
+                        .cornerRadius(6)
                         .overlay(
-                            RoundedRectangle(cornerRadius: 10)
-                                .stroke(isInputFocused ? accentColor : borderColor, lineWidth: 1)
+                            RoundedRectangle(cornerRadius: 6)
+                                .stroke(isInputFocused ? Color.primary.opacity(0.35) : borderColor, lineWidth: 1)
                         )
                         .onSubmit {
                             if !inputText.isEmpty { sendMessage() }
@@ -599,32 +544,26 @@ struct AIAgentView: View {
                 
                 // Send or Stop Button
                 if agent.isLoading {
-                    // STOP button
                     Button(action: { agent.stopGeneration() }) {
-                        Image(systemName: "stop.fill")
-                            .font(.system(size: 12))
-                            .foregroundColor(.white)
-                            .frame(width: 32, height: 32)
-                            .background(
-                                LinearGradient(colors: [.red, .orange], startPoint: .topLeading, endPoint: .bottomTrailing)
-                            )
-                            .cornerRadius(8)
-                            .shadow(color: .red.opacity(0.3), radius: 4, y: 2)
+                        Text("Stop")
+                            .font(.system(size: 10, weight: .medium))
+                            .foregroundColor(.primary)
+                            .padding(.horizontal, 10)
+                            .frame(height: 32)
+                            .background(Color.primary.opacity(0.09))
+                            .cornerRadius(5)
                     }
                     .buttonStyle(.plain)
                     .help("Stop Generation")
                 } else {
-                    // SEND button
                     Button(action: sendMessage) {
-                        Image(systemName: "paperplane.fill")
-                            .font(.system(size: 12))
-                            .foregroundColor(.white)
-                            .frame(width: 32, height: 32)
-                            .background(
-                                LinearGradient(colors: [.purple, .blue], startPoint: .topLeading, endPoint: .bottomTrailing)
-                            )
-                            .cornerRadius(8)
-                            .shadow(color: .purple.opacity(0.3), radius: 4, y: 2)
+                        Text("Send")
+                            .font(.system(size: 10, weight: .medium))
+                            .foregroundColor(.primary)
+                            .padding(.horizontal, 10)
+                            .frame(height: 32)
+                            .background(Color.primary.opacity(0.09))
+                            .cornerRadius(5)
                     }
                     .buttonStyle(.plain)
                     .disabled(inputText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty && attachments.isEmpty)
@@ -660,46 +599,29 @@ struct AIAgentView: View {
     
     private var agentPhaseBar: some View {
         HStack(spacing: 8) {
-            // Animated indicator
-            Circle()
-                .fill(agent.agentPhase.color)
-                .frame(width: 8, height: 8)
-                .overlay(
-                    Circle()
-                        .stroke(agent.agentPhase.color.opacity(0.5), lineWidth: 2)
-                        .scaleEffect(agent.agentPhase == .idle ? 1.0 : 1.5)
-                        .opacity(agent.agentPhase == .idle ? 0 : 0.5)
-                        .animation(.easeInOut(duration: 0.8).repeatForever(autoreverses: true), value: agent.agentPhase)
-                )
-            
-            Image(systemName: agent.agentPhase.icon)
-                .font(.system(size: 10))
-                .foregroundColor(agent.agentPhase.color)
+            ProgressView()
+                .controlSize(.mini)
             
             Text(agent.agentPhase.displayText)
                 .font(.system(size: 10, weight: .medium))
-                .foregroundColor(agent.agentPhase.color)
+                .foregroundColor(.secondary)
             
             Spacer()
             
             // Files modified counter
             if !agent.filesModified.isEmpty {
-                HStack(spacing: 3) {
-                    Image(systemName: "doc.badge.arrow.up")
-                        .font(.system(size: 9))
-                    Text("\(agent.filesModified.count) files")
-                        .font(.system(size: 9))
-                }
-                .foregroundColor(.orange)
+                Text("\(agent.filesModified.count) files changed")
+                    .font(.system(size: 9))
+                    .foregroundColor(.secondary)
                 .padding(.horizontal, 6)
                 .padding(.vertical, 2)
-                .background(Color.orange.opacity(0.1))
+                .background(Color.primary.opacity(0.05))
                 .cornerRadius(3)
             }
         }
         .padding(.horizontal, 12)
         .padding(.vertical, 5)
-        .background(agent.agentPhase.color.opacity(0.05))
+        .background(Color.primary.opacity(0.035))
         .transition(.move(edge: .top).combined(with: .opacity))
     }
     
@@ -707,10 +629,6 @@ struct AIAgentView: View {
     
     private func suggestedActionBar(_ suggestion: SuggestedAction) -> some View {
         HStack(spacing: 8) {
-            Image(systemName: suggestion.icon)
-                .font(.system(size: 14))
-                .foregroundColor(.green)
-            
             VStack(alignment: .leading, spacing: 1) {
                 Text(suggestion.title)
                     .font(.system(size: 11, weight: .bold))
@@ -730,16 +648,16 @@ struct AIAgentView: View {
             }) {
                 Text("Run")
                     .font(.system(size: 10, weight: .bold))
-                    .foregroundColor(.white)
+                    .foregroundColor(.primary)
                     .padding(.horizontal, 12)
                     .padding(.vertical, 4)
-                    .background(Color.green)
+                    .background(Color.primary.opacity(0.09))
                     .cornerRadius(4)
             }
             .buttonStyle(.plain)
             
             Button(action: { agent.suggestedAction = nil }) {
-                Image(systemName: "xmark")
+                Text("Dismiss")
                     .font(.system(size: 9))
                     .foregroundColor(.secondary)
             }
@@ -747,7 +665,7 @@ struct AIAgentView: View {
         }
         .padding(.horizontal, 12)
         .padding(.vertical, 6)
-        .background(Color.green.opacity(0.08))
+        .background(Color.primary.opacity(0.035))
         .transition(.move(edge: .bottom).combined(with: .opacity))
     }
     
@@ -759,50 +677,35 @@ struct AIAgentView: View {
                 // Token savings indicator
                 let stats = TokenOptimizer.shared.stats
                 if stats.savedTokens > 0 {
-                    HStack(spacing: 3) {
-                        Image(systemName: "bolt.fill")
-                            .font(.system(size: 8))
-                            .foregroundColor(.green)
-                        Text("\(stats.formattedSavings)")
-                            .font(.system(size: 8, weight: .medium))
-                            .foregroundColor(.green)
-                    }
+                    Text(stats.formattedSavings)
+                        .font(.system(size: 8, weight: .medium))
+                        .foregroundColor(.secondary)
                     .padding(.horizontal, 5)
                     .padding(.vertical, 2)
-                    .background(Color.green.opacity(0.08))
+                    .background(Color.primary.opacity(0.05))
                     .cornerRadius(3)
                 }
                 
                 // Memory count
                 let memCount = AgentMemoryService.shared.memories.count
                 if memCount > 0 {
-                    HStack(spacing: 3) {
-                        Image(systemName: "brain")
-                            .font(.system(size: 8))
-                            .foregroundColor(.purple)
-                        Text("\(memCount)")
-                            .font(.system(size: 8))
-                            .foregroundColor(.purple)
-                    }
+                    Text("Memory \(memCount)")
+                        .font(.system(size: 8))
+                        .foregroundColor(.secondary)
                     .padding(.horizontal, 5)
                     .padding(.vertical, 2)
-                    .background(Color.purple.opacity(0.06))
+                    .background(Color.primary.opacity(0.05))
                     .cornerRadius(3)
                 }
                 
                 ForEach(agent.activityLog.suffix(8)) { activity in
-                    HStack(spacing: 3) {
-                        Image(systemName: activity.type.icon)
-                            .font(.system(size: 8))
-                            .foregroundColor(activity.type.color)
-                        Text(activity.message)
-                            .font(.system(size: 8))
-                            .foregroundColor(.secondary)
-                            .lineLimit(1)
-                    }
+                    Text(activity.message)
+                        .font(.system(size: 8))
+                        .foregroundColor(.secondary)
+                        .lineLimit(1)
                     .padding(.horizontal, 5)
                     .padding(.vertical, 2)
-                    .background(activity.type.color.opacity(0.06))
+                    .background(Color.primary.opacity(0.04))
                     .cornerRadius(3)
                 }
             }
@@ -1027,29 +930,15 @@ struct AIAgentView: View {
         Menu {
             modelMenuContent
         } label: {
-            HStack(spacing: 4) {
-                // Provider icon with color
-                providerIcon(for: appState.aiProvider)
-                    .font(.system(size: 9, weight: .semibold))
-                
-                Text(appState.aiModel.isEmpty ? "Auto" : shortModelName(appState.aiModel))
-                    .font(.system(size: 9, weight: .medium))
-                    .lineLimit(1)
-                    .truncationMode(.tail)
-                
-                // Connection status dot
-                Circle()
-                    .fill(hasActiveKey(appState.aiProvider) ? Color.green : Color.orange)
-                    .frame(width: 4, height: 4)
-                
-                Image(systemName: "chevron.down")
-                    .font(.system(size: 6))
-            }
+            Text(appState.aiModel.isEmpty ? "Auto" : shortModelName(appState.aiModel))
+                .font(.system(size: 9, weight: .medium))
+                .lineLimit(1)
+                .truncationMode(.tail)
             .foregroundColor(.secondary)
             .padding(.horizontal, 6)
             .padding(.vertical, 4)
-            .background(Color.white.opacity(0.05))
-            .cornerRadius(4)
+            .background(Color.primary.opacity(0.05))
+            .cornerRadius(3)
         }
         .menuStyle(.borderlessButton)
         .frame(maxWidth: 130)
@@ -1085,11 +974,11 @@ struct AIAgentView: View {
         
         // Gemini
         Menu {
-            ForEach(["gemini-2.5-flash", "gemini-2.5-pro", "gemini-2.0-flash"], id: \.self) { model in
-                Button(action: { setModel("gemini", model) }) {
+            ForEach(modelCatalog.models(for: "gemini")) { model in
+                Button(action: { setModel("gemini", model.id) }) {
                     HStack {
-                        Text(model)
-                        if appState.aiModel == model { Image(systemName: "checkmark") }
+                        Text(model.name)
+                        if appState.aiModel == model.id { Image(systemName: "checkmark") }
                     }
                 }
             }
@@ -1109,11 +998,11 @@ struct AIAgentView: View {
         
         // Claude (Anthropic)
         Menu {
-            ForEach(["claude-3-7-sonnet-20250219", "claude-3-5-sonnet-20241022", "claude-3-5-haiku-20241022", "claude-3-opus-20240229"], id: \.self) { model in
-                Button(action: { setModel("anthropic", model) }) {
+            ForEach(modelCatalog.models(for: "anthropic")) { model in
+                Button(action: { setModel("anthropic", model.id) }) {
                     HStack {
-                        Text(model)
-                        if appState.aiModel == model { Image(systemName: "checkmark") }
+                        Text(model.name)
+                        if appState.aiModel == model.id { Image(systemName: "checkmark") }
                     }
                 }
             }
@@ -1133,11 +1022,11 @@ struct AIAgentView: View {
         
         // OpenAI (ChatGPT)
         Menu {
-            ForEach(["gpt-4o", "gpt-4o-mini", "gpt-4.5-preview", "o4-mini", "o3-mini"], id: \.self) { model in
-                Button(action: { setModel("openai", model) }) {
+            ForEach(modelCatalog.models(for: "openai")) { model in
+                Button(action: { setModel("openai", model.id) }) {
                     HStack {
-                        Text(model)
-                        if appState.aiModel == model { Image(systemName: "checkmark") }
+                        Text(model.name)
+                        if appState.aiModel == model.id { Image(systemName: "checkmark") }
                     }
                 }
             }
@@ -1157,11 +1046,11 @@ struct AIAgentView: View {
         
         // DeepSeek
         Menu {
-            ForEach(["deepseek-chat", "deepseek-reasoner"], id: \.self) { model in
-                Button(action: { setModel("deepseek", model) }) {
+            ForEach(modelCatalog.models(for: "deepseek")) { model in
+                Button(action: { setModel("deepseek", model.id) }) {
                     HStack {
-                        Text(model)
-                        if appState.aiModel == model { Image(systemName: "checkmark") }
+                        Text(model.name)
+                        if appState.aiModel == model.id { Image(systemName: "checkmark") }
                     }
                 }
             }
@@ -1181,11 +1070,11 @@ struct AIAgentView: View {
         
         // Grok
         Menu {
-            ForEach(["grok-3", "grok-3-mini", "grok-2"], id: \.self) { model in
-                Button(action: { setModel("grok", model) }) {
+            ForEach(modelCatalog.models(for: "grok")) { model in
+                Button(action: { setModel("grok", model.id) }) {
                     HStack {
-                        Text(model)
-                        if appState.aiModel == model { Image(systemName: "checkmark") }
+                        Text(model.name)
+                        if appState.aiModel == model.id { Image(systemName: "checkmark") }
                     }
                 }
             }
@@ -1203,25 +1092,15 @@ struct AIAgentView: View {
             }
         }
         
-        // Codex
-        Menu {
-            ForEach(["codex-mini-latest", "o4-mini"], id: \.self) { model in
-                Button(action: { setModel("openai", model) }) {
-                    HStack {
-                        Text(model)
-                        if appState.aiModel == model { Image(systemName: "checkmark") }
-                    }
-                }
-            }
-        } label: {
-            Label("Codex (OpenAI)", systemImage: "chevron.left.forwardslash.chevron.right")
-                .foregroundColor(.cyan)
-        }
-        
         // Other (Qwen, GLM)
         Menu {
-            Button("qwen-max") { setModel("qwen", "qwen-max") }
-            Button("glm-4-plus") { setModel("glm", "glm-4-plus") }
+            ForEach(modelCatalog.models(for: "qwen")) { model in
+                Button(model.name) { setModel("qwen", model.id) }
+            }
+            Divider()
+            ForEach(modelCatalog.models(for: "glm")) { model in
+                Button(model.name) { setModel("glm", model.id) }
+            }
         } label: {
             Label("Other Providers", systemImage: "ellipsis.circle")
         }
@@ -1262,6 +1141,18 @@ struct AIAgentView: View {
         )
         .font(.caption2)
         .foregroundColor(mcp.isRunning ? .green : .secondary)
+
+        Divider()
+        Button(modelCatalog.isRefreshing ? "Refreshing models…" : "Refresh from Dotmini Cloud") {
+            Task {
+                await modelCatalog.refreshIfNeeded(force: true)
+                let normalized = modelCatalog.normalizedSelection(provider: appState.aiProvider, model: appState.aiModel)
+                appState.aiProvider = normalized.provider
+                appState.aiModel = normalized.model
+                appState.saveSettings()
+            }
+        }
+        .disabled(modelCatalog.isRefreshing)
     }
     
     private func setModel(_ provider: String, _ model: String) {
@@ -1286,7 +1177,8 @@ struct AIAgentView: View {
             Text("📊 Token Optimizer Stats").font(.caption)
             Divider()
             
-            let stats = TokenOptimizer.shared.stats
+            let stats = tokenOptimizer.stats
+            Text("Active: \(stats.activeProvider)/\(stats.activeModel)")
             Text("Input: \(formatTokenCount(stats.inputTokens))")
             Text("Output: \(formatTokenCount(stats.outputTokens))")
             Text("Saved: \(formatTokenCount(stats.savedTokens))")
@@ -1294,8 +1186,10 @@ struct AIAgentView: View {
             Divider()
             
             Text("Requests: \(stats.totalRequests)")
-            Text("Cost: $\(String(format: "%.4f", stats.totalCost))")
+            Text("Estimated cost: $\(String(format: "%.4f", stats.totalCost))")
             Text("Compression: \(String(format: "%.0f%%", stats.compressionRatio * 100))")
+            Text("Context cache: \(stats.cacheHits) hit / \(stats.cacheMisses) miss")
+            Text("Cached: \(formatTokenCount(stats.cachedTokens)) tokens")
             
             Divider()
             
@@ -1319,7 +1213,7 @@ struct AIAgentView: View {
                     .font(.system(size: 10))
                     .foregroundColor(tokenSavingsColor)
                 
-                let stats = TokenOptimizer.shared.stats
+                let stats = tokenOptimizer.stats
                 if stats.savedTokens > 0 {
                     Text(stats.formattedSavings)
                         .font(.system(size: 9, weight: .medium, design: .monospaced))
@@ -2101,6 +1995,7 @@ struct MessageContentParser {
 struct AgentChatStage: View {
     let messages: [AgentMessageModel]
     let isLoading: Bool
+    var domain: AgentDomain = .software
     var currentToolExecution: String? = nil
     var onApplyChange: ((PendingChangeModel) -> Void)? = nil
     var onRejectChange: ((PendingChangeModel) -> Void)? = nil
@@ -2114,32 +2009,12 @@ struct AgentChatStage: View {
                         VStack(spacing: 20) {
                             Spacer().frame(height: 40)
                             
-                            // Animated sparkle icon
-                            ZStack {
-                                Circle()
-                                    .fill(
-                                        RadialGradient(
-                                            colors: [.purple.opacity(0.15), .blue.opacity(0.05), .clear],
-                                            center: .center,
-                                            startRadius: 10,
-                                            endRadius: 60
-                                        )
-                                    )
-                                    .frame(width: 100, height: 100)
-                                
-                                Image(systemName: "sparkles")
-                                    .font(.system(size: 36, weight: .light))
-                                    .foregroundStyle(
-                                        LinearGradient(colors: [.purple, .cyan], startPoint: .topLeading, endPoint: .bottomTrailing)
-                                    )
-                            }
-                            
                             VStack(spacing: 6) {
-                                Text("MicroCode AI")
-                                    .font(.system(size: 18, weight: .semibold, design: .rounded))
+                                Text(domain == .science ? "Science Agent" : "AI Agent")
+                                    .font(.system(size: 16, weight: .semibold))
                                     .foregroundColor(.primary.opacity(0.8))
                                 
-                                Text("Ask anything, write code, debug, or explore ideas")
+                                Text(domain == .science ? "Analyze evidence, structures, data, and scientific literature" : "Ask anything, write code, debug, or explore ideas")
                                     .font(.system(size: 12))
                                     .foregroundColor(.secondary)
                                     .multilineTextAlignment(.center)
@@ -2147,35 +2022,33 @@ struct AgentChatStage: View {
                             
                             // Quick suggestions
                             VStack(spacing: 8) {
-                                ForEach([
-                                    ("Explain this code", "doc.text.magnifyingglass"),
-                                    ("Find bugs in my project", "ladybug"),
-                                    ("Refactor for performance", "gauge.with.dots.needle.67percent"),
-                                    ("Write unit tests", "checkmark.shield")
-                                ], id: \.0) { suggestion, icon in
+                                ForEach(domain == .science ? [
+                                    "Analyze the scientific evidence in this project",
+                                    "Compare wild-type and mutant structures",
+                                    "Validate the AlphaFold workflow and confidence",
+                                    "Draft a LaTeX research report from project evidence"
+                                ] : [
+                                    "Explain this code",
+                                    "Find bugs in my project",
+                                    "Refactor for performance",
+                                    "Write unit tests"
+                                ], id: \.self) { suggestion in
                                     Button(action: {
                                         onSuggestionTap?(suggestion)
                                     }) {
-                                        HStack(spacing: 8) {
-                                            Image(systemName: icon)
-                                                .font(.system(size: 10))
-                                                .foregroundColor(.purple)
-                                                .frame(width: 16)
+                                        HStack {
                                             Text(suggestion)
                                                 .font(.system(size: 11))
                                                 .foregroundColor(.primary.opacity(0.7))
                                             Spacer()
-                                            Image(systemName: "arrow.right")
-                                                .font(.system(size: 8))
-                                                .foregroundColor(.secondary.opacity(0.4))
                                         }
                                         .padding(.horizontal, 14)
                                         .padding(.vertical, 10)
-                                        .background(Color.white.opacity(0.03))
-                                        .cornerRadius(8)
+                                        .background(Color.primary.opacity(0.035))
+                                        .cornerRadius(5)
                                         .overlay(
-                                            RoundedRectangle(cornerRadius: 8)
-                                                .stroke(Color.white.opacity(0.06), lineWidth: 1)
+                                            RoundedRectangle(cornerRadius: 5)
+                                                .stroke(Color.secondary.opacity(0.14), lineWidth: 1)
                                         )
                                     }
                                     .buttonStyle(.plain)
@@ -2624,10 +2497,10 @@ struct RichMessageRow: View {
                 
                 Text(message.content)
                     .font(.system(size: 13))
-                    .foregroundColor(.white)
+                    .foregroundColor(.primary)
                     .padding(10)
-                    .background(Color.accentColor)
-                    .cornerRadius(12, corners: [.topLeft, .topRight, .bottomLeft])
+                    .background(Color.primary.opacity(0.09))
+                    .cornerRadius(6, corners: [.topLeft, .topRight, .bottomLeft])
             }
             .padding(.horizontal, 14)
             .padding(.vertical, 6)
@@ -3930,10 +3803,6 @@ struct ChatListRow: View {
     var body: some View {
         Button(action: onSelect) {
             HStack(spacing: 8) {
-                Image(systemName: "bubble.left.fill")
-                    .font(.system(size: 10))
-                    .foregroundColor(isActive ? .accentColor : .secondary)
-                
                 VStack(alignment: .leading, spacing: 2) {
                     Text(chat.name)
                         .font(.system(size: 11, weight: isActive ? .semibold : .regular))
@@ -3949,8 +3818,8 @@ struct ChatListRow: View {
                 
                 if isHovering {
                     Button(action: onDelete) {
-                        Image(systemName: "xmark.circle.fill")
-                            .font(.system(size: 10))
+                        Text("Delete")
+                            .font(.system(size: 9))
                             .foregroundColor(.secondary)
                     }
                     .buttonStyle(.plain)
@@ -3958,8 +3827,8 @@ struct ChatListRow: View {
             }
             .padding(.horizontal, 10)
             .padding(.vertical, 6)
-            .background(isActive ? Color.accentColor.opacity(0.15) : (isHovering ? Color.white.opacity(0.05) : Color.clear))
-            .cornerRadius(6)
+            .background(isActive ? Color.primary.opacity(0.09) : (isHovering ? Color.primary.opacity(0.05) : Color.clear))
+            .cornerRadius(4)
         }
         .buttonStyle(.plain)
         .onHover { hovering in
@@ -3984,32 +3853,6 @@ struct AgentThinkingView: View {
     
     private let timer = Timer.publish(every: 0.5, on: .main, in: .common).autoconnect()
     
-    private var toolIcon: String {
-        if phase == .validating { return "checkmark.shield.fill" }
-        guard let tool = currentTool?.lowercased() else { return phase.icon }
-        if tool.contains("file_read") || tool.contains("reading") { return "doc.text.magnifyingglass" }
-        if tool.contains("file_write") || tool.contains("writing") { return "doc.text.fill" }
-        if tool.contains("replace") || tool.contains("editing") { return "pencil.line" }
-        if tool.contains("shell") || tool.contains("running") { return "terminal.fill" }
-        if tool.contains("grep") || tool.contains("search") { return "magnifyingglass" }
-        if tool.contains("list_dir") || tool.contains("tree") { return "folder.fill" }
-        if tool.contains("git") { return "arrow.triangle.branch" }
-        if tool.contains("web") || tool.contains("fetch") { return "globe" }
-        return "gearshape.fill"
-    }
-    
-    private var toolColor: Color {
-        if phase == .validating { return .orange }
-        guard let tool = currentTool?.lowercased() else { return phase.color }
-        if tool.contains("file_read") || tool.contains("reading") { return .cyan }
-        if tool.contains("file_write") || tool.contains("writing") { return .green }
-        if tool.contains("replace") || tool.contains("editing") { return .orange }
-        if tool.contains("shell") || tool.contains("running") { return .purple }
-        if tool.contains("grep") || tool.contains("search") { return .yellow }
-        if tool.contains("git") { return .pink }
-        return .accentColor
-    }
-    
     private var statusText: String {
         guard let tool = currentTool else {
             let dots = String(repeating: ".", count: (dotCount % 3) + 1)
@@ -4020,25 +3863,7 @@ struct AgentThinkingView: View {
     }
     
     var body: some View {
-        HStack(alignment: .top, spacing: 12) {
-            // AI Avatar
-            RoundedRectangle(cornerRadius: 6)
-                .fill(LinearGradient(
-                    colors: [toolColor, toolColor.opacity(0.6)],
-                    startPoint: .topLeading,
-                    endPoint: .bottomTrailing
-                ))
-                .frame(width: 28, height: 28)
-                .overlay(
-                    Image(systemName: toolIcon)
-                        .font(.system(size: 12, weight: .semibold))
-                        .foregroundColor(.white)
-                        .scaleEffect(pulsePhase ? 1.15 : 0.85)
-                        .animation(.easeInOut(duration: 0.6).repeatForever(autoreverses: true), value: pulsePhase)
-                )
-                .shadow(color: toolColor.opacity(0.3), radius: 6, y: 2)
-                .padding(.top, 4)
-            
+        HStack(alignment: .top, spacing: 8) {
             VStack(alignment: .leading, spacing: 6) {
                 HStack(spacing: 8) {
                     ProgressView()
@@ -4047,7 +3872,7 @@ struct AgentThinkingView: View {
                     
                     Text(statusText)
                         .font(.system(size: 11, weight: .medium, design: .monospaced))
-                        .foregroundColor(toolColor)
+                        .foregroundColor(.secondary)
                     
                     Spacer()
                 }
@@ -4055,11 +3880,11 @@ struct AgentThinkingView: View {
                 // Animated progress bar
                 GeometryReader { geo in
                     RoundedRectangle(cornerRadius: 1.5)
-                        .fill(toolColor.opacity(0.12))
+                        .fill(Color.primary.opacity(0.08))
                         .frame(height: 3)
                         .overlay(alignment: .leading) {
                             RoundedRectangle(cornerRadius: 1.5)
-                                .fill(toolColor.opacity(0.6))
+                                .fill(Color.primary.opacity(0.28))
                                 .frame(width: geo.size.width * 0.3, height: 3)
                                 .offset(x: pulsePhase ? geo.size.width * 0.7 : 0)
                                 .animation(.easeInOut(duration: 1.2).repeatForever(autoreverses: true), value: pulsePhase)
@@ -4105,25 +3930,6 @@ struct ToolStepRow: View {
     
     @State private var isExpanded = false
     
-    private var icon: String {
-        let name = result.toolName.lowercased()
-        if name.contains("file_read") { return "doc.text.magnifyingglass" }
-        if name.contains("file_write") { return "doc.text.fill" }
-        if name.contains("replace_in_file") { return "pencil.line" }
-        if name.contains("shell") { return "terminal.fill" }
-        if name.contains("grep") || name.contains("search") { return "magnifyingglass" }
-        if name.contains("file_search") { return "doc.text.magnifyingglass" }
-        if name.contains("list_dir") || name.contains("tree") { return "folder.fill" }
-        if name.contains("git") { return "arrow.triangle.branch" }
-        if name.contains("web") || name.contains("fetch") { return "globe" }
-        return "gearshape"
-    }
-    
-    private var iconColor: Color {
-        guard result.success else { return .red.opacity(0.8) }
-        return .secondary
-    }
-    
     private var label: String {
         switch result.toolName {
         case "file_read": return "FILE_READ"
@@ -4166,30 +3972,9 @@ struct ToolStepRow: View {
             // Step Header (always visible, clickable)
             Button(action: { withAnimation(.easeInOut(duration: 0.15)) { isExpanded.toggle() } }) {
                 HStack(spacing: 8) {
-                    // Timeline dot + line
-                    VStack(spacing: 0) {
-                        Circle()
-                            .fill(iconColor)
-                            .frame(width: 8, height: 8)
-                        if !isLast {
-                            Rectangle()
-                                .fill(Color.primary.opacity(0.08))
-                                .frame(width: 1)
-                        }
-                    }
-                    .frame(width: 8)
-                    
-                    // Status/Tool icon (only show error if failed, otherwise tool icon)
-                    if !result.success {
-                        Image(systemName: "exclamationmark.triangle.fill")
-                            .font(.system(size: 10))
-                            .foregroundColor(.red.opacity(0.8))
-                    } else {
-                        Image(systemName: icon)
-                            .font(.system(size: 10))
-                            .foregroundColor(iconColor)
-                            .frame(width: 14)
-                    }
+                    Text(String(format: "%02d", stepNumber))
+                        .font(.system(size: 9, design: .monospaced))
+                        .foregroundColor(.secondary.opacity(0.7))
                     
                     // Label
                     Text(label)
@@ -4200,16 +3985,15 @@ struct ToolStepRow: View {
                     if let file = filePath {
                         Text(file)
                             .font(.system(size: 10, design: .monospaced))
-                            .foregroundColor(iconColor.opacity(0.8))
+                            .foregroundColor(.secondary.opacity(0.8))
                             .lineLimit(1)
                     }
                     
                     Spacer()
                     
-                    // Expand chevron
-                    Image(systemName: isExpanded ? "chevron.down" : "chevron.right")
-                        .font(.system(size: 8, weight: .bold))
-                        .foregroundColor(.secondary.opacity(0.5))
+                    Text(isExpanded ? "Hide" : "Details")
+                        .font(.system(size: 9))
+                        .foregroundColor(.secondary.opacity(0.7))
                 }
                 .padding(.horizontal, 10)
                 .padding(.vertical, 6)
@@ -4238,4 +4022,3 @@ struct ToolStepRow: View {
         }
     }
 }
-

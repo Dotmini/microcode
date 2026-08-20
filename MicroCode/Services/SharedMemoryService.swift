@@ -5,9 +5,20 @@ class SharedMemoryService: ObservableObject {
     static let shared = SharedMemoryService()
     
     @Published var sharedDataFrames: [String] = []
+    @Published var sharedArtifacts: [URL] = []
     private let baseURL = "http://127.0.0.1:3000/api/data"
     
     private init() {}
+
+    func shareArtifact(_ url: URL) {
+        let normalized = url.standardizedFileURL
+        guard !sharedArtifacts.contains(where: { $0.path == normalized.path }) else { return }
+        sharedArtifacts.append(normalized)
+    }
+
+    func removeArtifact(_ url: URL) {
+        sharedArtifacts.removeAll { $0.standardizedFileURL.path == url.standardizedFileURL.path }
+    }
     
     func refreshList() async {
         guard let url = URL(string: "\(baseURL)/list") else { return }

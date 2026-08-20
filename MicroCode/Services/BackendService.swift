@@ -65,6 +65,23 @@ class BackendService {
         // When running as an App Bundle, PATH might be stripped.
         let home = FileManager.default.homeDirectoryForCurrentUser.path
         env["HOME"] = home
+
+        // Agent tools execute locally, but model calls should use the same
+        // OpenAI-compatible Dotmini proxy as the native AI client.
+        let defaults = UserDefaults.standard
+        let proxyBaseURL = defaults.string(forKey: "dotminiProxyURL") ?? "https://api.dotmini.net/v1"
+        let proxyToken = defaults.string(forKey: "dotminiLicenseKey")
+            ?? defaults.string(forKey: "microRentToken")
+            ?? ""
+        let keyMode = defaults.string(forKey: "aiKeyMode") ?? "cloud"
+        if keyMode == "cloud" {
+            env["DOTMINI_API_BASE_URL"] = proxyBaseURL
+            env["USE_MICRORENT_PROXY"] = "1"
+            env["MICRORENT_PROXY_URL"] = "\(proxyBaseURL)/chat/completions"
+        }
+        if keyMode == "cloud" && !proxyToken.isEmpty {
+            env["MICRORENT_TOKEN"] = proxyToken
+        }
         
         let currentPath = env["PATH"] ?? "/usr/bin:/bin:/usr/sbin:/sbin"
         let extraPaths = [

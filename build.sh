@@ -18,7 +18,8 @@ else
     echo "Warning: /Volumes/MAC is not mounted; using local build cache at $BUILD_ROOT"
 fi
 
-mkdir -p "$BUILD_ROOT/cargo-home" "$BUILD_ROOT/cargo-target" "$BUILD_ROOT/rustup-home" "$BUILD_ROOT/swiftpm" "$BUILD_ROOT/derived-data"
+mkdir -p "$BUILD_ROOT/cargo-home" "$BUILD_ROOT/cargo-target" "$BUILD_ROOT/rustup-home" "$BUILD_ROOT/swiftpm" "$BUILD_ROOT/derived-data" "$BUILD_ROOT/tmp"
+export TMPDIR="$BUILD_ROOT/tmp"
 export CARGO_HOME="$BUILD_ROOT/cargo-home"
 export CARGO_TARGET_DIR="$BUILD_ROOT/cargo-target"
 export RUSTUP_HOME="$BUILD_ROOT/rustup-home"
@@ -232,9 +233,11 @@ elif [ -f "Package.swift" ]; then
         fi
 
         swift build -c "$CONFIG" --scratch-path "$SWIFT_SCRATCH_PATH" \
-            -Xlinker -L"$RUST_LIB_DIR" \
-            -Xlinker -lmicrocode_embedded \
-            -Xlinker -lmicrocode_core
+            -Xlinker "$RUST_LIB_DIR/libmicrocode_embedded.a" \
+            -Xlinker "$RUST_LIB_DIR/libmicrocode_core.a" \
+            -Xlinker -framework -Xlinker SystemConfiguration \
+            -Xlinker -framework -Xlinker Security \
+            -Xlinker -framework -Xlinker CoreFoundation
 
         echo -e "${YELLOW}Packaging MicroCode.app...${NC}"
         SWIFT_BIN_PATH="$SWIFT_SCRATCH_PATH/$CONFIG/MicroCode"

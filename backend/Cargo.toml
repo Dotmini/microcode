@@ -4,6 +4,12 @@ members = [
     "idx-engine"
 ]
 
+# ethnum 1.5.2 constructs standard-library errors with a size-dependent
+# transmute that no longer compiles on current Rust. Pin the upstream fix until
+# a new crates.io release containing it is available.
+[patch.crates-io]
+ethnum = { git = "https://github.com/nlordell/ethnum-rs.git", rev = "712d6393b07a1f2cf2eb31d6a9edad1ea2a32159" }
+
 [package]
 name = "microcode-backend"
 version = "2.0.0"

@@ -59,6 +59,7 @@ let package = Package(
                 "Services/ExportService.swift",
                 "Views/SymbolEffectModifier.swift",
                 "Views/ContentView.swift",
+                "Views/FirstLaunchWelcomeView.swift",
                 "Views/RefactorProWindow.swift",
                 "Views/ExpandCodeWindow.swift",
                 "Views/FormatCodeWindow.swift",
@@ -78,6 +79,8 @@ let package = Package(
                 "Services/MLTrainer.swift",
                 "Views/AI/AITrainerView.swift",
                 "Views/AI/AIAgentView.swift",
+                "Views/ScienceModeView.swift",
+                "Services/ScienceService.swift",
                 "Services/ProjectManager.swift",
                 "Services/XcodeBuildParser.swift",
                 "Views/ProjectToolbar.swift",
@@ -153,6 +156,7 @@ let package = Package(
                 "Services/AgentService.swift",
                 "Services/AgentMemoryService.swift",
                 "Services/AIClient.swift",            // Direct AI API Client
+                "Services/AIModelCatalog.swift",       // Shared dynamic model registry
                 "Services/AIProviderAuthService.swift",// Multi-provider Auth + Keychain
                 "Services/KeychainManager.swift",      // Keychain CRUD + Rust FFI Bridge
                 "Services/MCPServer.swift",            // MCP Protocol Server

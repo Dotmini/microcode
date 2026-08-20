@@ -28,6 +28,8 @@ class FileNodeWrapper: NSObject {
 
 struct AuthenticFileTree: NSViewRepresentable {
     @Binding var fileTree: [FileNode]
+    let revision: UInt64
+    var backgroundColor: NSColor = .clear
     var onAction: (FileTreeAction) -> Void
     
     func makeCoordinator() -> Coordinator {
@@ -41,6 +43,9 @@ struct AuthenticFileTree: NSViewRepresentable {
         scrollView.autohidesScrollers = true
         
         let outlineView = NSOutlineView()
+        scrollView.drawsBackground = backgroundColor.alphaComponent > 0
+        scrollView.backgroundColor = backgroundColor
+        outlineView.backgroundColor = backgroundColor
         outlineView.dataSource = context.coordinator
         outlineView.delegate = context.coordinator
         outlineView.headerView = nil // No header
@@ -54,7 +59,10 @@ struct AuthenticFileTree: NSViewRepresentable {
         outlineView.outlineTableColumn = column
         
         // Selection Style
-        outlineView.style = .sourceList
+        // Source-list style applies an AppKit vibrancy material that stays
+        // gray even when the selected app theme is opaque. Plain style keeps
+        // the native behavior while respecting our explicit theme background.
+        outlineView.style = .plain
         outlineView.allowsMultipleSelection = true
         
         // Double click action
@@ -67,19 +75,23 @@ struct AuthenticFileTree: NSViewRepresentable {
     
     func updateNSView(_ nsView: NSScrollView, context: Context) {
         guard let outlineView = nsView.documentView as? NSOutlineView else { return }
+        context.coordinator.parent = self
+        nsView.drawsBackground = backgroundColor.alphaComponent > 0
+        nsView.backgroundColor = backgroundColor
+        outlineView.backgroundColor = backgroundColor
         
         // Efficient Update: Reload only if data changed
         // For simplicity in this step, we reload mostly.
         // Ideally we diff, but `fileTree` replacement is usually a full refresh event in AppState.
         
-        // Update root items
-        let newItems = fileTree.map { FileNodeWrapper($0) }
-        
         // Naive update: check count diff or deep logic.
         // For now, we update the coordinator's root cache and reload.
         // To preserve expansion state, we would need to save/restore persistent IDs.
         
-        if context.coordinator.needsReload(newTree: fileTree) {
+        if context.coordinator.needsReload(revision: revision) {
+             // Wrapper creation can itself be noticeable for very large roots,
+             // so only do it when AppState publishes an actual tree revision.
+             let newItems = fileTree.map { FileNodeWrapper($0) }
              context.coordinator.updateRootItems(newItems)
              
              // Save expansion state
@@ -97,7 +109,7 @@ struct AuthenticFileTree: NSViewRepresentable {
     class Coordinator: NSObject, NSOutlineViewDataSource, NSOutlineViewDelegate {
         var parent: AuthenticFileTree
         var rootItems: [FileNodeWrapper] = []
-        var lastFileTree: [FileNode] = []
+        var lastRevision: UInt64?
         
         init(_ parent: AuthenticFileTree) {
             self.parent = parent
@@ -107,13 +119,10 @@ struct AuthenticFileTree: NSViewRepresentable {
             self.rootItems = items
         }
         
-        func needsReload(newTree: [FileNode]) -> Bool {
-            // Use deep equality check (FileNode conforms to Equatable)
-            if newTree != lastFileTree {
-                lastFileTree = newTree
-                return true
-            }
-            return false
+        func needsReload(revision: UInt64) -> Bool {
+            guard lastRevision != revision else { return false }
+            lastRevision = revision
+            return true
         }
         
         // MARK: - State Persistence

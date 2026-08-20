@@ -83,6 +83,9 @@ class AgentMemoryService: ObservableObject {
     // N-gram configuration
     private let bigramWeight: Float = 1.5
     private let trigramWeight: Float = 2.0
+    private var embeddingCache: [String: [Float]] = [:]
+    private var embeddingCacheOrder: [String] = []
+    private let maximumEmbeddingCacheEntries = 256
     
     private var storageURL: URL {
         let appSupport = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first!
@@ -185,6 +188,14 @@ class AgentMemoryService: ObservableObject {
     
     /// Fetch high-fidelity BERT embeddings from the Rust backend (with local DJB2 fallback)
     func fetchEmbeddingFromBackend(_ text: String) async -> [Float]? {
+        let normalized = String(text.prefix(12_000))
+        let cacheKey = Self.stableCacheKey(normalized)
+        if let cached = embeddingCache[cacheKey] {
+            TokenOptimizer.shared.recordContextCache(hit: true, tokens: TokenOptimizer.shared.estimateTokens(normalized))
+            return cached
+        }
+        TokenOptimizer.shared.recordContextCache(hit: false, tokens: 0)
+
         guard let url = URL(string: "http://localhost:3000/api/ai/embedding") else { return nil }
         
         var request = URLRequest(url: url)
@@ -201,7 +212,7 @@ class AgentMemoryService: ObservableObject {
         }
         
         do {
-            let reqBody = Req(text: text)
+            let reqBody = Req(text: normalized)
             request.httpBody = try JSONEncoder().encode(reqBody)
             
             let (data, response) = try await URLSession.shared.data(for: request)
@@ -210,11 +221,31 @@ class AgentMemoryService: ObservableObject {
             }
             
             let decoded = try JSONDecoder().decode(Resp.self, from: data)
+            cacheEmbedding(decoded.embedding, for: cacheKey)
             return decoded.embedding
         } catch {
             print("[Memory] BERT embedding fetch failed (falling back to DJB2): \(error)")
             return nil
         }
+    }
+
+    private func cacheEmbedding(_ embedding: [Float], for key: String) {
+        embeddingCache[key] = embedding
+        embeddingCacheOrder.removeAll { $0 == key }
+        embeddingCacheOrder.append(key)
+        while embeddingCacheOrder.count > maximumEmbeddingCacheEntries {
+            let oldest = embeddingCacheOrder.removeFirst()
+            embeddingCache.removeValue(forKey: oldest)
+        }
+    }
+
+    nonisolated private static func stableCacheKey(_ text: String) -> String {
+        var hash: UInt64 = 14_695_981_039_346_656_037
+        for byte in text.utf8 {
+            hash ^= UInt64(byte)
+            hash &*= 1_099_511_628_211
+        }
+        return String(hash, radix: 16)
     }
     
     /// Format memories for LLM context (token-efficient)

@@ -13,146 +13,36 @@ import AppKit
 
 struct ContentView: View {
     @EnvironmentObject var appState: AppState
+    @AppStorage("microCodeWelcomeCompletedV1") private var welcomeCompleted = false
 
     var body: some View {
         VStack(spacing: 0) {
-            // VS Code-style Top Toolbar
             MainToolbar()
-            
-            // .NET Project Toolbar (shows when .NET project detected)
+                .environmentObject(appState)
             DotnetToolbar()
                 .environmentObject(appState)
-            
             Divider()
-            
-            // Main Content
-            CompatHSplitView {
-                // Sidebar (toggleable)
-                if appState.sidebarVisible {
-                    NavigatorView()
-                        .frame(minWidth: 200, idealWidth: 260, maxWidth: 400)
-                }
-                
-                // Editor Area
-                EditorArea()
-                
-                // Inspector Panel (optional)
-                if appState.gitPanelVisible {
-                    InspectorView()
-                        .frame(minWidth: 260, maxWidth: 350)
-                }
-                
-                // AI Agent Panel (Cursor-style inline agent — Premium)
-                if appState.aiChatVisible {
-                    VStack(spacing: 0) {
-                        // Premium gradient header
-                        HStack(spacing: 8) {
-                            // AI Icon with glow
-                            ZStack {
-                                Circle()
-                                    .fill(LinearGradient(colors: [.purple.opacity(0.3), .blue.opacity(0.2)], startPoint: .topLeading, endPoint: .bottomTrailing))
-                                    .frame(width: 24, height: 24)
-                                Image(systemName: "sparkles")
-                                    .font(.system(size: 11, weight: .bold))
-                                    .foregroundStyle(LinearGradient(colors: [.purple, .cyan], startPoint: .topLeading, endPoint: .bottomTrailing))
-                            }
-                            
-                            VStack(alignment: .leading, spacing: 1) {
-                                Text("MicroCode AI")
-                                    .font(.system(size: 11, weight: .bold, design: .rounded))
-                                    .foregroundColor(.primary)
-                                
-                                // Model name
-                                Text(AgentService.shared.selectedModel.isEmpty ? "Ready" : AgentService.shared.selectedModel)
-                                    .font(.system(size: 9))
-                                    .foregroundColor(.secondary)
-                                    .lineLimit(1)
-                            }
-                            
-                            Spacer()
-                            
-                            // Quick model picker
-                            Menu {
-                                ForEach(["deepseek-coder", "gpt-4o", "claude-sonnet", "gemini-pro", "local"], id: \.self) { m in
-                                    Button(m) { AgentService.shared.selectedModel = m }
-                                }
-                            } label: {
-                                Image(systemName: "cpu")
-                                    .font(.system(size: 9))
-                                    .foregroundColor(.secondary)
-                                    .frame(width: 20, height: 20)
-                                    .background(Color.white.opacity(0.06))
-                                    .cornerRadius(4)
-                            }
-                            .menuStyle(.borderlessButton)
-                            .frame(width: 20)
-                            .help("Switch Model")
-                            
-                            // New chat
-                            Button {
-                                _ = AgentService.shared.createNewChat()
-                            } label: {
-                                Image(systemName: "plus.message")
-                                    .font(.system(size: 10))
-                                    .foregroundColor(.secondary)
-                                    .frame(width: 20, height: 20)
-                            }
-                            .buttonStyle(.plain)
-                            .help("New Chat")
-                            
-                            // Expand to full screen
-                            Button {
-                                appState.aiChatVisible = false
-                                appState.toggleEditorMode(.aiAgent)
-                            } label: {
-                                Image(systemName: "arrow.up.left.and.arrow.down.right")
-                                    .font(.system(size: 9))
-                                    .foregroundColor(.secondary)
-                                    .frame(width: 20, height: 20)
-                            }
-                            .buttonStyle(.plain)
-                            .help("Full Screen Mode")
-                            
-                            Button {
-                                withAnimation(.easeInOut(duration: 0.2)) {
-                                    appState.aiChatVisible = false
-                                }
-                            } label: {
-                                Image(systemName: "xmark")
-                                    .font(.system(size: 9, weight: .bold))
-                                    .foregroundColor(.secondary)
-                                    .frame(width: 20, height: 20)
-                            }
-                            .buttonStyle(.plain)
-                            .help("Close (⌘L)")
-                        }
-                        .padding(.horizontal, 12)
-                        .padding(.vertical, 8)
-                        .background(
-                            LinearGradient(
-                                colors: [
-                                    Color(nsColor: .windowBackgroundColor),
-                                    Color.purple.opacity(0.03)
-                                ],
-                                startPoint: .leading,
-                                endPoint: .trailing
-                            )
-                        )
-                        
-                        // Subtle accent line
-                        Rectangle()
-                            .fill(LinearGradient(colors: [.purple.opacity(0.4), .cyan.opacity(0.3), .purple.opacity(0.1)], startPoint: .leading, endPoint: .trailing))
-                            .frame(height: 1)
-                        
-                        AIAgentView()
-                            .environmentObject(appState)
-                    }
-                    .frame(minWidth: 340, idealWidth: 400, maxWidth: 520)
-                    .transition(.move(edge: .trailing).combined(with: .opacity))
+
+            Group {
+                if appState.editorMode == .code {
+                    AgenticEditorWorkspace()
+                        .environmentObject(appState)
+                } else {
+                    legacyWorkspace
                 }
             }
         }
         .overlay(autoHealerOverlay)
+        .overlay {
+            if !welcomeCompleted {
+                FirstLaunchWelcomeView {
+                    welcomeCompleted = true
+                }
+                .environmentObject(appState)
+                .transition(.opacity)
+                .zIndex(200)
+            }
+        }
         .sheet(isPresented: $appState.showingRefactorProWindow) {
             RefactorProWindow()
                 .environmentObject(appState)
@@ -236,11 +126,10 @@ struct ContentView: View {
         .onCommand(#selector(NSResponder.selectAll(_:))) { }
         .background(
             ZStack {
-                if appState.appTheme != .extraClear && appState.appTheme != .transparent {
-                    CyberBackgroundView()
-                    Color.compat(nsColor: .windowBackgroundColor).opacity(0.4) // Glassmorphism effect
-                } else {
+                if appState.appTheme.isGlass {
                     Color.clear
+                } else {
+                    Color(nsColor: appState.appTheme.workspaceBackground)
                 }
             }
         )
@@ -281,6 +170,25 @@ struct ContentView: View {
         )
     }
 
+    private var legacyWorkspace: some View {
+        CompatHSplitView {
+            if appState.sidebarVisible {
+                NavigatorView()
+                    .frame(minWidth: 200, idealWidth: 260, maxWidth: 400)
+            }
+            EditorArea()
+            if appState.gitPanelVisible {
+                InspectorView()
+                    .frame(minWidth: 260, maxWidth: 350)
+            }
+            if appState.aiChatVisible {
+                LegacyInlineAgentPanel()
+                    .frame(minWidth: 340, idealWidth: 400, maxWidth: 520)
+                    .transition(.move(edge: .trailing).combined(with: .opacity))
+            }
+        }
+    }
+
     // MARK: - Auto-Healer View
 
     @ViewBuilder
@@ -305,6 +213,449 @@ struct ContentView: View {
             }
             .transition(.move(edge: .bottom).combined(with: .opacity))
             .zIndex(100)
+        }
+    }
+}
+
+// MARK: - Agentic-first Code Workspace
+
+enum AgenticWorkspaceSurface: String {
+    case agent
+    case editor
+}
+
+struct AgenticEditorWorkspace: View {
+    @EnvironmentObject var appState: AppState
+    @StateObject private var agent = AgentService.shared
+    @State private var surface: AgenticWorkspaceSurface = .agent
+
+    var body: some View {
+        CompatHSplitView {
+            if appState.sidebarVisible {
+                AgenticWorkspaceSidebar(surface: $surface)
+                    .frame(minWidth: 220, idealWidth: 250, maxWidth: 300)
+                    .transition(.move(edge: .leading).combined(with: .opacity))
+            }
+
+            VStack(spacing: 0) {
+                workspaceHeader
+                Divider()
+
+                if surface == .agent {
+                    AIAgentView(allowsChatSidebar: false)
+                        .environmentObject(appState)
+                } else {
+                    EditorArea()
+                        .environmentObject(appState)
+                }
+            }
+            .frame(minWidth: 480)
+
+            if appState.agenticContextVisible {
+                AgenticContextInspector(surface: $surface)
+                    .frame(minWidth: 250, idealWidth: 290, maxWidth: 360)
+                    .transition(.move(edge: .trailing).combined(with: .opacity))
+            }
+        }
+        .background(appState.appTheme.isGlass ? Color.clear : Color(nsColor: appState.appTheme.workspaceBackground))
+        .onAppear {
+            if let workspace = appState.workspaceFolder {
+                agent.setWorkspace(workspace.path)
+            }
+        }
+    }
+
+    private var workspaceHeader: some View {
+        HStack(spacing: 8) {
+            Text(appState.workspaceFolder?.lastPathComponent ?? "MicroCode")
+                .font(.system(size: 12, weight: .semibold))
+                .lineLimit(1)
+
+            if let file = appState.currentFile {
+                Text("/")
+                    .foregroundColor(.secondary)
+                Text(file.name)
+                    .font(.system(size: 11))
+                    .foregroundColor(.secondary)
+                    .lineLimit(1)
+            }
+
+            Spacer()
+
+            Text(surface == .agent ? agent.agentPhase.displayText : (appState.currentFile?.name ?? "No file selected"))
+                .font(.system(size: 10))
+                .foregroundColor(.secondary)
+                .lineLimit(1)
+
+            Button("Agent") { surface = .agent }
+                .agenticTabStyle(active: surface == .agent)
+            Button("Open Editor") { surface = .editor }
+                .agenticTabStyle(active: surface == .editor)
+
+            AgenticLayoutMenu()
+                .environmentObject(appState)
+        }
+        .padding(.horizontal, 12)
+        .frame(height: 40)
+        .background(appState.appTheme.isGlass ? Color.clear : Color(nsColor: appState.appTheme.panelBackground))
+    }
+}
+
+struct AgenticLayoutMenu: View {
+    @EnvironmentObject var appState: AppState
+
+    var body: some View {
+        Menu {
+            Button {
+                withAnimation(.easeInOut(duration: 0.16)) { appState.toggleSidebar() }
+            } label: {
+                Label(appState.sidebarVisible ? "Hide Project Sidebar" : "Show Project Sidebar",
+                      systemImage: "sidebar.left")
+            }
+
+            Button {
+                withAnimation(.easeInOut(duration: 0.16)) { appState.toggleAgenticContext() }
+            } label: {
+                Label(appState.agenticContextVisible ? "Hide Context Panel" : "Show Context Panel",
+                      systemImage: "sidebar.right")
+            }
+
+            Button {
+                withAnimation(.easeInOut(duration: 0.16)) { appState.toggleConsole() }
+            } label: {
+                Label(appState.consoleVisible ? "Hide Console" : "Show Console",
+                      systemImage: "rectangle.bottomthird.inset.filled")
+            }
+
+            Divider()
+
+            Menu("Modes") {
+                ForEach(EditorMode.allCases.filter { $0 != .code }) { mode in
+                    Button(mode.displayName) { appState.setEditorMode(mode) }
+                }
+            }
+        } label: {
+            Image(systemName: "ellipsis")
+                .font(.system(size: 12, weight: .medium))
+                .frame(width: 26, height: 26)
+                .contentShape(Rectangle())
+        }
+        .menuStyle(.borderlessButton)
+        .fixedSize()
+        .help("Workspace Layout")
+    }
+}
+
+private extension View {
+    func agenticTabStyle(active: Bool) -> some View {
+        self
+            .buttonStyle(.plain)
+            .font(.system(size: 10, weight: active ? .semibold : .regular))
+            .foregroundColor(active ? .primary : .secondary)
+            .padding(.horizontal, 9)
+            .padding(.vertical, 5)
+            .background(active ? Color.primary.opacity(0.09) : Color.clear)
+            .clipShape(RoundedRectangle(cornerRadius: 5))
+    }
+}
+
+struct AgenticWorkspaceSidebar: View {
+    @EnvironmentObject var appState: AppState
+    @StateObject private var agent = AgentService.shared
+    @Binding var surface: AgenticWorkspaceSurface
+
+    var body: some View {
+        VStack(spacing: 0) {
+            VStack(spacing: 6) {
+                Button {
+                    _ = agent.createNewChat(name: "New Task")
+                    surface = .agent
+                } label: {
+                    HStack {
+                        Text("New Task")
+                            .font(.system(size: 12, weight: .medium))
+                        Spacer()
+                        Text("+")
+                            .foregroundColor(.secondary)
+                    }
+                    .padding(.horizontal, 10)
+                    .frame(height: 32)
+                    .background(Color.primary.opacity(0.055))
+                    .overlay(RoundedRectangle(cornerRadius: 6).stroke(Color.primary.opacity(0.09)))
+                    .clipShape(RoundedRectangle(cornerRadius: 6))
+                }
+                .buttonStyle(.plain)
+
+                sidebarButton("Agent", active: surface == .agent) { surface = .agent }
+                sidebarButton("Code Editor", active: surface == .editor) { surface = .editor }
+            }
+            .padding(10)
+
+            if !agent.chatSessions.isEmpty {
+                Divider()
+                VStack(alignment: .leading, spacing: 3) {
+                    Text("RECENT TASKS")
+                        .font(.system(size: 9, weight: .semibold))
+                        .foregroundColor(.secondary)
+                        .padding(.horizontal, 10)
+                        .padding(.top, 8)
+
+                    ForEach(agent.chatSessions.prefix(4)) { chat in
+                        Button {
+                            agent.switchChat(to: chat.id)
+                            surface = .agent
+                        } label: {
+                            HStack {
+                                Text(chat.name)
+                                    .font(.system(size: 11))
+                                    .lineLimit(1)
+                                Spacer()
+                            }
+                            .padding(.horizontal, 10)
+                            .frame(height: 26)
+                            .background(agent.activeChatId == chat.id ? Color.primary.opacity(0.07) : Color.clear)
+                            .clipShape(RoundedRectangle(cornerRadius: 4))
+                        }
+                        .buttonStyle(.plain)
+                    }
+                }
+                .padding(.horizontal, 6)
+                .padding(.bottom, 8)
+            }
+
+            Divider()
+
+            NavigatorView(onOpenFile: { surface = .editor })
+                .environmentObject(appState)
+        }
+        .background(appState.appTheme.isGlass ? Color.clear : Color(nsColor: appState.appTheme.panelBackground))
+    }
+
+    private func sidebarButton(_ title: String, active: Bool, action: @escaping () -> Void) -> some View {
+        Button(action: action) {
+            HStack {
+                Text(title)
+                    .font(.system(size: 11, weight: active ? .medium : .regular))
+                Spacer()
+            }
+            .padding(.horizontal, 10)
+            .frame(height: 28)
+            .foregroundColor(active ? .primary : .secondary)
+            .background(active ? Color.primary.opacity(0.07) : Color.clear)
+            .clipShape(RoundedRectangle(cornerRadius: 5))
+        }
+        .buttonStyle(.plain)
+    }
+}
+
+struct AgenticContextInspector: View {
+    @EnvironmentObject var appState: AppState
+    @StateObject private var agent = AgentService.shared
+    @Binding var surface: AgenticWorkspaceSurface
+
+    var body: some View {
+        VStack(spacing: 0) {
+            HStack {
+                Text("CONTEXT")
+                    .font(.system(size: 10, weight: .semibold))
+                    .foregroundColor(.secondary)
+                Spacer()
+                Text(agent.isLoading ? "Working" : "Ready")
+                    .font(.system(size: 9))
+                    .foregroundColor(.secondary)
+            }
+            .padding(.horizontal, 12)
+            .frame(height: 38)
+
+            Divider()
+
+            ScrollView {
+                LazyVStack(alignment: .leading, spacing: 18) {
+                    inspectorSection("CURRENT FILE") {
+                        if let file = appState.currentFile {
+                            contextFileRow(path: file.path, status: file.isUnsaved ? "Modified" : file.language)
+                        } else {
+                            emptyLabel("No file selected")
+                        }
+                    }
+
+                    inspectorSection("FILES CHANGED \(changedFiles.count)") {
+                        if changedFiles.isEmpty {
+                            emptyLabel("No changes in this task")
+                        } else {
+                            ForEach(changedFiles.prefix(12), id: \.self) { path in
+                                contextFileRow(path: path, status: "Changed")
+                            }
+                        }
+                    }
+
+                    inspectorSection("OPEN FILES \(appState.openFiles.count)") {
+                        if appState.openFiles.isEmpty {
+                            emptyLabel("No open files")
+                        } else {
+                            ForEach(appState.openFiles.prefix(10)) { file in
+                                contextFileRow(path: file.path, status: file.isUnsaved ? "Unsaved" : nil)
+                            }
+                        }
+                    }
+
+                    inspectorSection("AGENT ACTIVITY") {
+                        if agent.activityLog.isEmpty {
+                            emptyLabel("Activity will appear here")
+                        } else {
+                            ForEach(agent.activityLog.suffix(8).reversed()) { activity in
+                                VStack(alignment: .leading, spacing: 2) {
+                                    Text(activity.message)
+                                        .font(.system(size: 10))
+                                        .lineLimit(2)
+                                    if let detail = activity.detail, !detail.isEmpty {
+                                        Text(detail)
+                                            .font(.system(size: 9))
+                                            .foregroundColor(.secondary)
+                                            .lineLimit(2)
+                                    }
+                                }
+                                .frame(maxWidth: .infinity, alignment: .leading)
+                                .padding(.vertical, 3)
+                            }
+                        }
+                    }
+                }
+                .padding(12)
+            }
+        }
+        .background(appState.appTheme.isGlass ? Color.clear : Color(nsColor: appState.appTheme.panelBackground))
+    }
+
+    private var changedFiles: [String] {
+        var values = agent.filesModified
+        values.append(contentsOf: appState.gitStatus?.files.map(\.path) ?? [])
+        return Array(NSOrderedSet(array: values)).compactMap { $0 as? String }
+    }
+
+    private func inspectorSection<Content: View>(_ title: String, @ViewBuilder content: () -> Content) -> some View {
+        VStack(alignment: .leading, spacing: 7) {
+            Text(title)
+                .font(.system(size: 9, weight: .semibold))
+                .foregroundColor(.secondary)
+            content()
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+    }
+
+    private func emptyLabel(_ text: String) -> some View {
+        Text(text)
+            .font(.system(size: 10))
+            .foregroundColor(.secondary.opacity(0.75))
+    }
+
+    private func contextFileRow(path: String, status: String?) -> some View {
+        Button {
+            let url = resolvedURL(for: path)
+            Task { @MainActor in
+                await appState.loadFile(url: url)
+                surface = .editor
+            }
+        } label: {
+            VStack(alignment: .leading, spacing: 2) {
+                Text(URL(fileURLWithPath: path).lastPathComponent)
+                    .font(.system(size: 10, weight: .medium))
+                    .lineLimit(1)
+                HStack(spacing: 5) {
+                    Text(relativePath(path))
+                        .font(.system(size: 9))
+                        .foregroundColor(.secondary)
+                        .lineLimit(1)
+                    if let status {
+                        Text(status)
+                            .font(.system(size: 8))
+                            .foregroundColor(.secondary)
+                    }
+                }
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .padding(.vertical, 3)
+        }
+        .buttonStyle(.plain)
+    }
+
+    private func resolvedURL(for path: String) -> URL {
+        if path.hasPrefix("/") { return URL(fileURLWithPath: path) }
+        return appState.workspaceFolder?.appendingPathComponent(path) ?? URL(fileURLWithPath: path)
+    }
+
+    private func relativePath(_ path: String) -> String {
+        guard let root = appState.workspaceFolder?.path, path.hasPrefix(root) else { return path }
+        return String(path.dropFirst(root.count)).trimmingCharacters(in: CharacterSet(charactersIn: "/"))
+    }
+}
+
+struct LegacyInlineAgentPanel: View {
+    @EnvironmentObject var appState: AppState
+    @StateObject private var modelCatalog = AIModelCatalog.shared
+
+    var body: some View {
+        VStack(spacing: 0) {
+            HStack(spacing: 8) {
+                VStack(alignment: .leading, spacing: 1) {
+                    Text("AI Agent")
+                        .font(.system(size: 11, weight: .semibold))
+                        .foregroundColor(.primary)
+                    Text(appState.aiModel.isEmpty ? "Ready" : appState.aiModel)
+                        .font(.system(size: 9))
+                        .foregroundColor(.secondary)
+                        .lineLimit(1)
+                }
+                Spacer()
+
+                Menu {
+                    ForEach(modelCatalog.providers) { provider in
+                        Menu(provider.name) {
+                            ForEach(provider.models) { model in
+                                Button(model.name) {
+                                    appState.aiProvider = provider.id
+                                    appState.aiModel = model.id
+                                    appState.saveSettings()
+                                }
+                            }
+                        }
+                    }
+                } label: {
+                    Text("Model")
+                        .font(.system(size: 10))
+                        .foregroundColor(.secondary)
+                        .padding(.horizontal, 5)
+                        .frame(height: 20)
+                }
+                .menuStyle(.borderlessButton)
+
+                Button {
+                    _ = AgentService.shared.createNewChat()
+                } label: {
+                    Text("New").font(.system(size: 10)).foregroundColor(.secondary).frame(height: 20)
+                }
+                .buttonStyle(.plain)
+
+                Button {
+                    appState.aiChatVisible = false
+                    appState.toggleEditorMode(.aiAgent)
+                } label: {
+                    Text("Expand").font(.system(size: 10)).foregroundColor(.secondary).frame(height: 20)
+                }
+                .buttonStyle(.plain)
+
+                Button {
+                    withAnimation(.easeInOut(duration: 0.2)) { appState.aiChatVisible = false }
+                } label: {
+                    Text("Close").font(.system(size: 10)).foregroundColor(.secondary).frame(height: 20)
+                }
+                .buttonStyle(.plain)
+            }
+            .padding(.horizontal, 12)
+            .padding(.vertical, 8)
+            .background(Color(nsColor: .windowBackgroundColor))
+            Divider()
+            AIAgentView().environmentObject(appState)
         }
     }
 }
@@ -385,10 +736,19 @@ struct MainToolbar: View {
                 
                 Divider().frame(height: 16).padding(.horizontal, 6)
                 
-                ToolbarButton(icon: "arrow.triangle.branch", isActive: appState.gitPanelVisible) {
-                    appState.toggleGitPanel()
+                ToolbarButton(
+                    icon: appState.editorMode == .code ? "sidebar.right" : "arrow.triangle.branch",
+                    isActive: appState.editorMode == .code ? appState.agenticContextVisible : appState.gitPanelVisible
+                ) {
+                    withAnimation(.easeInOut(duration: 0.16)) {
+                        if appState.editorMode == .code {
+                            appState.toggleAgenticContext()
+                        } else {
+                            appState.toggleGitPanel()
+                        }
+                    }
                 }
-                .help("Toggle Git Panel")
+                .help(appState.editorMode == .code ? "Toggle Context Panel" : "Toggle Git Panel")
                 
                 ToolbarButton(icon: "terminal", isActive: appState.consoleVisible) {
                     appState.toggleConsole()
@@ -458,6 +818,11 @@ struct MainToolbar: View {
                     appState.toggleEditorMode(.notebook)
                 }
                 .help("Notebook Mode")
+
+                ToolbarButton(icon: "atom", isActive: appState.editorMode == .science, color: appState.editorMode == .science ? .teal : .primary) {
+                    appState.toggleEditorMode(.science)
+                }
+                .help("Science Mode")
                 
                 ToolbarButton(icon: "flowchart", isActive: appState.editorMode == .scenario, color: appState.editorMode == .scenario ? .orange : .primary) {
                     appState.toggleEditorMode(.scenario)
@@ -563,13 +928,14 @@ struct ToolbarButton: View {
 struct NavigatorView: View {
     @EnvironmentObject var appState: AppState
     @State private var searchText = ""
+    var onOpenFile: (() -> Void)? = nil
     
     var body: some View {
         VStack(spacing: 0) {
             // Toolbar
             HStack(spacing: 8) {
-                Image(systemName: "folder.fill")
-                    .foregroundColor(.accentColor)
+                Image(systemName: "folder")
+                    .foregroundColor(.secondary)
                     .font(.system(size: 12))
                 
                 Text(appState.workspaceFolder?.lastPathComponent ?? "No Folder")
@@ -612,23 +978,34 @@ struct NavigatorView: View {
                 // Performance: Using NSOutlineView wrapper (AuthenticFileTree) for efficiency
                 AuthenticFileTree(
                     fileTree: $appState.fileTree,
+                    revision: appState.fileTreeRevision,
+                    backgroundColor: appState.appTheme.isGlass ? .clear : appState.appTheme.panelBackground,
                     onAction: { action in
                         handleAction(action)
                     }
                 )
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
+
+                if let warning = appState.fileTreeLimitWarning {
+                    Text(warning)
+                        .font(.system(size: 9))
+                        .foregroundColor(.secondary)
+                        .lineLimit(2)
+                        .padding(.horizontal, 10)
+                        .padding(.vertical, 6)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .background(Color.primary.opacity(0.035))
+                }
             } else {
                 EmptyNavigatorView()
             }
         }
         .background(
             Group {
-                if appState.appTheme == .transparent {
+                if appState.appTheme.isGlass {
                     VisualEffectView(material: .sidebar, blendingMode: .behindWindow)
-                } else if appState.appTheme == .extraClear {
-                    Color.clear
                 } else {
-                    Color.compat(nsColor: .controlBackgroundColor)
+                    Color(nsColor: appState.appTheme.panelBackground)
                 }
             }
         )
@@ -637,7 +1014,10 @@ struct NavigatorView: View {
     private func handleAction(_ action: FileTreeAction) {
         switch action {
         case .openFile(let node):
-            Task { @MainActor in await appState.loadFile(url: URL(fileURLWithPath: node.path)) }
+            Task { @MainActor in
+                await appState.loadFile(url: URL(fileURLWithPath: node.path))
+                onOpenFile?()
+            }
         case .loadChildren(let node):
             Task { @MainActor in await appState.loadChildren(for: node.id) }
         case .createFolder(let node, let name):
@@ -659,31 +1039,11 @@ struct EmptyNavigatorView: View {
     var body: some View {
         VStack(spacing: 16) {
             Spacer()
-            ZStack {
-                RoundedRectangle(cornerRadius: 16, style: .continuous)
-                    .fill(LinearGradient(colors: [Color(nsColor: .windowBackgroundColor), Color(nsColor: .controlBackgroundColor)], startPoint: .topLeading, endPoint: .bottomTrailing))
-                    .frame(width: 64, height: 64)
-                    .shadow(color: .black.opacity(0.3), radius: 10, x: 0, y: 5)
-                
-                RoundedRectangle(cornerRadius: 16, style: .continuous)
-                    .strokeBorder(LinearGradient(colors: [Color.white.opacity(0.2), Color.clear], startPoint: .top, endPoint: .bottom), lineWidth: 1)
-                    .frame(width: 64, height: 64)
-                
-                // MicroCode 'M' interlocking logo using native SF symbols stacked
-                ZStack {
-                    Image(systemName: "chevron.left")
-                        .font(.system(size: 24, weight: .bold))
-                        .foregroundStyle(Color(red: 0.04, green: 0.52, blue: 1.0))
-                        .offset(x: -8)
-                    
-                    Image(systemName: "chevron.right")
-                        .font(.system(size: 24, weight: .bold))
-                        .foregroundStyle(Color(red: 0.04, green: 0.52, blue: 1.0))
-                        .offset(x: 8)
-                }
-            }
+            Image(systemName: "folder")
+                .font(.system(size: 34, weight: .regular))
+                .foregroundColor(.secondary.opacity(0.7))
             Text("No Folder Open")
-                .font(.system(size: 14, weight: .medium, design: .rounded))
+                .font(.system(size: 13, weight: .medium))
                 .foregroundColor(.secondary)
             Button("Open Folder") {
                 appState.openFolder()
@@ -918,6 +1278,9 @@ struct EditorArea: View {
     var body: some View {
         Group {
             switch appState.editorMode {
+            case .science:
+                ScienceModeView()
+                    .environmentObject(appState)
             case .scenario:
                 ScenarioView()
                     .environmentObject(appState)
@@ -991,10 +1354,8 @@ struct EditorArea: View {
                     }
                     .background(
                         Group {
-                            if appState.appTheme == .transparent {
+                            if appState.appTheme.isGlass {
                                 VisualEffectView(material: .hudWindow, blendingMode: .behindWindow)
-                            } else if appState.appTheme == .extraClear {
-                                Color.clear
                             } else {
                                 Color.compat(nsColor: appState.appTheme.editorBackground)
                             }
@@ -1468,6 +1829,24 @@ struct CodeEditor: View {
             .background(Color.compat(nsColor: .windowBackgroundColor).opacity(0.5))
             
             Divider()
+
+            if file.isReadOnly || file.usesPlainTextMode {
+                HStack(spacing: 8) {
+                    Text(file.isTruncated ? "Large-file preview" : "Performance mode")
+                        .font(.system(size: 10, weight: .semibold))
+                    Text(file.isTruncated
+                         ? "Showing a read-only preview of \(formattedByteCount(file.originalByteSize))."
+                         : "Syntax highlighting and LSP are disabled for this file.")
+                        .font(.system(size: 10))
+                        .foregroundColor(.secondary)
+                    Spacer()
+                }
+                .padding(.horizontal, 12)
+                .padding(.vertical, 5)
+                .background(Color.primary.opacity(0.04))
+
+                Divider()
+            }
             
             // Code Editor with Syntax Highlighting Engine
             ZStack(alignment: .topLeading) {
@@ -1478,6 +1857,9 @@ struct CodeEditor: View {
                     isDark: appState.appTheme.isDark,
                     themeName: appState.appTheme.rawValue,
                     fileURL: URL(fileURLWithPath: file.path),
+                    isEditable: !file.isReadOnly,
+                    enableHighlighting: !file.usesPlainTextMode,
+                    showLineNumbers: appState.showLineNumbers && !file.usesPlainTextMode,
                     editorID: "file-\(file.id.uuidString)"
                 )
                 
@@ -1501,6 +1883,7 @@ struct CodeEditor: View {
             if !file.isUnsaved { text = newContent }
         }
         .onChange(of: text) { newValue in
+            guard !file.isReadOnly else { return }
             // Debounce state updates to prevent re-render loops and high CPU
             updateTask?.cancel()
             updateTask = Task {
@@ -1516,6 +1899,10 @@ struct CodeEditor: View {
                 }
             }
         }
+    }
+
+    private func formattedByteCount(_ count: Int) -> String {
+        ByteCountFormatter.string(fromByteCount: Int64(count), countStyle: .file)
     }
     
     private func breadcrumbComponents() -> [String] {
@@ -3792,6 +4179,7 @@ struct ThinkingIndicatorView: View {
 struct SettingsView: View {
     @EnvironmentObject var appState: AppState
     @Environment(\.dismiss) var dismiss
+    @StateObject private var modelCatalog = AIModelCatalog.shared
     
     // Local state for editing
     @State private var selectedProvider: String = ""
@@ -3799,6 +4187,7 @@ struct SettingsView: View {
     @State private var apiKey: String = ""
     @State private var fontSize: CGFloat = 13
     @State private var fontFamily: String = "Menlo"
+    @State private var showLineNumbers: Bool = false
     @State private var showSidebar: Bool = true
     @State private var showConsole: Bool = true
     @State private var selectedTheme: AppTheme = .system
@@ -4260,7 +4649,11 @@ struct SettingsView: View {
                 // Editing
                 VStack(alignment: .leading, spacing: 12) {
                     SettingsSectionHeader(title: "Editing Preferences")
-                    Toggle("Show line numbers", isOn: .constant(true))
+                    Toggle("Show line numbers", isOn: $showLineNumbers)
+                        .onChange(of: showLineNumbers) { _ in hasChanges = true }
+                    Text("Off by default. Large files in Performance mode hide line numbers automatically for stability.")
+                        .font(.caption)
+                        .foregroundColor(.secondary)
                     Toggle("Word wrap", isOn: .constant(false))
                 }
                 .padding()
@@ -4285,67 +4678,35 @@ struct SettingsView: View {
     }
     
     private var aiProviders: [AIProviderInfo] {
-        [
-            AIProviderInfo(id: "gemini", name: "Google Gemini", icon: "sparkle", color: .blue,
-                          endpoint: "generativelanguage.googleapis.com",
-                          models: [
-                              ("Gemini 3.1 Pro", "gemini-3.1-pro", "NEW"),
-                              ("Gemini 2.5 Pro", "gemini-2.5-pro-preview-05-06", ""),
-                              ("Gemini 2.5 Flash", "gemini-2.5-flash", "FAST"),
-                              ("Gemini 2.5 Flash‑Lite", "gemini-2.5-flash-lite", ""),
-                              ("Gemma 3n", "gemma-3n-e4", "OPEN"),
-                          ]),
-            AIProviderInfo(id: "openai", name: "OpenAI", icon: "brain.head.profile", color: .green,
-                          endpoint: "api.openai.com",
-                          models: [
-                              ("GPT‑5", "gpt-5", "NEW"),
-                              ("GPT‑4.5 Preview", "gpt-4.5-preview", ""),
-                              ("GPT‑4o", "gpt-4o", ""),
-                              ("o3-mini", "o3-mini", "FAST"),
-                              ("o4-mini", "o4-mini", "NEW"),
-                          ]),
-            AIProviderInfo(id: "anthropic", name: "Anthropic Claude", icon: "aqi.medium", color: .orange,
-                          endpoint: "api.anthropic.com",
-                          models: [
-                              ("Claude 4.7 Opus", "claude-4.7-opus-20260501", "NEW"),
-                              ("Claude 3.7 Sonnet", "claude-3-7-sonnet-20250219", ""),
-                              ("Claude 3.5 Sonnet", "claude-3-5-sonnet-20241022", ""),
-                              ("Claude 3.5 Haiku", "claude-3-5-haiku-20241022", "FAST"),
-                          ]),
-            AIProviderInfo(id: "deepseek", name: "DeepSeek", icon: "water.waves", color: .cyan,
-                          endpoint: "api.deepseek.com",
-                          models: [
-                              ("DeepSeek V4", "deepseek-chat-v4", "NEW"),
-                              ("DeepSeek Chat", "deepseek-chat", ""),
-                              ("DeepSeek Coder", "deepseek-coder", "CODE"),
-                              ("DeepSeek Reasoner", "deepseek-reasoner", "REASON"),
-                          ]),
-            AIProviderInfo(id: "grok", name: "Grok (xAI)", icon: "bolt.fill", color: .purple,
-                          endpoint: "api.x.ai",
-                          models: [
-                              ("Grok 3", "grok-3", "NEW"),
-                              ("Grok 3 Mini", "grok-3-mini", "FAST"),
-                          ]),
-            AIProviderInfo(id: "qwen", name: "Qwen (Alibaba)", icon: "cloud.fill", color: .indigo,
-                          endpoint: "dashscope.aliyuncs.com",
-                          models: [
-                              ("Qwen3 235B‑A22B", "qwen3-235b-a22b", "NEW"),
-                              ("Qwen Max", "qwen-max", ""),
-                              ("Qwen Plus", "qwen-plus", "FAST"),
-                          ]),
-            AIProviderInfo(id: "glm", name: "GLM (Zhipu AI)", icon: "globe.asia.australia", color: .red,
-                          endpoint: "open.bigmodel.cn",
-                          models: [
-                              ("GLM‑4.6", "glm-4.6", "NEW"),
-                              ("GLM‑4 Plus", "glm-4-plus", ""),
-                              ("GLM‑4 Flash", "glm-4-flash", "FAST"),
-                          ]),
+        modelCatalog.providers.map { provider in
+            AIProviderInfo(
+                id: provider.id,
+                name: provider.name,
+                icon: provider.icon,
+                color: providerColor(provider.id),
+                endpoint: provider.endpoint,
+                models: provider.models.map { ($0.name, $0.id, $0.badge) }
+            )
+        } + [
             AIProviderInfo(id: "local", name: "Local LLM", icon: "desktopcomputer", color: .mint,
                           endpoint: LocalLLMService.shared.activeEndpoint,
                           models: LocalLLMService.shared.availableModels.map {
                               (name: $0.displayName, id: $0.id, badge: $0.size ?? "")
                           } + [("Auto-detect", "local-model", "SCAN")]),
         ]
+    }
+
+    private func providerColor(_ provider: String) -> Color {
+        switch provider {
+        case "gemini": return .blue
+        case "openai": return .green
+        case "anthropic": return .orange
+        case "deepseek": return .cyan
+        case "grok": return .purple
+        case "qwen": return .indigo
+        case "glm": return .red
+        default: return .secondary
+        }
     }
     
     @State private var providerKeys: [String: String] = [:]
@@ -4359,6 +4720,19 @@ struct SettingsView: View {
                 HStack(spacing: 8) {
                     Text("Default Provider & Model")
                         .font(.system(size: 13, weight: .semibold))
+                    Spacer()
+                    Text(modelCatalog.source)
+                        .font(.system(size: 9))
+                        .foregroundColor(.secondary)
+                    Button(modelCatalog.isRefreshing ? "Refreshing…" : "Refresh Models") {
+                        Task {
+                            await modelCatalog.refreshIfNeeded(force: true)
+                            let normalized = modelCatalog.normalizedSelection(provider: selectedProvider, model: selectedModel)
+                            selectedProvider = normalized.provider
+                            selectedModel = normalized.model
+                        }
+                    }
+                    .disabled(modelCatalog.isRefreshing)
                 }
                 
                 Text("Choose which AI provider and model to use by default in the Agent and Chat.")
@@ -4974,6 +5348,7 @@ struct SettingsView: View {
         selectedModel = appState.aiModel
         fontSize = appState.fontSize
         fontFamily = appState.fontFamily
+        showLineNumbers = appState.showLineNumbers
         showSidebar = appState.sidebarVisible
         showConsole = appState.consoleVisible
         selectedTheme = appState.appTheme
@@ -5001,6 +5376,7 @@ struct SettingsView: View {
         appState.aiModel = selectedModel
         appState.fontSize = fontSize
         appState.fontFamily = fontFamily
+        appState.showLineNumbers = showLineNumbers
         appState.sidebarVisible = showSidebar
         appState.consoleVisible = showConsole
         appState.appTheme = selectedTheme
@@ -5027,6 +5403,7 @@ struct SettingsView: View {
         defaults.set(selectedModel, forKey: "aiModel")
         defaults.set(fontSize, forKey: "fontSize")
         defaults.set(fontFamily, forKey: "fontFamily")
+        defaults.set(showLineNumbers, forKey: "showLineNumbers")
         defaults.set(showSidebar, forKey: "sidebarVisible")
         defaults.set(showConsole, forKey: "consoleVisible")
         defaults.set(selectedTheme.rawValue, forKey: "appTheme")
