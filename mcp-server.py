@@ -53,11 +53,17 @@ ALLOWED_PATHS = [WORKSPACE, "/tmp"]
 # ============================================================
 
 def validate_path(path: str) -> str:
-    """Resolve and validate a file path is within sandbox."""
+    """Resolve and validate a file path is strictly within allowed sandbox directories."""
     resolved = os.path.realpath(os.path.expanduser(path))
     for allowed in ALLOWED_PATHS:
-        if resolved.startswith(os.path.realpath(allowed)):
-            return resolved
+        allowed_resolved = os.path.realpath(os.path.expanduser(allowed))
+        try:
+            # Must share commonpath and not be a sibling prefix bypass
+            common = os.path.commonpath([resolved, allowed_resolved])
+            if common == allowed_resolved:
+                return resolved
+        except ValueError:
+            continue
     raise PermissionError(f"Path '{path}' is outside workspace. Access denied.")
 
 # ============================================================
