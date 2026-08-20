@@ -44,6 +44,17 @@ struct MicroCodeApp: App {
                         await performBackgroundStartup()
                     }
                 }
+                .onOpenURL { url in
+                    handleIncomingDeepLink(url)
+                }
+                .onReceive(NotificationCenter.default.publisher(for: NSNotification.Name("MicroCodeOpenOmniAISnippet"))) { notif in
+                    if let info = notif.userInfo,
+                       let code = info["code"] as? String {
+                        let lang = info["language"] as? String ?? "swift"
+                        let shouldRun = info["shouldRun"] as? Bool ?? true
+                        appState.openSnippetFromOmniAI(code: code, language: lang, shouldRun: shouldRun)
+                    }
+                }
                 .onChange(of: appState.appTheme) { _ in
                     setupWindow()
                 }
@@ -69,8 +80,8 @@ struct MicroCodeApp: App {
             window.isMovableByWindowBackground = true
             
             // Dynamic transparency based on theme
-            let isTransparent = appState.appTheme == .extraClear || appState.appTheme == .transparent || appState.appTheme == .crystalClear || appState.appTheme == .obsidianGlass
-            window.backgroundColor = isTransparent ? .clear : .windowBackgroundColor
+            let isTransparent = appState.appTheme.isGlass
+            window.backgroundColor = isTransparent ? .clear : appState.appTheme.workspaceBackground
             window.isOpaque = !isTransparent
             window.hasShadow = true
             
@@ -85,12 +96,52 @@ struct MicroCodeApp: App {
         _ = AuthService.shared
         _ = AutoHealerService.shared
         
+        // Start Local MCP & HTTP Daemon Bridge for Omni AI
+        MCPServer.shared.startLocalHttpBridge(port: 18888)
+        
         // Log startup
-        ReportLogManager.shared.log("App Started", type: .info)
+        ReportLogManager.shared.log("App Started & Omni AI Local Bridge Initialized on Port 18888", type: .info)
         
         // Log startup performance
         await performanceManager.runOnECore {
-            print("🚀 App Startup: Background services warmed up")
+            print("🚀 App Startup: Background services and Omni AI Bridge warmed up")
+        }
+    }
+    
+    // MARK: - Omni AI & Deep Link Integration
+    
+    private func handleIncomingDeepLink(_ url: URL) {
+        NSApp.activate(ignoringOtherApps: true)
+        
+        guard let components = URLComponents(url: url, resolvingAgainstBaseURL: true) else { return }
+        let host = components.host ?? url.path
+        let queryItems = components.queryItems ?? []
+        
+        func queryValue(for key: String) -> String? {
+            return queryItems.first(where: { $0.name.lowercased() == key.lowercased() })?.value
+        }
+        
+        // Account Sync
+        if let email = queryValue(for: "email"), !email.isEmpty {
+            let token = queryValue(for: "token") ?? ""
+            let name = queryValue(for: "name") ?? queryValue(for: "display_name") ?? ""
+            appState.syncGoogleOrDotminiAccount(email: email, token: token, displayName: name)
+        }
+        
+        // Code Execution / Open
+        if host == "open" || host == "run" || host == "playground" || host.contains("snippet") {
+            var rawCode = queryValue(for: "code") ?? ""
+            if let b64 = queryValue(for: "base64"), let data = Data(base64Encoded: b64), let decoded = String(data: data, encoding: .utf8) {
+                rawCode = decoded
+            }
+            
+            let language = queryValue(for: "lang") ?? queryValue(for: "language") ?? "swift"
+            let action = queryValue(for: "action") ?? (host == "run" ? "run" : "open")
+            let shouldRun = (action == "run" || action == "open_and_run" || host == "run")
+            
+            if !rawCode.isEmpty {
+                appState.openSnippetFromOmniAI(code: rawCode, language: language, shouldRun: shouldRun)
+            }
         }
     }
 }

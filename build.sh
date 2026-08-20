@@ -5,6 +5,28 @@
 
 set -e
 
+# Keep generated build products and downloaded package caches off the internal
+# drive when the configured external volume is available. Override this path
+# with CODETUNER_BUILD_ROOT when using a different volume or directory.
+DEFAULT_BUILD_ROOT="/Volumes/MAC/CodeTunerBuild"
+if [ -n "${CODETUNER_BUILD_ROOT:-}" ]; then
+    BUILD_ROOT="$CODETUNER_BUILD_ROOT"
+elif [ -d "/Volumes/MAC" ]; then
+    BUILD_ROOT="$DEFAULT_BUILD_ROOT"
+else
+    BUILD_ROOT="$(pwd)/.codetuner-build"
+    echo "Warning: /Volumes/MAC is not mounted; using local build cache at $BUILD_ROOT"
+fi
+
+mkdir -p "$BUILD_ROOT/cargo-home" "$BUILD_ROOT/cargo-target" "$BUILD_ROOT/rustup-home" "$BUILD_ROOT/swiftpm" "$BUILD_ROOT/derived-data"
+export CARGO_HOME="$BUILD_ROOT/cargo-home"
+export CARGO_TARGET_DIR="$BUILD_ROOT/cargo-target"
+export RUSTUP_HOME="$BUILD_ROOT/rustup-home"
+export COPYFILE_DISABLE=1
+export COPY_EXTENDED_ATTRIBUTES_DISABLE=1
+SWIFT_SCRATCH_PATH="$BUILD_ROOT/swiftpm/$(basename "$PWD")"
+XCODE_DERIVED_DATA_PATH="$BUILD_ROOT/derived-data/$(basename "$PWD")"
+
 # Colors for output
 RED='\033[0;31m'
 GREEN='\033[0;32m'
@@ -88,6 +110,7 @@ fi
 
 echo -e "${GREEN}✓ Rust $(rustc --version)${NC}"
 echo -e "${GREEN}✓ Cargo $(cargo --version)${NC}"
+echo -e "${GREEN}✓ Build/cache root: $BUILD_ROOT${NC}"
 
 # Set deployment target for both Rust and Swift
 export MACOSX_DEPLOYMENT_TARGET=12.0
@@ -102,6 +125,13 @@ if [ "$FRONTEND_ONLY" = false ]; then
 
     cd backend
 
+    # Non-APFS external volumes may materialize macOS extended attributes as
+    # AppleDouble files. Some native crates (notably ring 0.16) reject unknown
+    # files while scanning their source tree, so fetch first and remove only
+    # this generated metadata from Cargo's cache.
+    cargo fetch
+    find "$CARGO_HOME" -type f -name '._*' -delete
+
     if [ "$CLEAN" = true ]; then
         echo -e "${YELLOW}Cleaning backend...${NC}"
         cargo clean
@@ -110,17 +140,17 @@ if [ "$FRONTEND_ONLY" = false ]; then
     if [ "$BUILD_TYPE" = "release" ]; then
         echo -e "${YELLOW}Building backend in release mode...${NC}"
         cargo build --release
-        BACKEND_PATH="target/release/microcode-backend"
+        BACKEND_PATH="$CARGO_TARGET_DIR/release/microcode-backend"
     else
         echo -e "${YELLOW}Building backend in debug mode...${NC}"
         cargo build
-        BACKEND_PATH="target/debug/microcode-backend"
+        BACKEND_PATH="$CARGO_TARGET_DIR/debug/microcode-backend"
     fi
 
     if [ $? -eq 0 ]; then
         echo ""
         echo -e "${GREEN}✓ Backend build successful!${NC}"
-        echo -e "${GREEN}  Binary location: backend/$BACKEND_PATH${NC}"
+        echo -e "${GREEN}  Binary location: $BACKEND_PATH${NC}"
 
         # Get binary size
         if [ -f "$BACKEND_PATH" ]; then
@@ -153,14 +183,14 @@ if [ "$BACKEND_ONLY" = false ]; then
     if [ -f "MicroCode.xcodeproj/project.pbxproj" ]; then
         if [ "$CLEAN" = true ]; then
             echo -e "${YELLOW}Cleaning frontend...${NC}"
-            xcodebuild clean -project MicroCode.xcodeproj -scheme MicroCode
+            xcodebuild clean -project MicroCode.xcodeproj -scheme MicroCode -derivedDataPath "$XCODE_DERIVED_DATA_PATH"
         fi
     
         echo -e "${YELLOW}Building frontend...${NC}"
         if [ "$BUILD_TYPE" = "release" ]; then
-            xcodebuild -project MicroCode.xcodeproj -scheme MicroCode -configuration Release
+            xcodebuild -project MicroCode.xcodeproj -scheme MicroCode -configuration Release -derivedDataPath "$XCODE_DERIVED_DATA_PATH"
         else
-            xcodebuild -project MicroCode.xcodeproj -scheme MicroCode -configuration Debug
+            xcodebuild -project MicroCode.xcodeproj -scheme MicroCode -configuration Debug -derivedDataPath "$XCODE_DERIVED_DATA_PATH"
         fi
     
         if [ $? -eq 0 ]; then
@@ -170,7 +200,7 @@ if [ "$BACKEND_ONLY" = false ]; then
             echo -e "${RED}✗ Frontend build failed!${NC}"
             exit 1
         fi
-    elif [ -f "Package.swift" ]; then
+elif [ -f "Package.swift" ]; then
         echo -e "${YELLOW}Building with Swift Package Manager...${NC}"
         
         CONFIG="debug"
@@ -180,10 +210,110 @@ if [ "$BACKEND_ONLY" = false ]; then
         
         if [ "$CLEAN" = true ]; then
             echo -e "${YELLOW}Cleaning frontend...${NC}"
-            swift package clean
+            swift package clean --scratch-path "$SWIFT_SCRATCH_PATH"
         fi
-        
-        swift build -c $CONFIG
+
+        # SwiftPM compiles the C/Objective-C bridges but does not know how to
+        # build or link their Rust implementations. Build both static libraries
+        # explicitly and pass their external target directory to the linker.
+        echo -e "${YELLOW}Building Rust FFI libraries...${NC}"
+        cargo fetch --manifest-path backend/Cargo.toml
+        cargo fetch --manifest-path microcode_core/Cargo.toml
+        find "$CARGO_HOME" -type f -name '._*' -delete
+
+        if [ "$CONFIG" = "release" ]; then
+            cargo build --manifest-path backend/Cargo.toml --lib --release
+            cargo build --manifest-path microcode_core/Cargo.toml --release
+            RUST_LIB_DIR="$CARGO_TARGET_DIR/release"
+        else
+            cargo build --manifest-path backend/Cargo.toml --lib
+            cargo build --manifest-path microcode_core/Cargo.toml
+            RUST_LIB_DIR="$CARGO_TARGET_DIR/debug"
+        fi
+
+        swift build -c "$CONFIG" --scratch-path "$SWIFT_SCRATCH_PATH" \
+            -Xlinker -L"$RUST_LIB_DIR" \
+            -Xlinker -lmicrocode_embedded \
+            -Xlinker -lmicrocode_core
+
+        echo -e "${YELLOW}Packaging MicroCode.app...${NC}"
+        SWIFT_BIN_PATH="$SWIFT_SCRATCH_PATH/$CONFIG/MicroCode"
+        BACKEND_BIN_PATH="$CARGO_TARGET_DIR/$CONFIG/microcode-backend"
+        APP_BUNDLE="$BUILD_ROOT/apps/MicroCode.app"
+
+        if [ ! -f "$SWIFT_BIN_PATH" ] || [ ! -f "$BACKEND_BIN_PATH" ]; then
+            echo -e "${RED}Error: Required app binaries were not found.${NC}"
+            echo "Frontend: $SWIFT_BIN_PATH"
+            echo "Backend:  $BACKEND_BIN_PATH"
+            exit 1
+        fi
+
+        rm -rf "$APP_BUNDLE"
+        mkdir -p "$APP_BUNDLE/Contents/MacOS" "$APP_BUNDLE/Contents/Resources"
+        cp "$SWIFT_BIN_PATH" "$APP_BUNDLE/Contents/MacOS/MicroCode"
+        cp "$BACKEND_BIN_PATH" "$APP_BUNDLE/Contents/MacOS/microcode-backend"
+        chmod +x "$APP_BUNDLE/Contents/MacOS/MicroCode" "$APP_BUNDLE/Contents/MacOS/microcode-backend"
+
+        if [ -f "microcodexround.icns" ]; then
+            cp "microcodexround.icns" "$APP_BUNDLE/Contents/Resources/AppIcon.icns"
+        fi
+        if [ -d "Extensions" ]; then
+            mkdir -p "$APP_BUNDLE/Contents/Resources/Extensions"
+            cp -R "Extensions/." "$APP_BUNDLE/Contents/Resources/Extensions/"
+        fi
+        if [ -f "mcp-server.py" ]; then
+            cp "mcp-server.py" "$APP_BUNDLE/Contents/Resources/mcp-server.py"
+            chmod 644 "$APP_BUNDLE/Contents/Resources/mcp-server.py"
+        fi
+
+        cat > "$APP_BUNDLE/Contents/Info.plist" <<EOF
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "https://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>CFBundleExecutable</key>
+    <string>MicroCode</string>
+    <key>CFBundleIdentifier</key>
+    <string>com.dotmini.microcode</string>
+    <key>CFBundleName</key>
+    <string>MicroCode</string>
+    <key>CFBundleDisplayName</key>
+    <string>MicroCode</string>
+    <key>CFBundleIconFile</key>
+    <string>AppIcon</string>
+    <key>CFBundleShortVersionString</key>
+    <string>2.0.0</string>
+    <key>CFBundleVersion</key>
+    <string>1</string>
+    <key>CFBundlePackageType</key>
+    <string>APPL</string>
+    <key>LSMinimumSystemVersion</key>
+    <string>13.0</string>
+    <key>NSHighResolutionCapable</key>
+    <true/>
+    <key>CFBundleURLTypes</key>
+    <array>
+        <dict>
+            <key>CFBundleTypeRole</key>
+            <string>Editor</string>
+            <key>CFBundleURLName</key>
+            <string>com.dotmini.microcode</string>
+            <key>CFBundleURLSchemes</key>
+            <array>
+                <string>microcode</string>
+                <string>codetuner</string>
+            </array>
+        </dict>
+    </array>
+</dict>
+</plist>
+EOF
+
+        # exFAT may store macOS metadata as AppleDouble files, which codesign
+        # treats as invalid nested bundle content.
+        find "$APP_BUNDLE" -type f -name '._*' -delete
+        codesign --force --deep --sign - "$APP_BUNDLE"
+        echo -e "${GREEN}✓ App bundle: $APP_BUNDLE${NC}"
         
         if [ $? -eq 0 ]; then
              echo ""
@@ -219,13 +349,18 @@ echo ""
 if [ "$FRONTEND_ONLY" = false ]; then
     echo -e "${GREEN}Backend:${NC}"
     echo -e "  To run: ${YELLOW}cd backend && cargo run --release${NC}"
-    echo -e "  Or:     ${YELLOW}./backend/$BACKEND_PATH${NC}"
+    echo -e "  Or:     ${YELLOW}$BACKEND_PATH${NC}"
     echo ""
 fi
 
 if [ "$BACKEND_ONLY" = false ]; then
     echo -e "${GREEN}Frontend:${NC}"
-    echo -e "  Open the app from Xcode or the build output"
+    if [ -n "${APP_BUNDLE:-}" ]; then
+        echo -e "  App: ${YELLOW}$APP_BUNDLE${NC}"
+        echo -e "  Open: ${YELLOW}open \"$APP_BUNDLE\"${NC}"
+    else
+        echo -e "  Open the app from Xcode or the build output"
+    fi
     echo ""
 fi
 

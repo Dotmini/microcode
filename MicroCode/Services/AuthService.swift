@@ -254,9 +254,33 @@ class AuthService: NSObject, ObservableObject {
         deleteSession()
     }
     
+    // MARK: - Omni AI & Dotmini Account Web Sync
+    
+    func syncWithWebSession(email: String, token: String = "", displayName: String = "") {
+        let cleanEmail = email.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !cleanEmail.isEmpty else { return }
+        
+        let name = displayName.isEmpty ? (cleanEmail.components(separatedBy: "@").first ?? "User") : displayName
+        let user = IDXUser(
+            id: token.isEmpty ? UUID().uuidString : token,
+            email: cleanEmail,
+            displayName: name,
+            photoURL: nil,
+            provider: .google,
+            createdAt: Date(),
+            lastLoginAt: Date(),
+            isPremium: true,
+            isEarlyAccess: true
+        )
+        
+        self.currentUser = user
+        self.authState = .signedIn(user)
+        try? saveSession(user)
+    }
+
     // MARK: - Session Management
     
-    private func saveSession(_ user: IDXUser) throws {
+    func saveSession(_ user: IDXUser) throws {
         let encoder = JSONEncoder()
         let data = try encoder.encode(user)
         

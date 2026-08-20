@@ -13,6 +13,8 @@
 
 import Foundation
 import Combine
+import Network
+import AppKit
 
 // MARK: - MCP Protocol Types
 
@@ -401,6 +403,58 @@ class MCPServer: ObservableObject {
                         "path": ["type": "string", "description": "File path to get diagnostics for"]
                     ]
                 ]
+            ],
+            [
+                "name": "microcode_run_playground",
+                "description": "Run code in interactive Playground mode with instant profiling and stdin support on native macOS.",
+                "inputSchema": [
+                    "type": "object",
+                    "properties": [
+                        "code": ["type": "string", "description": "Source code to execute"],
+                        "language": ["type": "string", "description": "Programming language (e.g. swift, python, go, rust, javascript)"],
+                        "stdin": ["type": "string", "description": "Standard input to pipe into program"]
+                    ],
+                    "required": ["code", "language"]
+                ]
+            ],
+            [
+                "name": "microcode_run_cell",
+                "description": "Run a specific notebook cell or code section in MicroCode Cell Mode.",
+                "inputSchema": [
+                    "type": "object",
+                    "properties": [
+                        "cell_id": ["type": "string", "description": "Identifier for the cell"],
+                        "code": ["type": "string", "description": "Cell code content"],
+                        "language": ["type": "string", "description": "Language of the cell"]
+                    ],
+                    "required": ["code", "language"]
+                ]
+            ],
+            [
+                "name": "microcode_open_snippet",
+                "description": "Open a code snippet from Omni AI directly in the MicroCode IDE editor and optionally execute it.",
+                "inputSchema": [
+                    "type": "object",
+                    "properties": [
+                        "code": ["type": "string", "description": "Code snippet to open"],
+                        "language": ["type": "string", "description": "Language of snippet"],
+                        "action": ["type": "string", "description": "Action to perform: 'open' or 'open_and_run'"]
+                    ],
+                    "required": ["code", "language"]
+                ]
+            ],
+            [
+                "name": "microcode_sync_account",
+                "description": "Sync user Google / Dotmini account credentials between Web and MicroCode Native IDE.",
+                "inputSchema": [
+                    "type": "object",
+                    "properties": [
+                        "email": ["type": "string", "description": "User email address"],
+                        "token": ["type": "string", "description": "Session token or JWT"],
+                        "display_name": ["type": "string", "description": "Display name"]
+                    ],
+                    "required": ["email"]
+                ]
             ]
         ]
         
@@ -413,6 +467,24 @@ class MCPServer: ObservableObject {
         guard let name = request.params?.name,
               let args = request.params?.arguments?.mapValues({ $0.value }) else {
             return MCPResponse(id: request.id, error: .invalidParams)
+        }
+        
+        // Fast-path tools that don't strictly require sandbox directory
+        if name == "microcode_run_playground" {
+            do {
+                let res = try await executeRunPlayground(args)
+                return MCPResponse(id: request.id, result: ["content": [["type": "text", "text": "\(res)"]]])
+            } catch {
+                return MCPResponse(id: request.id, result: ["content": [["type": "text", "text": "Error: \(error.localizedDescription)"]], "isError": true])
+            }
+        }
+        if name == "microcode_open_snippet" {
+            let res = await executeOpenSnippet(args)
+            return MCPResponse(id: request.id, result: ["content": [["type": "text", "text": "\(res)"]]])
+        }
+        if name == "microcode_sync_account" {
+            let res = executeSyncAccount(args)
+            return MCPResponse(id: request.id, result: ["content": [["type": "text", "text": "\(res)"]]])
         }
         
         guard let sandbox = sandbox else {
@@ -438,6 +510,8 @@ class MCPServer: ObservableObject {
                 result = try await executeGitStatus(args, sandbox: sandbox)
             case "get_diagnostics":
                 result = try await executeGetDiagnostics(args)
+            case "microcode_run_cell":
+                result = try await executeRunCell(args, sandbox: sandbox)
             default:
                 return MCPResponse(id: request.id, error: .custom("Unknown tool: \(name)"))
             }
@@ -706,15 +780,254 @@ class MCPServer: ObservableObject {
                     output = String(output.prefix(50000)) + "\n...[truncated]"
                 }
                 
-                continuation.resume(returning: output)
-            } catch {
-                timer.cancel()
-                continuation.resume(throwing: error)
+    // MARK: - Omni AI & Playground Direct Execution
+
+    private func executeRunPlayground(_ args: [String: Any]) async throws -> String {
+        guard let code = args["code"] as? String, !code.isEmpty else {
+            throw MCPToolError.missingParam("code")
+        }
+        let language = (args["language"] as? String ?? "swift").lowercased()
+        let stdin = args["stdin"] as? String ?? ""
+        
+        let tempDir = FileManager.default.temporaryDirectory
+        let ext: String
+        switch language {
+        case "swift": ext = "swift"
+        case "python", "py": ext = "py"
+        case "javascript", "js": ext = "js"
+        case "typescript", "ts": ext = "ts"
+        case "go", "golang": ext = "go"
+        case "rust", "rs": ext = "rs"
+        case "cpp", "c++": ext = "cpp"
+        case "c": ext = "c"
+        case "java": ext = "java"
+        case "kotlin", "kt": ext = "kt"
+        case "sh", "bash": ext = "sh"
+        default: ext = "txt"
+        }
+        
+        let sourceFile = tempDir.appendingPathComponent("playground_exec_\(UUID().uuidString.prefix(8)).\(ext)")
+        try code.write(to: sourceFile, atomically: true, encoding: .utf8)
+        defer { try? FileManager.default.removeItem(at: sourceFile) }
+        
+        var command = ""
+        switch language {
+        case "swift":
+            command = "swift \(sourceFile.path.shellEscaped())"
+        case "python", "py":
+            command = "python3 \(sourceFile.path.shellEscaped())"
+        case "javascript", "js":
+            command = "node \(sourceFile.path.shellEscaped())"
+        case "typescript", "ts":
+            command = "npx ts-node \(sourceFile.path.shellEscaped())"
+        case "go", "golang":
+            command = "go run \(sourceFile.path.shellEscaped())"
+        case "rust", "rs":
+            let bin = tempDir.appendingPathComponent("rust_bin_\(UUID().uuidString.prefix(8))").path
+            command = "rustc \(sourceFile.path.shellEscaped()) -o \(bin.shellEscaped()) && \(bin.shellEscaped())"
+        case "cpp", "c++":
+            let bin = tempDir.appendingPathComponent("cpp_bin_\(UUID().uuidString.prefix(8))").path
+            command = "clang++ -O2 -std=c++17 \(sourceFile.path.shellEscaped()) -o \(bin.shellEscaped()) && \(bin.shellEscaped())"
+        case "c":
+            let bin = tempDir.appendingPathComponent("c_bin_\(UUID().uuidString.prefix(8))").path
+            command = "clang -O2 \(sourceFile.path.shellEscaped()) -o \(bin.shellEscaped()) && \(bin.shellEscaped())"
+        case "java":
+            command = "java \(sourceFile.path.shellEscaped())"
+        case "sh", "bash":
+            command = "bash \(sourceFile.path.shellEscaped())"
+        default:
+            command = "cat \(sourceFile.path.shellEscaped())"
+        }
+        
+        if !stdin.isEmpty {
+            let stdinFile = tempDir.appendingPathComponent("stdin_\(UUID().uuidString.prefix(8)).txt")
+            try stdin.write(to: stdinFile, atomically: true, encoding: .utf8)
+            defer { try? FileManager.default.removeItem(at: stdinFile) }
+            command += " < \(stdinFile.path.shellEscaped())"
+        }
+        
+        return try await runShellCommand(command, cwd: tempDir.path, timeout: 15)
+    }
+
+    private func executeRunCell(_ args: [String: Any], sandbox: MCPSecuritySandbox) async throws -> String {
+        return try await executeRunPlayground(args)
+    }
+
+    private func executeOpenSnippet(_ args: [String: Any]) async -> String {
+        guard let code = args["code"] as? String else { return "Missing code" }
+        let language = args["language"] as? String ?? "swift"
+        let action = args["action"] as? String ?? "open_and_run"
+        let shouldRun = (action == "open_and_run" || action == "run")
+        
+        // Post notification or run on main actor
+        DispatchQueue.main.async {
+            NotificationCenter.default.post(
+                name: NSNotification.Name("MicroCodeOpenOmniAISnippet"),
+                object: nil,
+                userInfo: [
+                    "code": code,
+                    "language": language,
+                    "shouldRun": shouldRun
+                ]
+            )
+            NSApp.activate(ignoringOtherApps: true)
+        }
+        return "Opened snippet in MicroCode IDE (Language: \(language), AutoRun: \(shouldRun))"
+    }
+
+    private func executeSyncAccount(_ args: [String: Any]) -> String {
+        guard let email = args["email"] as? String, !email.isEmpty else { return "Missing email" }
+        let token = args["token"] as? String ?? ""
+        let displayName = args["display_name"] as? String ?? ""
+        
+        AuthService.shared.syncWithWebSession(email: email, token: token, displayName: displayName)
+        return "Account synced as \(email)"
+    }
+
+    // MARK: - Local HTTP Daemon Bridge for Omni AI & Web Apps
+
+    private var httpListener: NWListener?
+
+    func startLocalHttpBridge(port: UInt16 = 18888) {
+        guard httpListener == nil else { return }
+        do {
+            let params = NWParameters.tcp
+            let listener = try NWListener(using: params, on: NWEndpoint.Port(rawValue: port) ?? 18888)
+            
+            listener.newConnectionHandler = { [weak self] connection in
+                self?.handleIncomingConnection(connection)
+            }
+            
+            listener.stateUpdateHandler = { state in
+                switch state {
+                case .ready:
+                    print("⚡ MicroCode Local Daemon Bridge running on http://127.0.0.1:\(port)")
+                case .failed(let err):
+                    print("⚠️ MicroCode Local Bridge error: \(err)")
+                default:
+                    break
+                }
+            }
+            
+            listener.start(queue: DispatchQueue.global(qos: .userInitiated))
+            self.httpListener = listener
+        } catch {
+            print("⚠️ Failed to start MicroCode HTTP Bridge: \(error)")
+        }
+    }
+
+    func stopLocalHttpBridge() {
+        httpListener?.cancel()
+        httpListener = nil
+    }
+
+    private func handleIncomingConnection(_ connection: NWConnection) {
+        connection.start(queue: DispatchQueue.global(qos: .userInitiated))
+        connection.receive(minimumIncompleteLength: 1, maximumLength: 65536) { [weak self] content, _, isComplete, _ in
+            guard let self = self, let content = content, let requestString = String(data: content, encoding: .utf8) else {
+                connection.cancel()
+                return
+            }
+            
+            Task {
+                let responseData = await self.processHttpRequest(requestString)
+                connection.send(content: responseData, completion: .contentProcessed({ _ in
+                    connection.cancel()
+                }))
             }
         }
     }
-    
-    // MARK: - Logging
+
+    private func processHttpRequest(_ rawRequest: String) async -> Data {
+        let lines = rawRequest.components(separatedBy: "\r\n")
+        guard let firstLine = lines.first else { return Data() }
+        let parts = firstLine.components(separatedBy: " ")
+        guard parts.count >= 2 else { return Data() }
+        
+        let method = parts[0].uppercased()
+        let path = parts[1]
+        
+        let corsHeaders = "HTTP/1.1 200 OK\r\nAccess-Control-Allow-Origin: *\r\nAccess-Control-Allow-Methods: GET, POST, OPTIONS\r\nAccess-Control-Allow-Headers: Content-Type, Authorization\r\nContent-Type: application/json\r\nConnection: close\r\n\r\n"
+        
+        if method == "OPTIONS" {
+            return corsHeaders.data(using: .utf8) ?? Data()
+        }
+        
+        // Extract Body
+        var bodyString = ""
+        if let bodyIndex = rawRequest.range(of: "\r\n\r\n") {
+            bodyString = String(rawRequest[bodyIndex.upperBound...])
+        }
+        
+        if path.hasPrefix("/v1/run") && method == "POST" {
+            if let bodyData = bodyString.data(using: .utf8),
+               let json = try? JSONSerialization.jsonObject(with: bodyData) as? [String: Any] {
+                let code = json["code"] as? String ?? ""
+                let lang = json["language"] as? String ?? "swift"
+                
+                // Account sync if provided
+                if let email = json["email"] as? String, !email.isEmpty {
+                    let token = json["token"] as? String ?? ""
+                    let name = json["display_name"] as? String ?? ""
+                    AuthService.shared.syncWithWebSession(email: email, token: token, displayName: name)
+                }
+                
+                // Open and run in app
+                _ = await self.executeOpenSnippet(["code": code, "language": lang, "action": "open_and_run"])
+                
+                let resp = ["success": true, "status": "executed_on_mac", "message": "Loaded and running on MicroCode IDE"] as [String : Any]
+                let respBody = (try? JSONSerialization.data(withJSONObject: resp)) ?? Data()
+                let httpResp = "HTTP/1.1 200 OK\r\nAccess-Control-Allow-Origin: *\r\nContent-Type: application/json\r\nContent-Length: \(respBody.count)\r\nConnection: close\r\n\r\n"
+                var data = httpResp.data(using: .utf8) ?? Data()
+                data.append(respBody)
+                return data
+            }
+        }
+        
+        if path.hasPrefix("/v1/auth/sync") && method == "POST" {
+            if let bodyData = bodyString.data(using: .utf8),
+               let json = try? JSONSerialization.jsonObject(with: bodyData) as? [String: Any],
+               let email = json["email"] as? String {
+                let token = json["token"] as? String ?? ""
+                let name = json["display_name"] as? String ?? ""
+                AuthService.shared.syncWithWebSession(email: email, token: token, displayName: name)
+                
+                let resp = ["success": true, "synced_email": email] as [String : Any]
+                let respBody = (try? JSONSerialization.data(withJSONObject: resp)) ?? Data()
+                let httpResp = "HTTP/1.1 200 OK\r\nAccess-Control-Allow-Origin: *\r\nContent-Type: application/json\r\nContent-Length: \(respBody.count)\r\nConnection: close\r\n\r\n"
+                var data = httpResp.data(using: .utf8) ?? Data()
+                data.append(respBody)
+                return data
+            }
+        }
+        
+        if path.hasPrefix("/v1/status") || path == "/v1/health" {
+            let user = AuthService.shared.currentUser?.email ?? "Guest (Unified Mode)"
+            let resp = [
+                "status": "ok",
+                "app": "MicroCode Native IDE (macOS)",
+                "user": user,
+                "mcp_version": "2024-11-05"
+            ]
+            let respBody = (try? JSONSerialization.data(withJSONObject: resp)) ?? Data()
+            let httpResp = "HTTP/1.1 200 OK\r\nAccess-Control-Allow-Origin: *\r\nContent-Type: application/json\r\nContent-Length: \(respBody.count)\r\nConnection: close\r\n\r\n"
+            var data = httpResp.data(using: .utf8) ?? Data()
+            data.append(respBody)
+            return data
+        }
+        
+        if path.hasPrefix("/v1/mcp") && method == "POST" {
+            let mcpRespString = await self.handleRequest(bodyString)
+            let respBody = mcpRespString.data(using: .utf8) ?? Data()
+            let httpResp = "HTTP/1.1 200 OK\r\nAccess-Control-Allow-Origin: *\r\nContent-Type: application/json\r\nContent-Length: \(respBody.count)\r\nConnection: close\r\n\r\n"
+            var data = httpResp.data(using: .utf8) ?? Data()
+            data.append(respBody)
+            return data
+        }
+        
+        let notFound = "{\"error\": \"Not Found\"}"
+        return ("HTTP/1.1 404 Not Found\r\nAccess-Control-Allow-Origin: *\r\nContent-Type: application/json\r\nContent-Length: \(notFound.count)\r\nConnection: close\r\n\r\n" + notFound).data(using: .utf8) ?? Data()
+    }
     
     private func log(_ detail: String, method: String, status: MCPLog.LogStatus) {
         let entry = MCPLog(method: method, status: status, detail: detail)
