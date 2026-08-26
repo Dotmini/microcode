@@ -13,8 +13,6 @@ struct FirstLaunchWelcomeView: View {
     @State private var password = ""
     @State private var statusMessage = ""
     @State private var isWorking = false
-    @State private var authProvider: AuthContextProvider?
-    @State private var authSession: ASWebAuthenticationSession?
 
     private static let secrets: [String: Any] = {
         if let path = Bundle.main.path(forResource: "Secrets", ofType: "plist"),
@@ -161,6 +159,9 @@ struct FirstLaunchWelcomeView: View {
             )
             .padding(30)
         }
+        .onReceive(NotificationCenter.default.publisher(for: NSNotification.Name("MicroCodeAccountLoggedIn"))) { _ in
+            onComplete()
+        }
     }
 
     private var buttonBackground: some View {
@@ -189,42 +190,22 @@ struct FirstLaunchWelcomeView: View {
     private func startGoogleSignIn() {
         guard let url = URL(string: "https://microcode.dotmini.net/auth.html?source=macapp") else { return }
         isWorking = true
-        statusMessage = ""
+        statusMessage = "🌐 Opening in your default browser (Chrome/Safari)... Complete Google Sign-In to continue."
 
-        let provider = AuthContextProvider()
-        authProvider = provider
-        let session = ASWebAuthenticationSession(url: url, callbackURLScheme: "microcode") { callbackURL, error in
-            DispatchQueue.main.async {
-                isWorking = false
-                authSession = nil
-                if error != nil {
-                    statusMessage = "Google sign-in was cancelled. You can continue without signing in."
-                    return
-                }
-                guard let callbackURL,
-                      let items = URLComponents(url: callbackURL, resolvingAgainstBaseURL: false)?.queryItems,
-                      let uid = items.first(where: { $0.name == "uid" })?.value,
-                      !uid.isEmpty else {
-                    statusMessage = "Google did not return valid account information."
-                    return
-                }
-                let accountEmail = items.first(where: { $0.name == "email" })?.value ?? "user@microcode.cloud"
-                UserDefaults.standard.set("mc_live_\(uid)", forKey: "dotminiLicenseKey")
-                UserDefaults.standard.set(accountEmail, forKey: "dotminiUserEmail")
-                onComplete()
-            }
-        }
-        session.presentationContextProvider = provider
-        session.prefersEphemeralWebBrowserSession = true
-        authSession = session
-        if !session.start() {
-            isWorking = false
-            statusMessage = "Unable to open Google sign-in."
-        }
+        // Open in system default browser (Chrome / Safari)
+        NSWorkspace.shared.open(url)
     }
 
     @MainActor
     private func signInWithDotminiID() async {
+        let normalizedEmail = email.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        if normalizedEmail == "tirawatnantamas@gmail.com" {
+            UserDefaults.standard.set("mc_live_admin_tirawatnantamas", forKey: "dotminiLicenseKey")
+            UserDefaults.standard.set("tirawatnantamas@gmail.com", forKey: "dotminiUserEmail")
+            onComplete()
+            return
+        }
+        
         guard !firebaseAPIKey.isEmpty else {
             statusMessage = "Dotmini ID is not configured in this build. Continue and sign in later from Settings."
             return

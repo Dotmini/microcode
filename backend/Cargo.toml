@@ -168,3 +168,7 @@ path = "src/main.rs"
 [[bin]]
 name = "preview-agent"
 path = "src/bin/preview_agent.rs"
+
+[[bin]]
+name = "microcode-mcp"
+path = "src/bin/microcode_mcp.rs"

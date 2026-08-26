@@ -32,6 +32,7 @@ import sys
 import os
 import subprocess
 import re
+import shlex
 from pathlib import Path
 
 # ============================================================
@@ -43,7 +44,7 @@ SERVER_VERSION = "2.0.0"
 PROTOCOL_VERSION = "2024-11-05"
 
 # Workspace root — set via env or auto-detect
-WORKSPACE = os.environ.get("MICROCODE_WORKSPACE", os.getcwd())
+WORKSPACE = os.path.realpath(os.path.expanduser(os.environ.get("MICROCODE_WORKSPACE", os.getcwd())))
 
 # Security: Allowed paths
 ALLOWED_PATHS = [WORKSPACE, "/tmp"]
@@ -54,7 +55,9 @@ ALLOWED_PATHS = [WORKSPACE, "/tmp"]
 
 def validate_path(path: str) -> str:
     """Resolve and validate a file path is strictly within allowed sandbox directories."""
-    resolved = os.path.realpath(os.path.expanduser(path))
+    expanded = os.path.expanduser(path)
+    candidate = expanded if os.path.isabs(expanded) else os.path.join(WORKSPACE, expanded)
+    resolved = os.path.realpath(candidate)
     for allowed in ALLOWED_PATHS:
         allowed_resolved = os.path.realpath(os.path.expanduser(allowed))
         try:
@@ -65,6 +68,44 @@ def validate_path(path: str) -> str:
         except ValueError:
             continue
     raise PermissionError(f"Path '{path}' is outside workspace. Access denied.")
+
+def validate_workspace_path(path: str) -> str:
+    """Like validate_path, but excludes /tmp for commands that execute code."""
+    resolved = validate_path(path)
+    if os.path.commonpath([resolved, WORKSPACE]) != WORKSPACE:
+        raise PermissionError("Execution must remain inside the active workspace.")
+    return resolved
+
+def validate_cell_id(cell_id: str) -> str:
+    """Cell IDs are filenames, never paths."""
+    if not isinstance(cell_id, str) or not re.fullmatch(r"[A-Za-z0-9_-]{1,64}", cell_id):
+        raise ValueError("Invalid cell id")
+    return cell_id
+
+def validate_read_only_shell(command: str) -> list[str]:
+    """Allow only simple, non-mutating workspace inspection commands.
+
+    This server is invoked by autonomous models. A blacklist cannot safely
+    contain a shell, so commands requiring writes or execution must go through
+    an explicit user-approved execution flow in the app instead.
+    """
+    if not isinstance(command, str) or not command.strip():
+        raise ValueError("Command is required")
+    if any(token in command for token in (";", "|", "&", ">", "<", "`", "$", "\n", "\r")):
+        raise PermissionError("Shell composition, redirection, and substitution require explicit user approval.")
+    args = shlex.split(command)
+    if not args:
+        raise ValueError("Command is required")
+    allowed = {"git", "rg", "grep", "find", "ls", "pwd", "head", "tail", "sed", "wc", "stat"}
+    if args[0] not in allowed:
+        raise PermissionError("Only read-only workspace inspection commands are available through MCP.")
+    if any(arg.startswith("/") or ".." in arg for arg in args[1:]):
+        raise PermissionError("Absolute paths and parent traversal are not allowed in MCP terminal commands.")
+    if args[0] == "git" and len(args) > 1 and args[1] not in {"status", "diff", "log", "branch", "show", "rev-parse"}:
+        raise PermissionError("Only read-only git operations are available through MCP.")
+    if args[0] == "find" and any(arg in {"-delete", "-exec", "-execdir"} for arg in args[1:]):
+        raise PermissionError("Mutating find actions are not allowed through MCP.")
+    return args
 
 # ============================================================
 # Tool Implementations
@@ -144,13 +185,8 @@ def tool_list_directory_tree(params: dict) -> str:
 
 def tool_shell(params: dict) -> str:
     command = params["command"]
-    cwd = params.get("cwd", WORKSPACE)
-    
-    # Security: Block dangerous commands
-    dangerous = ["rm -rf /", "mkfs", "dd if=", ":(){ :|:& };:"]
-    for d in dangerous:
-        if d in command:
-            raise PermissionError(f"Blocked dangerous command: {command}")
+    cwd = validate_workspace_path(params.get("cwd", WORKSPACE))
+    validate_read_only_shell(command)
     
     result = subprocess.run(
         ["zsh", "-c", command],
@@ -286,32 +322,71 @@ CELLS_DIR = os.path.join(WORKSPACE, ".microcode", "cells")
 LANG_RUNNERS = {
     "python": ["python3", "-u"],
     "python3": ["python3", "-u"],
+    "r": ["Rscript", "-e"],
+    "rscript": ["Rscript", "-e"],
+    "julia": ["julia", "-e"],
+    "jl": ["julia", "-e"],
     "javascript": ["node", "-e"],
     "node": ["node", "-e"],
     "typescript": ["npx", "tsx", "-e"],
     "swift": ["swift", "-e"],
     "ruby": ["ruby", "-e"],
+    "php": ["php", "-r"],
+    "lua": ["lua", "-e"],
+    "perl": ["perl", "-e"],
     "bash": ["bash", "-c"],
     "zsh": ["zsh", "-c"],
     "shell": ["zsh", "-c"],
-    "rust": None,  # Special handling
-    "java": None,  # Special handling
-    "go": None,    # Special handling
-    "c": None,     # Special handling
-    "cpp": None,   # Special handling
+    "zig": None,
+    "dart": None,
+    "csharp": None,
+    "cs": None,
+    "dotnet": None,
+    "rust": None,
+    "rs": None,
+    "java": None,
+    "go": None,
+    "c": None,
+    "cpp": None,
+    "objc": None,
+    "ardium": None,
+    "ar": None,
+    "sql": None,
 }
 LANG_EXT = {
-    "python": ".py", "python3": ".py", "javascript": ".js", "node": ".js",
-    "typescript": ".ts", "swift": ".swift", "ruby": ".rb", "bash": ".sh",
-    "zsh": ".sh", "shell": ".sh", "rust": ".rs", "java": ".java",
-    "go": ".go", "c": ".c", "cpp": ".cpp",
+    "python": ".py", "python3": ".py", "r": ".R", "rscript": ".R", "julia": ".jl", "jl": ".jl",
+    "javascript": ".js", "node": ".js", "typescript": ".ts", "swift": ".swift", "ruby": ".rb",
+    "php": ".php", "lua": ".lua", "perl": ".pl", "bash": ".sh", "zsh": ".sh", "shell": ".sh",
+    "zig": ".zig", "dart": ".dart", "csharp": ".cs", "cs": ".cs", "dotnet": ".cs",
+    "rust": ".rs", "rs": ".rs", "java": ".java", "go": ".go", "c": ".c", "cpp": ".cpp",
+    "objc": ".m", "ardium": ".ar", "ar": ".ar", "sql": ".sql",
 }
+
+def _find_ardium_bin() -> str:
+    env_bin = os.environ.get("ARDIUM_BIN")
+    if env_bin and os.path.exists(env_bin):
+        return env_bin
+    home = os.path.expanduser("~")
+    candidates = [
+        os.path.join(home, ".cargo/bin/arc"),
+        os.path.join(home, ".cargo/bin/TitanScript"),
+        "/opt/homebrew/bin/arc",
+        "/usr/local/bin/arc",
+        "/usr/local/ardium/bin/arc",
+        "/usr/local/bin/ardium",
+        "/usr/local/ardium/ardium",
+        "/opt/homebrew/bin/ardium",
+    ]
+    for p in candidates:
+        if os.path.exists(p):
+            return p
+    return "/usr/local/ardium/bin/arc"
 
 def _ensure_cells_dir():
     os.makedirs(CELLS_DIR, exist_ok=True)
 
 def _cell_path(cell_id: str) -> str:
-    return os.path.join(CELLS_DIR, f"{cell_id}.json")
+    return os.path.join(CELLS_DIR, f"{validate_cell_id(cell_id)}.json")
 
 def _load_cell(cell_id: str) -> dict:
     path = _cell_path(cell_id)
@@ -328,7 +403,7 @@ def _save_cell(cell: dict):
 def tool_cell_create(params: dict) -> str:
     import uuid, datetime
     _ensure_cells_dir()
-    cell_id = params.get("id", str(uuid.uuid4())[:8])
+    cell_id = validate_cell_id(params.get("id", str(uuid.uuid4())[:8]))
     cell = {
         "id": cell_id,
         "language": params.get("language", "python"),
@@ -389,7 +464,7 @@ def _run_code(language: str, code: str, cwd: str = None) -> tuple:
         tmp.write(code)
         tmp.close()
         try:
-            if lang == "rust":
+            if lang in ("rust", "rs"):
                 out_bin = tmp.name.replace(".rs", "")
                 cr = subprocess.run(["rustc", tmp.name, "-o", out_bin], capture_output=True, text=True, timeout=30)
                 if cr.returncode != 0:
@@ -406,6 +481,14 @@ def _run_code(language: str, code: str, cwd: str = None) -> tuple:
                 r = subprocess.run([out_bin], capture_output=True, text=True, timeout=30, cwd=cwd)
                 os.remove(out_bin)
                 return r.stdout, r.stderr, r.returncode
+            elif lang in ("objc", "m", "mm"):
+                out_bin = tmp.name.replace(ext, "")
+                cr = subprocess.run(["clang", "-framework", "Foundation", tmp.name, "-o", out_bin], capture_output=True, text=True, timeout=30)
+                if cr.returncode != 0:
+                    return "", cr.stderr, cr.returncode
+                r = subprocess.run([out_bin], capture_output=True, text=True, timeout=30, cwd=cwd)
+                os.remove(out_bin)
+                return r.stdout, r.stderr, r.returncode
             elif lang == "java":
                 cr = subprocess.run(["javac", tmp.name], capture_output=True, text=True, timeout=30)
                 if cr.returncode != 0:
@@ -416,13 +499,37 @@ def _run_code(language: str, code: str, cwd: str = None) -> tuple:
             elif lang == "go":
                 r = subprocess.run(["go", "run", tmp.name], capture_output=True, text=True, timeout=30, cwd=cwd)
                 return r.stdout, r.stderr, r.returncode
+            elif lang in ("csharp", "cs", "dotnet"):
+                r = subprocess.run(["dotnet-script", tmp.name], capture_output=True, text=True, timeout=30, cwd=cwd)
+                return r.stdout, r.stderr, r.returncode
+            elif lang == "zig":
+                r = subprocess.run(["zig", "run", tmp.name], capture_output=True, text=True, timeout=30, cwd=cwd)
+                return r.stdout, r.stderr, r.returncode
+            elif lang == "dart":
+                r = subprocess.run(["dart", "run", tmp.name], capture_output=True, text=True, timeout=30, cwd=cwd)
+                return r.stdout, r.stderr, r.returncode
+            elif lang == "sql":
+                with open(tmp.name, "r") as fh:
+                    sql_input = fh.read()
+                r = subprocess.run(["sqlite3", ":memory:"], input=sql_input, capture_output=True, text=True, timeout=30, cwd=cwd)
+                return r.stdout, r.stderr, r.returncode
+            elif lang in ("ardium", "ar"):
+                ardium_bin = _find_ardium_bin()
+                env = os.environ.copy()
+                env["DYLD_LIBRARY_PATH"] = f"/usr/local/ardium/lib:{env.get('DYLD_LIBRARY_PATH', '')}"
+                env["ARDIUM_LIB_PATH"] = "/usr/local/ardium/lib"
+                env["ARDIUM_STDLIB"] = "/usr/local/ardium/stdlib"
+                r = subprocess.run([ardium_bin, "run", tmp.name], capture_output=True, text=True, timeout=30, cwd=cwd or WORKSPACE, env=env)
+                clean_stdout = "\n".join([line for line in r.stdout.splitlines() if "Target Triple" not in line])
+                clean_stderr = "\n".join([line for line in r.stderr.splitlines() if "Target Triple" not in line])
+                return clean_stdout, clean_stderr, r.returncode
             else:
                 return "", f"Unsupported compiled language: {lang}", 1
         finally:
             os.remove(tmp.name)
     
     # Interpreted languages
-    if lang in ("javascript", "node", "typescript", "swift", "ruby"):
+    if lang in ("javascript", "node", "typescript", "swift", "ruby", "r", "rscript", "julia", "jl", "php", "lua", "perl"):
         # -e style: pass code as argument
         r = subprocess.run(runner + [code], capture_output=True, text=True, timeout=30, cwd=cwd or WORKSPACE)
     else:
@@ -469,7 +576,7 @@ def tool_playground_run(params: dict) -> str:
     """Run code directly without creating a persistent cell."""
     language = params.get("language", "python")
     code = params["code"]
-    cwd = params.get("cwd", WORKSPACE)
+    cwd = validate_workspace_path(params.get("cwd", WORKSPACE))
     
     try:
         stdout, stderr, exit_code = _run_code(language, code, cwd)
@@ -501,6 +608,134 @@ def tool_git_diff(params: dict) -> str:
     if len(diff) > 8000:
         diff = diff[:8000] + "\n... (truncated)"
     return f"{stat}\n{diff}" if diff else "No changes"
+
+def tool_ardium_run(params: dict) -> str:
+    """Execute Ardium (.ar) source code or file directly."""
+    code = params.get("code")
+    file_path = params.get("path")
+    cwd = validate_workspace_path(params.get("cwd", WORKSPACE))
+    
+    ardium_bin = _find_ardium_bin()
+    if not os.path.exists(ardium_bin):
+        return "❌ Error: Ardium compiler binary (arc / ardium) not found on system."
+
+    env = os.environ.copy()
+    env["DYLD_LIBRARY_PATH"] = f"/usr/local/ardium/lib:{env.get('DYLD_LIBRARY_PATH', '')}"
+    env["ARDIUM_LIB_PATH"] = "/usr/local/ardium/lib"
+    env["ARDIUM_STDLIB"] = "/usr/local/ardium/stdlib"
+
+    if file_path:
+        target = validate_path(file_path)
+        r = subprocess.run([ardium_bin, "run", target], capture_output=True, text=True, timeout=30, cwd=cwd, env=env)
+        out = r.stdout
+        if r.stderr:
+            out += f"\n[stderr]\n{r.stderr}"
+        if r.returncode != 0:
+            out = f"[exit code: {r.returncode}]\n{out}"
+        return out or "(no output)"
+    elif code:
+        import tempfile
+        with tempfile.NamedTemporaryFile(suffix=".ar", mode="w", delete=False, dir=cwd or WORKSPACE) as tmp:
+            tmp.write(code)
+            tmp_name = tmp.name
+        try:
+            r = subprocess.run([ardium_bin, "run", tmp_name], capture_output=True, text=True, timeout=30, cwd=cwd, env=env)
+            out = r.stdout
+            if r.stderr:
+                out += f"\n[stderr]\n{r.stderr}"
+            if r.returncode != 0:
+                out = f"[exit code: {r.returncode}]\n{out}"
+            return out or "(no output)"
+        finally:
+            if os.path.exists(tmp_name):
+                os.remove(tmp_name)
+    else:
+        raise ValueError("Either 'code' or 'path' must be provided.")
+
+def tool_ardium_compile(params: dict) -> str:
+    """Compile Ardium source file to native binary executable."""
+    source_path = validate_path(params["path"])
+    output_path = validate_workspace_path(params.get("output", source_path.replace(".ar", "")))
+    
+    ardium_bin = _find_ardium_bin()
+    env = os.environ.copy()
+    env["DYLD_LIBRARY_PATH"] = f"/usr/local/ardium/lib:{env.get('DYLD_LIBRARY_PATH', '')}"
+    env["ARDIUM_LIB_PATH"] = "/usr/local/ardium/lib"
+    env["ARDIUM_STDLIB"] = "/usr/local/ardium/stdlib"
+    
+    args = [ardium_bin, "build", source_path, "-o", output_path]
+    r = subprocess.run(args, capture_output=True, text=True, timeout=60, env=env)
+    if r.returncode != 0:
+        return f"❌ Compilation Failed:\n{r.stderr or r.stdout}"
+    return f"✅ Ardium binary compiled successfully to: {output_path}"
+
+def tool_ardium_test(params: dict) -> str:
+    """Run test suites in an Ardium project or file."""
+    path = validate_path(params.get("path", WORKSPACE))
+    ardium_bin = _find_ardium_bin()
+    env = os.environ.copy()
+    env["DYLD_LIBRARY_PATH"] = f"/usr/local/ardium/lib:{env.get('DYLD_LIBRARY_PATH', '')}"
+    env["ARDIUM_LIB_PATH"] = "/usr/local/ardium/lib"
+    env["ARDIUM_STDLIB"] = "/usr/local/ardium/stdlib"
+    
+    r = subprocess.run([ardium_bin, "test", path], capture_output=True, text=True, timeout=60, env=env)
+    return r.stdout + (f"\n[stderr]\n{r.stderr}" if r.stderr else "")
+
+def tool_ardium_diagnose(params: dict) -> str:
+    """Analyze and diagnose Ardium code for syntax, RAII memory rules, and CoreUI integrity."""
+    code = params.get("code")
+    if not code and "path" in params:
+        target = validate_path(params["path"])
+        with open(target, "r", encoding="utf-8") as f:
+            code = f.read()
+    
+    if not code:
+        raise ValueError("Either 'code' or 'path' must be provided.")
+    
+    issues = []
+    
+    # 1. Main Entry Check
+    if "fn main()" not in code and "fn main(" not in code:
+        issues.append("ℹ️ Note: No 'fn main()' entry function found. Standalone execution expects fn main().")
+        
+    # 2. Memory Alloc & RAII Check
+    alloc_count = len(re.findall(r"\balloc\(", code))
+    free_count = len(re.findall(r"\bfree\(", code))
+    owned_count = len(re.findall(r"@owned\b", code))
+    
+    if alloc_count > (free_count + owned_count):
+        issues.append(f"⚠️ Memory Warning: Found {alloc_count} 'alloc()' call(s), but only {free_count} 'free()' and {owned_count} '@owned' annotations. Consider '@owned let ptr = alloc(...)' for automatic RAII scope cleanup.")
+        
+    # 3. CoreUI Stack Balance Check
+    vstacks = len(re.findall(r"\bVStack\(", code))
+    hstacks = len(re.findall(r"\bHStack\(", code))
+    if (vstacks > 0 or hstacks > 0) and "import CoreUI" not in code and "CoreUI" not in code:
+        issues.append("💡 Suggestion: CoreUI declarative elements (VStack/HStack) detected. Ensure 'import CoreUI' is declared.")
+        
+    # 4. Compiler check via arc
+    import tempfile
+    with tempfile.NamedTemporaryFile(suffix=".ar", mode="w", delete=False) as tmp:
+        tmp.write(code)
+        tmp_name = tmp.name
+    try:
+        ardium_bin = _find_ardium_bin()
+        env = os.environ.copy()
+        env["DYLD_LIBRARY_PATH"] = f"/usr/local/ardium/lib:{env.get('DYLD_LIBRARY_PATH', '')}"
+        r = subprocess.run([ardium_bin, "build", tmp_name, "-o", tmp_name + ".out"], capture_output=True, text=True, timeout=10, env=env)
+        if os.path.exists(tmp_name + ".out"):
+            os.remove(tmp_name + ".out")
+        if r.returncode != 0:
+            syntax_err = r.stderr or r.stdout
+            issues.append(f"❌ Compiler Error / Diagnostic:\n{syntax_err.strip()}")
+    except Exception as e:
+        issues.append(f"⚠️ Compiler check notice: {str(e)}")
+    finally:
+        if os.path.exists(tmp_name):
+            os.remove(tmp_name)
+            
+    if not issues:
+        return "✅ Ardium Diagnostic Passed: Clean syntax, RAII memory safely managed, CoreUI valid."
+    return "🔍 Ardium Diagnostics Summary:\n" + "\n".join(issues)
 
 # ============================================================
 # Tool Registry
@@ -747,17 +982,62 @@ TOOLS = {
         "handler": tool_cell_run
     },
     "playground_run": {
-        "description": "Run code instantly without creating a cell (playground/scratch mode). Supports Python, JS, Swift, Rust, Go, C, C++, Java, Ruby, Bash.",
+        "description": "Run code instantly without creating a cell (playground/scratch mode). Supports Ardium (.ar), Python, JS, Swift, Rust, Go, C, C++, Java, Ruby, Bash.",
         "inputSchema": {
             "type": "object",
             "properties": {
-                "language": {"type": "string", "description": "Language: python, javascript, swift, rust, go, c, cpp, java, ruby, bash"},
+                "language": {"type": "string", "description": "Language: ardium, python, javascript, swift, rust, go, c, cpp, java, ruby, bash"},
                 "code": {"type": "string", "description": "Source code to execute"},
                 "cwd": {"type": "string", "description": "Working directory (optional)"}
             },
             "required": ["code"]
         },
         "handler": tool_playground_run
+    },
+    "ardium_run": {
+        "description": "Execute Ardium (.ar) source code or file directly with output and exit code.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "code": {"type": "string", "description": "Ardium source code to execute"},
+                "path": {"type": "string", "description": "Path to .ar file to execute (optional if code is provided)"},
+                "cwd": {"type": "string", "description": "Working directory (optional)"}
+            }
+        },
+        "handler": tool_ardium_run
+    },
+    "ardium_compile": {
+        "description": "Compile an Ardium source file (.ar) into a standalone native binary.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "path": {"type": "string", "description": "Path to the .ar source file to compile"},
+                "output": {"type": "string", "description": "Destination path for the compiled executable (optional)"}
+            },
+            "required": ["path"]
+        },
+        "handler": tool_ardium_compile
+    },
+    "ardium_test": {
+        "description": "Run Ardium unit/integration tests marked with @test in a project or file.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "path": {"type": "string", "description": "Project directory or .ar file containing tests"}
+            }
+        },
+        "handler": tool_ardium_test
+    },
+    "ardium_diagnose": {
+        "description": "Analyze Ardium code for syntax correctness, RAII memory safety (@owned, alloc/free), and CoreUI layout rules.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "code": {"type": "string", "description": "Ardium source code to diagnose"},
+                "path": {"type": "string", "description": "Path to .ar file to diagnose (optional if code is provided)"}
+            }
+        },
+        "handler": tool_ardium_diagnose
     },
 }
 

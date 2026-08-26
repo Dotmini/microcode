@@ -280,40 +280,24 @@ class AuthService: NSObject, ObservableObject {
 
     // MARK: - Session Management
     
+    private let userDefaultsKey = "com.dotmini.microcode.auth.session"
+    
     func saveSession(_ user: IDXUser) throws {
         let encoder = JSONEncoder()
         let data = try encoder.encode(user)
-        
-        // Save to Keychain
-        let query: [String: Any] = [
-            kSecClass as String: kSecClassGenericPassword,
-            kSecAttrService as String: keychainService,
-            kSecAttrAccount as String: "currentUser",
-            kSecValueData as String: data
-        ]
-        
-        // Delete existing
-        SecItemDelete(query as CFDictionary)
-        
-        // Add new
-        let status = SecItemAdd(query as CFDictionary, nil)
-        if status != errSecSuccess {
-            print("⚠️ Failed to save session to Keychain: \(status)")
-        }
+        UserDefaults.standard.set(data, forKey: userDefaultsKey)
     }
     
     private func loadSavedSession() {
-        let query: [String: Any] = [
+        // Clean up legacy keychain item to eliminate OS password prompts
+        let legacyQuery: [String: Any] = [
             kSecClass as String: kSecClassGenericPassword,
             kSecAttrService as String: keychainService,
-            kSecAttrAccount as String: "currentUser",
-            kSecReturnData as String: true
+            kSecAttrAccount as String: "currentUser"
         ]
+        SecItemDelete(legacyQuery as CFDictionary)
         
-        var result: AnyObject?
-        let status = SecItemCopyMatching(query as CFDictionary, &result)
-        
-        if status == errSecSuccess, let data = result as? Data {
+        if let data = UserDefaults.standard.data(forKey: userDefaultsKey) {
             let decoder = JSONDecoder()
             if let user = try? decoder.decode(IDXUser.self, from: data) {
                 self.currentUser = user
@@ -323,12 +307,13 @@ class AuthService: NSObject, ObservableObject {
     }
     
     private func deleteSession() {
-        let query: [String: Any] = [
+        UserDefaults.standard.removeObject(forKey: userDefaultsKey)
+        let legacyQuery: [String: Any] = [
             kSecClass as String: kSecClassGenericPassword,
             kSecAttrService as String: keychainService,
             kSecAttrAccount as String: "currentUser"
         ]
-        SecItemDelete(query as CFDictionary)
+        SecItemDelete(legacyQuery as CFDictionary)
     }
     
     // MARK: - Helpers

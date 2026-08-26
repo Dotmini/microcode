@@ -803,21 +803,25 @@ class AppState: ObservableObject {
     @AppStorage("hpcEndpoint") var hpcEndpoint: String = "ws://127.0.0.1:8080/v1/agent"
     @AppStorage("hpcToken") var hpcToken: String = ""
 
-    @Published var fontSize: CGFloat = 13
-    @Published var fontFamily: String = "Menlo"
+    @Published var fontSize: CGFloat = 16
+    @Published var fontFamily: String = "SF Mono"
     @Published var appTheme: AppTheme = .dark
     /// Disabled by default. The editor uses a non-ruler overlay when enabled
     /// so this preference never changes NSScrollView's intrinsic layout.
     @Published var showLineNumbers: Bool = false
     
+    // AI Agent Chat Font Settings
+    @Published var agentFontName: String = "SF Pro"
+    @Published var agentFontSize: CGFloat = 16.0
+    
     // Playground Font Settings
-    @Published var playgroundFontName: String = "Menlo"
-    @Published var playgroundFontSize: CGFloat = 12.0
-    @Published var playgroundFontWeight: Int = 4 // 0: Thin, 1: Light, 2: Regular, 3: Medium, 4: Semibold, 5: Bold
+    @Published var playgroundFontName: String = "SF Mono"
+    @Published var playgroundFontSize: CGFloat = 16.0
+    @Published var playgroundFontWeight: Int = 2 // 0: Thin, 1: Light, 2: Regular, 3: Medium, 4: Semibold, 5: Bold
     
     // Notebook Cell Font Settings
-    @Published var cellFontName: String = "Menlo"
-    @Published var cellFontSize: CGFloat = 13.0
+    @Published var cellFontName: String = "SF Mono"
+    @Published var cellFontSize: CGFloat = 16.0
     @Published var cellFontWeight: Int = 2 // Regular
     @Published var selectedLanguage: String = "python"
     
@@ -834,11 +838,13 @@ class AppState: ObservableObject {
     @Published var showingSettingsDialog: Bool = false
     @Published var showingSimulatorDialog: Bool = false
     @Published var showingNewFileDialog: Bool = false
+    @Published var showingNewConversationDialog: Bool = false
     @Published var showingNodeManager: Bool = false
     @Published var showingDatabaseStudio: Bool = false
     @Published var showingAPIClient: Bool = false
     @Published var showingCICDView: Bool = false
     @Published var showingProjectRuntime: Bool = false
+    @Published var showingSubAgentMonitor: Bool = false
     
     // Project Detection
     @Published var currentProjectType: ProjectType = .unknown
@@ -915,10 +921,13 @@ class AppState: ObservableObject {
     @Published var enableDerivedDataAutoPurge: Bool = false
     @Published var enableDerivedDataAlert: Bool = true
     
-    // AI Chat
+    // AI Chat & Agent
     @Published var aiChatVisible: Bool = false
     @Published var aiChatMessages: [ChatMessage] = []
     @Published var agentMode: Bool = true
+    @Published var agentAutoApproveTools: Bool = false
+    @Published var agentCustomInstructions: String = ""
+    @Published var agentMaxIterations: Int = 0 // 0 = Unlimited (∞)
     @Published var pendingActions: [AgentAction] = []
     @Published var projectContext: String = ""  // Loaded from project.md
     
@@ -1061,12 +1070,36 @@ class AppState: ObservableObject {
                 }
             }
             .store(in: &cancellables)
+            
+        NotificationCenter.default.publisher(for: Notification.Name("MicroCodeAgentTerminalCommand"))
+            .receive(on: DispatchQueue.main)
+            .sink { [weak self] notification in
+                guard let self = self,
+                      let info = notification.userInfo,
+                      let cmd = info["command"] as? String else { return }
+                let output = (info["output"] as? String) ?? ""
+                let cwd = (info["cwd"] as? String) ?? ""
+                let cwdName = URL(fileURLWithPath: cwd).lastPathComponent
+                self.consoleOutput += "\n🤖 [Agent Terminal: \(cwdName.isEmpty ? cwd : cwdName)]\n$ \(cmd)\n\(output)\n"
+            }
+            .store(in: &cancellables)
     }
 
     private func loadSettings() {
         let defaults = UserDefaults.standard
-        fontSize = CGFloat(defaults.double(forKey: "fontSize")) == 0 ? 13 : CGFloat(defaults.double(forKey: "fontSize"))
-        fontFamily = defaults.string(forKey: "fontFamily") ?? "Menlo"
+        fontSize = CGFloat(defaults.double(forKey: "fontSize")) == 0 ? 16 : CGFloat(defaults.double(forKey: "fontSize"))
+        fontFamily = defaults.string(forKey: "fontFamily") ?? "SF Mono"
+        
+        agentFontName = defaults.string(forKey: "agentFontName") ?? "SF Pro"
+        agentFontSize = CGFloat(defaults.double(forKey: "agentFontSize")) == 0 ? 16.0 : CGFloat(defaults.double(forKey: "agentFontSize"))
+        
+        playgroundFontName = defaults.string(forKey: "playgroundFontName") ?? "SF Mono"
+        playgroundFontSize = CGFloat(defaults.double(forKey: "playgroundFontSize")) == 0 ? 16.0 : CGFloat(defaults.double(forKey: "playgroundFontSize"))
+        playgroundFontWeight = defaults.object(forKey: "playgroundFontWeight") == nil ? 2 : defaults.integer(forKey: "playgroundFontWeight")
+        
+        cellFontName = defaults.string(forKey: "cellFontName") ?? "SF Mono"
+        cellFontSize = CGFloat(defaults.double(forKey: "cellFontSize")) == 0 ? 16.0 : CGFloat(defaults.double(forKey: "cellFontSize"))
+        cellFontWeight = defaults.object(forKey: "cellFontWeight") == nil ? 2 : defaults.integer(forKey: "cellFontWeight")
         // One-time migration: older Settings UI displayed a hard-coded ON
         // checkbox even though line numbers were disabled internally. Do not
         // treat that stale preference as a real user choice.
@@ -1128,6 +1161,22 @@ class AppState: ObservableObject {
         enableDerivedDataAutoPurge = defaults.bool(forKey: "enableDerivedDataAutoPurge")
         enableDerivedDataAlert = defaults.object(forKey: "enableDerivedDataAlert") == nil ? true : defaults.bool(forKey: "enableDerivedDataAlert")
         
+        // Agent Settings
+        agentMode = defaults.object(forKey: "agentMode") == nil ? true : defaults.bool(forKey: "agentMode")
+        agentAutoApproveTools = defaults.bool(forKey: "agentAutoApproveTools")
+        agentCustomInstructions = defaults.string(forKey: "agentCustomInstructions") ?? ""
+        agentMaxIterations = defaults.object(forKey: "agentMaxIterations") == nil ? 0 : defaults.integer(forKey: "agentMaxIterations")
+        
+        // Restore last opened workspace folder
+        if let lastPath = defaults.string(forKey: "lastWorkspacePath"),
+           !lastPath.isEmpty,
+           FileManager.default.fileExists(atPath: lastPath) {
+            let url = URL(fileURLWithPath: lastPath)
+            Task { @MainActor in
+                await self.openWorkspace(url: url)
+            }
+        }
+        
         // Start the backend server automatically
         Task {
             await AIModelCatalog.shared.refreshIfNeeded()
@@ -1155,10 +1204,22 @@ class AppState: ObservableObject {
         let defaults = UserDefaults.standard
         defaults.set(Double(fontSize), forKey: "fontSize")
         defaults.set(fontFamily, forKey: "fontFamily")
+        defaults.set(agentFontName, forKey: "agentFontName")
+        defaults.set(Double(agentFontSize), forKey: "agentFontSize")
+        defaults.set(playgroundFontName, forKey: "playgroundFontName")
+        defaults.set(Double(playgroundFontSize), forKey: "playgroundFontSize")
+        defaults.set(playgroundFontWeight, forKey: "playgroundFontWeight")
+        defaults.set(cellFontName, forKey: "cellFontName")
+        defaults.set(Double(cellFontSize), forKey: "cellFontSize")
+        defaults.set(cellFontWeight, forKey: "cellFontWeight")
         defaults.set(appTheme.rawValue, forKey: "appTheme")
         defaults.set(showLineNumbers, forKey: "showLineNumbers")
         defaults.set(aiProvider, forKey: "aiProvider")
         defaults.set(aiModel, forKey: "aiModel")
+        defaults.set(agentMode, forKey: "agentMode")
+        defaults.set(agentAutoApproveTools, forKey: "agentAutoApproveTools")
+        defaults.set(agentCustomInstructions, forKey: "agentCustomInstructions")
+        defaults.set(agentMaxIterations, forKey: "agentMaxIterations")
         
         // Save API Keys
         for (provider, key) in apiKeys {
@@ -1358,24 +1419,22 @@ class AppState: ObservableObject {
         panel.allowsMultipleSelection = false
         panel.canChooseDirectories = true
         panel.canChooseFiles = false
+        panel.canCreateDirectories = true
         panel.title = "Open Folder"
         panel.message = "Select a project folder to open"
-        panel.prompt = "Open Folder"
+        panel.prompt = "Open"
         
-        if let window = NSApp.keyWindow {
-            panel.beginSheetModal(for: window) { [weak self] response in
-                guard let self = self, response == .OK, let url = panel.url else { return }
-                Task { @MainActor in
-                    await self.loadFolderOptimized(url: url)
-                }
-            }
-        } else {
-            if panel.runModal() == .OK, let url = panel.url {
-                Task { @MainActor in
-                    await self.loadFolderOptimized(url: url)
-                }
+        panel.begin { [weak self] response in
+            guard let self = self, response == .OK, let url = panel.url else { return }
+            Task { @MainActor in
+                await self.loadFolderOptimized(url: url)
             }
         }
+    }
+    
+    /// Public async method to open a workspace from path / URL
+    func openWorkspace(url: URL) async {
+        await loadFolderOptimized(url: url)
     }
     
     /// Optimized folder loading with lazy background services
@@ -1404,6 +1463,8 @@ class AppState: ObservableObject {
         
         // Step 1: Immediate UI update (no CPU cost)
         self.workspaceFolder = url
+        UserDefaults.standard.set(url.path, forKey: "lastWorkspacePath")
+        AgentService.shared.setWorkspace(url.path)
         
         // Initialize MicroCode AI Core
         self.microCodeService = MicroCodeService(workspacePath: url.path)
@@ -2243,6 +2304,7 @@ class AppState: ObservableObject {
         case "objective-cpp": return "mm"
         case "ocaml": return "ml"
         case "haskell": return "hs"
+        case "ardium", "ar": return "ar"
         default: return "txt"
         }
     }
@@ -2427,6 +2489,13 @@ class AppState: ObservableObject {
         case "haxe", "hx": // New: Haxe
             // Haxe --interp requires a Main class. We assume the user wrote a class named 'Main'.
             args = ["haxe", "--main", "Main", "--interp"]
+            
+        case "ardium", "ar":
+            if let bin = ArdiumRunner.findBinary() {
+                return await runProcess(executable: bin, arguments: ["run", sourcePath])
+            } else {
+                return ("", "❌ Error: Ardium toolchain not found. Please install Ardium at /usr/local/ardium.", 1)
+            }
             
         default:
             return ("", "Error: Language '\(language)' not supported yet.", 1)
@@ -3374,32 +3443,35 @@ class AppState: ObservableObject {
     /// every entry in directories with hundreds of thousands of files.
     nonisolated private static func scanDirectoryBounded(at url: URL, limit: Int) -> (nodes: [FileNode], wasTruncated: Bool) {
         let keys: [URLResourceKey] = [.isDirectoryKey, .isRegularFileKey, .isSymbolicLinkKey]
-        guard let enumerator = FileManager.default.enumerator(
-            at: url,
-            includingPropertiesForKeys: keys,
-            options: [.skipsHiddenFiles],
-            errorHandler: { _, _ in true }
-        ) else { return ([], false) }
-
+        let fm = FileManager.default
+        
+        var urlsToProcess: [URL] = []
+        if let contents = try? fm.contentsOfDirectory(at: url, includingPropertiesForKeys: keys, options: [.skipsHiddenFiles]) {
+            urlsToProcess = contents
+        } else if let pathContents = try? fm.contentsOfDirectory(atPath: url.path) {
+            urlsToProcess = pathContents.filter { !$0.hasPrefix(".") }.map { url.appendingPathComponent($0) }
+        }
+        
         var nodes: [FileNode] = []
-        nodes.reserveCapacity(min(limit, 256))
+        nodes.reserveCapacity(min(limit, urlsToProcess.count))
         var wasTruncated = false
 
-        while let child = enumerator.nextObject() as? URL {
-            let values = try? child.resourceValues(forKeys: Set(keys))
-            let isDirectory = values?.isDirectory == true
-            if isDirectory { enumerator.skipDescendants() }
-
-            guard child.lastPathComponent.hasPrefix("._") == false else { continue }
+        for child in urlsToProcess {
+            guard child.lastPathComponent.hasPrefix("._") == false,
+                  child.lastPathComponent.hasPrefix(".") == false else { continue }
             if nodes.count >= limit {
                 wasTruncated = true
                 break
             }
 
+            var isDir: ObjCBool = false
+            let exists = fm.fileExists(atPath: child.path, isDirectory: &isDir)
+            guard exists else { continue }
+
             nodes.append(FileNode(
                 name: child.lastPathComponent,
                 path: child.standardizedFileURL.path,
-                isDirectory: isDirectory,
+                isDirectory: isDir.boolValue,
                 children: [],
                 hasLoadedChildren: false
             ))

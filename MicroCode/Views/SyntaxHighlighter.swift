@@ -118,9 +118,20 @@ struct LanguageRules {
     )
 
     static let ardium = LanguageRules(
-        keywords: ["fn", "let", "mut", "if", "else", "while", "return", "import", "void"],
-        types: ["int", "string", "bool"],
-        stringDelimiters: ["\""],
+        keywords: [
+            "fn", "var", "let", "mut", "struct", "class", "enum", "import", "extern", "async", "await",
+            "export", "test", "interrupt", "@owned", "@State", "@External", "@export", "@test",
+            "if", "else", "elif", "loop", "while", "for", "return", "break", "continue", "match",
+            "true", "false", "nil", "null", "GLOBAL", "RESET", "ERR",
+            "alloc", "free", "peek", "poke", "print", "println", "printf"
+        ],
+        types: [
+            "int", "i8", "i16", "i32", "i64", "u8", "u16", "u32", "u64",
+            "float", "f32", "f64", "string", "bool", "void",
+            "i8_ptr", "i32_ptr", "i64_ptr", "ptr", "Vector2", "Array", "Map", "Any",
+            "VStack", "HStack", "ZStack", "Text", "Title", "Headline", "Button", "TextField", "Image", "Spacer", "Live", "DebugUI"
+        ],
+        stringDelimiters: ["\"\"\"", "\""],
         commentPatterns: [("//", nil), ("/*", "*/")]
     )
     

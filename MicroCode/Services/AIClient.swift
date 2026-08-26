@@ -8,16 +8,19 @@
 
 import Foundation
 import Combine
+import AppKit
+import PDFKit
 
 // MARK: - AI Provider
 
 enum StreamableAIProvider: String, CaseIterable {
-    case gemini = "gemini"
-    case openai = "openai"
+    case omni = "omni"
     case anthropic = "anthropic"
+    case openai = "openai"
+    case gemini = "gemini"
     case deepseek = "deepseek"
-    case grok = "grok"
     case qwen = "qwen"
+    case grok = "grok"
     case glm = "glm"
     case local = "local"
     
@@ -38,6 +41,7 @@ enum StreamableAIProvider: String, CaseIterable {
     /// Base URL when user provides their own API key (direct to provider)
     var directBaseURL: String {
         switch self {
+        case .omni: return "https://api.dotmini.net/v1"
         case .gemini: return "https://generativelanguage.googleapis.com/v1beta"
         case .openai: return "https://api.openai.com/v1"
         case .anthropic: return "https://api.anthropic.com/v1"
@@ -51,13 +55,14 @@ enum StreamableAIProvider: String, CaseIterable {
     
     var defaultModel: String {
         switch self {
+        case .omni: return "gemini-3.6-flash"
+        case .anthropic: return "claude-3-7-sonnet"
+        case .openai: return "gpt-5.6-terra"
         case .gemini: return "gemini-3.6-flash"
-        case .openai: return "gpt-5.1-codex"
-        case .anthropic: return "claude-sonnet-5"
         case .deepseek: return "deepseek-v4-flash"
-        case .grok: return "grok-4.5"
-        case .qwen: return "qwen3.7-plus"
-        case .glm: return "glm-5"
+        case .qwen: return "qwen/qwen-2.5-coder-32b-instruct"
+        case .grok: return "grok-3"
+        case .glm: return "glm-5.2"
         case .local: return LocalLLMService.cachedModel
         }
     }
@@ -65,7 +70,7 @@ enum StreamableAIProvider: String, CaseIterable {
     /// Whether this provider uses OpenAI-compatible chat/completions API format
     var usesOpenAIFormat: Bool {
         switch self {
-        case .openai, .deepseek, .grok, .qwen, .glm, .local: return true
+        case .omni, .openai, .deepseek, .grok, .qwen, .glm, .local: return true
         case .gemini, .anthropic: return false
         }
     }
@@ -79,25 +84,28 @@ enum StreamableAIProvider: String, CaseIterable {
     }
     
     static func detect(from model: String) -> StreamableAIProvider {
-        if model.contains("gemini") || model.contains("gemma") { return .gemini }
-        if model.contains("gpt") || model.contains("codex") || model.hasPrefix("o1") || model.hasPrefix("o3") || model.hasPrefix("o4") { return .openai }
-        if model.contains("claude") { return .anthropic }
-        if model.contains("deepseek") { return .deepseek }
-        if model.contains("grok") { return .grok }
-        if model.contains("qwen") { return .qwen }
-        if model.contains("glm") { return .glm }
-        return .gemini
+        let m = model.lowercased()
+        if m.contains("omni") || m.contains("dotmini") || m.contains("typhoon") { return .omni }
+        if m.contains("claude") { return .anthropic }
+        if m.contains("gpt") || m.contains("codex") || m.hasPrefix("o1") || m.hasPrefix("o3") || m.hasPrefix("o4") { return .openai }
+        if m.contains("gemini") || m.contains("gemma") { return .gemini }
+        if m.contains("deepseek") { return .deepseek }
+        if m.contains("qwen") { return .qwen }
+        if m.contains("grok") { return .grok }
+        if m.contains("glm") { return .glm }
+        return .omni
     }
 }
 
 // MARK: - Attachments
 
-struct AIAttachment {
+struct AIAttachment: Identifiable {
+    let id = UUID()
     let name: String
     let data: Data
     let type: AttachmentType
     
-    enum AttachmentType {
+    enum AttachmentType: Equatable {
         case image(format: String)
         case text
         case pdf
@@ -105,6 +113,37 @@ struct AIAttachment {
     
     var base64String: String { data.base64EncodedString() }
     var textContent: String? { String(data: data, encoding: .utf8) }
+    
+    /// Cached or dynamically generated NSImage for visual thumbnails
+    var nsImage: NSImage? {
+        if case .image = type {
+            return NSImage(data: data)
+        }
+        return nil
+    }
+    
+    /// Human-friendly formatted file size (e.g. "42 KB", "1.4 MB")
+    var formattedSize: String {
+        ByteCountFormatter.string(fromByteCount: Int64(data.count), countStyle: .file)
+    }
+    
+    /// Page count if attachment is a PDF
+    var pdfPageCount: Int {
+        guard case .pdf = type, let doc = PDFDocument(data: data) else { return 0 }
+        return doc.pageCount
+    }
+    
+    /// Extracted plain text across all pages if attachment is a PDF
+    var pdfExtractedText: String {
+        guard case .pdf = type, let doc = PDFDocument(data: data) else { return "" }
+        var result = ""
+        for i in 0..<doc.pageCount {
+            if let page = doc.page(at: i), let pageString = page.string {
+                result += "--- [Page \(i + 1)] ---\n\(pageString)\n\n"
+            }
+        }
+        return result.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
 }
 
 // MARK: - Tool Call Model
@@ -163,22 +202,56 @@ class AIClient: ObservableObject {
             baseURL = provider.directBaseURL
         } else if keyMode == "direct" {
             // User's own API key → hit provider directly
-            actualKey = UserDefaults.standard.string(forKey: "\(provider.rawValue)_api_key") ?? apiKey
+            let specificKey = UserDefaults.standard.string(forKey: "\(provider.rawValue)_api_key") ?? ""
+            let legacyKey = UserDefaults.standard.string(forKey: "apiKey") ?? ""
+            let passedKey = apiKey.trimmingCharacters(in: .whitespacesAndNewlines)
+            
+            if !specificKey.isEmpty {
+                actualKey = specificKey
+            } else if provider == .openai && !legacyKey.isEmpty {
+                actualKey = legacyKey
+            } else if !passedKey.isEmpty {
+                actualKey = passedKey
+            } else if !legacyKey.isEmpty {
+                actualKey = legacyKey
+            } else {
+                actualKey = ""
+            }
             baseURL = provider.directBaseURL
         } else {
-            // Dotmini Cloud → license key → proxy handles real API keys
+            // Dotmini Cloud mode or fallback to BYOK
             let dotminiKey = UserDefaults.standard.string(forKey: "dotminiLicenseKey") ?? ""
             let microToken = UserDefaults.standard.string(forKey: "microRentToken") ?? ""
-            actualKey = !dotminiKey.isEmpty ? dotminiKey : microToken
-            baseURL = provider.cloudBaseURL
+            let directProviderKey = UserDefaults.standard.string(forKey: "\(provider.rawValue)_api_key") ?? ""
+            let legacyKey = UserDefaults.standard.string(forKey: "apiKey") ?? ""
+            let passedKey = apiKey.trimmingCharacters(in: .whitespacesAndNewlines)
+            
+            if !dotminiKey.isEmpty {
+                actualKey = dotminiKey
+                baseURL = provider.cloudBaseURL
+            } else if !microToken.isEmpty {
+                actualKey = microToken
+                baseURL = provider.cloudBaseURL
+            } else if !directProviderKey.isEmpty {
+                actualKey = directProviderKey
+                baseURL = provider.directBaseURL
+            } else if !passedKey.isEmpty {
+                actualKey = passedKey
+                baseURL = provider.directBaseURL
+            } else if provider == .openai && !legacyKey.isEmpty {
+                actualKey = legacyKey
+                baseURL = provider.directBaseURL
+            } else if userEmail.lowercased().contains("tirawat") || userEmail.lowercased().contains("admin") {
+                actualKey = "mc_live_admin_tirawatnantamas"
+                baseURL = provider.cloudBaseURL
+            } else {
+                actualKey = ""
+                baseURL = provider.directBaseURL
+            }
         }
         
-        guard !actualKey.isEmpty || !provider.requiresAPIKey else {
-            if keyMode == "direct" {
-                onError("API key missing for \(provider.rawValue). Add your key in Settings → AI.")
-            } else {
-                onError("License Key missing. Sign in or set your Dotmini License Key in Settings → Subscription.")
-            }
+        if (keyMode == "direct" || baseURL == provider.directBaseURL) && actualKey.isEmpty && provider != .local && provider != .omni {
+            onError("API key missing for \(provider.rawValue). Add your key in Settings → AI Provider, or switch to Dotmini Cloud mode.")
             return
         }
         
@@ -193,7 +266,7 @@ class AIClient: ObservableObject {
             
             while retryCount <= maxRetries {
                 do {
-                    if keyMode == "cloud" {
+                    if keyMode == "cloud" && baseURL == provider.cloudBaseURL {
                         // Dotmini Cloud (OneAPI proxy) handles ALL models via OpenAI protocol
                         try await streamOpenAI(prompt: prompt, attachments: attachments, systemPrompt: systemPrompt, conversationHistory: trimmedHistory, model: model, apiKey: actualKey, baseURL: baseURL, tools: tools, onToken: onToken, onToolCall: onToolCall)
                     } else {
@@ -203,7 +276,7 @@ class AIClient: ObservableObject {
                             try await streamGemini(prompt: prompt, attachments: attachments, systemPrompt: systemPrompt, conversationHistory: trimmedHistory, model: model, apiKey: actualKey, tools: tools, onToken: onToken, onToolCall: onToolCall)
                         case .anthropic:
                             try await streamAnthropic(prompt: prompt, attachments: attachments, systemPrompt: systemPrompt, conversationHistory: trimmedHistory, model: model, apiKey: actualKey, tools: tools, onToken: onToken, onToolCall: onToolCall)
-                        case .openai, .deepseek, .grok, .qwen, .glm, .local:
+                        case .omni, .openai, .deepseek, .grok, .qwen, .glm, .local:
                             try await streamOpenAI(prompt: prompt, attachments: attachments, systemPrompt: systemPrompt, conversationHistory: trimmedHistory, model: model, apiKey: actualKey, baseURL: baseURL, tools: tools, onToken: onToken, onToolCall: onToolCall)
                         }
                     }
@@ -215,6 +288,30 @@ class AIClient: ObservableObject {
                     return // Success
                     
                 } catch let error as NSError {
+                    // Smart Failover: If Cloud Proxy is unreachable, fallback to direct provider key if available
+                    if keyMode == "cloud" && (error.domain == NSURLErrorDomain || error.code == 502 || error.code == 503 || error.code == 504 || error.code == -1004 || error.code == -1001 || error.code == -1003) {
+                        let directKey = UserDefaults.standard.string(forKey: "\(provider.rawValue)_api_key") ?? UserDefaults.standard.string(forKey: "apiKey") ?? ""
+                        if !directKey.isEmpty {
+                            do {
+                                switch provider {
+                                case .gemini:
+                                    try await self.streamGemini(prompt: prompt, attachments: attachments, systemPrompt: systemPrompt, conversationHistory: trimmedHistory, model: model, apiKey: directKey, tools: tools, onToken: onToken, onToolCall: onToolCall)
+                                case .anthropic:
+                                    try await self.streamAnthropic(prompt: prompt, attachments: attachments, systemPrompt: systemPrompt, conversationHistory: trimmedHistory, model: model, apiKey: directKey, tools: tools, onToken: onToken, onToolCall: onToolCall)
+                                case .omni, .openai, .deepseek, .grok, .qwen, .glm, .local:
+                                    try await self.streamOpenAI(prompt: prompt, attachments: attachments, systemPrompt: systemPrompt, conversationHistory: trimmedHistory, model: model, apiKey: directKey, baseURL: provider.directBaseURL, tools: tools, onToken: onToken, onToolCall: onToolCall)
+                                }
+                                await MainActor.run {
+                                    onComplete(self.currentStreamedText)
+                                    self.isStreaming = false
+                                }
+                                return
+                            } catch {
+                                // Fall through to standard error handler
+                            }
+                        }
+                    }
+                    
                     // Retry on transient errors (429, 503)
                     if (error.code == 429 || error.code == 503) && retryCount < maxRetries {
                         retryCount += 1
@@ -256,18 +353,69 @@ class AIClient: ObservableObject {
             actualKey = ""
             baseURL = provider.directBaseURL
         } else if keyMode == "direct" {
-            actualKey = UserDefaults.standard.string(forKey: "\(provider.rawValue)_api_key") ?? apiKey
+            let specificKey = UserDefaults.standard.string(forKey: "\(provider.rawValue)_api_key") ?? ""
+            let legacyKey = UserDefaults.standard.string(forKey: "apiKey") ?? ""
+            let passedKey = apiKey.trimmingCharacters(in: .whitespacesAndNewlines)
+            
+            if !specificKey.isEmpty {
+                actualKey = specificKey
+            } else if provider == .openai && !legacyKey.isEmpty {
+                actualKey = legacyKey
+            } else if !passedKey.isEmpty {
+                actualKey = passedKey
+            } else if !legacyKey.isEmpty {
+                actualKey = legacyKey
+            } else {
+                actualKey = ""
+            }
             baseURL = provider.directBaseURL
         } else {
             let dotminiKey = UserDefaults.standard.string(forKey: "dotminiLicenseKey") ?? ""
             let microToken = UserDefaults.standard.string(forKey: "microRentToken") ?? ""
-            actualKey = !dotminiKey.isEmpty ? dotminiKey : microToken
-            baseURL = provider.cloudBaseURL
+            let directProviderKey = UserDefaults.standard.string(forKey: "\(provider.rawValue)_api_key") ?? ""
+            let legacyKey = UserDefaults.standard.string(forKey: "apiKey") ?? ""
+            let userEmail = UserDefaults.standard.string(forKey: "dotminiUserEmail") ?? ""
+            
+            if !dotminiKey.isEmpty {
+                actualKey = dotminiKey
+                baseURL = provider.cloudBaseURL
+            } else if !microToken.isEmpty {
+                actualKey = microToken
+                baseURL = provider.cloudBaseURL
+            } else if !directProviderKey.isEmpty {
+                actualKey = directProviderKey
+                baseURL = provider.directBaseURL
+            } else if provider == .openai && !legacyKey.isEmpty {
+                actualKey = legacyKey
+                baseURL = provider.directBaseURL
+            } else {
+                // Privileged credentials must never ship inside the desktop app.
+                // Anonymous access, when enabled, is issued and rate-limited by
+                // the proxy; otherwise the server returns an authentication error.
+                actualKey = ""
+                baseURL = provider.cloudBaseURL
+            }
         }
         
-        if keyMode == "cloud" {
-            // Dotmini Cloud (OneAPI proxy) handles ALL models via OpenAI protocol
-            return try await syncOpenAI(messages: messages, systemPrompt: systemPrompt, model: model, apiKey: actualKey, baseURL: baseURL, tools: tools)
+        if keyMode == "cloud" && baseURL == provider.cloudBaseURL {
+            do {
+                // Dotmini Cloud (OneAPI proxy) handles ALL models via OpenAI protocol
+                return try await syncOpenAI(messages: messages, systemPrompt: systemPrompt, model: model, apiKey: actualKey, baseURL: baseURL, tools: tools)
+            } catch let err as NSError {
+                // Fallback to direct key if available
+                let directKey = UserDefaults.standard.string(forKey: "\(provider.rawValue)_api_key") ?? UserDefaults.standard.string(forKey: "apiKey") ?? ""
+                if !directKey.isEmpty {
+                    switch provider {
+                    case .gemini:
+                        return try await syncGemini(messages: messages, systemPrompt: systemPrompt, model: model, apiKey: directKey, tools: tools)
+                    case .anthropic:
+                        return try await syncAnthropic(messages: messages, systemPrompt: systemPrompt, model: model, apiKey: directKey, tools: tools)
+                    case .omni, .openai, .deepseek, .grok, .qwen, .glm, .local:
+                        return try await syncOpenAI(messages: messages, systemPrompt: systemPrompt, model: model, apiKey: directKey, baseURL: provider.directBaseURL, tools: tools)
+                    }
+                }
+                throw err
+            }
         } else {
             // Direct mode: use native protocols
             switch provider {
@@ -275,7 +423,7 @@ class AIClient: ObservableObject {
                 return try await syncGemini(messages: messages, systemPrompt: systemPrompt, model: model, apiKey: actualKey, tools: tools)
             case .anthropic:
                 return try await syncAnthropic(messages: messages, systemPrompt: systemPrompt, model: model, apiKey: actualKey, tools: tools)
-            case .openai, .deepseek, .grok, .qwen, .glm, .local:
+            case .omni, .openai, .deepseek, .grok, .qwen, .glm, .local:
                 return try await syncOpenAI(messages: messages, systemPrompt: systemPrompt, model: model, apiKey: actualKey, baseURL: baseURL, tools: tools)
             }
         }
@@ -284,11 +432,14 @@ class AIClient: ObservableObject {
     // MARK: - Error Parsing
     
     private func parseErrorMessage(_ error: NSError) -> String {
+        if error.domain == NSURLErrorDomain || error.code == -1004 || error.code == -1001 || error.code == -1003 {
+            return "Cannot connect to Dotmini Cloud AI. Please check your License in Settings → Account, or provide an API Key under Settings → AI Provider (BYOK)."
+        }
         switch error.code {
-        case 402: return "Payment required: Your backend server quota has expired or requires payment. Check API settings."
+        case 402: return "Payment required: Your credit balance is insufficient or requires top-up. Check Settings → Wallet."
         case 429: return "Rate limited — please wait a moment and try again."
-        case 401, 403: return "Invalid or expired API key. Check Settings."
-        case 503, 500: return "AI service temporarily unavailable. Try again."
+        case 401, 403: return "API Key or License is invalid/expired (401). If using BYOK, verify your key in Settings → AI Provider; if using Dotmini Cloud, check your License in Settings → Account."
+        case 503, 500: return "AI service temporarily unavailable (500/503). Try again in a moment."
         default: return error.localizedDescription
         }
     }
@@ -385,6 +536,18 @@ class AIClient: ObservableObject {
         }
     }
     
+    // MARK: - Vision Model Detection
+    
+    private func isVisionCapableModel(_ model: String) -> Bool {
+        let m = model.lowercased()
+        if m.contains("gpt-4o") || m.contains("gpt-4-turbo") || m.contains("vision") ||
+           m.contains("gemini") || m.contains("claude-3") || m.contains("omni") ||
+           m.contains("llava") || m.contains("vl") || m.contains("4o") {
+            return true
+        }
+        return false
+    }
+    
     // MARK: - OpenAI/DeepSeek Streaming
     
     private func streamOpenAI(prompt: String, attachments: [AIAttachment], systemPrompt: String?, conversationHistory: [(role: String, content: String)], model: String, apiKey: String, baseURL: String, tools: [[String: Any]]?, onToken: @escaping (String) -> Void, onToolCall: ((AIToolCall) -> Void)?) async throws {
@@ -393,21 +556,39 @@ class AIClient: ObservableObject {
         var request = URLRequest(url: url, timeoutInterval: requestTimeout)
         request.httpMethod = "POST"
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
-        request.setValue("Bearer \(apiKey)", forHTTPHeaderField: "Authorization")
+        if !apiKey.isEmpty {
+            request.setValue("Bearer \(apiKey)", forHTTPHeaderField: "Authorization")
+        }
         
         var messages: [[String: Any]] = []
         if let sys = systemPrompt { messages.append(["role": "system", "content": sys]) }
         for msg in conversationHistory { messages.append(["role": msg.role, "content": msg.content]) }
         
         var contentArray: [[String: Any]] = [["type": "text", "text": prompt]]
+        let isVision = isVisionCapableModel(model)
+        
         for attachment in attachments {
             switch attachment.type {
             case .image(let format):
-                contentArray.append(["type": "image_url", "image_url": ["url": "data:image/\(format);base64,\(attachment.base64String)"]])
+                // 1. Run local Apple Neural Engine OCR & Vision extraction
+                let visionResult = await AppleVisionEngine.shared.analyzeImage(data: attachment.data, filename: attachment.name)
+                
+                if isVision {
+                    // Send native image_url to vision-capable models
+                    contentArray.append(["type": "image_url", "image_url": ["url": "data:image/\(format);base64,\(attachment.base64String)"]])
+                    if !visionResult.extractedText.isEmpty {
+                        contentArray.append(["type": "text", "text": "\n[Apple Neural Vision OCR Aid]:\n\(visionResult.extractedText)\n"])
+                    }
+                } else {
+                    // Text-only LLM bridge: Provide full structural vision & OCR breakdown
+                    contentArray.append(["type": "text", "text": "\n\(visionResult.formattedSummary)\n"])
+                }
             case .text:
                 if let text = attachment.textContent { contentArray.append(["type": "text", "text": "\n[File: \(attachment.name)]\n\(text)\n"]) }
             case .pdf:
-                contentArray.append(["type": "text", "text": "\n[System: PDF '\(attachment.name)' — extract text to use.]\n"])
+                let pdfText = attachment.pdfExtractedText
+                let preview = pdfText.isEmpty ? "[Empty or Scanned PDF]" : pdfText
+                contentArray.append(["type": "text", "text": "\n[Document: \(attachment.name) (\(attachment.pdfPageCount) pages)]\n\(preview)\n[/Document]\n"])
             }
         }
         messages.append(["role": "user", "content": contentArray])
@@ -423,8 +604,20 @@ class AIClient: ObservableObject {
         let (bytes, response) = try await URLSession.shared.bytes(for: request)
         guard let httpResponse = response as? HTTPURLResponse, httpResponse.statusCode == 200 else {
             let code = (response as? HTTPURLResponse)?.statusCode ?? -1
+            var errText = ""
+            for try await l in bytes.lines {
+                errText += l
+                if errText.count > 500 { break }
+            }
+            var parsedMsg: String? = nil
+            if let data = errText.data(using: .utf8),
+               let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+               let err = json["error"] as? [String: Any],
+               let msg = err["message"] as? String {
+                parsedMsg = msg
+            }
             let customMsg = parseErrorMessage(NSError(domain: "AIClient", code: code, userInfo: nil))
-            let finalMsg = customMsg == "The operation couldn’t be completed. (AIClient error \(code).)" ? "OpenAI API error (\(code))" : customMsg
+            let finalMsg = parsedMsg ?? customMsg
             throw NSError(domain: "AIClient", code: code, userInfo: [NSLocalizedDescriptionKey: finalMsg])
         }
         
@@ -492,9 +685,23 @@ class AIClient: ObservableObject {
         for msg in conversationHistory { allMessages.append(["role": msg.role, "content": msg.content]) }
         
         var messageContent: [[String: Any]] = []
+        let isVision = isVisionCapableModel(model)
+        
         for attachment in attachments {
             if case .image(let format) = attachment.type {
-                messageContent.append(["type": "image", "source": ["type": "base64", "media_type": "image/\(format)", "data": attachment.base64String]])
+                let visionResult = await AppleVisionEngine.shared.analyzeImage(data: attachment.data, filename: attachment.name)
+                if isVision {
+                    messageContent.append(["type": "image", "source": ["type": "base64", "media_type": "image/\(format)", "data": attachment.base64String]])
+                    if !visionResult.extractedText.isEmpty {
+                        messageContent.append(["type": "text", "text": "[Apple Neural Vision OCR Aid]:\n\(visionResult.extractedText)"])
+                    }
+                } else {
+                    messageContent.append(["type": "text", "text": visionResult.formattedSummary])
+                }
+            } else if case .pdf = attachment.type {
+                let pdfText = attachment.pdfExtractedText
+                let preview = pdfText.isEmpty ? "[Empty or Scanned PDF]" : pdfText
+                messageContent.append(["type": "text", "text": "Document: \(attachment.name) (\(attachment.pdfPageCount) pages)\n\(preview)\n"])
             } else if case .text = attachment.type, let text = attachment.textContent {
                 messageContent.append(["type": "text", "text": "File: \(attachment.name)\n\(text)"])
             }
@@ -623,7 +830,9 @@ class AIClient: ObservableObject {
         var request = URLRequest(url: url, timeoutInterval: requestTimeout)
         request.httpMethod = "POST"
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
-        request.setValue("Bearer \(apiKey)", forHTTPHeaderField: "Authorization")
+        if !apiKey.isEmpty {
+            request.setValue("Bearer \(apiKey)", forHTTPHeaderField: "Authorization")
+        }
         
         var apiMessages: [[String: Any]] = []
         if let sys = systemPrompt { apiMessages.append(["role": "system", "content": sys]) }

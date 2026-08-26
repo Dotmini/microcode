@@ -97,7 +97,7 @@ struct NotebookAIPanel: View {
             // Input
             inputBar
         }
-        .background(Color(nsColor: .controlBackgroundColor))
+        .background(appState.appTheme.isGlass ? Color.clear : Color(nsColor: appState.appTheme.panelBackground))
     }
     
     // MARK: - Header
@@ -135,7 +135,7 @@ struct NotebookAIPanel: View {
         }
         .padding(.horizontal, 14)
         .padding(.vertical, 10)
-        .background(Color(nsColor: .controlBackgroundColor))
+        .background(appState.appTheme.isGlass ? Color.clear : Color(nsColor: appState.appTheme.panelBackground))
     }
     
     // MARK: - Cell Context Badge
@@ -263,11 +263,11 @@ struct NotebookAIPanel: View {
                         .lineLimit(1...4)
                         .focused($isInputFocused)
                         .padding(8)
-                        .background(Color(nsColor: .textBackgroundColor))
+                        .background(appState.appTheme.isGlass ? Color.clear : Color(nsColor: appState.appTheme.elevatedBackground))
                         .cornerRadius(8)
                         .overlay(
                             RoundedRectangle(cornerRadius: 8)
-                                .stroke(isInputFocused ? Color.accentColor : Color.primary.opacity(0.1), lineWidth: 1)
+                                .stroke(isInputFocused ? Color.accentColor : (appState.appTheme.isDark ? Color.white.opacity(0.15) : Color.black.opacity(0.12)), lineWidth: 1)
                         )
                         .onSubmit { sendMessage() }
                 } else {
@@ -276,7 +276,7 @@ struct NotebookAIPanel: View {
                         .font(.system(size: 13))
                         .focused($isInputFocused)
                         .padding(8)
-                        .background(Color(nsColor: .textBackgroundColor))
+                        .background(appState.appTheme.isGlass ? Color.clear : Color(nsColor: appState.appTheme.elevatedBackground))
                         .cornerRadius(8)
                         .onSubmit { sendMessage() }
                 }
@@ -295,7 +295,7 @@ struct NotebookAIPanel: View {
             }
             .padding(12)
         }
-        .background(Color(nsColor: .controlBackgroundColor))
+        .background(appState.appTheme.isGlass ? Color.clear : Color(nsColor: appState.appTheme.panelBackground))
     }
     
     // MARK: - Build Cell Context
@@ -361,7 +361,7 @@ struct NotebookAIPanel: View {
         
         ## Your Capabilities
         - You can see ALL cells in the notebook (code, output, languages)
-        - You understand Python, R, Julia, SQL, Rust, Go, C++, Objective-C, R Markdown, and LaTeX
+        - You understand Python, R, Julia, SQL, Ardium, Rust, Go, C++, Objective-C, R Markdown, and LaTeX
         - You can write code that works across cells and languages
         - You understand data flow between cells
         
@@ -524,6 +524,8 @@ struct CellAIMessageRow: View {
                 
                 ForEach(blocks) { block in
                     switch block {
+                    case .thought(let content, let duration):
+                        AntigravityThoughtBlockView(content: content, durationSeconds: duration)
                     case .text(let text):
                         if !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
                             CellAITextView(text: text)

@@ -187,7 +187,7 @@ struct PlaygroundView: View {
     // MARK: - Toolbar
     
     private var playgroundToolbar: some View {
-        HStack {
+        HStack(spacing: 8) {
             // Language Selector
             Menu {
                 ForEach(supportedLanguages, id: \.self) { lang in
@@ -201,42 +201,56 @@ struct PlaygroundView: View {
                     }
                 }
             } label: {
-                HStack {
+                HStack(spacing: 6) {
                     Image(systemName: languageIcon(language))
-                        .foregroundColor(.pink)
+                        .foregroundColor(.accentColor)
                     Text(language.capitalized)
-                        .font(.system(size: 13, weight: .medium))
+                        .font(.system(size: 12, weight: .semibold))
+                    Image(systemName: "chevron.down")
+                        .font(.system(size: 9, weight: .bold))
+                        .foregroundColor(.secondary)
                 }
-                .padding(.horizontal, 12)
-                .padding(.vertical, 6)
-                .background(controlBackground)
-                .cornerRadius(6)
+                .padding(.horizontal, 10)
+                .padding(.vertical, 5)
+                .background(
+                    RoundedRectangle(cornerRadius: 6, style: .continuous)
+                        .fill(controlBackground)
+                )
             }
+            .buttonStyle(.plain)
             
             // Settings Button
             Button(action: { showingSettings.toggle() }) {
                 Image(systemName: "gearshape.fill")
+                    .font(.system(size: 12))
                     .foregroundColor(.secondary)
+                    .padding(6)
+                    .background(
+                        RoundedRectangle(cornerRadius: 6, style: .continuous)
+                            .fill(controlBackground)
+                    )
             }
-            .buttonStyle(.borderless)
+            .buttonStyle(.plain)
             .popover(isPresented: $showingSettings) {
-                VStack(alignment: .leading, spacing: 16) {
+                VStack(alignment: .leading, spacing: 14) {
                     Text("Playground Settings")
                         .font(.headline)
                     
                     Divider()
                     
                     // Font Size
-                    VStack(alignment: .leading) {
+                    VStack(alignment: .leading, spacing: 4) {
                         Text("Font Size: \(Int(appState.playgroundFontSize))")
                             .font(.caption)
+                            .foregroundColor(.secondary)
                         Slider(value: $appState.playgroundFontSize, in: 10...24, step: 1)
                     }
                     
                     // Font Family
-                    VStack(alignment: .leading) {
+                    VStack(alignment: .leading, spacing: 4) {
                         Text("Font Family")
                             .font(.caption)
+                            .foregroundColor(.secondary)
                         Picker("", selection: $appState.playgroundFontName) {
                             Text("Menlo").tag("Menlo")
                             Text("Monaco").tag("Monaco")
@@ -249,9 +263,10 @@ struct PlaygroundView: View {
                     }
                     
                     // Theme
-                    VStack(alignment: .leading) {
+                    VStack(alignment: .leading, spacing: 4) {
                         Text("Theme")
                             .font(.caption)
+                            .foregroundColor(.secondary)
                         Picker("", selection: $appState.appTheme) {
                             ForEach(AppTheme.allCases, id: \.self) { theme in
                                 Text(theme.displayName).tag(theme)
@@ -260,7 +275,7 @@ struct PlaygroundView: View {
                         .labelsHidden()
                     }
                 }
-                .padding()
+                .padding(14)
                 .frame(width: 250)
             }
             
@@ -274,95 +289,123 @@ struct PlaygroundView: View {
             }
             
             Divider()
-                .frame(height: 20)
+                .frame(height: 16)
             
-            // Document Mode Toggle
-            Toggle(isOn: $showDocumentMode) {
+            // Document Mode Toggle Button
+            Button(action: { showDocumentMode.toggle() }) {
                 HStack(spacing: 4) {
                     Image(systemName: "doc.text.fill")
-                    Text("Document Mode")
+                    Text("Document")
                 }
-                .font(.system(size: 12))
+                .font(.system(size: 11, weight: .medium))
+                .foregroundColor(showDocumentMode ? .white : .secondary)
+                .padding(.horizontal, 8)
+                .padding(.vertical, 5)
+                .background(
+                    RoundedRectangle(cornerRadius: 6, style: .continuous)
+                        .fill(showDocumentMode ? Color.blue.opacity(0.8) : controlBackground)
+                )
             }
-            .toggleStyle(.button)
-            .buttonStyle(.bordered)
-            .tint(showDocumentMode ? .blue : .secondary)
+            .buttonStyle(.plain)
             
             Spacer()
             
             // Data Files Toggle
-            Toggle(isOn: $showDataFiles) {
+            Button(action: { showDataFiles.toggle() }) {
                 HStack(spacing: 4) {
                     Image(systemName: "folder")
                     Text("Data")
                 }
-                .font(.system(size: 12))
+                .font(.system(size: 11, weight: .medium))
+                .foregroundColor(showDataFiles ? .white : .secondary)
+                .padding(.horizontal, 8)
+                .padding(.vertical, 5)
+                .background(
+                    RoundedRectangle(cornerRadius: 6, style: .continuous)
+                        .fill(showDataFiles ? Color.orange.opacity(0.8) : controlBackground)
+                )
             }
-            .toggleStyle(.button)
-            .buttonStyle(.bordered)
-            .tint(showDataFiles ? .orange : .secondary)
+            .buttonStyle(.plain)
             
             // Output Toggle
-            Toggle(isOn: $showOutput) {
+            Button(action: { showOutput.toggle() }) {
                 HStack(spacing: 4) {
                     Image(systemName: "terminal")
                     Text("Output")
                 }
-                .font(.system(size: 12))
+                .font(.system(size: 11, weight: .medium))
+                .foregroundColor(showOutput ? .white : .secondary)
+                .padding(.horizontal, 8)
+                .padding(.vertical, 5)
+                .background(
+                    RoundedRectangle(cornerRadius: 6, style: .continuous)
+                        .fill(showOutput ? Color.cyan.opacity(0.8) : controlBackground)
+                )
             }
-            .toggleStyle(.button)
-            .buttonStyle(.bordered)
-            .tint(showOutput ? .green : .secondary)
+            .buttonStyle(.plain)
             
             // GUI Preview Toggle
-            Toggle(isOn: $showGUIPreview) {
+            Button(action: { showGUIPreview.toggle() }) {
                 HStack(spacing: 4) {
                     Image(systemName: "macwindow")
                     Text("Preview")
                 }
-                .font(.system(size: 12))
+                .font(.system(size: 11, weight: .medium))
+                .foregroundColor(showGUIPreview ? .white : .secondary)
+                .padding(.horizontal, 8)
+                .padding(.vertical, 5)
+                .background(
+                    RoundedRectangle(cornerRadius: 6, style: .continuous)
+                        .fill(showGUIPreview ? Color.purple.opacity(0.8) : controlBackground)
+                )
             }
-            .toggleStyle(.button)
-            .buttonStyle(.bordered)
-            .tint(showGUIPreview ? .pink : .secondary)
+            .buttonStyle(.plain)
             
             Divider()
-                .frame(height: 20)
+                .frame(height: 16)
             
             // Auto-run toggle
             Toggle("Auto-run", isOn: $autoRunEnabled)
-                .font(.system(size: 12))
+                .font(.system(size: 11))
                 .toggleStyle(.switch)
+                .controlSize(.small)
             
             // Live Preview (Hot Reload) toggle
-            Toggle(isOn: Binding(
-                get: { HotReloadService.shared.isEnabled },
-                set: { _ in HotReloadService.shared.toggle() }
-            )) {
+            Button(action: { HotReloadService.shared.toggle() }) {
                 HStack(spacing: 4) {
                     Image(systemName: "bolt.fill")
                     Text("Hot Reload")
                 }
-                .font(.system(size: 12))
+                .font(.system(size: 11, weight: .medium))
+                .foregroundColor(HotReloadService.shared.isEnabled ? .black : .secondary)
+                .padding(.horizontal, 8)
+                .padding(.vertical, 5)
+                .background(
+                    RoundedRectangle(cornerRadius: 6, style: .continuous)
+                        .fill(HotReloadService.shared.isEnabled ? Color.yellow : controlBackground)
+                )
             }
-            .toggleStyle(.button)
-            .buttonStyle(.bordered)
-            .tint(HotReloadService.shared.isEnabled ? .yellow : .secondary)
+            .buttonStyle(.plain)
             
             // Execution stats
             if executionTime > 0 {
                 HStack(spacing: 4) {
                     Image(systemName: "clock")
                         .foregroundColor(.secondary)
-                        .font(.system(size: 11))
+                        .font(.system(size: 10))
                     Text("\(String(format: "%.2f", executionTime))s")
-                        .font(.system(size: 11))
+                        .font(.system(size: 10, weight: .medium))
                         .foregroundColor(.secondary)
                 }
-                .padding(.horizontal, 8)
+                .padding(.horizontal, 6)
+                .padding(.vertical, 4)
+                .background(
+                    RoundedRectangle(cornerRadius: 4, style: .continuous)
+                        .fill(controlBackground)
+                )
             }
             
-            // Run/Stop button
+            // Run/Stop button (Clean Emerald Green / Danger Red)
             Button(action: {
                 if isExecuting {
                     executionTask?.cancel()
@@ -374,14 +417,21 @@ struct PlaygroundView: View {
                     }
                 }
             }) {
-                HStack(spacing: 4) {
-                    Image(systemName: isExecuting ? "stop.circle.fill" : "play.circle.fill")
+                HStack(spacing: 5) {
+                    Image(systemName: isExecuting ? "stop.fill" : "play.fill")
+                        .font(.system(size: 10, weight: .bold))
                     Text(isExecuting ? "Stop" : "Run")
+                        .font(.system(size: 12, weight: .semibold))
                 }
-                .font(.system(size: 12, weight: .medium))
+                .foregroundColor(.white)
+                .padding(.horizontal, 12)
+                .padding(.vertical, 5)
+                .background(
+                    RoundedRectangle(cornerRadius: 6, style: .continuous)
+                        .fill(isExecuting ? Color.red : Color(red: 0.12, green: 0.72, blue: 0.42))
+                )
             }
-            .buttonStyle(.borderedProminent)
-            .tint(isExecuting ? .red : .pink)
+            .buttonStyle(.plain)
             .keyboardShortcut("r", modifiers: [.command])
             
             // Clear output
@@ -390,16 +440,23 @@ struct PlaygroundView: View {
                 executionTime = 0
             }) {
                 Image(systemName: "trash")
+                    .font(.system(size: 11))
+                    .foregroundColor(.secondary)
+                    .padding(6)
+                    .background(
+                        RoundedRectangle(cornerRadius: 6, style: .continuous)
+                            .fill(controlBackground)
+                    )
             }
-            .buttonStyle(.borderless)
+            .buttonStyle(.plain)
             .help("Clear Output")
         }
-        .padding()
+        .padding(.horizontal, 12)
+        .padding(.vertical, 8)
         .background(panelBackground)
     }
     
     // MARK: - Code Editor Panel
-    
     
     private var editorBackground: Color {
         appState.appTheme == .transparent ? .clear : Color(nsColor: appState.appTheme.editorBackground)
@@ -414,11 +471,17 @@ struct PlaygroundView: View {
     }
     
     private var panelBackground: Color {
-        appState.appTheme == .transparent ? Color.white.opacity(0.05) : Color(nsColor: .windowBackgroundColor)
+        if appState.appTheme == .transparent {
+            return Color.white.opacity(0.05)
+        }
+        return Color(nsColor: appState.appTheme.workspaceBackground)
     }
     
     private var controlBackground: Color {
-        appState.appTheme == .transparent ? Color.white.opacity(0.08) : Color(nsColor: .controlBackgroundColor)
+        if appState.appTheme == .transparent {
+            return Color.white.opacity(0.08)
+        }
+        return Color(nsColor: appState.appTheme.editorBackground).opacity(0.85)
     }
     
     private var codeEditorPanel: some View {
@@ -1094,17 +1157,24 @@ struct PlaygroundView: View {
                 showingEnvManager = true
             }
         } label: {
-            HStack(spacing: 4) {
-                Image(systemName: "terminal")
-                    .foregroundColor(.green)
+            HStack(spacing: 6) {
+                Image(systemName: "terminal.fill")
+                    .font(.system(size: 10))
+                    .foregroundColor(Color(red: 0.12, green: 0.72, blue: 0.42))
                 Text(currentPythonDisplay)
-                    .font(.system(size: 12))
+                    .font(.system(size: 12, weight: .medium))
+                Image(systemName: "chevron.down")
+                    .font(.system(size: 9, weight: .bold))
+                    .foregroundColor(.secondary)
             }
-            .padding(.horizontal, 8)
-            .padding(.vertical, 4)
-            .background(controlBackground)
-            .cornerRadius(4)
+            .padding(.horizontal, 10)
+            .padding(.vertical, 5)
+            .background(
+                RoundedRectangle(cornerRadius: 6, style: .continuous)
+                    .fill(controlBackground)
+            )
         }
+        .buttonStyle(.plain)
         .onAppear {
             state.detectPythonVersions()
         }
@@ -1911,13 +1981,37 @@ struct PlaygroundView: View {
             
         case "ardium", "ar":
             code = """
-            // Ardium Playground
+            // ==========================================
+            // Ardium 2.3 Playground
+            // ==========================================
+
+            let language = "Ardium";
+            let version = "v2.3";
+            let sum = 0;
+            let i = 1;
+
+            fn calculate_magic() {
+                return 42;
+            }
+
             fn main() {
-                print("Hello, Ardium!")
+                println("🚀 Welcome to Ardium Playground in MicroCode!");
                 
-                let x = 10
-                let y = 20
-                print("Sum:", x + y)
+                print("Language: ");
+                println(language);
+                print("Version:  ");
+                println(version);
+                
+                while (i < 11) {
+                    sum = sum + (i * i);
+                    i = i + 1;
+                }
+                print("Sum of squares (1..10) = ");
+                println(sum);
+                
+                print("calculate_magic() returned: ");
+                println(calculate_magic());
+                println("=========================================");
             }
             """
         
@@ -1983,109 +2077,7 @@ struct PlaygroundView: View {
         }
     }
 
-    // MARK: - Cell Mode & Catalogue Logic
-    
-    private var cellEditorPanel: some View {
-        ScrollView {
-            VStack(spacing: 12) {
-                if cells.isEmpty {
-                    // Empty state — prevent crash on empty array
-                    VStack(spacing: 12) {
-                        Image(systemName: "square.grid.2x2")
-                            .font(.system(size: 36))
-                            .foregroundColor(.secondary.opacity(0.4))
-                        Text("No cells yet")
-                            .font(.system(size: 14, weight: .medium))
-                            .foregroundColor(.secondary)
-                        Text("Click \"Add New Cell\" to get started")
-                            .font(.system(size: 12))
-                            .foregroundColor(.secondary.opacity(0.6))
-                    }
-                    .frame(maxWidth: .infinity)
-                    .padding(.vertical, 40)
-                } else {
-                    ForEach(cells) { cell in
-                        PlaygroundCellView(
-                            cell: cell,
-                            language: language,
-                            onRun: { runCell(cell: cell) },
-                            onDelete: { deleteCell(cell: cell) }
-                        )
-                        .environmentObject(appState)
-                        .id(cell.id) // Stabilize identity to prevent NSView recreation crash
-                    }
-                }
-                
-                Button(action: addCell) {
-                    HStack {
-                        Image(systemName: "plus.circle.fill")
-                        Text("Add New Cell")
-                    }
-                    .padding()
-                    .frame(maxWidth: .infinity)
-                    .background(Color.secondary.opacity(0.1))
-                    .cornerRadius(8)
-                    .padding(.horizontal, 8)
-                }
-                .buttonStyle(.plain)
-                .padding(.bottom, 20)
-            }
-            .padding(.top, 12)
-        }
-    }
-    
-    func getUsedColors() -> [CellColorTheme] {
-        // Return ALL color themes for the catalog, mark which are in use
-        return CellColorTheme.allCases
-    }
-    
-    func cellCountForColor(_ theme: CellColorTheme) -> Int {
-        cells.filter { $0.colorTheme == theme }.count
-    }
-    
-    func runCell(cell: PlaygroundCellModel) {
-        Task { @MainActor in
-            cell.isExecuting = true
-            cell.output = ""
-            let startTime = Date()
-            
-            do {
-                let result = try await BackendService.shared.executeCode(code: cell.code, language: language)
-                cell.output = cleanANSI(result.stdout + result.stderr)
-                cell.executionTime = Date().timeIntervalSince(startTime)
-                cell.isExecuting = false
-            } catch {
-                cell.output = "Error: \(error.localizedDescription)"
-                cell.isExecuting = false
-            }
-        }
-    }
-    
-    func runCellsByColor(_ theme: CellColorTheme) {
-        for cell in cells where cell.colorTheme == theme {
-            runCell(cell: cell)
-        }
-    }
-    
-    func runAllCells() {
-        for cell in cells {
-            runCell(cell: cell)
-        }
-    }
-    
-    func addCell() {
-        cells.append(PlaygroundCellModel(code: "", colorTheme: .none))
-    }
-    
-    func deleteCell(cell: PlaygroundCellModel) {
-        // Fast indexed removal with animation to prevent NSView recreation crash
-        withAnimation(.easeInOut(duration: 0.2)) {
-            if let idx = cells.firstIndex(where: { $0.id == cell.id }) {
-                cells.remove(at: idx)
-            }
-        }
-        // Allow empty state — don't auto-add
-    }
+    // MARK: - Catalogue Logic
     
     func handleCatalogueItem(code: String) {
         self.code += "\n" + code

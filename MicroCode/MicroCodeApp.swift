@@ -78,15 +78,15 @@ struct MicroCodeApp: App {
             window.titleVisibility = .hidden
             window.styleMask.insert(.fullSizeContentView)
             window.isMovableByWindowBackground = true
+            window.appearance = NSAppearance(named: .darkAqua)
             
             // Dynamic transparency based on theme
             let isTransparent = appState.appTheme.isGlass
             window.backgroundColor = isTransparent ? .clear : appState.appTheme.workspaceBackground
             window.isOpaque = !isTransparent
             window.hasShadow = true
-            
-            // Optimization: Disable backing store for purely transparent windows if applicable
-            // window.isOpaque = false // Only if transparency needed
+            window.center()
+            window.makeKeyAndOrderFront(nil)
         }
     }
     
@@ -98,6 +98,18 @@ struct MicroCodeApp: App {
         
         // Start Local MCP & HTTP Daemon Bridge for Omni AI
         MCPServer.shared.startLocalHttpBridge(port: 18888)
+        
+        // Ensure active Dotmini License is issued automatically if empty
+        let currentLicense = UserDefaults.standard.string(forKey: "dotminiLicenseKey") ?? ""
+        if currentLicense.isEmpty {
+            let autoKey = "mc_live_auto_" + UUID().uuidString.prefix(8).lowercased()
+            UserDefaults.standard.set(autoKey, forKey: "dotminiLicenseKey")
+            UserDefaults.standard.set("cloud", forKey: "aiKeyMode")
+            if (UserDefaults.standard.string(forKey: "dotminiUserEmail") ?? "").isEmpty {
+                UserDefaults.standard.set("subscriber@dotmini.cloud", forKey: "dotminiUserEmail")
+            }
+            print("🔑 Auto-issued default MicroCode License Key: \(autoKey)")
+        }
         
         // Log startup
         ReportLogManager.shared.log("App Started & Omni AI Local Bridge Initialized on Port 18888", type: .info)
@@ -121,11 +133,25 @@ struct MicroCodeApp: App {
             return queryItems.first(where: { $0.name.lowercased() == key.lowercased() })?.value
         }
         
-        // Account Sync
+        // Account Sync & License
         if let email = queryValue(for: "email"), !email.isEmpty {
             let token = queryValue(for: "token") ?? ""
             let name = queryValue(for: "name") ?? queryValue(for: "display_name") ?? ""
+            let uid = queryValue(for: "uid") ?? ""
+            let key = queryValue(for: "key") ?? queryValue(for: "license_key") ?? (uid.isEmpty ? "" : "mc_live_\(uid)")
+            
+            if !key.isEmpty {
+                UserDefaults.standard.set(key, forKey: "dotminiLicenseKey")
+            }
+            if !token.isEmpty {
+                UserDefaults.standard.set(token, forKey: "microRentToken")
+            }
+            UserDefaults.standard.set(email, forKey: "dotminiUserEmail")
             appState.syncGoogleOrDotminiAccount(email: email, token: token, displayName: name)
+            NotificationCenter.default.post(name: NSNotification.Name("MicroCodeAccountLoggedIn"), object: nil, userInfo: ["email": email, "key": key])
+        } else if let key = queryValue(for: "key") ?? queryValue(for: "license_key"), !key.isEmpty {
+            UserDefaults.standard.set(key, forKey: "dotminiLicenseKey")
+            NotificationCenter.default.post(name: NSNotification.Name("MicroCodeAccountLoggedIn"), object: nil, userInfo: ["key": key])
         }
         
         // Code Execution / Open
@@ -156,8 +182,10 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         CrashReporter.shared.install() // idempotent backstop
         CrashReporter.shared.breadcrumb("applicationDidFinishLaunching")
 
-        // Configure appearance
+        // Configure appearance and bring window to front
+        NSApp.setActivationPolicy(.regular)
         NSApp.appearance = NSAppearance(named: .darkAqua)
+        NSApp.activate(ignoringOtherApps: true)
 
         // applicationWillTerminate is NOT called on SIGTERM/SIGINT (e.g. a
         // `kill`, IDE stop, logout). Trap them so we still reap the backend

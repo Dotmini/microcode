@@ -11,11 +11,13 @@ set -e
 DEFAULT_BUILD_ROOT="/Volumes/MAC/CodeTunerBuild"
 if [ -n "${CODETUNER_BUILD_ROOT:-}" ]; then
     BUILD_ROOT="$CODETUNER_BUILD_ROOT"
+elif [ -d "/Volumes/MAC 1" ]; then
+    BUILD_ROOT="/Volumes/MAC 1/CodeTunerBuild"
 elif [ -d "/Volumes/MAC" ]; then
     BUILD_ROOT="$DEFAULT_BUILD_ROOT"
 else
     BUILD_ROOT="$(pwd)/.codetuner-build"
-    echo "Warning: /Volumes/MAC is not mounted; using local build cache at $BUILD_ROOT"
+    echo "Warning: External drive is not mounted; using local build cache at $BUILD_ROOT"
 fi
 
 mkdir -p "$BUILD_ROOT/cargo-home" "$BUILD_ROOT/cargo-target" "$BUILD_ROOT/rustup-home" "$BUILD_ROOT/swiftpm" "$BUILD_ROOT/derived-data" "$BUILD_ROOT/tmp"

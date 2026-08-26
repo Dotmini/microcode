@@ -113,6 +113,7 @@ enum CellLanguage: String, CaseIterable, Identifiable {
     case r = "R"
     case julia = "Julia"
     case sql = "SQL"
+    case ardium = "Ardium"
     case rust = "Rust"
     case go = "Go"
     case cpp = "C++"
@@ -130,6 +131,7 @@ enum CellLanguage: String, CaseIterable, Identifiable {
         case .r: return "r.circle.fill"
         case .julia: return "j.circle.fill"
         case .sql: return "cylinder.fill"
+        case .ardium: return "sparkles"
         case .rust: return "gearshape.fill"
         case .go: return "g.circle.fill"
         case .cpp: return "c.circle.fill"
@@ -147,6 +149,7 @@ enum CellLanguage: String, CaseIterable, Identifiable {
         case .r: return .purple
         case .julia: return .green
         case .sql: return .cyan
+        case .ardium: return .purple
         case .rust: return .orange
         case .go: return .mint
         case .cpp: return .blue
@@ -185,6 +188,34 @@ enum CellLanguage: String, CaseIterable, Identifiable {
             WHERE active = 1
             ORDER BY created_at DESC
             LIMIT 10;
+            """
+        case .ardium:
+            return """
+            // ==========================================
+            // Ardium Native High-Performance Module
+            // ==========================================
+
+            let version = "v2.3";
+            let sum = 0;
+            let i = 1;
+
+            fn main() {
+                println("=========================================");
+                println("      HELLO FROM ARDIUM NOTEBOOK!        ");
+                println("=========================================");
+                
+                print("Ardium Native Toolchain: ");
+                println(version);
+                
+                while (i < 11) {
+                    sum = sum + (i * i);
+                    i = i + 1;
+                }
+                
+                print("Sum of squares (1..10) = ");
+                println(sum);
+                println("=========================================");
+            }
             """
         case .rust:
             return """
@@ -294,7 +325,7 @@ enum CellLanguage: String, CaseIterable, Identifiable {
     /// Whether this language is executable code
     var isExecutable: Bool {
         switch self {
-        case .python, .r, .julia, .sql, .rust, .go, .cpp, .objc, .java, .csharp: return true
+        case .python, .r, .julia, .sql, .ardium, .rust, .go, .cpp, .objc, .java, .csharp: return true
         case .rmarkdown, .latex: return true  // Rendered via external tools
         }
     }
@@ -306,6 +337,7 @@ enum CellLanguage: String, CaseIterable, Identifiable {
         case .r: return "R"
         case .julia: return "jl"
         case .sql: return "sql"
+        case .ardium: return "ar"
         case .rust: return "rs"
         case .go: return "go"
         case .cpp: return "cpp"
@@ -328,6 +360,7 @@ enum CellLanguage: String, CaseIterable, Identifiable {
         case "r", "rscript": return .r
         case "julia", "jl": return .julia
         case "sql", "mysql", "postgresql", "postgres", "sqlite", "plsql", "tsql": return .sql
+        case "ardium", "ar": return .ardium
         case "rust", "rs": return .rust
         case "go", "golang": return .go
         case "cpp", "c++", "cxx", "cc", "c", "h", "hpp": return .cpp
@@ -517,14 +550,14 @@ final class NotebookViewModel: ObservableObject {
         
         // If no saved notebooks, create initial
         if notebooks.isEmpty {
-            let notebook = NotebookModel(name: "Notebook 1")
+            let notebook = NotebookModel(name: "Cell Sheet 1")
             notebooks = [notebook]
             activeNotebookId = notebook.id
             if let firstCell = notebook.cells.first {
                 selectedCellId = firstCell.id
             }
         }
-        print("📝 NotebookViewModel: Init complete with \(notebooks.count) notebook(s)")
+        print("📝 NotebookViewModel: Init complete with \(notebooks.count) cell sheet(s)")
     }
     
     // Get data file paths as Python code for easy import
@@ -539,7 +572,7 @@ final class NotebookViewModel: ObservableObject {
     }
     
     func createNotebook() {
-        let notebook = NotebookModel(name: "Notebook \(notebooks.count + 1)")
+        let notebook = NotebookModel(name: "Cell Sheet \(notebooks.count + 1)")
         notebooks.append(notebook)
         activeNotebookId = notebook.id
         if let firstCell = notebook.cells.first {
@@ -664,6 +697,8 @@ final class NotebookViewModel: ObservableObject {
             runJuliaCell(cell)
         case .sql:
             runSQLCell(cell)
+        case .ardium:
+            runArdiumCell(cell)
         case .rmarkdown:
             runRMarkdownCell(cell)
         case .latex:
@@ -1086,6 +1121,43 @@ final class NotebookViewModel: ObservableObject {
             } catch {
                 let result = "❌ Error: \(error.localizedDescription)"
                 self.handleCellOutput(cellID: cellID, result: result)
+            }
+        }
+    }
+    
+    private func runArdiumCell(_ cell: NotebookCellModel) {
+        let cellID = cell.id
+        let code = cell.content
+        let workingDir = workingDirectory
+        
+        DispatchQueue.main.async {
+            cell.isExecuting = true
+            cell.output = ""
+        }
+        
+        Task {
+            var finalCode = code
+            if !finalCode.contains("fn main(") && !finalCode.contains("func main(") {
+                let trimmed = finalCode.trimmingCharacters(in: .whitespacesAndNewlines)
+                if trimmed.contains("print") || trimmed.contains("println") || trimmed.contains("show()") {
+                    finalCode = "fn main() {\n" + finalCode + "\n}"
+                }
+            }
+            
+            let res = await ArdiumRunner.execute(code: finalCode)
+            var out = res.stdout
+            if !res.stderr.isEmpty {
+                out += (out.isEmpty ? "" : "\n") + res.stderr
+            }
+            if out.isEmpty && res.exitCode == 0 {
+                out = "(Executed with no output)"
+            }
+            
+            let cleanPattern = #"\x1B(?:[@-Z\\-_]|\[[0-?]*[ -/]*[@-~])"#
+            let cleanOut = out.replacingOccurrences(of: cleanPattern, with: "", options: .regularExpression)
+            
+            await MainActor.run {
+                self.handleCellOutput(cellID: cellID, result: cleanOut)
             }
         }
     }
@@ -1716,6 +1788,13 @@ final class NotebookViewModel: ObservableObject {
                 ScienceService.indexWorkspace(at: workspace)
             }.value
             guard let notebook = self.activeNotebook else { return }
+            // A file can be renamed or deleted in Science Mode between syncs.
+            // Remove only stale references inside this project; imported files
+            // in other notebook workspaces must remain untouched.
+            notebook.dataFiles.removeAll { file in
+                file.url.standardizedFileURL.path.hasPrefix(expectedPath + "/") &&
+                !FileManager.default.fileExists(atPath: file.url.path)
+            }
             let paths = context.structures + context.sequences + context.results + context.papers + context.datasets
             for relative in paths.prefix(1_000) {
                 let url = workspace.appendingPathComponent(relative).standardizedFileURL
@@ -1768,6 +1847,7 @@ final class NotebookViewModel: ObservableObject {
         notebook.dataFiles.removeAll { $0.id == file.id }
         SharedMemoryService.shared.removeArtifact(file.url)
         scheduleAutoSave()
+        notifyScienceContextChanged()
     }
 
     func deleteDataFile(_ file: DataFile) {
@@ -1789,20 +1869,27 @@ final class NotebookViewModel: ObservableObject {
             from pathlib import Path
             structure_path = Path(r"\(path)")
             print(f"Structure: {structure_path.name}")
-            # Optional: pip install biopython
-            from Bio.PDB import PDBParser, MMCIFParser
-            parser = MMCIFParser(QUIET=True) if structure_path.suffix.lower() in {".cif", ".mmcif"} else PDBParser(QUIET=True)
-            structure = parser.get_structure(structure_path.stem, structure_path)
-            print("Models:", len(list(structure.get_models())))
-            print("Chains:", [chain.id for chain in structure.get_chains()])
+            try:
+                from Bio.PDB import PDBParser, MMCIFParser
+            except ImportError:
+                print("Biopython is not installed. Run: pip install biopython")
+            else:
+                parser = MMCIFParser(QUIET=True) if structure_path.suffix.lower() in {".cif", ".mmcif"} else PDBParser(QUIET=True)
+                structure = parser.get_structure(structure_path.stem, structure_path)
+                print("Models:", len(list(structure.get_models())))
+                print("Chains:", [chain.id for chain in structure.get_chains()])
             """
         case .sequence:
             code = """
             from pathlib import Path
             fasta_path = Path(r"\(path)")
-            from Bio import SeqIO
-            records = list(SeqIO.parse(fasta_path, "fasta"))
-            print(f"{len(records)} sequences", [len(r.seq) for r in records[:20]])
+            try:
+                from Bio import SeqIO
+            except ImportError:
+                print("Biopython is not installed. Run: pip install biopython")
+            else:
+                records = list(SeqIO.parse(fasta_path, "fasta"))
+                print(f"{len(records)} sequences", [len(r.seq) for r in records[:20]])
             """
         case .csv:
             code = "import pandas as pd\ndata = pd.read_csv(r\"\(path)\")\ndisplay(data.head())"
@@ -2275,18 +2362,17 @@ struct NotebookView: View {
     @EnvironmentObject var appState: AppState
     @StateObject private var viewModel = NotebookViewModel()
     @ObservedObject private var pythonEnvManager = PythonEnvManager.shared
-    @ObservedObject private var shmService = SharedMemoryService.shared
     @State private var isReady = false
     @State private var showAIPanel = false
     @State private var showingHPCSettings = false
     private let notebookHeaderHeight: CGFloat = 34
     
     private var panelBackground: Color {
-        appState.appTheme == .transparent ? Color.white.opacity(0.05) : Color(nsColor: .windowBackgroundColor)
+        appState.appTheme.isGlass ? Color.white.opacity(0.05) : Color(nsColor: appState.appTheme.panelBackground)
     }
     
     private var controlBackground: Color {
-        appState.appTheme == .transparent ? Color.white.opacity(0.08) : Color(nsColor: .controlBackgroundColor)
+        appState.appTheme.isGlass ? Color.white.opacity(0.08) : Color(nsColor: appState.appTheme.elevatedBackground)
     }
     
     var body: some View {
@@ -2444,7 +2530,7 @@ struct NotebookView: View {
             HStack {
                 Image(systemName: "doc.text.fill")
                     .foregroundColor(.orange)
-                Text("Notebooks")
+                Text("Cell Sheets")
                     .font(.headline)
                 Spacer()
                 
@@ -2724,7 +2810,7 @@ struct NotebookView: View {
                 .padding()
             }
         }
-        .background(Color(nsColor: .controlBackgroundColor).opacity(0.5))
+        .background(appState.appTheme.isGlass ? Color.clear : Color(nsColor: appState.appTheme.panelBackground))
     }
     
     // MARK: - Toolbar
@@ -2866,6 +2952,9 @@ struct NotebookView: View {
                     .font(.caption)
                     .foregroundColor(.secondary)
                 
+                Button { viewModel.addCell(type: .code, language: .ardium) } label: {
+                    Label("Ardium", systemImage: "sparkles")
+                }
                 Button { viewModel.addCell(type: .code, language: .rust) } label: {
                     Label("Rust", systemImage: "gearshape.fill")
                 }
@@ -3027,7 +3116,7 @@ struct NotebookView: View {
         .padding(.horizontal, 10)
         .padding(.vertical, 6)
         .frame(height: notebookHeaderHeight)
-        .background(Color(nsColor: .controlBackgroundColor))
+        .background(appState.appTheme.isGlass ? Color.clear : Color(nsColor: appState.appTheme.panelBackground))
     }
     
     // MARK: - Python Version Menu
@@ -3257,7 +3346,7 @@ struct NotebookCellsList: View {
     @EnvironmentObject var appState: AppState
 
     private var controlBackground: Color {
-        appState.appTheme == .transparent ? Color.white.opacity(0.08) : Color(nsColor: .controlBackgroundColor)
+        appState.appTheme.isGlass ? Color.white.opacity(0.08) : Color(nsColor: appState.appTheme.elevatedBackground)
     }
 
     var body: some View {
@@ -3312,7 +3401,7 @@ struct NotebookCellsList: View {
             }
             .padding()
         }
-        .background(appState.appTheme == .transparent ? Color.clear : Color(nsColor: .textBackgroundColor).opacity(0.3))
+        .background(appState.appTheme.isGlass ? Color.clear : Color(nsColor: appState.appTheme.workspaceBackground))
     }
 }
 
@@ -3335,11 +3424,43 @@ struct NotebookCellView: View {
     @State private var codeHeight: CGFloat = 80
     
     private var panelBackground: Color {
-        appState.appTheme == .transparent ? Color.white.opacity(0.05) : Color(nsColor: .windowBackgroundColor)
+        appState.appTheme.isGlass ? Color.white.opacity(0.05) : Color(nsColor: appState.appTheme.panelBackground)
     }
     
     private var controlBackground: Color {
-        appState.appTheme == .transparent ? Color.white.opacity(0.08) : Color(nsColor: .controlBackgroundColor)
+        appState.appTheme.isGlass ? Color.white.opacity(0.08) : Color(nsColor: appState.appTheme.elevatedBackground)
+    }
+    
+    private var cellCardBackground: some View {
+        ZStack {
+            if appState.appTheme.isGlass {
+                if cell.useCustomColor, let custom = cell.customColor {
+                    custom.color
+                } else if cell.colorTheme != .none {
+                    cell.colorTheme.color
+                } else {
+                    Color.white.opacity(0.05)
+                }
+            } else {
+                // Solid theme (e.g. Near Black #090A0C / elevated #131416)
+                Color(nsColor: appState.appTheme.elevatedBackground)
+                if cell.useCustomColor, let custom = cell.customColor {
+                    custom.color
+                } else if cell.colorTheme != .none {
+                    cell.colorTheme.color
+                }
+            }
+        }
+    }
+    
+    private var cellBorderColor: Color {
+        if cell.useCustomColor, let custom = cell.customColor {
+            return custom.borderColor
+        }
+        if cell.colorTheme != .none {
+            return cell.colorTheme.borderColor
+        }
+        return appState.appTheme.isDark ? Color.white.opacity(0.12) : Color.black.opacity(0.1)
     }
     
     var body: some View {
@@ -3382,7 +3503,8 @@ struct NotebookCellView: View {
                         .padding(8)
                     } else {
                         // Code Editor - height matches line count exactly
-                        let lineCount = max(1, cell.content.components(separatedBy: "\n").count)
+                        // Zero-allocation UTF8 scan instead of components(separatedBy:)
+                        let lineCount = max(1, cell.content.utf8.reduce(1) { $0 + ($1 == 0x0A ? 1 : 0) })
                         let lineHeight: CGFloat = 20  // line height for 13pt monospaced font
                         let calculatedHeight = CGFloat(lineCount) * lineHeight + 16  // +16 for padding
                         
@@ -3399,6 +3521,7 @@ struct NotebookCellView: View {
                             themeName: appState.appTheme.rawValue,
                             fontName: appState.cellFontName,
                             fontWeight: appState.cellFontWeight,
+                            isTransparent: true,
                             showLineNumbers: appState.showLineNumbers,
                             editorID: "cell-\(cell.id.uuidString)"
                         )
@@ -3449,7 +3572,7 @@ struct NotebookCellView: View {
                                                             .foregroundColor(.primary)
                                                     }
                                                     .frame(width: 120, height: 120)
-                                                    .background(appState.appTheme == .transparent ? Color.clear : Color(nsColor: .textBackgroundColor))
+                                                    .background(appState.appTheme.isGlass ? Color.clear : Color(nsColor: appState.appTheme.panelBackground))
                                                     .cornerRadius(8)
                                                     .overlay(
                                                         RoundedRectangle(cornerRadius: 8)
@@ -3469,7 +3592,7 @@ struct NotebookCellView: View {
                                                             .foregroundColor(.primary)
                                                     }
                                                     .frame(width: 120, height: 120)
-                                                    .background(appState.appTheme == .transparent ? Color.clear : Color(nsColor: .textBackgroundColor))
+                                                    .background(appState.appTheme.isGlass ? Color.clear : Color(nsColor: appState.appTheme.panelBackground))
                                                     .cornerRadius(8)
                                                     .overlay(
                                                         RoundedRectangle(cornerRadius: 8)
@@ -3499,7 +3622,7 @@ struct NotebookCellView: View {
                                                         panel.allowedContentTypes = [.png]
                                                         panel.nameFieldStringValue = imageURL.lastPathComponent
                                                         if panel.runModal() == .OK, let url = panel.url {
-                                                            try? FileManager.default.copyItem(at: imageURL, to: url)
+                                                             try? FileManager.default.copyItem(at: imageURL, to: url)
                                                         }
                                                     }
                                                     Button("Copy Image") {
@@ -3521,13 +3644,13 @@ struct NotebookCellView: View {
             .padding(.horizontal, 4)
             .padding(.bottom, 8)
         }
-        .background(cell.backgroundColor)
+        .background(cellCardBackground)
         .cornerRadius(12)
         .overlay(
             RoundedRectangle(cornerRadius: 12)
-                .stroke(isSelected ? Color.accentColor : cell.borderColorValue.opacity(0.5), lineWidth: isSelected ? 2 : 1)
+                .stroke(isSelected ? Color.accentColor : cellBorderColor, lineWidth: isSelected ? 2 : 1)
         )
-        .shadow(color: Color.black.opacity(0.05), radius: 4, x: 0, y: 2)
+        .shadow(color: appState.appTheme.isGlass ? Color.black.opacity(0.05) : Color.clear, radius: 4, x: 0, y: 2)
         .padding(.horizontal, 16)
         .contentShape(Rectangle())
         .onTapGesture(perform: onSelect)
@@ -3789,7 +3912,6 @@ struct NotebookCellView: View {
         }
         .padding(.horizontal, 8)
         .padding(.vertical, 6)
-        .background(cell.backgroundColor.opacity(0.5))
     }
     
     private var executionLabel: String {
@@ -3811,281 +3933,498 @@ struct NotebookCellView: View {
 
 // MARK: - HPC Settings View
 
+// MARK: - Dotmini Cloud GPU Hub & Settings View
+
 struct HPCSettingsView: View {
     @EnvironmentObject var appState: AppState
+    @ObservedObject private var cloudGPU = CloudGPUService.shared
     @ObservedObject private var gpu = RemoteGPUService.shared
     @ObservedObject private var prov = RemoteProviderService.shared
+    
     @AppStorage("remoteSSHCommand") private var sshCmd = ""
     @AppStorage("remoteSSHKey") private var sshKey = ""
     @AppStorage("runpodApiKey") private var runpodKey = ""
     @AppStorage("vastApiKey") private var vastKey = ""
     @AppStorage("cloudGPUBaseURL") private var cloudGPUBase = ""
+    
+    @State private var selectedTab = 0 // 0=Cluster, 1=Wallet, 2=Git Ingest, 3=SSH
     @State private var providerSel: RemoteProviderService.Provider = .runpod
-    @State private var showProvider = false
-    @State private var showAdvanced = false
-    @State private var showGateway = false
+    @State private var customTopupAmount: String = "300"
+    @State private var isTopupLoading: Bool = false
+    @State private var topupError: String = ""
+    
+    // Git Ingestion State
+    @State private var gitRepoURL: String = ""
+    @State private var gitBranch: String = "main"
+    @State private var gitToken: String = ""
+    @State private var gitDestination: String = "data"
+    @State private var isIngesting: Bool = false
+    @State private var ingestLogs: String = ""
+    @State private var cloudFileList: [String] = []
+    @State private var isRefreshingFiles: Bool = false
+    
     @State private var testing = false
     @State private var testOK: Bool? = nil
     @State private var testMsg = ""
 
-    private var connected: Bool { gpu.status == .connected }
-    private var connecting: Bool { gpu.status == .connecting }
-    private var statusText: String {
-        switch gpu.status {
-        case .disconnected: return "Not connected"
-        case .connecting:   return "Connecting…"
-        case .connected:    return "Connected — cells run on the remote GPU"
-        case .failed(let m): return m
-        }
-    }
-    private var statusColor: Color {
-        switch gpu.status {
-        case .connected: return .green
-        case .connecting: return .orange
-        case .failed: return .red
-        default: return .secondary
-        }
+    private var isConnected: Bool {
+        cloudGPU.activeSession != nil || gpu.status == .connected
     }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
-            HStack(spacing: 8) {
-                Image(systemName: "bolt.horizontal.circle.fill")
-                    .font(.title2).foregroundColor(.blue)
-                Text("Remote GPU — RunPod / Vast.ai")
+            // Header
+            headerView
+            
+            // Tab Selector
+            Picker("", selection: $selectedTab) {
+                Text("GPU Cluster").tag(0)
+                Text("GPU Wallet").tag(1)
+                Text("Git Ingest").tag(2)
+                Text("SSH / Custom").tag(3)
+            }
+            .pickerStyle(.segmented)
+            .labelsHidden()
+            
+            Divider()
+            
+            // Content by Tab
+            ScrollView {
+                VStack(alignment: .leading, spacing: 14) {
+                    switch selectedTab {
+                    case 0:
+                        gpuClusterTab
+                    case 1:
+                        gpuWalletTab
+                    case 2:
+                        gitIngestTab
+                    case 3:
+                        sshManualTab
+                    default:
+                        gpuClusterTab
+                    }
+                }
+                .padding(.vertical, 4)
+            }
+            .frame(maxHeight: 380)
+        }
+        .padding(14)
+        .frame(width: 440)
+        .background(appState.appTheme.isGlass ? Color.clear : Color(nsColor: appState.appTheme.panelBackground))
+        .onAppear {
+            Task {
+                await cloudGPU.refresh()
+            }
+        }
+    }
+
+    // MARK: - Header
+    private var headerView: some View {
+        HStack(spacing: 8) {
+            Image(systemName: "cpu.fill")
+                .font(.title2)
+                .foregroundColor(.accentColor)
+            
+            VStack(alignment: .leading, spacing: 1) {
+                Text("Dotmini Cloud GPU Hub")
                     .font(.headline)
+                Text("High-performance compute clusters & persistent storage")
+                    .font(.caption2)
+                    .foregroundColor(.secondary)
+            }
+            
+            Spacer()
+            
+            // Wallet Badge
+            Button {
+                selectedTab = 1
+            } label: {
+                HStack(spacing: 4) {
+                    Image(systemName: "creditcard.fill")
+                        .foregroundColor(.green)
+                        .font(.caption2)
+                    Text(cloudGPU.balanceText)
+                        .font(.system(size: 11, weight: .bold, design: .monospaced))
+                }
+                .padding(.horizontal, 6)
+                .padding(.vertical, 3)
+                .background(appState.appTheme.isGlass ? Color.white.opacity(0.08) : Color(nsColor: appState.appTheme.elevatedBackground))
+                .cornerRadius(6)
+            }
+            .buttonStyle(.plain)
+            .help("GPU Credit Balance")
+        }
+    }
+
+    // MARK: - Tab 0: GPU Cluster
+    private var gpuClusterTab: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            if let session = cloudGPU.activeSession {
+                // Active Session Info
+                VStack(alignment: .leading, spacing: 6) {
+                    HStack {
+                        Circle().fill(Color.green).frame(width: 8, height: 8)
+                        Text("Active: \(session.gpuLabel)")
+                            .font(.system(size: 12, weight: .semibold))
+                        Spacer()
+                        Text(cloudGPU.priceText(session.pricePerMinute))
+                            .font(.caption)
+                            .foregroundColor(.secondary)
+                    }
+                    
+                    Text("Jupyter WSS tunnel active. Cells are executed directly on the cloud GPU.")
+                        .font(.caption2)
+                        .foregroundColor(.secondary)
+                    
+                    HStack {
+                        Button(role: .destructive) {
+                            Task { await cloudGPU.stop() }
+                        } label: {
+                            Label("Disconnect GPU", systemImage: "stop.circle.fill")
+                        }
+                        .buttonStyle(.borderedProminent)
+                        .tint(.red)
+                        .controlSize(.small)
+                        
+                        Spacer()
+                    }
+                }
+                .padding(10)
+                .background(RoundedRectangle(cornerRadius: 8).fill(Color.green.opacity(0.1)))
+            } else {
+                Text("Select an NVIDIA GPU instance. Pricing includes compute rate + 7% VAT + service fee.")
+                    .font(.caption2)
+                    .foregroundColor(.secondary)
             }
 
-            Text("Paste the SSH command your provider gives you. MicroCode starts Jupyter, opens a secure tunnel and connects — no token, no URL to type.")
-                .font(.caption).foregroundColor(.secondary)
-                .fixedSize(horizontal: false, vertical: true)
-
-            VStack(alignment: .leading, spacing: 4) {
-                Text("SSH COMMAND").font(.system(size: 10, weight: .bold)).foregroundColor(.secondary)
-                HStack(spacing: 6) {
-                    TextField("ssh -p 41122 root@1.2.3.4 -i ~/.ssh/key", text: $sshCmd, axis: .vertical)
-                        .textFieldStyle(.roundedBorder)
-                        .lineLimit(1...3)
-                        .disableAutocorrection(true)
-                    Button {
-                        if let s = NSPasteboard.general.string(forType: .string) {
-                            sshCmd = s.trimmingCharacters(in: .whitespacesAndNewlines)
+            // GPU Catalog List
+            VStack(spacing: 6) {
+                ForEach(cloudGPU.catalog) { gpu in
+                    HStack {
+                        VStack(alignment: .leading, spacing: 2) {
+                            HStack(spacing: 6) {
+                                Text(gpu.label)
+                                    .font(.system(size: 11, weight: .medium))
+                                Text("\(gpu.vramGB)GB VRAM")
+                                    .font(.system(size: 9, weight: .semibold))
+                                    .padding(.horizontal, 4)
+                                    .padding(.vertical, 1)
+                                    .background(Color.blue.opacity(0.15))
+                                    .foregroundColor(.blue)
+                                    .cornerRadius(3)
+                            }
+                            Text(gpu.pricePerHourText + " (\(cloudGPU.priceText(gpu.pricePerMinute)))")
+                                .font(.caption2)
+                                .foregroundColor(.secondary)
                         }
-                    } label: { Image(systemName: "doc.on.clipboard") }
-                    .buttonStyle(.borderless).help("Paste")
+                        
+                        Spacer()
+                        
+                        Button {
+                            Task {
+                                await cloudGPU.connect(gpu: gpu) {
+                                    selectedTab = 1 // Switch to wallet on insufficient balance
+                                }
+                            }
+                        } label: {
+                            if cloudGPU.status == .connecting && cloudGPU.activeSession == nil {
+                                ProgressView().scaleEffect(0.6)
+                            } else {
+                                Text(cloudGPU.activeSession?.gpuLabel == gpu.label ? "Connected" : "Launch")
+                                    .font(.system(size: 11, weight: .semibold))
+                            }
+                        }
+                        .buttonStyle(.borderedProminent)
+                        .controlSize(.small)
+                        .disabled(cloudGPU.activeSession != nil || cloudGPU.status == .connecting)
+                    }
+                    .padding(8)
+                    .background(appState.appTheme.isGlass ? Color.white.opacity(0.05) : Color(nsColor: appState.appTheme.elevatedBackground))
+                    .cornerRadius(8)
                 }
             }
 
-            // One-time key authorisation — no .pem juggling. MicroCode owns
-            // its own key; the user just pastes our PUBLIC key into the
-            // provider once.
-            VStack(alignment: .leading, spacing: 6) {
-                HStack(spacing: 6) {
-                    Text("ONE-TIME SETUP").font(.system(size: 10, weight: .bold)).foregroundColor(.secondary)
+            if !cloudGPU.lastError.isEmpty {
+                Text(cloudGPU.lastError)
+                    .font(.caption2)
+                    .foregroundColor(.red)
+                    .padding(.top, 4)
+            }
+        }
+    }
+
+    // MARK: - Tab 1: GPU Wallet (Credit)
+    private var gpuWalletTab: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            VStack(alignment: .leading, spacing: 4) {
+                Text("GPU CREDIT BALANCE")
+                    .font(.system(size: 10, weight: .bold))
+                    .foregroundColor(.secondary)
+                
+                HStack(alignment: .firstTextBaseline) {
+                    Text(cloudGPU.balanceText)
+                        .font(.system(size: 24, weight: .bold, design: .rounded))
+                        .foregroundColor(.green)
                     Spacer()
                     Button {
-                        NSPasteboard.general.clearContents()
-                        NSPasteboard.general.setString(gpu.managedPublicKey, forType: .string)
-                    } label: { Label("Copy MicroCode SSH key", systemImage: "key.fill") }
-                    .buttonStyle(.bordered).controlSize(.small)
-                }
-                Text("Paste this once into your provider: RunPod → Settings ▸ SSH Public Keys, or Vast → instance ▸ Manage SSH Keys. Then just Connect — no .pem to pick.")
-                    .font(.system(size: 10)).foregroundColor(.secondary)
-                    .fixedSize(horizontal: false, vertical: true)
-                Text(gpu.managedPublicKey.isEmpty ? "(generating key…)" :
-                        String(gpu.managedPublicKey.prefix(46)) + "…")
-                    .font(.system(size: 9, design: .monospaced))
-                    .foregroundColor(.secondary).lineLimit(1).textSelection(.enabled)
-
-                DisclosureGroup("Use my own private key instead") {
-                    HStack(spacing: 6) {
-                        Text(sshKey.isEmpty ? "none" : (sshKey as NSString).lastPathComponent)
-                            .font(.system(size: 11)).foregroundColor(.secondary).lineLimit(1)
-                        Spacer()
-                        Button("Choose .pem…") {
-                            let p = NSOpenPanel()
-                            p.canChooseFiles = true; p.canChooseDirectories = false
-                            p.allowsMultipleSelection = false
-                            p.showsHiddenFiles = true
-                            if p.runModal() == .OK, let u = p.url { sshKey = u.path }
-                        }
-                        .buttonStyle(.borderless).font(.system(size: 11))
-                        if !sshKey.isEmpty {
-                            Button { sshKey = "" } label: { Image(systemName: "xmark.circle.fill") }
-                                .buttonStyle(.borderless).foregroundColor(.secondary)
-                        }
+                        Task { await cloudGPU.loadWallet() }
+                    } label: {
+                        Image(systemName: "arrow.clockwise")
                     }
-                    .padding(.top, 4)
+                    .buttonStyle(.borderless)
+                    .help("Refresh Balance")
                 }
-                .font(.system(size: 10))
+                
+                Text("GPU Credit is dedicated to cloud computing only (RunPod + VAT + margin) and is separate from AI Assistant subscriptions.")
+                    .font(.caption2)
+                    .foregroundColor(.secondary)
+            }
+            .padding(10)
+            .background(appState.appTheme.isGlass ? Color.white.opacity(0.05) : Color(nsColor: appState.appTheme.elevatedBackground))
+            .cornerRadius(8)
+
+            Text("Top-up Packages")
+                .font(.system(size: 11, weight: .semibold))
+
+            LazyVGrid(columns: [GridItem(.flexible()), GridItem(.flexible())], spacing: 8) {
+                ForEach(CloudGPUService.defaultTopupPackages) { pkg in
+                    Button {
+                        Task {
+                            isTopupLoading = true
+                            topupError = ""
+                            let (url, err) = await cloudGPU.topUp(packageId: pkg.id)
+                            isTopupLoading = false
+                            if let u = url { NSWorkspace.shared.open(u) }
+                            else if let e = err { topupError = e }
+                        }
+                    } label: {
+                        VStack(alignment: .leading, spacing: 4) {
+                            HStack {
+                                Text(pkg.name)
+                                    .font(.system(size: 11, weight: .bold))
+                                Spacer()
+                                if let b = pkg.badge {
+                                    Text(b)
+                                        .font(.system(size: 8, weight: .bold))
+                                        .padding(.horizontal, 4)
+                                        .padding(.vertical, 1)
+                                        .background(Color.orange.opacity(0.2))
+                                        .foregroundColor(.orange)
+                                        .cornerRadius(3)
+                                }
+                            }
+                            Text("฿\(pkg.amountTHB)")
+                                .font(.system(size: 16, weight: .bold))
+                                .foregroundColor(.primary)
+                            if pkg.bonusTHB > 0 {
+                                Text("+฿\(pkg.bonusTHB) Bonus Credit")
+                                    .font(.caption2)
+                                    .foregroundColor(.green)
+                            }
+                        }
+                        .padding(8)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .background(appState.appTheme.isGlass ? Color.white.opacity(0.06) : Color(nsColor: appState.appTheme.elevatedBackground))
+                        .cornerRadius(8)
+                        .overlay(
+                            RoundedRectangle(cornerRadius: 8)
+                                .stroke(Color.primary.opacity(0.1), lineWidth: 1)
+                        )
+                    }
+                    .buttonStyle(.plain)
+                }
             }
 
-            HStack(spacing: 10) {
-                if connected {
-                    Button(role: .destructive) { gpu.disconnect() } label: {
-                        Label("Disconnect", systemImage: "stop.circle")
-                    }
-                } else {
+            // Custom Top-up
+            VStack(alignment: .leading, spacing: 6) {
+                Text("Custom Top-up (THB)")
+                    .font(.caption2)
+                    .foregroundColor(.secondary)
+                
+                HStack(spacing: 8) {
+                    TextField("Amount in THB (e.g. 300)", text: $customTopupAmount)
+                        .textFieldStyle(.roundedBorder)
+                    
                     Button {
-                        gpu.connect(sshCommand: sshCmd, keyPath: sshKey.isEmpty ? nil : sshKey)
+                        if let amt = Int(customTopupAmount), amt >= 50 {
+                            Task {
+                                isTopupLoading = true
+                                topupError = ""
+                                let (url, err) = await cloudGPU.topUpCustom(amountTHB: amt)
+                                isTopupLoading = false
+                                if let u = url { NSWorkspace.shared.open(u) }
+                                else if let e = err { topupError = e }
+                            }
+                        }
                     } label: {
-                        HStack(spacing: 6) {
-                            if connecting { ProgressView().scaleEffect(0.6) }
-                            Image(systemName: "link")
-                            Text(connecting ? "Connecting…" : "Connect")
+                        if isTopupLoading {
+                            ProgressView().scaleEffect(0.6)
+                        } else {
+                            Text("Checkout")
                         }
                     }
                     .buttonStyle(.borderedProminent)
-                    .disabled(connecting || sshCmd.trimmingCharacters(in: .whitespaces).isEmpty)
+                    .controlSize(.small)
                 }
-                Circle().fill(statusColor).frame(width: 8, height: 8)
-                Text(statusText).font(.system(size: 11)).foregroundColor(statusColor)
-                    .lineLimit(2).fixedSize(horizontal: false, vertical: true)
             }
 
-            if !gpu.log.isEmpty {
-                ScrollView {
-                    Text(gpu.log)
-                        .font(.system(size: 10, design: .monospaced))
-                        .frame(maxWidth: .infinity, alignment: .leading)
-                        .textSelection(.enabled)
-                }
-                .frame(height: 110)
-                .padding(8)
-                .background(RoundedRectangle(cornerRadius: 6).fill(Color.black.opacity(0.25)))
+            if !topupError.isEmpty {
+                Text(topupError)
+                    .font(.caption2)
+                    .foregroundColor(.red)
             }
-
-            DisclosureGroup("Connect via provider API key (RunPod / Vast.ai)", isExpanded: $showProvider) {
-                VStack(alignment: .leading, spacing: 8) {
-                    Picker("", selection: $providerSel) {
-                        ForEach(RemoteProviderService.Provider.allCases) { Text($0.rawValue).tag($0) }
-                    }
-                    .pickerStyle(.segmented).labelsHidden()
-
-                    SecureField(providerSel == .runpod ? "RunPod API key" : "Vast.ai API key",
-                                text: providerSel == .runpod ? $runpodKey : $vastKey)
-                        .textFieldStyle(.roundedBorder)
-
-                    HStack(spacing: 8) {
-                        Button {
-                            Task {
-                                await prov.listInstances(provider: providerSel,
-                                                         apiKey: providerSel == .runpod ? runpodKey : vastKey)
-                            }
-                        } label: {
-                            HStack(spacing: 6) {
-                                if prov.isLoading { ProgressView().scaleEffect(0.6) }
-                                Text(prov.isLoading ? "Loading…" : "List instances")
-                            }
-                        }
-                        .buttonStyle(.bordered)
-                        .disabled(prov.isLoading)
-                        if !prov.error.isEmpty {
-                            Text(prov.error).font(.system(size: 10)).foregroundColor(.red)
-                                .lineLimit(2).fixedSize(horizontal: false, vertical: true)
-                        }
-                    }
-
-                    ForEach(prov.instances) { inst in
-                        Button {
-                            sshCmd = prov.sshCommand(for: inst)
-                            let useKey = sshKey.isEmpty ? nil : sshKey
-                            Task {
-                                // Zero-setup: auto-register MicroCode's managed
-                                // public key on the provider account using the
-                                // same API key, so the SSH connect just works
-                                // (no copy/paste). Best effort — connect anyway.
-                                if useKey == nil {
-                                    await prov.uploadKey(
-                                        provider: providerSel,
-                                        apiKey: providerSel == .runpod ? runpodKey : vastKey,
-                                        publicKey: gpu.managedPublicKey)
-                                }
-                                gpu.connect(sshCommand: sshCmd, keyPath: useKey)
-                            }
-                        } label: {
-                            HStack(spacing: 6) {
-                                Circle().fill(inst.running ? Color.green : Color.secondary)
-                                    .frame(width: 7, height: 7)
-                                Text(inst.label).font(.system(size: 11)).lineLimit(1)
-                                Spacer()
-                                Image(systemName: "link").font(.system(size: 10))
-                            }
-                            .contentShape(Rectangle())
-                        }
-                        .buttonStyle(.plain)
-                        .disabled(!inst.running)
-                    }
-
-                    Text("Zero-setup: pick an instance → MicroCode auto-registers its key on your account via this API key, SSHes in, and connects. No SSH key or .pem to manage.")
-                        .font(.system(size: 10)).foregroundColor(.secondary)
-                        .fixedSize(horizontal: false, vertical: true)
-                }
-                .padding(.top, 6)
-            }
-            .font(.system(size: 11))
-
-            DisclosureGroup("Advanced — manual Jupyter URL/token", isExpanded: $showAdvanced) {
-                VStack(alignment: .leading, spacing: 8) {
-                    TextField("https://xxxx.trycloudflare.com", text: $appState.hpcEndpoint)
-                        .textFieldStyle(.roundedBorder).disableAutocorrection(true)
-                    SecureField("Jupyter token", text: $appState.hpcToken)
-                        .textFieldStyle(.roundedBorder)
-                    HStack(spacing: 8) {
-                        Button {
-                            Task { await testConnection() }
-                        } label: {
-                            HStack(spacing: 6) {
-                                if testing { ProgressView().scaleEffect(0.6) }
-                                Text(testing ? "Testing…" : "Test Connection")
-                            }
-                        }
-                        .buttonStyle(.bordered)
-                        .disabled(testing || appState.hpcEndpoint.trimmingCharacters(in: .whitespaces).isEmpty)
-                        if let ok = testOK {
-                            Image(systemName: ok ? "checkmark.circle.fill" : "xmark.octagon.fill")
-                                .foregroundColor(ok ? .green : .red)
-                        }
-                    }
-                    if !testMsg.isEmpty {
-                        Text(testMsg).font(.system(size: 10, design: .monospaced))
-                            .foregroundColor(testOK == true ? .green : .red)
-                            .fixedSize(horizontal: false, vertical: true).textSelection(.enabled)
-                    }
-                }
-                .padding(.top, 6)
-            }
-            .font(.system(size: 11))
-
-            DisclosureGroup("Managed Cloud GPU gateway (advanced)", isExpanded: $showGateway) {
-                VStack(alignment: .leading, spacing: 8) {
-                    Text("Endpoint MicroCode uses for one-click Cloud GPU. Leave blank to use the default.")
-                        .font(.system(size: 10)).foregroundColor(.secondary)
-                        .fixedSize(horizontal: false, vertical: true)
-                    TextField("https://gpu.dotmini.net/gpu/v1", text: $cloudGPUBase)
-                        .textFieldStyle(.roundedBorder)
-                        .disableAutocorrection(true)
-                        .autocorrectionDisabled(true)
-                    HStack(spacing: 8) {
-                        Text("Default: https://gpu.dotmini.net/gpu/v1")
-                            .font(.system(size: 10, design: .monospaced))
-                            .foregroundColor(.secondary)
-                        Spacer()
-                        if !cloudGPUBase.isEmpty {
-                            Button("Reset") { cloudGPUBase = "" }
-                                .buttonStyle(.borderless).controlSize(.small)
-                        }
-                    }
-                    Text("Authenticated with your MicroCode account token (same as AI). Billed from the separate Cloud GPU Wallet.")
-                        .font(.system(size: 10)).foregroundColor(.secondary)
-                        .fixedSize(horizontal: false, vertical: true)
-                }
-                .padding(.top, 6)
-            }
-            .font(.system(size: 11))
         }
-        .padding()
-        .frame(width: 380)
+    }
+
+    // MARK: - Tab 2: Git Cloud Ingest (10Gbps Direct Clone)
+    private var gitIngestTab: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            Text("Ingest large datasets or repositories from GitHub / GitLab / HuggingFace directly to the Cloud Pod's 10Gbps storage without using your local bandwidth.")
+                .font(.caption2)
+                .foregroundColor(.secondary)
+
+            VStack(alignment: .leading, spacing: 6) {
+                Text("REPOSITORY URL").font(.system(size: 9, weight: .bold)).foregroundColor(.secondary)
+                TextField("https://github.com/username/large-dataset", text: $gitRepoURL)
+                    .textFieldStyle(.roundedBorder)
+                    .disableAutocorrection(true)
+
+                HStack(spacing: 8) {
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text("BRANCH").font(.system(size: 9, weight: .bold)).foregroundColor(.secondary)
+                        TextField("main", text: $gitBranch)
+                            .textFieldStyle(.roundedBorder)
+                            .frame(width: 100)
+                    }
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text("TARGET DIR").font(.system(size: 9, weight: .bold)).foregroundColor(.secondary)
+                        TextField("data", text: $gitDestination)
+                            .textFieldStyle(.roundedBorder)
+                            .frame(width: 100)
+                    }
+                }
+
+                Text("AUTH TOKEN (Optional for Private Repos)").font(.system(size: 9, weight: .bold)).foregroundColor(.secondary)
+                SecureField("Personal Access Token (ghp_... / glpat-...)", text: $gitToken)
+                    .textFieldStyle(.roundedBorder)
+
+                Button {
+                    Task {
+                        isIngesting = true
+                        ingestLogs = "Starting 10Gbps Git Ingestion on Cloud Pod...\n"
+                        do {
+                            let res = try await cloudGPU.cloneGitRepository(
+                                repoURL: gitRepoURL,
+                                branch: gitBranch,
+                                token: gitToken.isEmpty ? nil : gitToken,
+                                destination: gitDestination
+                            ) { progressLine in
+                                ingestLogs += progressLine
+                            }
+                            ingestLogs += "\n" + res
+                            await refreshCloudFiles()
+                        } catch {
+                            ingestLogs += "\n❌ Error: \(error.localizedDescription)"
+                        }
+                        isIngesting = false
+                    }
+                } label: {
+                    HStack(spacing: 6) {
+                        if isIngesting { ProgressView().scaleEffect(0.6) }
+                        Image(systemName: "arrow.down.to.line.circle.fill")
+                        Text(isIngesting ? "Ingesting..." : "Ingest Dataset to Cloud Volume")
+                    }
+                }
+                .buttonStyle(.borderedProminent)
+                .tint(.orange)
+                .controlSize(.small)
+                .disabled(isIngesting || gitRepoURL.trimmingCharacters(in: .whitespaces).isEmpty || cloudGPU.activeSession == nil)
+
+                if cloudGPU.activeSession == nil {
+                    Text("⚠️ Launch a GPU instance in Tab 1 first before ingesting.")
+                        .font(.caption2)
+                        .foregroundColor(.orange)
+                }
+            }
+
+            if !ingestLogs.isEmpty {
+                VStack(alignment: .leading, spacing: 4) {
+                    Text("INGESTION LOGS").font(.system(size: 9, weight: .bold)).foregroundColor(.secondary)
+                    ScrollView {
+                        Text(ingestLogs)
+                            .font(.system(size: 9, design: .monospaced))
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                            .textSelection(.enabled)
+                    }
+                    .frame(height: 80)
+                    .padding(6)
+                    .background(RoundedRectangle(cornerRadius: 6).fill(Color.black.opacity(0.3)))
+                }
+            }
+        }
+    }
+
+    private func refreshCloudFiles() async {
+        isRefreshingFiles = true
+        cloudFileList = await cloudGPU.listCloudFiles(remotePath: gitDestination)
+        isRefreshingFiles = false
+    }
+
+    // MARK: - Tab 3: SSH / Custom Provider
+    private var sshManualTab: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            Text("Connect directly to self-hosted instances or private SSH tunnels.")
+                .font(.caption2)
+                .foregroundColor(.secondary)
+
+            VStack(alignment: .leading, spacing: 4) {
+                Text("SSH COMMAND").font(.system(size: 9, weight: .bold)).foregroundColor(.secondary)
+                TextField("ssh -p 41122 root@1.2.3.4 -i ~/.ssh/key", text: $sshCmd, axis: .vertical)
+                    .textFieldStyle(.roundedBorder)
+                    .lineLimit(1...2)
+            }
+
+            HStack(spacing: 8) {
+                Button {
+                    gpu.connect(sshCommand: sshCmd, keyPath: sshKey.isEmpty ? nil : sshKey)
+                } label: {
+                    Text(gpu.status == .connected ? "Connected" : "Connect via SSH")
+                }
+                .buttonStyle(.borderedProminent)
+                .controlSize(.small)
+                .disabled(gpu.status == .connecting || sshCmd.trimmingCharacters(in: .whitespaces).isEmpty)
+
+                if gpu.status == .connected {
+                    Button(role: .destructive) { gpu.disconnect() } label: {
+                        Text("Disconnect")
+                    }
+                    .buttonStyle(.bordered)
+                    .controlSize(.small)
+                }
+            }
+
+            DisclosureGroup("Advanced: Cloudflare / Custom Jupyter URL") {
+                VStack(alignment: .leading, spacing: 6) {
+                    TextField("https://xxxx.trycloudflare.com", text: $appState.hpcEndpoint)
+                        .textFieldStyle(.roundedBorder)
+                    SecureField("Jupyter Token", text: $appState.hpcToken)
+                        .textFieldStyle(.roundedBorder)
+                    Button("Test Connection") {
+                        Task { await testConnection() }
+                    }
+                    .buttonStyle(.bordered)
+                    .controlSize(.small)
+
+                    if !testMsg.isEmpty {
+                        Text(testMsg)
+                            .font(.system(size: 9, design: .monospaced))
+                            .foregroundColor(testOK == true ? .green : .red)
+                    }
+                }
+                .padding(.top, 4)
+            }
+            .font(.system(size: 10))
+        }
     }
 
     private func testConnection() async {
@@ -4093,7 +4432,6 @@ struct HPCSettingsView: View {
         defer { testing = false }
         var base = appState.hpcEndpoint.trimmingCharacters(in: .whitespacesAndNewlines)
         if base.hasSuffix("/") { base.removeLast() }
-        // ws:// → http:// for the REST probe
         var probe = base
         if probe.hasPrefix("ws://") { probe = "http://" + probe.dropFirst(5) }
         if probe.hasPrefix("wss://") { probe = "https://" + probe.dropFirst(6) }
@@ -4116,14 +4454,12 @@ struct HPCSettingsView: View {
                let specs = json["kernelspecs"] as? [String: Any] {
                 testOK = true
                 testMsg = "✅ Jupyter reachable (\(ms) ms)\nKernels: \(specs.keys.sorted().joined(separator: ", "))"
-            } else if http.statusCode == 403 || http.statusCode == 401 {
-                testOK = false; testMsg = "Reached server but token rejected (HTTP \(http.statusCode)). Check the token."
             } else {
-                testOK = false; testMsg = "HTTP \(http.statusCode) — is this a Jupyter server URL?"
+                testOK = false; testMsg = "HTTP \(http.statusCode)"
             }
         } catch {
             testOK = false
-            testMsg = "Unreachable: \(error.localizedDescription)\nCheck the tunnel is running and the URL is public."
+            testMsg = "Unreachable: \(error.localizedDescription)"
         }
     }
 }

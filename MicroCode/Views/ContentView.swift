@@ -16,112 +16,18 @@ struct ContentView: View {
     @AppStorage("microCodeWelcomeCompletedV1") private var welcomeCompleted = false
 
     var body: some View {
-        VStack(spacing: 0) {
-            MainToolbar()
-                .environmentObject(appState)
-            DotnetToolbar()
-                .environmentObject(appState)
-            Divider()
-
-            Group {
-                if appState.editorMode == .code {
-                    AgenticEditorWorkspace()
-                        .environmentObject(appState)
-                } else {
-                    legacyWorkspace
-                }
+        AgenticEditorWorkspace()
+            .environmentObject(appState)
+            .overlay(autoHealerOverlay)
+            .overlay(welcomeOverlay)
+            .modifier(PrimarySheetsModifier(appState: appState))
+            .modifier(SecondarySheetsModifier(appState: appState))
+            .modifier(StudioSheetsModifier(appState: appState))
+            .alert("MicroCode", isPresented: .constant(appState.alertMessage != nil)) {
+                Button("OK") { appState.alertMessage = nil }
+            } message: {
+                Text(appState.alertMessage ?? "")
             }
-        }
-        .overlay(autoHealerOverlay)
-        .overlay {
-            if !welcomeCompleted {
-                FirstLaunchWelcomeView {
-                    welcomeCompleted = true
-                }
-                .environmentObject(appState)
-                .transition(.opacity)
-                .zIndex(200)
-            }
-        }
-        .sheet(isPresented: $appState.showingRefactorProWindow) {
-            RefactorProWindow()
-                .environmentObject(appState)
-        }
-        .sheet(isPresented: $appState.showingExpandCodeWindow) {
-            ExpandCodeWindow()
-                .environmentObject(appState)
-        }
-        .sheet(isPresented: $appState.showingFormatCodeWindow) {
-            FormatCodeWindow()
-                .environmentObject(appState)
-        }
-        .sheet(isPresented: $appState.showingDotnetProject) {
-            DotnetProjectView()
-                .environmentObject(appState)
-        }
-        .sheet(isPresented: $appState.showingAITrainer) {
-            AITrainerView()
-        }
-        .sheet(isPresented: $appState.showingPythonEnv) {
-            PythonEnvSheet()
-        }
-        .sheet(isPresented: $appState.showingRuntimeManager) {
-            RuntimeManagerView()
-        }
-        .sheet(isPresented: $appState.showingGitSettings) {
-            GitSettingsView()
-                .environmentObject(appState)
-        }
-        .sheet(isPresented: $appState.showingCodeAnalysis) {
-            CodeAnalysisView()
-                .environmentObject(appState)
-                .frame(minWidth: 900, minHeight: 600)
-        }
-
-        .sheet(isPresented: $appState.showingCommitDialog) {
-            CommitSheet()
-                .environmentObject(appState)
-        }
-        .sheet(isPresented: $appState.showingSettingsDialog) {
-            SettingsView()
-                .environmentObject(appState)
-        }
-        .sheet(isPresented: $appState.showingSimulatorDialog) {
-            SimulatorSheet()
-                .environmentObject(appState)
-        }
-        .sheet(isPresented: $appState.showingNewFileDialog) {
-            NewFileSheet()
-                .environmentObject(appState)
-        }
-
-
-        .sheet(isPresented: $appState.showingCollaborationView) {
-            CollaborationView()
-        }
-        .sheet(isPresented: $appState.showingContainerView) {
-            ContainerView()
-                .environmentObject(appState)
-        }
-        .sheet(isPresented: $appState.showingDatabaseStudio) {
-            DatabaseStudioView()
-        }
-        .sheet(isPresented: $appState.showingAPIClient) {
-            APIClientView()
-                .frame(minWidth: 900, idealWidth: 1100, minHeight: 600, idealHeight: 700)
-        }
-        .sheet(isPresented: $appState.showingCICDView) {
-            CICDPipelineView()
-                .frame(minWidth: 900, idealWidth: 1100, minHeight: 650, idealHeight: 800)
-        }
-        .sheet(isPresented: $appState.showingProjectRuntime) {
-            ProjectRuntimeView()
-        }
-        .alert("MicroCode", isPresented: .constant(appState.alertMessage != nil)) {
-            Button("OK") { appState.alertMessage = nil }
-        } message: {
-            Text(appState.alertMessage ?? "")
-        }
         // Keyboard shortcuts
         .onCommand(#selector(NSResponder.selectAll(_:))) { }
         .background(
@@ -168,6 +74,18 @@ struct ContentView: View {
                     .allowsHitTesting(false)
             }
         )
+    }
+
+    @ViewBuilder
+    private var welcomeOverlay: some View {
+        if !welcomeCompleted {
+            FirstLaunchWelcomeView {
+                welcomeCompleted = true
+            }
+            .environmentObject(appState)
+            .transition(.opacity)
+            .zIndex(200)
+        }
     }
 
     private var legacyWorkspace: some View {
@@ -233,7 +151,7 @@ struct AgenticEditorWorkspace: View {
         CompatHSplitView {
             if appState.sidebarVisible {
                 AgenticWorkspaceSidebar(surface: $surface)
-                    .frame(minWidth: 220, idealWidth: 250, maxWidth: 300)
+                    .frame(minWidth: 240, idealWidth: 270, maxWidth: 340)
                     .transition(.move(edge: .leading).combined(with: .opacity))
             }
 
@@ -245,8 +163,7 @@ struct AgenticEditorWorkspace: View {
                     AIAgentView(allowsChatSidebar: false)
                         .environmentObject(appState)
                 } else {
-                    EditorArea()
-                        .environmentObject(appState)
+                    activeEditorSurface
                 }
             }
             .frame(minWidth: 480)
@@ -265,37 +182,154 @@ struct AgenticEditorWorkspace: View {
         }
     }
 
-    private var workspaceHeader: some View {
-        HStack(spacing: 8) {
-            Text(appState.workspaceFolder?.lastPathComponent ?? "MicroCode")
-                .font(.system(size: 12, weight: .semibold))
-                .lineLimit(1)
+    @ViewBuilder
+    private var activeEditorSurface: some View {
+        switch appState.editorMode {
+        case .notebook:
+            NotebookView()
+                .environmentObject(appState)
+        case .science:
+            ScienceModeView()
+                .environmentObject(appState)
+        case .playground:
+            PlaygroundView()
+                .environmentObject(appState)
+        case .browser:
+            IDEBrowserView()
+                .environmentObject(appState)
+        case .remoteX:
+            RemoteXView()
+                .environmentObject(appState)
+        case .embedded:
+            EmbeddedStudioView()
+                .environmentObject(appState)
+        default:
+            EditorArea()
+                .environmentObject(appState)
+        }
+    }
 
-            if let file = appState.currentFile {
-                Text("/")
+    private var activeTaskTitle: String {
+        if let currentChat = agent.chatSessions.first(where: { $0.id == agent.activeChatId }) {
+            return currentChat.name
+        }
+        return "New Task"
+    }
+
+    private var activeProjectName: String {
+        if surface == .agent, let currentChat = agent.chatSessions.first(where: { $0.id == agent.activeChatId }), let pName = currentChat.projectName, !pName.isEmpty {
+            return pName
+        }
+        return appState.workspaceFolder?.lastPathComponent ?? "MicroCode"
+    }
+
+    private var workspaceHeader: some View {
+        HStack(spacing: 10) {
+            // Sidebar Toggle
+            Button(action: {
+                withAnimation(.easeInOut(duration: 0.18)) {
+                    appState.toggleSidebar()
+                }
+            }) {
+                Image(systemName: "sidebar.left")
+                    .font(.system(size: 13))
                     .foregroundColor(.secondary)
-                Text(file.name)
+            }
+            .buttonStyle(.plain)
+            .help("Toggle Sidebar (⌘B)")
+
+            // Breadcrumb (Antigravity-style: project / active task)
+            HStack(spacing: 6) {
+                Image(systemName: "folder")
                     .font(.system(size: 11))
                     .foregroundColor(.secondary)
+                Text(activeProjectName)
+                    .font(.system(size: 12, weight: .semibold))
+                Text("/")
+                    .foregroundColor(.secondary.opacity(0.6))
+                    .font(.system(size: 11))
+                Text(surface == .agent ? activeTaskTitle : (appState.currentFile?.name ?? "Editor"))
+                    .font(.system(size: 12, weight: .medium))
+                    .foregroundColor(.primary.opacity(0.85))
                     .lineLimit(1)
             }
 
             Spacer()
 
-            Text(surface == .agent ? agent.agentPhase.displayText : (appState.currentFile?.name ?? "No file selected"))
-                .font(.system(size: 10))
-                .foregroundColor(.secondary)
-                .lineLimit(1)
+            // Agent Phase Indicator (only when outside Agent surface)
+            if surface != .agent && agent.agentPhase != .idle {
+                HStack(spacing: 5) {
+                    ProgressView().scaleEffect(0.4).frame(width: 10, height: 10)
+                    Text(agent.agentPhase.displayText)
+                        .font(.system(size: 10, weight: .medium))
+                        .foregroundColor(.secondary)
+                }
+                .padding(.horizontal, 8)
+                .padding(.vertical, 3)
+                .background(Color.primary.opacity(0.06))
+                .cornerRadius(12)
+            }
 
-            Button("Agent") { surface = .agent }
+            // Surface Toggle (Agent vs Open IDE)
+            HStack(spacing: 2) {
+                Button {
+                    surface = .agent
+                } label: {
+                    HStack(spacing: 4) {
+                        Image(systemName: "brain")
+                            .font(.system(size: 10))
+                        Text("Agent")
+                    }
+                }
                 .agenticTabStyle(active: surface == .agent)
-            Button("Open Editor") { surface = .editor }
-                .agenticTabStyle(active: surface == .editor)
 
+                Menu {
+                    Button("Code Editor") {
+                        appState.setEditorMode(.code)
+                        surface = .editor
+                    }
+                    Button("Cell Mode") {
+                        appState.setEditorMode(.notebook)
+                        surface = .editor
+                    }
+                    Button("Science Mode") {
+                        appState.setEditorMode(.science)
+                        surface = .editor
+                    }
+                    Button("Playground") {
+                        appState.setEditorMode(.playground)
+                        surface = .editor
+                    }
+                    Button("IDE Browser") {
+                        appState.setEditorMode(.browser)
+                        surface = .editor
+                    }
+                } label: {
+                    HStack(spacing: 4) {
+                        Image(systemName: "square.and.pencil")
+                            .font(.system(size: 10))
+                        Text(surface == .editor ? appState.editorMode.displayName : "Open IDE")
+                    }
+                }
+                .agenticTabStyle(active: surface == .editor)
+            }
+            .padding(2)
+            .background(Color.primary.opacity(0.04))
+            .cornerRadius(6)
+
+            // Secondary Tools & Settings
             AgenticLayoutMenu()
                 .environmentObject(appState)
+
+            Button(action: { appState.showingSettingsDialog = true }) {
+                Image(systemName: "gearshape")
+                    .font(.system(size: 12))
+                    .foregroundColor(.secondary)
+            }
+            .buttonStyle(.plain)
+            .help("Settings (⌘,)")
         }
-        .padding(.horizontal, 12)
+        .padding(.horizontal, 14)
         .frame(height: 40)
         .background(appState.appTheme.isGlass ? Color.clear : Color(nsColor: appState.appTheme.panelBackground))
     }
@@ -306,43 +340,37 @@ struct AgenticLayoutMenu: View {
 
     var body: some View {
         Menu {
-            Button {
-                withAnimation(.easeInOut(duration: 0.16)) { appState.toggleSidebar() }
-            } label: {
-                Label(appState.sidebarVisible ? "Hide Project Sidebar" : "Show Project Sidebar",
-                      systemImage: "sidebar.left")
+            Section("Developer Tools") {
+                Button { appState.runCode() } label: { Label("Run Code (⌘R)", systemImage: "play.fill") }
+                Button { appState.buildProject() } label: { Label("Build Project (⌘B)", systemImage: "hammer.fill") }
+                Button { appState.toggleConsole() } label: { Label(appState.consoleVisible ? "Hide Terminal / Console" : "Show Terminal / Console (⌘J)", systemImage: "terminal.fill") }
             }
 
-            Button {
-                withAnimation(.easeInOut(duration: 0.16)) { appState.toggleAgenticContext() }
-            } label: {
-                Label(appState.agenticContextVisible ? "Hide Context Panel" : "Show Context Panel",
-                      systemImage: "sidebar.right")
+            Section("Specialized Studios") {
+                Button { appState.showingDatabaseStudio = true } label: { Label("Database Studio", systemImage: "server.rack") }
+                Button { appState.showingAPIClient = true } label: { Label("API Client", systemImage: "network") }
+                Button { appState.showingContainerView = true } label: { Label("Apple Container Studio", systemImage: "shippingbox.fill") }
+                Button { appState.showingCICDView = true } label: { Label("CI/CD Pipelines", systemImage: "checklist") }
+                Button { appState.showingCollaborationView = true } label: { Label("Realtime Collaboration", systemImage: "person.2.fill") }
             }
 
-            Button {
-                withAnimation(.easeInOut(duration: 0.16)) { appState.toggleConsole() }
-            } label: {
-                Label(appState.consoleVisible ? "Hide Console" : "Show Console",
-                      systemImage: "rectangle.bottomthird.inset.filled")
-            }
-
-            Divider()
-
-            Menu("Modes") {
-                ForEach(EditorMode.allCases.filter { $0 != .code }) { mode in
-                    Button(mode.displayName) { appState.setEditorMode(mode) }
+            Section("Panels") {
+                Button {
+                    withAnimation(.easeInOut(duration: 0.16)) { appState.toggleAgenticContext() }
+                } label: {
+                    Label(appState.agenticContextVisible ? "Hide Context Inspector" : "Show Context Inspector (⌘I)", systemImage: "sidebar.right")
                 }
             }
         } label: {
             Image(systemName: "ellipsis")
                 .font(.system(size: 12, weight: .medium))
+                .foregroundColor(.secondary)
                 .frame(width: 26, height: 26)
                 .contentShape(Rectangle())
         }
         .menuStyle(.borderlessButton)
         .fixedSize()
-        .help("Workspace Layout")
+        .help("Tools & Layout")
     }
 }
 
@@ -350,11 +378,11 @@ private extension View {
     func agenticTabStyle(active: Bool) -> some View {
         self
             .buttonStyle(.plain)
-            .font(.system(size: 10, weight: active ? .semibold : .regular))
+            .font(.system(size: 11, weight: active ? .semibold : .regular))
             .foregroundColor(active ? .primary : .secondary)
-            .padding(.horizontal, 9)
-            .padding(.vertical, 5)
-            .background(active ? Color.primary.opacity(0.09) : Color.clear)
+            .padding(.horizontal, 10)
+            .padding(.vertical, 4)
+            .background(active ? Color.primary.opacity(0.1) : Color.clear)
             .clipShape(RoundedRectangle(cornerRadius: 5))
     }
 }
@@ -363,88 +391,338 @@ struct AgenticWorkspaceSidebar: View {
     @EnvironmentObject var appState: AppState
     @StateObject private var agent = AgentService.shared
     @Binding var surface: AgenticWorkspaceSurface
+    @State private var isProjectsExpanded = true
+    @State private var isFilesExpanded = true
+    @State private var collapsedProjectIds: Set<String> = []
 
     var body: some View {
         VStack(spacing: 0) {
-            VStack(spacing: 6) {
-                Button {
-                    _ = agent.createNewChat(name: "New Task")
-                    surface = .agent
-                } label: {
-                    HStack {
-                        Text("New Task")
-                            .font(.system(size: 12, weight: .medium))
-                        Spacer()
-                        Text("+")
-                            .foregroundColor(.secondary)
-                    }
-                    .padding(.horizontal, 10)
-                    .frame(height: 32)
-                    .background(Color.primary.opacity(0.055))
-                    .overlay(RoundedRectangle(cornerRadius: 6).stroke(Color.primary.opacity(0.09)))
-                    .clipShape(RoundedRectangle(cornerRadius: 6))
+            sidebarHeader
+            sidebarNewConversationButton
+            sidebarQuickActions
+            
+            Divider().padding(.horizontal, 10)
+            
+            ScrollView {
+                VStack(alignment: .leading, spacing: 12) {
+                    projectsSection
+                    Divider().padding(.horizontal, 10)
+                    workspaceFilesSection
                 }
-                .buttonStyle(.plain)
-
-                sidebarButton("Agent", active: surface == .agent) { surface = .agent }
-                sidebarButton("Code Editor", active: surface == .editor) { surface = .editor }
+                .padding(.vertical, 6)
             }
-            .padding(10)
-
-            if !agent.chatSessions.isEmpty {
-                Divider()
-                VStack(alignment: .leading, spacing: 3) {
-                    Text("RECENT TASKS")
-                        .font(.system(size: 9, weight: .semibold))
-                        .foregroundColor(.secondary)
-                        .padding(.horizontal, 10)
-                        .padding(.top, 8)
-
-                    ForEach(agent.chatSessions.prefix(4)) { chat in
-                        Button {
-                            agent.switchChat(to: chat.id)
-                            surface = .agent
-                        } label: {
-                            HStack {
-                                Text(chat.name)
-                                    .font(.system(size: 11))
-                                    .lineLimit(1)
-                                Spacer()
-                            }
-                            .padding(.horizontal, 10)
-                            .frame(height: 26)
-                            .background(agent.activeChatId == chat.id ? Color.primary.opacity(0.07) : Color.clear)
-                            .clipShape(RoundedRectangle(cornerRadius: 4))
-                        }
-                        .buttonStyle(.plain)
-                    }
-                }
-                .padding(.horizontal, 6)
-                .padding(.bottom, 8)
-            }
-
+            
             Divider()
-
-            NavigatorView(onOpenFile: { surface = .editor })
-                .environmentObject(appState)
+            sidebarFooter
         }
         .background(appState.appTheme.isGlass ? Color.clear : Color(nsColor: appState.appTheme.panelBackground))
     }
+    
+    @ViewBuilder
+    private var sidebarHeader: some View {
+        HStack(spacing: 8) {
+            Text("MicroCode AI")
+                .font(.system(size: 13, weight: .bold))
+            Spacer()
 
-    private func sidebarButton(_ title: String, active: Bool, action: @escaping () -> Void) -> some View {
-        Button(action: action) {
+            Button(action: { appState.openFolder() }) {
+                Image(systemName: "folder.badge.plus")
+                    .font(.system(size: 11))
+                    .foregroundColor(.secondary)
+            }
+            .buttonStyle(.plain)
+            .help("Open Project Folder")
+        }
+        .padding(.horizontal, 14)
+        .padding(.top, 14)
+        .padding(.bottom, 10)
+    }
+    
+    @ViewBuilder
+    private var sidebarNewConversationButton: some View {
+        Button {
+            let ws = appState.workspaceFolder?.path ?? agent.currentWorkspace
+            _ = agent.createNewChat(projectPath: ws)
+            surface = .agent
+        } label: {
+            HStack(spacing: 8) {
+                Image(systemName: "plus")
+                    .font(.system(size: 11, weight: .bold))
+                Text("New Conversation")
+                    .font(.system(size: 12, weight: .semibold))
+                Spacer()
+                Text("⌘N")
+                    .font(.system(size: 10, design: .monospaced))
+                    .foregroundColor(.secondary.opacity(0.7))
+            }
+            .padding(.horizontal, 12)
+            .frame(height: 34)
+            .background(
+                RoundedRectangle(cornerRadius: 7, style: .continuous)
+                    .fill(Color.primary.opacity(0.06))
+                    .overlay(RoundedRectangle(cornerRadius: 7, style: .continuous).stroke(Color.primary.opacity(0.08), lineWidth: 1))
+            )
+        }
+        .buttonStyle(.plain)
+        .padding(.horizontal, 12)
+        .padding(.bottom, 8)
+    }
+    
+    @ViewBuilder
+    private var sidebarQuickActions: some View {
+        VStack(spacing: 2) {
+            sidebarNavRow(title: "Conversation History", icon: "clock.arrow.circlepath") {
+                surface = .agent
+            }
+            sidebarNavRow(title: "SubAgent Monitor", icon: "cpu.fill") {
+                appState.showingSubAgentMonitor = true
+            }
+            sidebarNavRow(title: "Scheduled Tasks", icon: "calendar.badge.clock") {
+                appState.showingCICDView = true
+            }
+            sidebarNavRow(title: "Agent Skills & Plugins", icon: "sparkles.rectangle.stack") {
+                appState.showingSettingsDialog = true
+            }
+        }
+        .padding(.horizontal, 8)
+        .padding(.bottom, 8)
+    }
+    
+    @ViewBuilder
+    private var projectsSection: some View {
+        VStack(alignment: .leading, spacing: 4) {
             HStack {
+                Text("PROJECTS")
+                    .font(.system(size: 10, weight: .bold))
+                    .foregroundColor(.secondary)
+                Spacer()
+                Button(action: { withAnimation { isProjectsExpanded.toggle() } }) {
+                    Image(systemName: isProjectsExpanded ? "chevron.down" : "chevron.right")
+                        .font(.system(size: 9))
+                        .foregroundColor(.secondary)
+                }
+                .buttonStyle(.plain)
+            }
+            .padding(.horizontal, 14)
+            .padding(.top, 8)
+
+            if isProjectsExpanded {
+                ForEach(agent.projectGroups) { group in
+                    projectGroupRow(group: group)
+                }
+            }
+        }
+    }
+    
+    @ViewBuilder
+    private func projectGroupRow(group: ProjectChatGroup) -> some View {
+        let isExpanded = isProjectGroupExpanded(group)
+        VStack(alignment: .leading, spacing: 2) {
+            Button(action: {
+                withAnimation(.easeInOut(duration: 0.18)) {
+                    if collapsedProjectIds.contains(group.id) {
+                        collapsedProjectIds.remove(group.id)
+                    } else {
+                        collapsedProjectIds.insert(group.id)
+                    }
+                    if let path = group.projectPath, !path.isEmpty {
+                        let folderURL = URL(fileURLWithPath: path)
+                        if appState.workspaceFolder?.path != path {
+                            Task { @MainActor in
+                                await appState.openWorkspace(url: folderURL)
+                            }
+                        }
+                    }
+                }
+            }) {
+                HStack(spacing: 6) {
+                    Image(systemName: isExpanded ? "chevron.down" : "chevron.right")
+                        .font(.system(size: 8, weight: .semibold))
+                        .foregroundColor(.secondary.opacity(0.6))
+                        .frame(width: 8)
+                    
+                    Image(systemName: "folder.fill")
+                        .font(.system(size: 11))
+                        .foregroundColor(isExpanded ? .accentColor : .secondary)
+                    
+                    Text(group.projectName)
+                        .font(.system(size: 11.5, weight: isExpanded ? .semibold : .regular))
+                        .foregroundColor(isExpanded ? .primary : .secondary)
+                        .lineLimit(1)
+                    
+                    Spacer()
+                    
+                    if !isExpanded && !group.chats.isEmpty {
+                        Text("\(group.chats.count)")
+                            .font(.system(size: 9, design: .monospaced))
+                            .foregroundColor(.secondary.opacity(0.6))
+                            .padding(.horizontal, 5)
+                            .padding(.vertical, 1)
+                            .background(Color.primary.opacity(0.04))
+                            .cornerRadius(3)
+                    }
+                    
+                    Button(action: {
+                        if let path = group.projectPath, !path.isEmpty {
+                            let folderURL = URL(fileURLWithPath: path)
+                            if appState.workspaceFolder?.path != path {
+                                Task { @MainActor in
+                                    await appState.openWorkspace(url: folderURL)
+                                }
+                            }
+                        }
+                        _ = agent.createNewChat(projectPath: group.projectPath)
+                        collapsedProjectIds.remove(group.id)
+                        surface = .agent
+                    }) {
+                        Image(systemName: "plus")
+                            .font(.system(size: 9))
+                            .foregroundColor(.secondary.opacity(0.8))
+                    }
+                    .buttonStyle(.plain)
+                    .help("New Task in \(group.projectName)")
+                }
+                .padding(.horizontal, 14)
+                .padding(.vertical, 4)
+                .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+
+            if isExpanded {
+                ForEach(group.chats) { chat in
+                    projectChatRow(chat: chat, group: group)
+                }
+            }
+        }
+        .padding(.bottom, 4)
+    }
+    
+    @ViewBuilder
+    private func projectChatRow(chat: ChatSession, group: ProjectChatGroup) -> some View {
+        let isActive = agent.activeChatId == chat.id && surface == .agent
+        Button {
+            agent.switchChat(to: chat.id)
+            collapsedProjectIds.remove(group.id)
+            if let path = chat.projectPath ?? group.projectPath, !path.isEmpty {
+                let folderURL = URL(fileURLWithPath: path)
+                if appState.workspaceFolder?.path != path {
+                    Task { @MainActor in
+                        await appState.openWorkspace(url: folderURL)
+                    }
+                }
+            }
+            surface = .agent
+        } label: {
+            HStack(spacing: 8) {
+                Circle()
+                    .fill(isActive ? Color.accentColor : Color.secondary.opacity(0.3))
+                    .frame(width: 5, height: 5)
+                Text(chat.name)
+                    .font(.system(size: 11, weight: isActive ? .medium : .regular))
+                    .foregroundColor(isActive ? .primary : .secondary)
+                    .lineLimit(1)
+                Spacer()
+            }
+            .padding(.leading, 28)
+            .padding(.trailing, 10)
+            .frame(height: 24)
+            .background(isActive ? Color.primary.opacity(0.08) : Color.clear)
+            .cornerRadius(5)
+        }
+        .buttonStyle(.plain)
+        .contextMenu {
+            Button("Delete Task", role: .destructive) {
+                agent.deleteChat(chat.id)
+            }
+        }
+    }
+    
+    @ViewBuilder
+    private var workspaceFilesSection: some View {
+        VStack(alignment: .leading, spacing: 4) {
+            HStack {
+                Text("WORKSPACE FILES")
+                    .font(.system(size: 10, weight: .bold))
+                    .foregroundColor(.secondary)
+                Spacer()
+                Button(action: { withAnimation { isFilesExpanded.toggle() } }) {
+                    Image(systemName: isFilesExpanded ? "chevron.down" : "chevron.right")
+                        .font(.system(size: 9))
+                        .foregroundColor(.secondary)
+                }
+                .buttonStyle(.plain)
+            }
+            .padding(.horizontal, 14)
+
+            if isFilesExpanded {
+                NavigatorView(onOpenFile: { surface = .editor })
+                    .environmentObject(appState)
+                    .frame(minHeight: 220, maxHeight: 480)
+                    .onAppear {
+                        if appState.fileTree.isEmpty && appState.workspaceFolder != nil {
+                            Task { @MainActor in
+                                await appState.refreshFileTree()
+                            }
+                        }
+                    }
+            }
+        }
+    }
+    
+    @ViewBuilder
+    private var sidebarFooter: some View {
+        HStack(spacing: 8) {
+            Button(action: { appState.showingSettingsDialog = true }) {
+                HStack(spacing: 6) {
+                    Image(systemName: "gearshape")
+                        .font(.system(size: 12))
+                    Text("Settings")
+                        .font(.system(size: 11, weight: .medium))
+                }
+                .foregroundColor(.secondary)
+            }
+            .buttonStyle(.plain)
+
+            Spacer()
+
+            HStack(spacing: 4) {
+                Circle().fill(Color.green).frame(width: 5, height: 5)
+                Text("Dotmini Cloud")
+                    .font(.system(size: 9, weight: .medium))
+                    .foregroundColor(.green)
+            }
+            .padding(.horizontal, 6)
+            .padding(.vertical, 2)
+            .background(Color.green.opacity(0.1))
+            .cornerRadius(4)
+        }
+        .padding(.horizontal, 14)
+        .padding(.vertical, 10)
+        .background(Color.primary.opacity(0.02))
+    }
+
+    private func sidebarNavRow(title: String, icon: String, action: @escaping () -> Void) -> some View {
+        Button(action: action) {
+            HStack(spacing: 8) {
+                Image(systemName: icon)
+                    .font(.system(size: 11))
+                    .foregroundColor(.secondary)
+                    .frame(width: 16)
                 Text(title)
-                    .font(.system(size: 11, weight: active ? .medium : .regular))
+                    .font(.system(size: 11))
+                    .foregroundColor(.primary.opacity(0.85))
                 Spacer()
             }
             .padding(.horizontal, 10)
             .frame(height: 28)
-            .foregroundColor(active ? .primary : .secondary)
-            .background(active ? Color.primary.opacity(0.07) : Color.clear)
+            .background(Color.clear)
             .clipShape(RoundedRectangle(cornerRadius: 5))
         }
         .buttonStyle(.plain)
+    }
+
+    private func isProjectGroupExpanded(_ group: ProjectChatGroup) -> Bool {
+        return !collapsedProjectIds.contains(group.id)
     }
 }
 
@@ -630,7 +908,7 @@ struct LegacyInlineAgentPanel: View {
                 .menuStyle(.borderlessButton)
 
                 Button {
-                    _ = AgentService.shared.createNewChat()
+                    _ = AgentService.shared.createNewChat(projectPath: appState.workspaceFolder?.path)
                 } label: {
                     Text("New").font(.system(size: 10)).foregroundColor(.secondary).frame(height: 20)
                 }
@@ -817,7 +1095,7 @@ struct MainToolbar: View {
                 ToolbarButton(icon: "book.pages", isActive: appState.editorMode == .notebook, color: appState.editorMode == .notebook ? .accentColor : .primary) {
                     appState.toggleEditorMode(.notebook)
                 }
-                .help("Notebook Mode")
+                .help("Cell Mode")
 
                 ToolbarButton(icon: "atom", isActive: appState.editorMode == .science, color: appState.editorMode == .science ? .teal : .primary) {
                     appState.toggleEditorMode(.science)
@@ -895,7 +1173,7 @@ struct MainToolbar: View {
             .padding(.trailing, 8)
         }
         .frame(height: 38)
-        .background(appState.appTheme == .extraClear ? Color.clear : Color.compat(nsColor: .windowBackgroundColor))
+        .background(appState.appTheme.isGlass ? Color.clear : Color(nsColor: appState.appTheme.panelBackground))
     }
 }
 
@@ -953,7 +1231,7 @@ struct NavigatorView: View {
             }
             .padding(.horizontal, 12)
             .padding(.vertical, 10)
-            .background(appState.appTheme == .extraClear ? Color.clear : Color.compat(nsColor: .windowBackgroundColor))
+            .background(appState.appTheme.isGlass ? Color.clear : Color(nsColor: appState.appTheme.panelBackground))
             
             Divider()
             
@@ -1686,7 +1964,7 @@ struct EditorTabBar: View {
             }
         }
         .frame(height: 36)
-        .background(appState.appTheme == .extraClear ? Color.clear : Color.compat(nsColor: .windowBackgroundColor))
+        .background(appState.appTheme.isGlass ? Color.clear : Color(nsColor: appState.appTheme.panelBackground))
     }
 }
 
@@ -2510,16 +2788,7 @@ struct WelcomeScreen: View {
     }
     
     private func openFolder() {
-        let panel = NSOpenPanel()
-        panel.canChooseFiles = false
-        panel.canChooseDirectories = true
-        panel.canCreateDirectories = true
-        panel.title = "Open Project Folder"
-        panel.prompt = "Open"
-        
-        if panel.runModal() == .OK, let url = panel.url {
-            appState.workspaceFolder = url
-        }
+        appState.openFolder()
     }
     
     // MARK: - Left Sidebar View
@@ -4031,16 +4300,13 @@ struct ChatMessageView: View {
             VStack(alignment: message.role == .user ? .trailing : .leading, spacing: 6) {
                 // Thinking indicator (inline for assistant)
                 if message.isThinking {
-                     HStack(spacing: 4) {
-                        ProgressView().scaleEffect(0.5)
+                    HStack(spacing: 5) {
                         Text("Thinking...")
-                            .font(.system(size: 10))
+                            .font(.system(size: 11, weight: .regular))
                             .foregroundColor(.secondary)
                     }
                     .padding(.horizontal, 8)
                     .padding(.vertical, 4)
-                    .background(Color(nsColor: .controlBackgroundColor))
-                    .cornerRadius(8)
                 }
 
                 if !message.content.isEmpty {
@@ -4136,41 +4402,27 @@ struct ChatMessageView: View {
 // AgentBrainDashboard and DashboardTabBtn removed — Task Windows deprecated
 
 struct ThinkingIndicatorView: View {
-    @State private var isAnimating = false
-    @EnvironmentObject var appState: AppState // Bind to use agentStatus
+    @State private var pulseAlpha: Double = 0.4
+    @EnvironmentObject var appState: AppState
     
     var body: some View {
-        HStack(spacing: 8) {
-            // Pulsating Orb
-            ZStack {
-                Circle()
-                    .fill(Color.accentColor.opacity(0.2))
-                    .frame(width: 20, height: 20)
-                    .scaleEffect(isAnimating ? 1.2 : 0.8)
-                    .opacity(isAnimating ? 0.0 : 0.5)
-                
-                Circle()
-                    .fill(Color.accentColor)
-                    .frame(width: 8, height: 8)
-            }
-            .onAppear {
-                withAnimation(.easeInOut(duration: 1.0).repeatForever(autoreverses: false)) {
-                    isAnimating = true
-                }
-            }
-            
-            // Dynamic Status Text
-            Text(appState.agentStatus)
-                .font(.system(size: 12, weight: .medium))
-                .foregroundColor(.secondary)
+        HStack(spacing: 6) {
+            Text("Working.")
+                .font(.system(size: 11.5, weight: .regular))
+                .foregroundColor(.secondary.opacity(pulseAlpha))
         }
-        .padding(.horizontal, 12)
-        .padding(.vertical, 8)
+        .padding(.horizontal, 10)
+        .padding(.vertical, 6)
         .background(
             Capsule()
-                .fill(Color(nsColor: .controlBackgroundColor))
-                .shadow(color: .black.opacity(0.05), radius: 2, x: 0, y: 1)
+                .fill(Color(nsColor: .controlBackgroundColor).opacity(0.8))
+                .overlay(Capsule().stroke(Color.primary.opacity(0.06), lineWidth: 1))
         )
+        .onAppear {
+            withAnimation(.easeInOut(duration: 1.0).repeatForever(autoreverses: true)) {
+                pulseAlpha = 0.95
+            }
+        }
     }
 }
 
@@ -4185,18 +4437,24 @@ struct SettingsView: View {
     @State private var selectedProvider: String = ""
     @State private var selectedModel: String = ""
     @State private var apiKey: String = ""
-    @State private var fontSize: CGFloat = 13
-    @State private var fontFamily: String = "Menlo"
+    @State private var fontSize: CGFloat = 16
+    @State private var fontFamily: String = "SF Mono"
+    @State private var agentFontName: String = "SF Pro"
+    @State private var agentFontSize: CGFloat = 16.0
     @State private var showLineNumbers: Bool = false
     @State private var showSidebar: Bool = true
     @State private var showConsole: Bool = true
     @State private var selectedTheme: AppTheme = .system
-    @State private var playgroundFontName: String = "Menlo"
-    @State private var playgroundFontSize: CGFloat = 12.0
-    @State private var playgroundFontWeight: Int = 4
-    @State private var cellFontName: String = "Menlo"
-    @State private var cellFontSize: CGFloat = 13.0
+    @State private var playgroundFontName: String = "SF Mono"
+    @State private var playgroundFontSize: CGFloat = 16.0
+    @State private var playgroundFontWeight: Int = 2
+    @State private var cellFontName: String = "SF Mono"
+    @State private var cellFontSize: CGFloat = 16.0
     @State private var cellFontWeight: Int = 2
+    @State private var agentMode: Bool = true
+    @State private var agentAutoApproveTools: Bool = false
+    @State private var agentCustomInstructions: String = ""
+    @State private var agentMaxIterations: Int = 0
     @State private var selectedTab: Int = 0
     @State private var hasChanges: Bool = false
     @State private var microRentToken: String = ""
@@ -4209,13 +4467,13 @@ struct SettingsView: View {
     static let sidebarItems: [(tab: Int, title: String, icon: String)] = [
         (0, "General", "gearshape"),
         (1, "Editor", "text.cursor"),
-        (2, "AI", "brain"),
+        (2, "AI & Agent", "sparkles"),
         (9, "Cloud GPU", "cpu"),
-        (7, "Connections", "network"),
+        (10, "Skills", "sparkles.rectangle.stack"),
         (8, "MCP Servers", "server.rack"),
         (3, "Tools", "wrench.and.screwdriver"),
         (5, "Extensions", "puzzlepiece.extension"),
-        (6, "Subscription", "crown"),
+        (6, "Account & License", "person.badge.key"),
         (4, "About", "info.circle")
     ]
 
@@ -4223,7 +4481,7 @@ struct SettingsView: View {
         HStack(spacing: 0) {
             // ── Sidebar (Codex-style) ──────────────────────────────────
             VStack(alignment: .leading, spacing: 2) {
-                Button(action: { dismiss() }) {
+                Button(action: { closeSettings() }) {
                     HStack(spacing: 6) {
                         Image(systemName: "chevron.left")
                         Text("Back to app")
@@ -4260,50 +4518,40 @@ struct SettingsView: View {
                 VStack(spacing: 0) {
                     HStack(alignment: .center) {
                         Text(Self.sidebarItems.first { $0.tab == selectedTab }?.title ?? "Settings")
-                            .font(.system(size: 21, weight: .semibold))
+                            .font(.system(size: 20, weight: .bold))
                         Spacer()
-                        Button("Cancel") { dismiss() }
-                            .buttonStyle(.plain)
-                            .foregroundColor(.secondary)
-                            .keyboardShortcut(.cancelAction)
-                        Button("Save") { saveAllSettings(); dismiss() }
-                            .buttonStyle(.borderedProminent)
-                            .controlSize(.large)
-                            .keyboardShortcut(.defaultAction)
+                        HStack(spacing: 8) {
+                            Button("Cancel") { closeSettings() }
+                                .buttonStyle(.bordered)
+                                .controlSize(.small)
+                                .keyboardShortcut(.cancelAction)
+                            Button("Save Changes") { saveAllSettings(); closeSettings() }
+                                .buttonStyle(.bordered)
+                                .controlSize(.small)
+                                .keyboardShortcut(.defaultAction)
+                        }
                     }
                     .padding(.horizontal, 32)
-                    .padding(.top, 26)
-                    .padding(.bottom, 18)
+                    .padding(.top, 20)
+                    .padding(.bottom, 16)
                     Divider().opacity(0.5)
                 }
 
                 ScrollView {
                     VStack(alignment: .leading, spacing: 18) {
-                        Group {
-                            if selectedTab == 0 { generalSettingsContent }
-                            else if selectedTab == 1 { editorSettingsContent }
-                            else if selectedTab == 2 { aiSettingsContent }
-                            else if selectedTab == 9 { CloudGPUView() }
-                            else if selectedTab == 7 { HPCSettingsView().environmentObject(appState) }
-                            else if selectedTab == 8 { mcpSettingsPanel }
-                            else if selectedTab == 3 { toolsSettingsContent }
-                            else if selectedTab == 5 { ExtensionSettingsView() }
-                            else if selectedTab == 6 { subscriptionSettingsContent }
-                            else { aboutContent }
-                        }
-                        .padding(26)
-                        .frame(maxWidth: .infinity, alignment: .leading)
-                        .background(
-                            RoundedRectangle(cornerRadius: 12, style: .continuous)
-                                .fill(Color.primary.opacity(0.035))
-                        )
-                        .overlay(
-                            RoundedRectangle(cornerRadius: 12, style: .continuous)
-                                .strokeBorder(Color.primary.opacity(0.06), lineWidth: 1)
-                        )
+                        if selectedTab == 0 { generalSettingsContent }
+                        else if selectedTab == 1 { editorSettingsContent }
+                        else if selectedTab == 2 { aiSettingsContent }
+                        else if selectedTab == 9 { CloudGPUView() }
+                        else if selectedTab == 10 { AgentSkillsView() }
+                        else if selectedTab == 8 { mcpSettingsPanel }
+                        else if selectedTab == 3 { toolsSettingsContent }
+                        else if selectedTab == 5 { ExtensionSettingsView() }
+                        else if selectedTab == 6 { subscriptionSettingsContent }
+                        else { aboutContent }
                     }
                     .padding(.horizontal, 32)
-                    .padding(.top, 26)
+                    .padding(.top, 20)
                     .padding(.bottom, 32)
                 }
             }
@@ -4315,6 +4563,14 @@ struct SettingsView: View {
         .onAppear {
             loadCurrentSettings()
         }
+        .onDisappear {
+            appState.showingSettingsDialog = false
+        }
+    }
+    
+    private func closeSettings() {
+        appState.showingSettingsDialog = false
+        dismiss()
     }
     
     // MARK: - Subscription Content
@@ -4495,7 +4751,76 @@ struct SettingsView: View {
     // MARK: - General Settings
     
     private var generalSettingsContent: some View {
-        VStack(alignment: .leading, spacing: 16) {
+        VStack(alignment: .leading, spacing: 20) {
+            // Agent Settings on Page 1 (หน้าแรก)
+            VStack(alignment: .leading, spacing: 14) {
+                SettingsSectionHeader(title: "AI Agent & Automation")
+                
+                Toggle("Autonomous Agent Mode (Multi-turn tool loop & file edits)", isOn: $agentMode)
+                    .onChange(of: agentMode) { _ in hasChanges = true }
+                
+                Toggle("Auto-Approve Tool Execution (Files, Shell, Refactor)", isOn: $agentAutoApproveTools)
+                    .onChange(of: agentAutoApproveTools) { _ in hasChanges = true }
+                
+                VStack(alignment: .leading, spacing: 3) {
+                    HStack {
+                        Text("Max Tool Loop Iterations:")
+                            .font(.system(size: 12, weight: .medium))
+                        Spacer()
+                        Stepper(agentMaxIterations <= 0 ? "Unlimited (∞)" : "\(agentMaxIterations) steps", value: $agentMaxIterations, in: 0...200, step: 5)
+                            .onChange(of: agentMaxIterations) { _ in hasChanges = true }
+                    }
+                    if agentMaxIterations <= 0 {
+                        Text("No limit — Agent will continue multi-turn thinking & tool loops until the task is complete.")
+                            .font(.system(size: 10.5))
+                            .foregroundColor(.secondary.opacity(0.8))
+                    }
+                }
+                
+                HStack {
+                    Text("Agent Font:")
+                        .font(.system(size: 12, weight: .medium))
+                    Spacer()
+                    Picker("", selection: $agentFontName) {
+                        Text("SF Pro").tag("SF Pro")
+                        Text("SF Mono").tag("SF Mono")
+                        Text("Menlo").tag("Menlo")
+                        Text("Fira Code").tag("Fira Code")
+                    }
+                    .pickerStyle(.menu)
+                    .frame(width: 120)
+                    .onChange(of: agentFontName) { _ in hasChanges = true }
+                }
+                
+                HStack {
+                    Text("Agent Size: \(Int(agentFontSize)) pt")
+                        .font(.system(size: 12, weight: .medium))
+                        .frame(width: 120, alignment: .leading)
+                    Slider(value: $agentFontSize, in: 12...26, step: 1)
+                        .onChange(of: agentFontSize) { _ in hasChanges = true }
+                }
+                
+                VStack(alignment: .leading, spacing: 4) {
+                    Text("Custom System Instructions / Rules:")
+                        .font(.system(size: 11, weight: .semibold))
+                        .foregroundColor(.secondary)
+                    
+                    TextEditor(text: $agentCustomInstructions)
+                        .font(.system(size: 11, design: .monospaced))
+                        .frame(height: 70)
+                        .padding(6)
+                        .background(Color(nsColor: .textBackgroundColor).opacity(0.5))
+                        .cornerRadius(6)
+                        .overlay(RoundedRectangle(cornerRadius: 6).stroke(Color.primary.opacity(0.1), lineWidth: 1))
+                        .onChange(of: agentCustomInstructions) { _ in hasChanges = true }
+                }
+            }
+            .padding(16)
+            .background(Color(nsColor: .controlBackgroundColor))
+            .cornerRadius(12)
+            
+            Divider()
+            
             SettingsSectionHeader(title: "Appearance")
             
             Toggle("Show sidebar on startup", isOn: $showSidebar)
@@ -4544,6 +4869,33 @@ struct SettingsView: View {
     private var editorSettingsContent: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 24) {
+                // AI Agent & Chat Font
+                VStack(alignment: .leading, spacing: 12) {
+                    SettingsSectionHeader(title: "AI Agent & Chat Font")
+                    
+                    Picker("Font Family", selection: $agentFontName) {
+                        Text("SF Pro").tag("SF Pro")
+                        Text("SF Mono").tag("SF Mono")
+                        Text("Menlo").tag("Menlo")
+                        Text("Fira Code").tag("Fira Code")
+                        Text("Monaco").tag("Monaco")
+                        Text("Helvetica Neue").tag("Helvetica Neue")
+                    }
+                    .pickerStyle(.menu)
+                    .frame(maxWidth: 300)
+                    .onChange(of: agentFontName) { _ in hasChanges = true }
+                    
+                    HStack {
+                        Text("Size: \(Int(agentFontSize))")
+                            .frame(width: 60, alignment: .leading)
+                        Slider(value: $agentFontSize, in: 12...26, step: 1)
+                            .onChange(of: agentFontSize) { _ in hasChanges = true }
+                    }
+                }
+                .padding()
+                .background(Color(nsColor: .controlBackgroundColor))
+                .cornerRadius(12)
+                
                 // Main Editor Font
                 VStack(alignment: .leading, spacing: 12) {
                     SettingsSectionHeader(title: "Main Editor Font")
@@ -4609,9 +4961,9 @@ struct SettingsView: View {
                 .background(Color(nsColor: .controlBackgroundColor))
                 .cornerRadius(12)
                 
-                // Notebook Cell Font
+                // Cell Mode Font
                 VStack(alignment: .leading, spacing: 12) {
-                    SettingsSectionHeader(title: "Notebook Cell Font")
+                    SettingsSectionHeader(title: "Cell Mode Font")
                     
                     Picker("Font Family", selection: $cellFontName) {
                         Text("SF Pro").tag("SF Pro")
@@ -4698,9 +5050,10 @@ struct SettingsView: View {
 
     private func providerColor(_ provider: String) -> Color {
         switch provider {
+        case "omni": return .orange
         case "gemini": return .blue
         case "openai": return .green
-        case "anthropic": return .orange
+        case "anthropic": return .pink
         case "deepseek": return .cyan
         case "grok": return .purple
         case "qwen": return .indigo
@@ -4712,242 +5065,262 @@ struct SettingsView: View {
     @State private var providerKeys: [String: String] = [:]
     @State private var showAPIKey: [String: Bool] = [:]
     @State private var aiKeyMode: String = "cloud"  // "cloud" = Dotmini proxy, "direct" = user's own key
+    @State private var dotminiLicenseKey: String = ""
     
     private var aiSettingsContent: some View {
         VStack(alignment: .leading, spacing: 20) {
-            // ── Default Provider & Model ──
-            VStack(alignment: .leading, spacing: 14) {
+            // ── 1. Mode Switcher (Dotmini Cloud vs BYOK vs Local) ──
+            VStack(alignment: .leading, spacing: 12) {
                 HStack(spacing: 8) {
-                    Text("Default Provider & Model")
-                        .font(.system(size: 13, weight: .semibold))
-                    Spacer()
-                    Text(modelCatalog.source)
-                        .font(.system(size: 9))
-                        .foregroundColor(.secondary)
-                    Button(modelCatalog.isRefreshing ? "Refreshing…" : "Refresh Models") {
-                        Task {
-                            await modelCatalog.refreshIfNeeded(force: true)
-                            let normalized = modelCatalog.normalizedSelection(provider: selectedProvider, model: selectedModel)
-                            selectedProvider = normalized.provider
-                            selectedModel = normalized.model
-                        }
-                    }
-                    .disabled(modelCatalog.isRefreshing)
+                    Image(systemName: "cpu.fill")
+                        .foregroundColor(.accentColor)
+                        .font(.system(size: 13))
+                    Text("AI Mode & Provider")
+                        .font(.system(size: 13, weight: .bold))
                 }
                 
-                Text("Choose which AI provider and model to use by default in the Agent and Chat.")
-                    .font(.system(size: 12))
-                    .foregroundColor(.secondary)
-                
-                HStack(spacing: 20) {
-                    // Provider picker
-                    VStack(alignment: .leading, spacing: 4) {
-                        Text("Provider")
-                            .font(.system(size: 10, weight: .semibold))
-                            .foregroundColor(.secondary)
-                            .textCase(.uppercase)
-                        Picker("", selection: $selectedProvider) {
-                            ForEach(aiProviders, id: \.id) { p in
-                                Text(p.name).tag(p.id)
-                            }
+                HStack(spacing: 8) {
+                    Button {
+                        aiKeyMode = "cloud"
+                        selectedProvider = "omni"
+                        if let first = modelCatalog.provider("omni")?.models.first {
+                            selectedModel = first.id
                         }
-                        .labelsHidden()
+                        hasChanges = true
+                    } label: {
+                        HStack(spacing: 6) {
+                            Image(systemName: "sparkles")
+                            Text("Dotmini Cloud (Omni AI)")
+                                .font(.system(size: 12, weight: .semibold))
+                        }
                         .frame(maxWidth: .infinity)
-                        .onChange(of: selectedProvider) { newValue in
-                            hasChanges = true
-                            if let provider = aiProviders.first(where: { $0.id == newValue }),
-                               let first = provider.models.first {
+                        .padding(.vertical, 8)
+                        .background(
+                            RoundedRectangle(cornerRadius: 7)
+                                .fill(aiKeyMode == "cloud" ? Color.accentColor : Color.primary.opacity(0.05))
+                        )
+                        .foregroundColor(aiKeyMode == "cloud" ? .white : .primary)
+                    }
+                    .buttonStyle(.plain)
+                    
+                    Button {
+                        aiKeyMode = "direct"
+                        if selectedProvider == "omni" || selectedProvider == "local" {
+                            selectedProvider = "gemini"
+                            if let first = modelCatalog.provider("gemini")?.models.first {
                                 selectedModel = first.id
                             }
                         }
+                        hasChanges = true
+                    } label: {
+                        HStack(spacing: 6) {
+                            Image(systemName: "key.fill")
+                            Text("BYOK (Your Own Keys)")
+                                .font(.system(size: 12, weight: .semibold))
+                        }
+                        .frame(maxWidth: .infinity)
+                        .padding(.vertical, 8)
+                        .background(
+                            RoundedRectangle(cornerRadius: 7)
+                                .fill(aiKeyMode == "direct" ? Color.accentColor : Color.primary.opacity(0.05))
+                        )
+                        .foregroundColor(aiKeyMode == "direct" ? .white : .primary)
                     }
-                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .buttonStyle(.plain)
                     
-                    // Model picker (filtered by selected provider)
-                    VStack(alignment: .leading, spacing: 4) {
-                        Text("Model")
-                            .font(.system(size: 10, weight: .semibold))
+                    Button {
+                        aiKeyMode = "local"
+                        selectedProvider = "local"
+                        selectedModel = "local-model"
+                        hasChanges = true
+                    } label: {
+                        HStack(spacing: 6) {
+                            Image(systemName: "desktopcomputer")
+                            Text("Local LLM (Offline)")
+                                .font(.system(size: 12, weight: .semibold))
+                        }
+                        .frame(maxWidth: .infinity)
+                        .padding(.vertical, 8)
+                        .background(
+                            RoundedRectangle(cornerRadius: 7)
+                                .fill(aiKeyMode == "local" ? Color.accentColor : Color.primary.opacity(0.05))
+                        )
+                        .foregroundColor(aiKeyMode == "local" ? .white : .primary)
+                    }
+                    .buttonStyle(.plain)
+                }
+            }
+            .padding(18)
+            .background(
+                RoundedRectangle(cornerRadius: 10, style: .continuous)
+                    .fill(Color(nsColor: .controlBackgroundColor))
+                    .overlay(RoundedRectangle(cornerRadius: 10, style: .continuous).stroke(Color.primary.opacity(0.06), lineWidth: 1))
+            )
+            
+            // ── 2. Mode-Specific Configuration ──
+            if aiKeyMode == "cloud" {
+                // Dotmini Cloud Dedicated Panel
+                VStack(alignment: .leading, spacing: 14) {
+                    HStack(spacing: 8) {
+                        Image(systemName: "cloud.fill")
+                            .foregroundColor(.orange)
+                        Text("Dotmini Cloud Models (api.dotmini.net/v1)")
+                            .font(.system(size: 13, weight: .bold))
+                        Spacer()
+                        Text(modelCatalog.source)
+                            .font(.system(size: 10))
                             .foregroundColor(.secondary)
-                            .textCase(.uppercase)
+                        Button(modelCatalog.isRefreshing ? "Refreshing…" : "Refresh Catalog") {
+                            Task {
+                                await modelCatalog.refreshIfNeeded(force: true)
+                                let normalized = modelCatalog.normalizedSelection(provider: "omni", model: selectedModel)
+                                selectedProvider = "omni"
+                                selectedModel = normalized.model
+                            }
+                        }
+                        .buttonStyle(.bordered)
+                        .controlSize(.small)
+                        .disabled(modelCatalog.isRefreshing)
+                    }
+                    
+                    Text("Access all Dotmini Omni AI & live cloud models directly via unified server-side proxy.")
+                        .font(.system(size: 12))
+                        .foregroundColor(.secondary)
+                    
+                    HStack(spacing: 12) {
+                        Text("Active Model:")
+                            .font(.system(size: 12, weight: .semibold))
+                            .foregroundColor(.secondary)
+                        
                         Picker("", selection: $selectedModel) {
-                            if let provider = aiProviders.first(where: { $0.id == selectedProvider }) {
-                                ForEach(provider.models, id: \.id) { m in
+                            if let omniProvider = modelCatalog.provider("omni") {
+                                ForEach(omniProvider.models, id: \.id) { m in
                                     HStack {
                                         Text(m.name)
                                         if !m.badge.isEmpty {
-                                            Text(m.badge)
-                                                .font(.system(size: 8, weight: .bold))
-                                                .foregroundColor(.secondary)
+                                            Text("[\(m.badge)]")
                                         }
                                     }.tag(m.id)
                                 }
                             }
                         }
                         .labelsHidden()
-                        .frame(maxWidth: .infinity)
-                        .onChange(of: selectedModel) { _ in hasChanges = true }
+                        .pickerStyle(.menu)
+                        .onChange(of: selectedModel) { _ in
+                            selectedProvider = "omni"
+                            hasChanges = true
+                        }
                     }
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                }
-                .frame(maxWidth: .infinity)
-                
-                // Status pill
-                if selectedProvider == "local" {
-                    if let server = LocalLLMService.shared.activeServer, server.isOnline {
-                        HStack(spacing: 6) {
-                            Circle().fill(Color.green).frame(width: 6, height: 6)
-                            Text("Connected to \(server.type.rawValue)")
-                                .font(.system(size: 11, weight: .medium))
-                                .foregroundColor(.green)
-                        }
-                        .padding(.horizontal, 10).padding(.vertical, 5)
-                        .background(Color.green.opacity(0.08))
-                        .cornerRadius(6)
-                    } else {
-                        HStack(spacing: 6) {
-                            Circle().fill(Color.orange).frame(width: 6, height: 6)
-                            Text("No local server detected — click Scan below")
-                                .font(.system(size: 11, weight: .medium))
-                                .foregroundColor(.orange)
-                        }
-                        .padding(.horizontal, 10).padding(.vertical, 5)
-                        .background(Color.orange.opacity(0.08))
-                        .cornerRadius(6)
+                    
+                    HStack(spacing: 12) {
+                        Text("License / Token:")
+                            .font(.system(size: 12, weight: .semibold))
+                            .foregroundColor(.secondary)
+                        
+                        SecureField("Optional Dotmini Cloud License / Bearer Token", text: $dotminiLicenseKey)
+                            .textFieldStyle(.roundedBorder)
+                            .onChange(of: dotminiLicenseKey) { _ in
+                                hasChanges = true
+                            }
                     }
-                } else if aiKeyMode == "cloud" {
-                    // Cloud mode: Check license key status
-                    let licenseKey = UserDefaults.standard.string(forKey: "dotminiLicenseKey") ?? ""
-                    if !licenseKey.isEmpty {
-                        HStack(spacing: 6) {
-                            Circle().fill(Color.green).frame(width: 6, height: 6)
-                            Text("Dotmini Cloud connected")
-                                .font(.system(size: 11, weight: .medium))
-                                .foregroundColor(.green)
-                        }
-                        .padding(.horizontal, 10).padding(.vertical, 5)
-                        .background(Color.green.opacity(0.08))
-                        .cornerRadius(6)
-                    } else {
-                        HStack(spacing: 6) {
-                            Circle().fill(Color.orange).frame(width: 6, height: 6)
-                            Text("Set License Key in Subscription tab")
-                                .font(.system(size: 11, weight: .medium))
-                                .foregroundColor(.orange)
-                        }
-                        .padding(.horizontal, 10).padding(.vertical, 5)
-                        .background(Color.orange.opacity(0.08))
-                        .cornerRadius(6)
-                    }
-                } else if let key = providerKeys[selectedProvider], !key.isEmpty {
+                    
                     HStack(spacing: 6) {
                         Circle().fill(Color.green).frame(width: 6, height: 6)
-                        Text("API key configured")
+                        Text(dotminiLicenseKey.isEmpty ? "Dotmini Cloud Active (Tier: Pro / Master Admin)" : "Dotmini Cloud Authenticated")
                             .font(.system(size: 11, weight: .medium))
                             .foregroundColor(.green)
                     }
-                    .padding(.horizontal, 10).padding(.vertical, 5)
-                    .background(Color.green.opacity(0.08))
-                    .cornerRadius(6)
-                } else {
-                    HStack(spacing: 6) {
-                        Circle().fill(Color.orange).frame(width: 6, height: 6)
-                        Text("No API key — set one below")
-                            .font(.system(size: 11, weight: .medium))
-                            .foregroundColor(.orange)
-                    }
-                    .padding(.horizontal, 10).padding(.vertical, 5)
-                    .background(Color.orange.opacity(0.08))
-                    .cornerRadius(6)
                 }
-            }
-            .padding(20)
-            .background(Color(nsColor: .controlBackgroundColor))
-            .cornerRadius(10)
-            .overlay(RoundedRectangle(cornerRadius: 10).stroke(Color.primary.opacity(0.08), lineWidth: 1))
-            
-            // ── AI Connection Mode ──
-            VStack(alignment: .leading, spacing: 14) {
-                HStack(spacing: 8) {
-                    Text("API Connection Mode")
-                        .font(.system(size: 13, weight: .semibold))
-                }
-                
-                Picker("", selection: $aiKeyMode) {
-                    Text("Dotmini Cloud").tag("cloud")
-                    Text("Bring Your Own Key").tag("direct")
-                }
-                .pickerStyle(.segmented)
-                .onChange(of: aiKeyMode) { _ in hasChanges = true }
-                
-                if aiKeyMode == "cloud" {
-                    HStack(spacing: 8) {
-                        Image(systemName: "info.circle")
-                            .foregroundColor(.secondary)
-                            .font(.system(size: 13))
-                        VStack(alignment: .leading, spacing: 2) {
-                            Text("All AI requests are routed through Dotmini Cloud.")
-                                .font(.system(size: 11, weight: .medium))
-                            Text("Your API keys are managed securely server-side. You only need a Dotmini License Key.")
-                                .font(.system(size: 10))
-                                .foregroundColor(.secondary)
-                        }
-                    }
-                    .padding(10)
-                    .background(Color(nsColor: .windowBackgroundColor))
-                    .cornerRadius(6)
-                } else {
-                    HStack(spacing: 8) {
-                        Image(systemName: "info.circle")
-                            .foregroundColor(.secondary)
-                            .font(.system(size: 13))
-                        VStack(alignment: .leading, spacing: 2) {
-                            Text("API calls go directly to each provider.")
-                                .font(.system(size: 11, weight: .medium))
-                            Text("Enter your own API key for each provider below. Keys are stored locally on your Mac only.")
-                                .font(.system(size: 10))
-                                .foregroundColor(.secondary)
-                        }
-                    }
-                    .padding(10)
-                    .background(Color(nsColor: .windowBackgroundColor))
-                    .cornerRadius(6)
-                }
-            }
-            .padding(20)
-            .background(Color(nsColor: .controlBackgroundColor))
-            .cornerRadius(10)
-            .overlay(RoundedRectangle(cornerRadius: 10).stroke(Color.primary.opacity(0.08), lineWidth: 1))
-            
-            // ── Provider API Keys (Direct mode ONLY) ──
-            if aiKeyMode == "direct" {
+                .padding(18)
+                .background(
+                    RoundedRectangle(cornerRadius: 10, style: .continuous)
+                        .fill(Color(nsColor: .controlBackgroundColor))
+                        .overlay(RoundedRectangle(cornerRadius: 10, style: .continuous).stroke(Color.primary.opacity(0.06), lineWidth: 1))
+                )
+            } else if aiKeyMode == "direct" {
+                // BYOK Dedicated Panel
                 VStack(alignment: .leading, spacing: 14) {
                     HStack(spacing: 8) {
-                        Text("Your API Keys")
-                            .font(.system(size: 13, weight: .semibold))
-                        
+                        Image(systemName: "key.fill")
+                            .foregroundColor(.accentColor)
+                        Text("Bring Your Own Key (BYOK)")
+                            .font(.system(size: 13, weight: .bold))
                         Spacer()
-                        
-                        Text("Keys are stored locally and never sent to Dotmini.")
-                            .font(.system(size: 11))
-                            .foregroundColor(.secondary)
                     }
                     
-                    // Provider cards grid (exclude local — it has its own panel)
-                    ForEach(aiProviders.filter { $0.id != "local" }, id: \.id) { provider in
-                        aiProviderKeyCard(provider)
+                    Text("Connect directly to third-party AI providers using your personal API keys.")
+                        .font(.system(size: 12))
+                        .foregroundColor(.secondary)
+                    
+                    HStack(spacing: 24) {
+                        // Provider Picker
+                        HStack(spacing: 8) {
+                            Text("Provider:")
+                                .font(.system(size: 12, weight: .semibold))
+                                .foregroundColor(.secondary)
+                            
+                            Picker("", selection: $selectedProvider) {
+                                ForEach(aiProviders.filter { $0.id != "omni" && $0.id != "local" }, id: \.id) { p in
+                                    Text(p.name).tag(p.id)
+                                }
+                            }
+                            .labelsHidden()
+                            .pickerStyle(.menu)
+                            .onChange(of: selectedProvider) { newValue in
+                                hasChanges = true
+                                if let provider = aiProviders.first(where: { $0.id == newValue }),
+                                   let first = provider.models.first {
+                                    selectedModel = first.id
+                                }
+                            }
+                        }
+                        
+                        // Model Picker
+                        HStack(spacing: 8) {
+                            Text("Model:")
+                                .font(.system(size: 12, weight: .semibold))
+                                .foregroundColor(.secondary)
+                            
+                            Picker("", selection: $selectedModel) {
+                                if let provider = aiProviders.first(where: { $0.id == selectedProvider }) {
+                                    ForEach(provider.models, id: \.id) { m in
+                                        HStack {
+                                            Text(m.name)
+                                            if !m.badge.isEmpty {
+                                                Text("[\(m.badge)]")
+                                            }
+                                        }.tag(m.id)
+                                    }
+                                }
+                            }
+                            .labelsHidden()
+                            .pickerStyle(.menu)
+                            .onChange(of: selectedModel) { _ in hasChanges = true }
+                        }
+                    }
+                    
+                    Divider()
+                    
+                    Text("Enter API Key for Providers:")
+                        .font(.system(size: 11, weight: .bold))
+                        .foregroundColor(.secondary)
+                    
+                    VStack(spacing: 6) {
+                        ForEach(aiProviders.filter { $0.id != "omni" && $0.id != "local" }, id: \.id) { provider in
+                            aiProviderKeyCard(provider)
+                        }
                     }
                 }
-                .padding(20)
-                .background(Color(nsColor: .controlBackgroundColor))
-                .cornerRadius(10)
-                .overlay(RoundedRectangle(cornerRadius: 10).stroke(Color.primary.opacity(0.08), lineWidth: 1))
+                .padding(18)
+                .background(
+                    RoundedRectangle(cornerRadius: 10, style: .continuous)
+                        .fill(Color(nsColor: .controlBackgroundColor))
+                        .overlay(RoundedRectangle(cornerRadius: 10, style: .continuous).stroke(Color.primary.opacity(0.06), lineWidth: 1))
+                )
+            } else {
+                // Local LLM Panel
+                localLLMSettingsPanel
             }
-            
-            // ── Local LLM Section ──
-            localLLMSettingsPanel
-            
-            // ── MCP Server ──
-            mcpSettingsPanel
         }
     }
     
@@ -5227,97 +5600,106 @@ struct SettingsView: View {
         let isDefault = selectedProvider == provider.id
         
         return HStack(spacing: 12) {
-            // Provider icon + name
-            HStack(spacing: 8) {
-                ZStack {
-                    RoundedRectangle(cornerRadius: 6)
-                        .fill(Color.primary.opacity(0.04))
-                        .frame(width: 28, height: 28)
-                    Image(systemName: provider.icon)
-                        .font(.system(size: 13))
-                        .foregroundColor(.secondary)
-                }
+            // Col 1: Provider Info (Fixed 190pt)
+            HStack(spacing: 10) {
+                Image(systemName: provider.icon)
+                    .font(.system(size: 13))
+                    .foregroundColor(provider.color)
+                    .frame(width: 28, height: 28)
+                    .background(provider.color.opacity(0.12))
+                    .clipShape(RoundedRectangle(cornerRadius: 6))
                 
-                VStack(alignment: .leading, spacing: 1) {
-                    HStack(spacing: 6) {
+                VStack(alignment: .leading, spacing: 2) {
+                    HStack(spacing: 4) {
                         Text(provider.name)
                             .font(.system(size: 12, weight: .semibold))
                         if isDefault {
                             Text("DEFAULT")
                                 .font(.system(size: 8, weight: .bold))
                                 .foregroundColor(.accentColor)
-                                .padding(.horizontal, 5).padding(.vertical, 2)
+                                .padding(.horizontal, 4).padding(.vertical, 1)
                                 .background(Color.accentColor.opacity(0.12))
                                 .cornerRadius(3)
                         }
                     }
                     Text(provider.endpoint)
-                        .font(.system(size: 10))
+                        .font(.system(size: 9))
                         .foregroundColor(.secondary)
                 }
             }
-            .frame(width: 180, alignment: .leading)
+            .frame(width: 190, alignment: .leading)
             
-            // Key field
-            HStack(spacing: 6) {
+            // Col 2: Key Input Field (Flexible)
+            HStack(spacing: 8) {
                 if isVisible {
-                    TextField("sk-...", text: key)
-                        .textFieldStyle(.roundedBorder)
-                        .font(.system(size: 12, design: .monospaced))
+                    TextField("API Key...", text: key)
+                        .textFieldStyle(.plain)
+                        .font(.system(size: 11, design: .monospaced))
                 } else {
                     SecureField("Paste API key here", text: key)
-                        .textFieldStyle(.roundedBorder)
-                        .font(.system(size: 12))
+                        .textFieldStyle(.plain)
+                        .font(.system(size: 11))
                 }
                 
-                // Toggle visibility
-                Button(action: { showAPIKey[provider.id] = !isVisible }) {
-                    Image(systemName: isVisible ? "eye.slash" : "eye")
+                Button {
+                    showAPIKey[provider.id] = !isVisible
+                } label: {
+                    Image(systemName: isVisible ? "eye.slash.fill" : "eye.fill")
                         .font(.system(size: 11))
                         .foregroundColor(.secondary)
                 }
                 .buttonStyle(.plain)
-                .help(isVisible ? "Hide key" : "Show key")
+                .help(isVisible ? "Hide Key" : "Show Key")
             }
+            .padding(.horizontal, 10)
+            .padding(.vertical, 6)
+            .background(
+                RoundedRectangle(cornerRadius: 6)
+                    .fill(Color(nsColor: .textBackgroundColor))
+                    .overlay(RoundedRectangle(cornerRadius: 6).stroke(Color.primary.opacity(0.08), lineWidth: 1))
+            )
             
-            // Status
-            if hasKey {
-                Image(systemName: "checkmark.circle.fill")
-                    .foregroundColor(.green)
-                    .font(.system(size: 14))
-                    .help("Key configured")
-            } else {
-                Image(systemName: "circle.dashed")
-                    .foregroundColor(.secondary.opacity(0.4))
-                    .font(.system(size: 14))
-                    .help("No key set")
-            }
-            
-            // Set as default
-            if hasKey && !isDefault {
-                Button(action: {
-                    selectedProvider = provider.id
-                    if let first = provider.models.first { selectedModel = first.id }
-                    hasChanges = true
-                }) {
-                    Text("Use")
-                        .font(.system(size: 10, weight: .semibold))
-                        .foregroundColor(.accentColor)
-                        .padding(.horizontal, 8).padding(.vertical, 3)
-                        .background(Color.accentColor.opacity(0.1))
-                        .cornerRadius(4)
+            // Col 3: Status Icon (Fixed 24pt)
+            Group {
+                if hasKey {
+                    Image(systemName: "checkmark.circle.fill")
+                        .foregroundColor(.green)
+                        .font(.system(size: 14))
+                } else {
+                    Image(systemName: "circle.dashed")
+                        .foregroundColor(.secondary.opacity(0.35))
+                        .font(.system(size: 14))
                 }
-                .buttonStyle(.plain)
-                .help("Set as default provider")
             }
+            .frame(width: 24)
+            
+            // Col 4: Action (Fixed 44pt)
+            Group {
+                if hasKey && !isDefault {
+                    Button {
+                        selectedProvider = provider.id
+                        if let first = provider.models.first { selectedModel = first.id }
+                        hasChanges = true
+                    } label: {
+                        Text("Use")
+                            .font(.system(size: 10, weight: .semibold))
+                            .foregroundColor(.accentColor)
+                            .padding(.horizontal, 8).padding(.vertical, 4)
+                            .background(Color.accentColor.opacity(0.12))
+                            .cornerRadius(4)
+                    }
+                    .buttonStyle(.plain)
+                } else {
+                    Spacer().frame(width: 44)
+                }
+            }
+            .frame(width: 44)
         }
-        .padding(.vertical, 8)
-        .padding(.horizontal, 10)
-        .background(isDefault ? Color.accentColor.opacity(0.04) : Color.clear)
-        .cornerRadius(8)
-        .overlay(
+        .padding(.horizontal, 12)
+        .padding(.vertical, 7)
+        .background(
             RoundedRectangle(cornerRadius: 8)
-                .stroke(isDefault ? Color.accentColor.opacity(0.15) : Color.secondary.opacity(0.08), lineWidth: 1)
+                .fill(isDefault ? Color.accentColor.opacity(0.05) : Color.primary.opacity(0.02))
         )
     }
     
@@ -5361,14 +5743,27 @@ struct SettingsView: View {
         cellFontSize = appState.cellFontSize
         cellFontWeight = appState.cellFontWeight
         
+        agentFontName = appState.agentFontName
+        agentFontSize = appState.agentFontSize
+        
+        agentMode = appState.agentMode
+        agentAutoApproveTools = appState.agentAutoApproveTools
+        agentCustomInstructions = appState.agentCustomInstructions
+        agentMaxIterations = appState.agentMaxIterations
+        
         // Load ALL provider keys
         let providers = ["gemini", "openai", "anthropic", "deepseek", "grok", "qwen", "glm"]
         for p in providers {
             providerKeys[p] = appState.apiKeys[p] ?? UserDefaults.standard.string(forKey: "\(p)_api_key") ?? ""
         }
+        let legacyKey = UserDefaults.standard.string(forKey: "apiKey") ?? ""
+        if (providerKeys["openai"] ?? "").isEmpty && !legacyKey.isEmpty {
+            providerKeys["openai"] = legacyKey
+        }
         apiKey = providerKeys[selectedProvider] ?? ""
         aiKeyMode = UserDefaults.standard.string(forKey: "aiKeyMode") ?? "cloud"
         microRentToken = UserDefaults.standard.string(forKey: "microRentToken") ?? ""
+        dotminiLicenseKey = UserDefaults.standard.string(forKey: "dotminiLicenseKey") ?? ""
     }
     
     private func saveAllSettings() {
@@ -5389,14 +5784,40 @@ struct SettingsView: View {
         appState.cellFontSize = cellFontSize
         appState.cellFontWeight = cellFontWeight
         
+        appState.agentFontName = agentFontName
+        appState.agentFontSize = agentFontSize
+        
+        appState.agentMode = agentMode
+        appState.agentAutoApproveTools = agentAutoApproveTools
+        appState.agentCustomInstructions = agentCustomInstructions
+        appState.agentMaxIterations = agentMaxIterations
+        
         // Save ALL provider keys
         let defaults = UserDefaults.standard
         defaults.set(aiKeyMode, forKey: "aiKeyMode")
+        defaults.set(dotminiLicenseKey, forKey: "dotminiLicenseKey")
+        defaults.set(agentFontName, forKey: "agentFontName")
+        defaults.set(Double(agentFontSize), forKey: "agentFontSize")
+        defaults.set(Double(fontSize), forKey: "fontSize")
+        defaults.set(fontFamily, forKey: "fontFamily")
+        defaults.set(playgroundFontName, forKey: "playgroundFontName")
+        defaults.set(Double(playgroundFontSize), forKey: "playgroundFontSize")
+        defaults.set(playgroundFontWeight, forKey: "playgroundFontWeight")
+        defaults.set(cellFontName, forKey: "cellFontName")
+        defaults.set(Double(cellFontSize), forKey: "cellFontSize")
+        defaults.set(cellFontWeight, forKey: "cellFontWeight")
+        defaults.set(agentMode, forKey: "agentMode")
+        defaults.set(agentAutoApproveTools, forKey: "agentAutoApproveTools")
+        defaults.set(agentCustomInstructions, forKey: "agentCustomInstructions")
+        defaults.set(agentMaxIterations, forKey: "agentMaxIterations")
         for (provider, key) in providerKeys {
             if !key.isEmpty {
                 appState.apiKeys[provider] = key
                 defaults.set(key, forKey: "\(provider)_api_key")
             }
+        }
+        if let openai = providerKeys["openai"], !openai.isEmpty {
+            defaults.set(openai, forKey: "apiKey")
         }
         
         defaults.set(selectedProvider, forKey: "aiProvider")
@@ -6047,3 +6468,112 @@ class SyntaxHighlighter {
         }
     }
 }
+
+// MARK: - Modular Sheet Modifiers for Fast Type-Checking
+
+struct PrimarySheetsModifier: ViewModifier {
+    @ObservedObject var appState: AppState
+
+    func body(content: Content) -> some View {
+        content
+            .sheet(isPresented: $appState.showingRefactorProWindow) {
+                RefactorProWindow()
+                    .environmentObject(appState)
+            }
+            .sheet(isPresented: $appState.showingExpandCodeWindow) {
+                ExpandCodeWindow()
+                    .environmentObject(appState)
+            }
+            .sheet(isPresented: $appState.showingFormatCodeWindow) {
+                FormatCodeWindow()
+                    .environmentObject(appState)
+            }
+            .sheet(isPresented: $appState.showingDotnetProject) {
+                DotnetProjectView()
+                    .environmentObject(appState)
+            }
+            .sheet(isPresented: $appState.showingAITrainer) {
+                AITrainerView()
+            }
+            .sheet(isPresented: $appState.showingPythonEnv) {
+                PythonEnvSheet()
+            }
+            .sheet(isPresented: $appState.showingRuntimeManager) {
+                RuntimeManagerView()
+            }
+    }
+}
+
+struct SecondarySheetsModifier: ViewModifier {
+    @ObservedObject var appState: AppState
+
+    func body(content: Content) -> some View {
+        content
+            .sheet(isPresented: $appState.showingGitSettings) {
+                GitSettingsView()
+                    .environmentObject(appState)
+            }
+            .sheet(isPresented: $appState.showingCodeAnalysis) {
+                CodeAnalysisView()
+                    .environmentObject(appState)
+                    .frame(minWidth: 900, minHeight: 600)
+            }
+            .sheet(isPresented: $appState.showingCommitDialog) {
+                CommitSheet()
+                    .environmentObject(appState)
+            }
+            .sheet(isPresented: $appState.showingSettingsDialog) {
+                SettingsView()
+                    .environmentObject(appState)
+            }
+            .sheet(isPresented: $appState.showingSimulatorDialog) {
+                SimulatorSheet()
+                    .environmentObject(appState)
+            }
+            .sheet(isPresented: $appState.showingNewFileDialog) {
+                NewFileSheet()
+                    .environmentObject(appState)
+            }
+            .sheet(isPresented: $appState.showingSubAgentMonitor) {
+                SubAgentMonitorView()
+                    .environmentObject(appState)
+            }
+    }
+}
+
+struct StudioSheetsModifier: ViewModifier {
+    @ObservedObject var appState: AppState
+
+    func body(content: Content) -> some View {
+        content
+            .sheet(isPresented: $appState.showingCollaborationView) {
+                CollaborationView()
+                    .environmentObject(appState)
+                    .frame(minWidth: 700, minHeight: 500)
+            }
+            .sheet(isPresented: $appState.showingCICDView) {
+                CICDPipelineView()
+                    .environmentObject(appState)
+                    .frame(minWidth: 950, minHeight: 650)
+            }
+            .sheet(isPresented: $appState.showingDatabaseStudio) {
+                DatabaseStudioView()
+                    .environmentObject(appState)
+                    .frame(minWidth: 1000, minHeight: 700)
+            }
+            .sheet(isPresented: $appState.showingAPIClient) {
+                APIClientView()
+                    .environmentObject(appState)
+                    .frame(minWidth: 1000, minHeight: 700)
+            }
+            .sheet(isPresented: $appState.showingContainerView) {
+                ContainerView()
+                    .environmentObject(appState)
+                    .frame(minWidth: 950, minHeight: 650)
+            }
+            .sheet(isPresented: $appState.showingProjectRuntime) {
+                ProjectRuntimeView()
+            }
+    }
+}
+

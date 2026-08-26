@@ -31,10 +31,10 @@ struct NodeVersionPicker: View {
                     loadVersions()
                 }
             } label: {
-                HStack(spacing: 4) {
+                HStack(spacing: 6) {
                     Image(systemName: "hexagon.fill")
                         .foregroundColor(.green)
-                        .font(.system(size: 11))
+                        .font(.system(size: 10))
                     
                     if isLoading {
                         ProgressView()
@@ -42,25 +42,23 @@ struct NodeVersionPicker: View {
                             .frame(width: 10, height: 10)
                     } else {
                         Text(currentVersionDisplay)
-                            .font(.system(size: 11, weight: .medium))
+                            .font(.system(size: 12, weight: .medium))
                             .foregroundColor(.primary)
                     }
                     
-                    Image(systemName: "chevron.up.chevron.down")
-                        .font(.system(size: 9))
+                    Image(systemName: "chevron.down")
+                        .font(.system(size: 9, weight: .bold))
                         .foregroundColor(.secondary)
                 }
-                .padding(.horizontal, 8)
-                .padding(.vertical, 4)
-                .background(Color(nsColor: .controlBackgroundColor))
-                .cornerRadius(4)
-                .overlay(
-                    RoundedRectangle(cornerRadius: 4)
-                        .stroke(Color.secondary.opacity(0.2), lineWidth: 1)
+                .padding(.horizontal, 10)
+                .padding(.vertical, 5)
+                .background(
+                    RoundedRectangle(cornerRadius: 6, style: .continuous)
+                        .fill(Color(nsColor: .controlBackgroundColor).opacity(0.85))
                 )
             }
-            .menuStyle(.borderlessButton)
-            .frame(width: 140)
+            .buttonStyle(.plain)
+            .frame(maxWidth: 160)
             
             if let error = error {
                 Image(systemName: "exclamationmark.triangle.fill")

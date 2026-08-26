@@ -80,39 +80,39 @@ enum CellColorTheme: String, CaseIterable, Identifiable, Codable {
     
     var color: Color {
         switch self {
-        case .none: return Color(nsColor: .textBackgroundColor)
-        case .blue: return .blue.opacity(0.12)
-        case .green: return .green.opacity(0.12)
-        case .purple: return .purple.opacity(0.12)
-        case .orange: return .orange.opacity(0.12)
-        case .pink: return .pink.opacity(0.12)
-        case .yellow: return .yellow.opacity(0.12)
-        case .red: return .red.opacity(0.12)
-        case .cyan: return .cyan.opacity(0.12)
-        case .teal: return .teal.opacity(0.12)
-        case .indigo: return .indigo.opacity(0.12)
-        case .mint: return .mint.opacity(0.12)
-        case .brown: return .brown.opacity(0.12)
-        case .gray: return .gray.opacity(0.12)
+        case .none: return Color.clear
+        case .blue: return .blue.opacity(0.15)
+        case .green: return .green.opacity(0.15)
+        case .purple: return .purple.opacity(0.15)
+        case .orange: return .orange.opacity(0.15)
+        case .pink: return .pink.opacity(0.15)
+        case .yellow: return .yellow.opacity(0.15)
+        case .red: return .red.opacity(0.15)
+        case .cyan: return .cyan.opacity(0.15)
+        case .teal: return .teal.opacity(0.15)
+        case .indigo: return .indigo.opacity(0.15)
+        case .mint: return .mint.opacity(0.15)
+        case .brown: return .brown.opacity(0.15)
+        case .gray: return .gray.opacity(0.15)
         }
     }
     
     var borderColor: Color {
         switch self {
-        case .none: return .gray.opacity(0.3)
-        case .blue: return .blue.opacity(0.5)
-        case .green: return .green.opacity(0.5)
-        case .purple: return .purple.opacity(0.5)
-        case .orange: return .orange.opacity(0.5)
-        case .pink: return .pink.opacity(0.5)
-        case .yellow: return .yellow.opacity(0.5)
-        case .red: return .red.opacity(0.5)
-        case .cyan: return .cyan.opacity(0.5)
-        case .teal: return .teal.opacity(0.5)
-        case .indigo: return .indigo.opacity(0.5)
-        case .mint: return .mint.opacity(0.5)
-        case .brown: return .brown.opacity(0.5)
-        case .gray: return .gray.opacity(0.5)
+        case .none: return Color.secondary.opacity(0.25)
+        case .blue: return .blue.opacity(0.6)
+        case .green: return .green.opacity(0.6)
+        case .purple: return .purple.opacity(0.6)
+        case .orange: return .orange.opacity(0.6)
+        case .pink: return .pink.opacity(0.6)
+        case .yellow: return .yellow.opacity(0.6)
+        case .red: return .red.opacity(0.6)
+        case .cyan: return .cyan.opacity(0.6)
+        case .teal: return .teal.opacity(0.6)
+        case .indigo: return .indigo.opacity(0.6)
+        case .mint: return .mint.opacity(0.6)
+        case .brown: return .brown.opacity(0.6)
+        case .gray: return .gray.opacity(0.6)
         }
     }
     

@@ -35,6 +35,8 @@ public final class SyntaxHighlightingEngine: @unchecked Sendable {
         
         // Core languages
         register("rust") { createRustLexer() }
+        register("ardium") { createArdiumLexer() }
+        register("ar") { createArdiumLexer() }
         register("javascript") { createJavaScriptLexer() }
         register("typescript") { createTypeScriptLexer() }  // Dedicated TypeScript lexer
         

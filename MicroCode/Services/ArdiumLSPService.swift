@@ -13,9 +13,8 @@ class ArdiumLSPService {
     func start() {
         guard !isRunning else { return }
         
-        // Locate 'arc' binary
-        let searchPaths = ["/usr/local/bin/arc", "/opt/homebrew/bin/arc", "/usr/bin/arc"]
-        guard let arcPath = searchPaths.first(where: { FileManager.default.fileExists(atPath: $0) }) else {
+        // Locate 'arc' / 'ardium' binary
+        guard let arcPath = ArdiumRunner.findBinary() else {
             print("❌ Ardium LSP: 'arc' binary not found.")
             return
         }
