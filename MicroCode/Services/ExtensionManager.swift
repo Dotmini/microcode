@@ -105,15 +105,204 @@ class ExtensionManager: ObservableObject {
         }
     }
     
+    // MARK: - Default Official Catalog
+    static let defaultOfficialExtensions: [ExtensionManifest] = [
+        ExtensionManifest(
+            id: "ms-python.python",
+            name: "Python & Pyright LSP",
+            version: "2025.1.0",
+            author: "Microsoft",
+            description: "Rich Python IntelliSense, Linting, Pyright type checking, and virtual environment auto-detection.",
+            type: .language,
+            runtime: .javascript,
+            main: "extension.js",
+            icon: "curlybraces",
+            repository: "https://github.com/microsoft/vscode-python",
+            license: "MIT",
+            keywords: ["python", "pyright", "lsp"]
+        ),
+        ExtensionManifest(
+            id: "rust-lang.rust-analyzer",
+            name: "Rust Analyzer",
+            version: "0.4.2",
+            author: "Rust Community",
+            description: "Modular compiler frontend for the Rust language, high-speed completion, and macro expansion.",
+            type: .language,
+            runtime: .rust,
+            main: "rust-analyzer",
+            icon: "gearshape.2.fill",
+            repository: "https://github.com/rust-lang/rust-analyzer",
+            license: "Apache-2.0",
+            keywords: ["rust", "cargo", "lsp"]
+        ),
+        ExtensionManifest(
+            id: "swiftlang.swift-vscode",
+            name: "Swift & SourceKit-LSP",
+            version: "1.11.0",
+            author: "Swift Server Workgroup",
+            description: "First-class Swift support for macOS and Linux, SwiftPM build tasks, and SourceKit-LSP integration.",
+            type: .language,
+            runtime: .swift,
+            main: "extension.js",
+            icon: "swift",
+            repository: "https://github.com/swiftlang/vscode-swift",
+            license: "Apache-2.0",
+            keywords: ["swift", "apple", "swiftpm"]
+        ),
+        ExtensionManifest(
+            id: "golang.go",
+            name: "Go Language Tools",
+            version: "0.41.0",
+            author: "Go Team at Google",
+            description: "Rich language support for Go, gopls language server, test runner, and delve debugger integration.",
+            type: .language,
+            runtime: .javascript,
+            main: "extension.js",
+            icon: "arrow.triangle.2.circlepath",
+            repository: "https://github.com/golang/vscode-go",
+            license: "MIT",
+            keywords: ["go", "golang", "gopls"]
+        ),
+        ExtensionManifest(
+            id: "bradlc.vscode-tailwindcss",
+            name: "Tailwind CSS IntelliSense",
+            version: "0.14.0",
+            author: "Tailwind Labs",
+            description: "Intelligent Tailwind CSS autocomplete, class sorting, syntax highlighting, and linting.",
+            type: .tool,
+            runtime: .javascript,
+            main: "extension.js",
+            icon: "paintbrush.fill",
+            repository: "https://github.com/tailwindlabs/tailwindcss-intellisense",
+            license: "MIT",
+            keywords: ["tailwind", "css", "web"]
+        ),
+        ExtensionManifest(
+            id: "esbenp.prettier-vscode",
+            name: "Prettier Code Formatter",
+            version: "10.4.0",
+            author: "Prettier",
+            description: "Opinionated code formatter supporting JavaScript, TypeScript, CSS, JSON, Markdown, and YAML.",
+            type: .tool,
+            runtime: .javascript,
+            main: "extension.js",
+            icon: "wand.and.stars",
+            repository: "https://github.com/prettier/prettier-vscode",
+            license: "MIT",
+            keywords: ["formatter", "prettier", "js"]
+        ),
+        ExtensionManifest(
+            id: "eamodio.gitlens",
+            name: "GitLens Pro",
+            version: "15.0.0",
+            author: "GitKraken",
+            description: "Supercharge Git within MicroCode. Line blame annotations, commit history graph, and interactive rebase.",
+            type: .tool,
+            runtime: .javascript,
+            main: "extension.js",
+            icon: "arrow.triangle.branch",
+            repository: "https://github.com/gitkraken/vscode-gitlens",
+            license: "MIT",
+            keywords: ["git", "gitlens", "blame"]
+        ),
+        ExtensionManifest(
+            id: "ms-toolsai.jupyter",
+            name: "Jupyter Notebook Interactive",
+            version: "2025.2.0",
+            author: "Microsoft",
+            description: "Interactive Python notebooks, execution cells, Matplotlib graphics, and remote kernel connections.",
+            type: .fileFormat,
+            runtime: .javascript,
+            main: "extension.js",
+            icon: "book.pages.fill",
+            repository: "https://github.com/microsoft/vscode-jupyter",
+            license: "MIT",
+            keywords: ["jupyter", "ipynb", "python"]
+        ),
+        ExtensionManifest(
+            id: "ms-azuretools.vscode-docker",
+            name: "Docker & Containers",
+            version: "1.29.0",
+            author: "Microsoft",
+            description: "Build, manage, and debug containerized applications with Docker CLI and compose file linting.",
+            type: .tool,
+            runtime: .javascript,
+            main: "extension.js",
+            icon: "shippingbox.fill",
+            repository: "https://github.com/microsoft/vscode-docker",
+            license: "MIT",
+            keywords: ["docker", "containers", "devops"]
+        ),
+        ExtensionManifest(
+            id: "dotmini.cloud-gpu",
+            name: "Dotmini Cloud GPU Pod",
+            version: "2.0.0",
+            author: "Dotmini Software",
+            description: "Direct zero-config compute bridge to RTX 4090, A100, H100, and B200 cloud clusters with 10Gbps dataset sync.",
+            type: .aiProvider,
+            runtime: .rust,
+            main: "cloud_gpu",
+            icon: "cpu.fill",
+            repository: "https://github.com/Dotmini/microcode",
+            license: "Proprietary",
+            keywords: ["cloud", "gpu", "hpc", "runpod"]
+        ),
+        ExtensionManifest(
+            id: "dotmini.cyber-dark",
+            name: "Cyber Dark Pro Theme",
+            version: "1.5.0",
+            author: "Dotmini Software",
+            description: "Sleek, near-black high contrast developer theme with neon syntax highlights and metal backgrounds.",
+            type: .theme,
+            runtime: .javascript,
+            main: "theme.json",
+            icon: "moon.stars.fill",
+            repository: "https://github.com/Dotmini/microcode",
+            license: "MIT",
+            keywords: ["theme", "dark", "cyber"]
+        ),
+        ExtensionManifest(
+            id: "google.colab-theme",
+            name: "Google Colab Dark Theme",
+            version: "1.0.0",
+            author: "Project IDX Team",
+            description: "Dark theme inspired by Google Colab & Project IDX editor palettes.",
+            type: .theme,
+            runtime: .javascript,
+            main: "colab.json",
+            icon: "paintpalette.fill",
+            repository: "https://github.com/Dotmini/microcode",
+            license: "MIT",
+            keywords: ["theme", "colab", "google"]
+        )
+    ]
+
     // MARK: - Load Extensions
     func loadExtensions() async {
         isLoading = true
         var extensions: [InstalledExtension] = []
         
-        // Load official extensions first
-        extensions.append(contentsOf: await loadExtensionsFromDirectory(officialExtensionsDirectory, isOfficial: true))
+        // 1. Load official extensions from directory
+        let dirOfficial = await loadExtensionsFromDirectory(officialExtensionsDirectory, isOfficial: true)
+        extensions.append(contentsOf: dirOfficial)
         
-        // Load user extensions
+        // 2. Add built-in defaults if not already present
+        let existingIDs = Set(extensions.map(\.id))
+        for def in Self.defaultOfficialExtensions {
+            if !existingIDs.contains(def.id) {
+                extensions.append(
+                    InstalledExtension(
+                        id: def.id,
+                        manifest: def,
+                        path: URL(fileURLWithPath: "/builtin/\(def.id)"),
+                        isEnabled: enabledExtensions.contains(def.id) || true, // default enabled
+                        isOfficial: true
+                    )
+                )
+            }
+        }
+        
+        // 3. Load user extensions
         extensions.append(contentsOf: await loadExtensionsFromDirectory(extensionsDirectory, isOfficial: false))
         
         await MainActor.run {

@@ -79,17 +79,19 @@ pub async fn execute_stream(
 
     // Handle Ardium separately to avoid lifetime issues
     if lang_id == "ardium" || lang_id == "ar" {
-        let ardium_bin =
-            std::env::var("ARDIUM_BIN").unwrap_or_else(|_| "/usr/local/bin/arc".to_string());
+        let ardium_bin = find_ardium_binary();
 
         let mut child = Command::new(&ardium_bin)
             .arg("run")
             .arg(&temp_file)
+            .env("DYLD_LIBRARY_PATH", "/usr/local/ardium/lib")
+            .env("ARDIUM_LIB_PATH", "/usr/local/ardium/lib")
+            .env("ARDIUM_STDLIB", "/usr/local/ardium/stdlib")
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .kill_on_drop(true)
             .spawn()
-            .map_err(|e| AppError::ExecutionError(format!("Failed to spawn Ardium: {}", e)))?;
+            .map_err(|e| AppError::ExecutionError(format!("Failed to spawn Ardium at {}: {}", ardium_bin, e)))?;
 
         let stdout = child
             .stdout
@@ -786,20 +788,53 @@ async fn execute_swift(code: &str) -> Result<ExecutionResult> {
     })
 }
 
+fn find_ardium_binary() -> String {
+    if let Ok(bin) = std::env::var("ARDIUM_BIN") {
+        if Path::new(&bin).exists() {
+            return bin;
+        }
+    }
+    if let Ok(home) = std::env::var("HOME") {
+        let user_arc = format!("{}/.cargo/bin/arc", home);
+        if Path::new(&user_arc).exists() {
+            return user_arc;
+        }
+        let user_titan = format!("{}/.cargo/bin/TitanScript", home);
+        if Path::new(&user_titan).exists() {
+            return user_titan;
+        }
+    }
+    let candidates = [
+        "/opt/homebrew/bin/arc",
+        "/usr/local/bin/arc",
+        "/usr/local/ardium/bin/arc",
+        "/usr/local/bin/ardium",
+        "/usr/local/ardium/ardium",
+        "/opt/homebrew/bin/ardium",
+    ];
+    for p in candidates {
+        if Path::new(p).exists() {
+            return p.to_string();
+        }
+    }
+    "/usr/local/ardium/bin/arc".to_string()
+}
+
 async fn execute_ardium(code: &str) -> Result<ExecutionResult> {
     let temp_file = create_temp_file("ar", code).await?;
 
-    // Use full path to avoid conflict with system 'ar' archiver
-    let ardium_binary =
-        std::env::var("ARDIUM_BIN").unwrap_or_else(|_| "/usr/local/bin/arc".to_string());
+    let ardium_binary = find_ardium_binary();
 
     let mut child = Command::new(&ardium_binary)
         .arg("run")
         .arg(&temp_file)
+        .env("DYLD_LIBRARY_PATH", "/usr/local/ardium/lib")
+        .env("ARDIUM_LIB_PATH", "/usr/local/ardium/lib")
+        .env("ARDIUM_STDLIB", "/usr/local/ardium/stdlib")
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()
-        .map_err(|e| AppError::ExecutionError(format!("Failed to spawn arc (Ardium): {}", e)))?;
+        .map_err(|e| AppError::ExecutionError(format!("Failed to spawn Ardium at {}: {}", ardium_binary, e)))?;
 
     let stdout = child.stdout.take().unwrap();
     let stderr = child.stderr.take().unwrap();
@@ -814,11 +849,17 @@ async fn execute_ardium(code: &str) -> Result<ExecutionResult> {
     let mut stderr_output = String::new();
 
     while let Ok(Some(line)) = stdout_lines.next_line().await {
+        if line.contains("Target Triple") {
+            continue;
+        }
         stdout_output.push_str(&line);
         stdout_output.push('\n');
     }
 
     while let Ok(Some(line)) = stderr_lines.next_line().await {
+        if line.contains("Target Triple") {
+            continue;
+        }
         stderr_output.push_str(&line);
         stderr_output.push('\n');
     }

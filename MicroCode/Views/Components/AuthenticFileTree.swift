@@ -88,14 +88,12 @@ struct AuthenticFileTree: NSViewRepresentable {
         // For now, we update the coordinator's root cache and reload.
         // To preserve expansion state, we would need to save/restore persistent IDs.
         
-        if context.coordinator.needsReload(revision: revision) {
-             // Wrapper creation can itself be noticeable for very large roots,
-             // so only do it when AppState publishes an actual tree revision.
+        if context.coordinator.needsReload(revision: revision, currentTreeCount: fileTree.count) {
+             // Save expansion state BEFORE updating rootItems
+             let expandedIds = context.coordinator.getExpandedIds(outlineView)
+             
              let newItems = fileTree.map { FileNodeWrapper($0) }
              context.coordinator.updateRootItems(newItems)
-             
-             // Save expansion state
-             let expandedIds = context.coordinator.getExpandedIds(outlineView)
              
              outlineView.reloadData()
              
@@ -119,17 +117,21 @@ struct AuthenticFileTree: NSViewRepresentable {
             self.rootItems = items
         }
         
-        func needsReload(revision: UInt64) -> Bool {
-            guard lastRevision != revision else { return false }
-            lastRevision = revision
-            return true
+        func needsReload(revision: UInt64, currentTreeCount: Int) -> Bool {
+            if lastRevision != revision || rootItems.count != currentTreeCount {
+                lastRevision = revision
+                return true
+            }
+            return false
         }
         
         // MARK: - State Persistence
         
         func getExpandedIds(_ outlineView: NSOutlineView) -> Set<String> {
             var expanded = Set<String>()
-            for i in 0..<outlineView.numberOfRows {
+            let rowCount = outlineView.numberOfRows
+            guard rowCount > 0 else { return expanded }
+            for i in 0..<rowCount {
                 if let item = outlineView.item(atRow: i) as? FileNodeWrapper, outlineView.isItemExpanded(item) {
                      expanded.insert(item.id)
                 }
@@ -138,20 +140,14 @@ struct AuthenticFileTree: NSViewRepresentable {
         }
         
         func restoreExpansion(_ outlineView: NSOutlineView, ids: Set<String>) {
-            // This is recursive/tricky because we need to expand parents first.
-            // But since we just reloaded, we iterate whatever is visible or known.
-            // Actually, we need to traverse the model to find wrappers matching IDs.
-            
             func expand(_ item: FileNodeWrapper) {
                 if ids.contains(item.id) {
-                    // Ensure children wrappers are created so we can traverse them
                     if item.childrenWrappers == nil {
                         item.childrenWrappers = item.node.children.map { FileNodeWrapper($0) }
                     }
                     
                     outlineView.expandItem(item)
                     
-                    // Recurse
                     if let children = item.childrenWrappers {
                         children.forEach { expand($0) }
                     }
@@ -173,24 +169,19 @@ struct AuthenticFileTree: NSViewRepresentable {
         
         func outlineView(_ outlineView: NSOutlineView, child index: Int, ofItem item: Any?) -> Any {
             if item == nil {
+                guard index >= 0 && index < rootItems.count else { return NSObject() }
                 return rootItems[index]
             }
             guard let wrapper = item as? FileNodeWrapper else { return NSObject() }
             
-            // Lazy creations of child wrappers to ensure identity
             if wrapper.childrenWrappers == nil {
                 wrapper.childrenWrappers = wrapper.node.children.map { FileNodeWrapper($0) }
             }
             
-            // Update wrapper if model changed? 
-            // Since we rebuild roots on update, we assume `node` in wrapper is fresh enough for structure.
-            // But inside `node.children`, we might have stale data if we don't refresh deeply.
-            // Because `FileNodeWrapper` is created from `node` which is a value type copy.
-            
-            // Ideally: The wrapper should hold a reference or we rebuild wrappers on every update.
-            // For this version (v1), we rebuild wrappers.
-            
-            return wrapper.childrenWrappers![index]
+            guard let children = wrapper.childrenWrappers, index >= 0 && index < children.count else {
+                return NSObject()
+            }
+            return children[index]
         }
         
         func outlineView(_ outlineView: NSOutlineView, isItemExpandable item: Any) -> Bool {
@@ -262,6 +253,17 @@ struct AuthenticFileTree: NSViewRepresentable {
                      }
                 }
             } else {
+                parent.onAction(.openFile(item.node))
+            }
+        }
+        
+        // MARK: - Selection Events
+        
+        func outlineViewSelectionDidChange(_ notification: Notification) {
+            guard let outlineView = notification.object as? NSOutlineView else { return }
+            let row = outlineView.selectedRow
+            guard row >= 0, let item = outlineView.item(atRow: row) as? FileNodeWrapper else { return }
+            if !item.node.isDirectory {
                 parent.onAction(.openFile(item.node))
             }
         }

@@ -125,14 +125,6 @@ struct MCPAnyCodable: Codable {
 class MCPSecuritySandbox {
     let workspacePath: String
     
-    // Blocked commands for safety
-    private let blockedCommands = [
-        "rm -rf /", "rm -rf ~", "sudo rm", "mkfs", "dd if=",
-        ":(){ :|:& };:", "chmod -R 777 /", "curl | sh",
-        "wget -O- | sh", "> /dev/sda", "mv / ", "shutdown",
-        "reboot", "halt", "init 0", "init 6"
-    ]
-    
     // Allowed file extensions for write
     private let allowedExtensions = Set([
         "swift", "rs", "py", "js", "ts", "jsx", "tsx", "java", "kt",
@@ -143,50 +135,52 @@ class MCPSecuritySandbox {
     ])
     
     init(workspace: String) {
-        self.workspacePath = workspace
+        self.workspacePath = URL(fileURLWithPath: workspace)
+            .standardizedFileURL
+            .resolvingSymlinksInPath()
+            .path
     }
     
     /// Validate path is within workspace
     func validatePath(_ path: String) -> Result<String, MCPError> {
-        let resolved = (path as NSString).expandingTildeInPath
-        let absolute: String
-        
-        if resolved.hasPrefix("/") {
-            absolute = resolved
-        } else {
-            absolute = (workspacePath as NSString).appendingPathComponent(resolved)
-        }
-        
-        let canonical = (absolute as NSString).standardizingPath
-        let workspaceCanonical = (workspacePath as NSString).standardizingPath
-        
-        guard canonical.hasPrefix(workspaceCanonical) else {
+        let expanded = (path as NSString).expandingTildeInPath
+        let candidate = expanded.hasPrefix("/")
+            ? URL(fileURLWithPath: expanded)
+            : URL(fileURLWithPath: workspacePath).appendingPathComponent(expanded)
+        let canonical = candidate.standardizedFileURL.resolvingSymlinksInPath().path
+        let workspaceCanonical = workspacePath
+
+        // Do not use a plain prefix test: `/workspace-evil` is not inside
+        // `/workspace`. Existing symlinks are resolved before testing.
+        guard canonical == workspaceCanonical || canonical.hasPrefix(workspaceCanonical + "/") else {
             return .failure(.custom("Access denied: path '\(path)' is outside workspace"))
         }
-        
-        // Block dotfile traversal attacks
-        if canonical.contains("../") || canonical.contains("/..") {
-            return .failure(.custom("Access denied: path traversal detected"))
-        }
-        
         return .success(canonical)
     }
     
-    /// Validate command is safe to execute
+    /// Autonomous MCP terminal requests are deliberately limited to simple,
+    /// read-only workspace inspection. A substring blacklist is not a sandbox.
     func validateCommand(_ command: String) -> Result<Void, MCPError> {
-        let lower = command.lowercased()
-        
-        for blocked in blockedCommands {
-            if lower.contains(blocked.lowercased()) {
-                return .failure(.custom("Command blocked for safety: contains '\(blocked)'"))
-            }
+        let trimmed = command.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return .failure(.invalidParams) }
+        let unsafeSyntax = [";", "|", "&", ">", "<", "`", "$", "\n", "\r"]
+        guard !unsafeSyntax.contains(where: { trimmed.contains($0) }) else {
+            return .failure(.custom("Shell composition, redirection, and substitution require explicit user approval"))
         }
-        
-        // Block network exfiltration
-        if lower.contains("curl") && (lower.contains("| sh") || lower.contains("| bash")) {
-            return .failure(.custom("Command blocked: pipe to shell detected"))
+        let parts = trimmed.split(whereSeparator: { $0 == " " || $0 == "\t" })
+        guard let executable = parts.first else { return .failure(.invalidParams) }
+        let allowedExecutables: Set<String> = ["git", "rg", "grep", "find", "ls", "pwd", "head", "tail", "sed", "wc", "stat"]
+        guard allowedExecutables.contains(String(executable)) else {
+            return .failure(.custom("Only read-only workspace inspection commands are available through MCP"))
         }
-        
+        let arguments = parts.dropFirst()
+        guard !arguments.contains(where: { $0.hasPrefix("/") || $0.contains("..") }) else {
+            return .failure(.custom("Absolute paths and parent traversal are not allowed in MCP terminal commands"))
+        }
+        if executable == "git", let operation = arguments.first,
+           !["status", "diff", "log", "branch", "show", "rev-parse"].contains(String(operation)) {
+            return .failure(.custom("Only read-only git operations are available through MCP"))
+        }
         return .success(())
     }
     
@@ -749,41 +743,75 @@ class MCPServer: ObservableObject {
             let errPipe = Pipe()
             process.standardOutput = pipe
             process.standardError = errPipe
-            
-            // Timeout
+            let outputLock = NSLock()
+            let completionLock = NSLock()
+            var stdout = Data()
+            var stderr = Data()
+            var didTimeout = false
+            var didResume = false
+            let readers = DispatchGroup()
+
+            func finish(_ result: Result<String, Error>) {
+                completionLock.lock()
+                defer { completionLock.unlock() }
+                guard !didResume else { return }
+                didResume = true
+                switch result {
+                case .success(let value): continuation.resume(returning: value)
+                case .failure(let error): continuation.resume(throwing: error)
+                }
+            }
+
             let timer = DispatchSource.makeTimerSource()
             timer.schedule(deadline: .now() + .seconds(timeout))
             timer.setEventHandler {
+                outputLock.lock()
+                didTimeout = true
+                outputLock.unlock()
                 process.terminate()
             }
+            process.terminationHandler = { completedProcess in
+                timer.cancel()
+                readers.notify(queue: .global(qos: .utility)) {
+                    outputLock.lock()
+                    let outData = stdout
+                    let errData = stderr
+                    let timedOut = didTimeout
+                    outputLock.unlock()
+
+                    var output = String(data: outData, encoding: .utf8) ?? ""
+                    let errorOutput = String(data: errData, encoding: .utf8) ?? ""
+                    if !errorOutput.isEmpty {
+                        output += output.isEmpty ? errorOutput : "\n" + errorOutput
+                    }
+                    if timedOut {
+                        output += output.isEmpty ? "Command timed out after \(timeout) seconds" : "\nCommand timed out after \(timeout) seconds"
+                    } else if completedProcess.terminationStatus != 0 && output.isEmpty {
+                        output = "Command exited with code \(completedProcess.terminationStatus)"
+                    }
+                    if output.count > 50000 {
+                        output = String(output.prefix(50000)) + "\n...[truncated]"
+                    }
+                    finish(.success(output))
+                }
+            }
+
             timer.resume()
-            
             do {
                 try process.run()
-                process.waitUntilExit()
-                timer.cancel()
-                
-                let data = pipe.fileHandleForReading.readDataToEndOfFile()
-                let errData = errPipe.fileHandleForReading.readDataToEndOfFile()
-                
-                var output = String(data: data, encoding: .utf8) ?? ""
-                if output.isEmpty {
-                    output = String(data: errData, encoding: .utf8) ?? ""
+                for (handle, isStdout) in [(pipe.fileHandleForReading, true), (errPipe.fileHandleForReading, false)] {
+                    readers.enter()
+                    DispatchQueue.global(qos: .utility).async {
+                        let data = handle.readDataToEndOfFile()
+                        outputLock.lock()
+                        if isStdout { stdout.append(data) } else { stderr.append(data) }
+                        outputLock.unlock()
+                        readers.leave()
+                    }
                 }
-                
-                if process.terminationStatus != 0 && output.isEmpty {
-                    output = "Command exited with code \(process.terminationStatus)"
-                }
-                
-                // Limit output size
-                if output.count > 50000 {
-                    output = String(output.prefix(50000)) + "\n...[truncated]"
-                }
-                
-                continuation.resume(returning: output)
             } catch {
                 timer.cancel()
-                continuation.resume(throwing: error)
+                finish(.failure(error))
             }
         }
     }
@@ -794,23 +822,54 @@ class MCPServer: ObservableObject {
         guard let code = args["code"] as? String, !code.isEmpty else {
             throw MCPToolError.missingParam("code")
         }
-        let language = (args["language"] as? String ?? "swift").lowercased()
+        let language = (args["language"] as? String ?? "python").lowercased()
         let stdin = args["stdin"] as? String ?? ""
+        
+        // Native Ardium execution
+        if language == "ardium" || language == "ar" {
+            var finalCode = code
+            if !finalCode.contains("fn main(") && !finalCode.contains("func main(") {
+                let trimmed = finalCode.trimmingCharacters(in: .whitespacesAndNewlines)
+                if trimmed.contains("print") || trimmed.contains("println") || trimmed.contains("show(") {
+                    finalCode = "fn main() {\n" + finalCode + "\n}"
+                }
+            }
+            let res = await ArdiumRunner.execute(code: finalCode)
+            var out = res.stdout
+            if !res.stderr.isEmpty { out += (out.isEmpty ? "" : "\n") + res.stderr }
+            let cleanPattern = #"\x1B(?:[@-Z\\-_]|\[[0-?]*[ -/]*[@-~])"#
+            let cleanOut = out.replacingOccurrences(of: cleanPattern, with: "", options: .regularExpression)
+            return cleanOut.isEmpty ? "(Executed with no output)" : cleanOut
+        }
         
         let tempDir = FileManager.default.temporaryDirectory
         let ext: String
         switch language {
         case "swift": ext = "swift"
-        case "python", "py": ext = "py"
-        case "javascript", "js": ext = "js"
+        case "python", "py", "python3": ext = "py"
+        case "javascript", "js", "node": ext = "js"
         case "typescript", "ts": ext = "ts"
         case "go", "golang": ext = "go"
         case "rust", "rs": ext = "rs"
-        case "cpp", "c++": ext = "cpp"
+        case "cpp", "c++", "cc": ext = "cpp"
         case "c": ext = "c"
+        case "objc", "objective-c", "m": ext = "m"
+        case "objc++", "objective-cpp", "mm": ext = "mm"
         case "java": ext = "java"
         case "kotlin", "kt": ext = "kt"
-        case "sh", "bash": ext = "sh"
+        case "csharp", "cs", "dotnet": ext = "cs"
+        case "php": ext = "php"
+        case "ruby", "rb": ext = "rb"
+        case "r", "rscript": ext = "R"
+        case "julia", "jl": ext = "jl"
+        case "zig": ext = "zig"
+        case "dart": ext = "dart"
+        case "lua": ext = "lua"
+        case "scala": ext = "scala"
+        case "perl", "pl": ext = "pl"
+        case "haskell", "hs": ext = "hs"
+        case "sh", "bash", "zsh": ext = "sh"
+        case "sql": ext = "sql"
         default: ext = "txt"
         }
         
@@ -822,29 +881,59 @@ class MCPServer: ObservableObject {
         switch language {
         case "swift":
             command = "swift \(sourceFile.path.shellEscaped())"
-        case "python", "py":
+        case "python", "py", "python3":
             command = "python3 \(sourceFile.path.shellEscaped())"
-        case "javascript", "js":
+        case "javascript", "js", "node":
             command = "node \(sourceFile.path.shellEscaped())"
         case "typescript", "ts":
-            command = "npx ts-node \(sourceFile.path.shellEscaped())"
+            command = "npx -y ts-node \(sourceFile.path.shellEscaped())"
         case "go", "golang":
             command = "go run \(sourceFile.path.shellEscaped())"
         case "rust", "rs":
             let bin = tempDir.appendingPathComponent("rust_bin_\(UUID().uuidString.prefix(8))").path
             command = "rustc \(sourceFile.path.shellEscaped()) -o \(bin.shellEscaped()) && \(bin.shellEscaped())"
-        case "cpp", "c++":
+        case "cpp", "c++", "cc":
             let bin = tempDir.appendingPathComponent("cpp_bin_\(UUID().uuidString.prefix(8))").path
             command = "clang++ -O2 -std=c++17 \(sourceFile.path.shellEscaped()) -o \(bin.shellEscaped()) && \(bin.shellEscaped())"
         case "c":
             let bin = tempDir.appendingPathComponent("c_bin_\(UUID().uuidString.prefix(8))").path
             command = "clang -O2 \(sourceFile.path.shellEscaped()) -o \(bin.shellEscaped()) && \(bin.shellEscaped())"
+        case "objc", "objective-c", "m", "objc++", "objective-cpp", "mm":
+            let bin = tempDir.appendingPathComponent("objc_bin_\(UUID().uuidString.prefix(8))").path
+            command = "clang -framework Foundation \(sourceFile.path.shellEscaped()) -o \(bin.shellEscaped()) && \(bin.shellEscaped())"
         case "java":
             command = "java \(sourceFile.path.shellEscaped())"
-        case "sh", "bash":
+        case "kotlin", "kt":
+            let jar = tempDir.appendingPathComponent("kt_\(UUID().uuidString.prefix(8)).jar").path
+            command = "kotlinc \(sourceFile.path.shellEscaped()) -include-runtime -d \(jar.shellEscaped()) && java -jar \(jar.shellEscaped())"
+        case "csharp", "cs", "dotnet":
+            command = "dotnet-script \(sourceFile.path.shellEscaped()) 2>/dev/null || csc \(sourceFile.path.shellEscaped()) -out:\(tempDir.path)/cs.exe && mono \(tempDir.path)/cs.exe 2>/dev/null || dotnet run"
+        case "php":
+            command = "php \(sourceFile.path.shellEscaped())"
+        case "ruby", "rb":
+            command = "ruby \(sourceFile.path.shellEscaped())"
+        case "r", "rscript":
+            command = "Rscript \(sourceFile.path.shellEscaped())"
+        case "julia", "jl":
+            command = "julia \(sourceFile.path.shellEscaped())"
+        case "zig":
+            command = "zig run \(sourceFile.path.shellEscaped())"
+        case "dart":
+            command = "dart run \(sourceFile.path.shellEscaped())"
+        case "lua":
+            command = "lua \(sourceFile.path.shellEscaped())"
+        case "scala":
+            command = "scala \(sourceFile.path.shellEscaped())"
+        case "perl", "pl":
+            command = "perl \(sourceFile.path.shellEscaped())"
+        case "haskell", "hs":
+            command = "runghc \(sourceFile.path.shellEscaped())"
+        case "sh", "bash", "zsh":
             command = "bash \(sourceFile.path.shellEscaped())"
+        case "sql":
+            command = "sqlite3 :memory: < \(sourceFile.path.shellEscaped())"
         default:
-            command = "cat \(sourceFile.path.shellEscaped())"
+            command = "bash \(sourceFile.path.shellEscaped())"
         }
         
         if !stdin.isEmpty {
@@ -854,7 +943,7 @@ class MCPServer: ObservableObject {
             command += " < \(stdinFile.path.shellEscaped())"
         }
         
-        return try await runShellCommand(command, cwd: tempDir.path, timeout: 15)
+        return try await runShellCommand(command, cwd: tempDir.path, timeout: 30)
     }
 
     private func executeRunCell(_ args: [String: Any], sandbox: MCPSecuritySandbox) async throws -> String {

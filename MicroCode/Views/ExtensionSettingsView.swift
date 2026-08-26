@@ -22,8 +22,8 @@ struct ExtensionSettingsView: View {
         VStack(spacing: 0) {
             // Header
             HStack {
-                Image(systemName: "puzzlepiece.extension.fill")
-                    .foregroundColor(.accentColor)
+                Image(systemName: "puzzlepiece.extension")
+                    .foregroundColor(.secondary)
                 Text("Extensions")
                     .font(.headline)
                 
@@ -32,7 +32,8 @@ struct ExtensionSettingsView: View {
                 Button(action: { showInstallSheet = true }) {
                     Label("Install", systemImage: "plus")
                 }
-                .compatButtonStyleBorderedProminent()
+                .buttonStyle(.bordered)
+                .controlSize(.small)
             }
             .padding()
             
@@ -167,49 +168,47 @@ struct ExtensionRow: View {
             // Icon
             ZStack {
                 RoundedRectangle(cornerRadius: 8)
-                    .fill(`extension`.manifest.type == .theme ? 
-                          Color.purple.opacity(0.2) : Color.accentColor.opacity(0.2))
-                    .frame(width: 40, height: 40)
+                    .fill(Color.primary.opacity(0.06))
+                    .frame(width: 38, height: 38)
                 Image(systemName: `extension`.displayIcon)
-                    .font(.system(size: 18))
-                    .foregroundColor(`extension`.manifest.type == .theme ? .purple : .accentColor)
+                    .font(.system(size: 16))
+                    .foregroundColor(.secondary)
             }
             
             // Info
             VStack(alignment: .leading, spacing: 2) {
-                HStack {
+                HStack(spacing: 6) {
                     Text(`extension`.manifest.name)
-                        .font(.headline)
+                        .font(.system(size: 13, weight: .semibold))
                     
                     if `extension`.isOfficial {
                         Text("OFFICIAL")
-                            .font(.caption2)
-                            .fontWeight(.bold)
-                            .foregroundColor(.white)
-                            .padding(.horizontal, 6)
+                            .font(.system(size: 8.5, weight: .bold))
+                            .foregroundColor(.secondary)
+                            .padding(.horizontal, 5)
                             .padding(.vertical, 2)
-                            .background(Color.blue)
-                            .cornerRadius(4)
+                            .background(Color.primary.opacity(0.06))
+                            .clipShape(Capsule())
                     }
                     
                     Text("v\(`extension`.manifest.version)")
-                        .font(.caption)
-                        .foregroundColor(.secondary)
+                        .font(.system(size: 11))
+                        .foregroundColor(.secondary.opacity(0.7))
                 }
                 
                 Text(`extension`.manifest.description)
-                    .font(.caption)
+                    .font(.system(size: 11))
                     .foregroundColor(.secondary)
                     .lineLimit(1)
                 
                 HStack(spacing: 8) {
                     Label(`extension`.manifest.type.displayName, systemImage: `extension`.manifest.type.icon)
-                        .font(.caption2)
+                        .font(.system(size: 10))
                         .foregroundColor(.secondary)
                     
                     Text("by \(`extension`.manifest.author)")
-                        .font(.caption2)
-                        .foregroundColor(.secondary)
+                        .font(.system(size: 10))
+                        .foregroundColor(.secondary.opacity(0.8))
                 }
             }
             

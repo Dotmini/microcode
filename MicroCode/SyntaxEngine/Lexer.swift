@@ -662,6 +662,62 @@ public func createRustLexer() -> StateMachineLexer {
     )
 }
 
+/// Creates a pre-configured lexer for Ardium
+public func createArdiumLexer() -> StateMachineLexer {
+    let ardiumKeywords: [String: SyntaxTokenType] = [
+        // Declarations
+        "fn": .keywordDeclaration, "var": .keywordDeclaration, "let": .keywordDeclaration,
+        "mut": .keywordModifier, "struct": .keywordDeclaration, "class": .keywordDeclaration,
+        "enum": .keywordDeclaration, "import": .keywordDeclaration, "extern": .keywordDeclaration,
+        "async": .keywordModifier, "await": .keywordModifier,
+        "export": .keywordDeclaration, "test": .keywordDeclaration, "interrupt": .keywordDeclaration,
+        
+        // Memory & RAII keywords
+        "@owned": .keywordModifier, "@State": .keywordModifier, "@External": .keywordModifier,
+        "@export": .keywordModifier, "@test": .keywordModifier,
+        "alloc": .function, "free": .function, "peek": .function, "poke": .function,
+        
+        // Control flow
+        "if": .keyword, "else": .keyword, "elif": .keyword,
+        "loop": .keyword, "while": .keyword, "for": .keyword,
+        "return": .keywordControl, "break": .keywordControl, "continue": .keywordControl,
+        "match": .keyword,
+        
+        // Constants & Special
+        "true": .number, "false": .number, "nil": .number, "null": .number,
+        "GLOBAL": .keyword, "RESET": .keyword, "ERR": .keyword,
+        
+        // Primitive & Pointer Types
+        "int": .type, "i8": .type, "i16": .type, "i32": .type, "i64": .type,
+        "u8": .type, "u16": .type, "u32": .type, "u64": .type,
+        "float": .type, "f32": .type, "f64": .type,
+        "string": .type, "bool": .type, "void": .type,
+        "i8_ptr": .type, "i32_ptr": .type, "i64_ptr": .type, "ptr": .type,
+        
+        // Composite & stdlib types
+        "Vector2": .type, "Array": .type, "Map": .type, "Any": .type,
+        
+        // Builtins & CoreUI Framework
+        "print": .function, "println": .function, "printf": .function,
+        "VStack": .function, "HStack": .function, "ZStack": .function,
+        "Text": .function, "Title": .function, "Headline": .function,
+        "Button": .function, "TextField": .function, "Image": .function, "Spacer": .function,
+        "Live": .function, "DebugUI": .function,
+        "init": .function, "createWindow": .function, "run": .function
+    ]
+    
+    return StateMachineLexer(
+        languageId: "ardium",
+        keywords: ardiumKeywords,
+        lineCommentPrefix: "//",
+        blockCommentMarkers: ("/*", "*/"),
+        docCommentPrefix: "///",
+        stringDelimiters: ["\""],
+        multilineStringDelimiter: "\"\"\"",
+        interpolationStart: nil
+    )
+}
+
 /// Creates a pre-configured lexer for JavaScript/TypeScript
 public func createJavaScriptLexer() -> StateMachineLexer {
     let jsKeywords: [String: SyntaxTokenType] = [

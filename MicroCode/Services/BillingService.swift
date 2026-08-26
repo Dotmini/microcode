@@ -157,7 +157,7 @@ class BillingService: ObservableObject {
         }
     }
     
-    /// Triggers a Stripe Checkout Session for purchasing tokens
+    /// Triggers a Checkout Session for purchasing tokens via Beam Payment / Gateway
     func buyTokens(packageId: String) async throws -> URL {
         guard let token = authToken else { throw URLError(.userAuthenticationRequired) }
         
@@ -185,8 +185,12 @@ class BillingService: ObservableObject {
         }
     }
     
-    /// Triggers a Stripe Checkout Session for Pro Subscription
-    func upgradeToProViaStripe() async throws -> URL {
+    /// Triggers a Checkout Session for Pro Subscription via Beam Payment / Gateway
+    func upgradeToPro() async throws -> URL {
         return try await buyTokens(packageId: "sub_pro_monthly")
+    }
+    
+    func upgradeToProViaStripe() async throws -> URL {
+        return try await upgradeToPro()
     }
 }

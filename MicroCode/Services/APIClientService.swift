@@ -228,10 +228,12 @@ class APIClientService: ObservableObject {
                 throw NSError(domain: "APIClient", code: 0, userInfo: [NSLocalizedDescriptionKey: "Invalid response"])
             }
             
-            let headerMap = Dictionary(uniqueKeysWithValues: httpResponse.allHeaderFields.compactMap { key, value in
-                guard let k = key as? String, let v = value as? String else { return nil as (String, String)? }
-                return (k, v)
-            }.compactMap { $0 })
+            var headerMap: [String: String] = [:]
+            for (key, value) in httpResponse.allHeaderFields {
+                if let k = key as? String, let v = value as? String {
+                    headerMap[k] = v
+                }
+            }
             
             let bodyStr = String(data: data, encoding: .utf8) ?? "(binary data: \(data.count) bytes)"
             

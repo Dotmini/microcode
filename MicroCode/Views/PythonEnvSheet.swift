@@ -19,147 +19,210 @@ struct PythonEnvSheet: View {
     var body: some View {
         VStack(spacing: 0) {
             // Header
-            HStack {
-                Image(systemName: "terminal.fill")
-                    .foregroundColor(.green)
+            HStack(spacing: 8) {
+                Image(systemName: "terminal")
+                    .foregroundColor(.secondary)
+                    .font(.system(size: 14))
                 Text("Python Environments")
-                    .font(.headline)
+                    .font(.system(size: 14, weight: .semibold))
                 
                 Spacer()
                 
                 Button(action: { showingCreateEnv = true }) {
-                    Image(systemName: "plus.circle.fill")
-                        .foregroundColor(.accentColor)
+                    Label("New Environment", systemImage: "plus")
                 }
-                .buttonStyle(.plain)
-                .help("Create New Environment")
+                .buttonStyle(.bordered)
+                .controlSize(.small)
                 
                 Button(action: { dismiss() }) {
-                    Image(systemName: "xmark.circle.fill")
+                    Image(systemName: "xmark")
+                        .font(.system(size: 10, weight: .bold))
                         .foregroundColor(.secondary)
+                        .padding(6)
+                        .background(Color.primary.opacity(0.06))
+                        .clipShape(Circle())
                 }
                 .buttonStyle(.plain)
             }
-            .padding()
+            .padding(.horizontal, 16)
+            .padding(.vertical, 12)
             
             Divider()
             
             HStack(spacing: 0) {
-                // Environment List
-                VStack(alignment: .leading, spacing: 0) {
-                    Text("Environments")
-                        .font(.caption)
-                        .foregroundColor(.secondary)
-                        .padding(.horizontal)
-                        .padding(.top, 8)
+                // Environment List (Sidebar)
+                VStack(alignment: .leading, spacing: 6) {
+                    Text("ENVIRONMENTS")
+                        .font(.system(size: 10, weight: .bold))
+                        .foregroundColor(.secondary.opacity(0.8))
+                        .padding(.horizontal, 14)
+                        .padding(.top, 10)
                     
-                    List(envManager.environments, selection: $selectedEnv) { env in
-                        EnvRow(env: env, isActive: envManager.activeEnvironment?.id == env.id)
-                            .tag(env)
+                    ScrollView {
+                        VStack(spacing: 4) {
+                            ForEach(envManager.environments) { env in
+                                Button(action: { selectedEnv = env }) {
+                                    HStack(spacing: 8) {
+                                        Image(systemName: envManager.activeEnvironment?.id == env.id ? "checkmark.circle.fill" : "cube")
+                                            .font(.system(size: 12))
+                                            .foregroundColor(envManager.activeEnvironment?.id == env.id ? .secondary : .secondary.opacity(0.6))
+                                        
+                                        VStack(alignment: .leading, spacing: 1) {
+                                            Text(env.name)
+                                                .font(.system(size: 12, weight: selectedEnv?.id == env.id ? .semibold : .regular))
+                                                .foregroundColor(.primary)
+                                            Text(env.pythonVersion)
+                                                .font(.system(size: 10))
+                                                .foregroundColor(.secondary)
+                                        }
+                                        Spacer()
+                                    }
+                                    .padding(.horizontal, 10)
+                                    .padding(.vertical, 6)
+                                    .background(
+                                        RoundedRectangle(cornerRadius: 6)
+                                            .fill(selectedEnv?.id == env.id ? Color.primary.opacity(0.1) : Color.clear)
+                                    )
+                                }
+                                .buttonStyle(.plain)
+                            }
+                        }
+                        .padding(.horizontal, 8)
                     }
-                    .listStyle(.sidebar)
                 }
-                .frame(width: 200)
+                .frame(width: 190)
+                .background(Color(nsColor: .controlBackgroundColor).opacity(0.3))
                 
                 Divider()
                 
                 // Details Panel
-                VStack(alignment: .leading, spacing: 16) {
+                VStack(alignment: .leading, spacing: 14) {
                     if let env = selectedEnv {
                         // Environment Info
-                        GroupBox(label: Text("Environment Details")) {
-                            VStack(alignment: .leading, spacing: 8) {
+                        VStack(alignment: .leading, spacing: 8) {
+                            Text("Environment Details")
+                                .font(.system(size: 12, weight: .semibold))
+                                .foregroundColor(.secondary)
+                            
+                            VStack(alignment: .leading, spacing: 6) {
                                 CompatLabeledContent("Name", value: env.name)
                                 CompatLabeledContent("Python", value: env.pythonVersion)
                                 CompatLabeledContent("Path", value: env.path.path)
                                     .font(.system(size: 10, design: .monospaced))
                             }
-                            .padding(.vertical, 4)
+                            .padding(10)
+                            .background(
+                                RoundedRectangle(cornerRadius: 7)
+                                    .fill(Color.primary.opacity(0.04))
+                                    .overlay(RoundedRectangle(cornerRadius: 7).stroke(Color.primary.opacity(0.06), lineWidth: 1))
+                            )
                         }
                         
                         // Actions
-                        HStack {
+                        HStack(spacing: 8) {
                             Button(action: { envManager.activateEnvironment(env) }) {
-                                HStack {
+                                HStack(spacing: 4) {
                                     Image(systemName: "checkmark.circle")
                                     Text("Activate")
                                 }
                             }
-                            .buttonStyle(.borderedProminent)
+                            .buttonStyle(.bordered)
+                            .controlSize(.small)
                             .disabled(envManager.activeEnvironment?.id == env.id)
                             
                             Button(action: { deleteEnv(env) }) {
-                                HStack {
+                                HStack(spacing: 4) {
                                     Image(systemName: "trash")
                                     Text("Delete")
                                 }
                             }
                             .buttonStyle(.bordered)
-                            .foregroundColor(.red)
+                            .controlSize(.small)
+                            .foregroundColor(.secondary)
                         }
                         
-                        // ── Auto-detected packages (primary path) ───────────
-                        GroupBox(label: Label("Auto-detected from your code", systemImage: "wand.and.stars")) {
+                        // ── Auto-detected packages ───────────
+                        VStack(alignment: .leading, spacing: 8) {
+                            Label("Auto-detected from code", systemImage: "sparkles")
+                                .font(.system(size: 12, weight: .semibold))
+                                .foregroundColor(.secondary)
+                            
                             VStack(alignment: .leading, spacing: 8) {
                                 if envManager.detectedPackages.isEmpty {
-                                    Text("No 3rd-party imports detected yet. Run a cell or write `import …` and they'll appear here automatically.")
-                                        .font(.caption)
+                                    Text("No 3rd-party imports detected yet. Write or run Python code to see packages here.")
+                                        .font(.system(size: 11))
                                         .foregroundColor(.secondary)
                                 } else {
                                     Text(envManager.detectedPackages.joined(separator: ", "))
-                                        .font(.system(.body, design: .monospaced))
+                                        .font(.system(size: 11, design: .monospaced))
                                         .textSelection(.enabled)
-
+                                    
                                     Button {
                                         envManager.installPackages(envManager.detectedPackages, in: env) { _, _ in }
                                     } label: {
                                         Label("Install \(envManager.detectedPackages.count) detected package\(envManager.detectedPackages.count == 1 ? "" : "s")",
-                                              systemImage: "arrow.down.circle.fill")
+                                              systemImage: "arrow.down.circle")
                                     }
-                                    .buttonStyle(.borderedProminent)
+                                    .buttonStyle(.bordered)
+                                    .controlSize(.small)
                                     .disabled(envManager.isWorking)
                                 }
                             }
                             .frame(maxWidth: .infinity, alignment: .leading)
-                            .padding(.vertical, 4)
+                            .padding(10)
+                            .background(
+                                RoundedRectangle(cornerRadius: 7)
+                                    .fill(Color.primary.opacity(0.04))
+                                    .overlay(RoundedRectangle(cornerRadius: 7).stroke(Color.primary.opacity(0.06), lineWidth: 1))
+                            )
                         }
 
-                        // ── Manual install (fallback) ───────────────────────
-                        GroupBox(label: Text("Or install manually")) {
-                            VStack(alignment: .leading, spacing: 8) {
-                                HStack {
-                                    TextField("Package names (space separated)", text: $packagesToInstall)
-                                        .textFieldStyle(.roundedBorder)
+                        // ── Manual install ───────────────────────
+                        VStack(alignment: .leading, spacing: 6) {
+                            Text("Or install manually")
+                                .font(.system(size: 12, weight: .semibold))
+                                .foregroundColor(.secondary)
+                            
+                            HStack(spacing: 8) {
+                                TextField("Package names (space separated)", text: $packagesToInstall)
+                                    .textFieldStyle(.plain)
+                                    .font(.system(size: 12))
+                                    .padding(7)
+                                    .background(
+                                        RoundedRectangle(cornerRadius: 6)
+                                            .fill(Color(nsColor: .textBackgroundColor))
+                                            .overlay(RoundedRectangle(cornerRadius: 6).stroke(Color.primary.opacity(0.08), lineWidth: 1))
+                                    )
 
-                                    Button("Install") {
-                                        installPackages(env)
-                                    }
-                                    .buttonStyle(.bordered)
-                                    .disabled(packagesToInstall.isEmpty || envManager.isWorking)
+                                Button("Install") {
+                                    installPackages(env)
                                 }
-
-                                Text("Example: numpy pandas matplotlib")
-                                    .font(.caption)
-                                    .foregroundColor(.secondary)
+                                .buttonStyle(.bordered)
+                                .controlSize(.small)
+                                .disabled(packagesToInstall.isEmpty || envManager.isWorking)
                             }
-                            .padding(.vertical, 4)
+
+                            Text("Example: numpy pandas matplotlib")
+                                .font(.system(size: 10))
+                                .foregroundColor(.secondary.opacity(0.8))
                         }
                         
                         Spacer()
                     } else {
-                        VStack {
+                        VStack(spacing: 8) {
                             Spacer()
-                            Image(systemName: "folder.badge.gearshape")
-                                .font(.system(size: 48))
-                                .foregroundColor(.secondary)
-                            Text("Select an environment")
+                            Image(systemName: "cube.transparent")
+                                .font(.system(size: 36))
+                                .foregroundColor(.secondary.opacity(0.4))
+                            Text("Select an environment to view details")
+                                .font(.system(size: 12))
                                 .foregroundColor(.secondary)
                             Spacer()
                         }
                         .frame(maxWidth: .infinity)
                     }
                 }
-                .padding()
+                .padding(16)
                 .frame(maxWidth: .infinity)
             }
             

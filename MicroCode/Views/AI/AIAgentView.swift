@@ -11,6 +11,8 @@ import Combine
 import MicroCodeSupport
 import AppKit
 import WebKit
+import UniformTypeIdentifiers
+import PDFKit
 
 // MARK: - AI Agent View (Professional)
 
@@ -23,14 +25,54 @@ struct AIAgentView: View {
     
     @State private var inputText = ""
     @State private var attachments: [AIAttachment] = []
+    @State private var isDropTargeted = false
     @State private var isHoveringInput = false
     @State private var isPaperMode = false  // A4 Paper reading mode
     @State private var isCellMode = false   // Cell Mode (notebook-style)
     @State private var currentPaperPage = 0
     @State private var showModelPicker = false
+    @State private var showProjectDropdown = false
+    @State private var showSubAgentDropdown = false
+    @State private var selectedSubAgentType: String = "main"
     @State private var isPlanMode = false
     @State private var isTaskMode = false
+    @State private var collapsedProjectsInChatSidebar: Set<String> = []
     @FocusState private var isInputFocused: Bool
+    
+    private var selectedSubAgentDisplayName: String {
+        switch selectedSubAgentType {
+        case "main": return "Main Agent"
+        case "architect": return "Architect"
+        case "frontend_engineer": return "Frontend Specialist"
+        case "backend_engineer": return "Backend Engineer"
+        case "bug_hunter": return "Bug Hunter"
+        case "test_runner": return "Test Runner"
+        case "security_auditor": return "Security Auditor"
+        default:
+            if let def = SubAgentHarness.shared.registeredDefinitions[selectedSubAgentType] {
+                return def.role
+            }
+            return selectedSubAgentType.capitalized
+        }
+    }
+    
+    private var currentProjectName: String {
+        if let ws = appState.workspaceFolder?.path, !ws.isEmpty {
+            return URL(fileURLWithPath: ws).lastPathComponent
+        }
+        if let activeChat = agent.chatSessions.first(where: { $0.id == agent.activeChatId }),
+           let activeChatPath = activeChat.projectPath, !activeChatPath.isEmpty {
+            return URL(fileURLWithPath: activeChatPath).lastPathComponent
+        }
+        return "No Project"
+    }
+    
+    private var currentModelDisplayName: String {
+        if let modelDef = AIModelCatalog.shared.model(id: appState.aiModel) {
+            return modelDef.name
+        }
+        return appState.aiModel.isEmpty ? "Gemini 3.7 Flash" : appState.aiModel
+    }
     
     // Aesthetic Constants
     private let borderColor = Color.white.opacity(0.1)
@@ -73,30 +115,67 @@ struct AIAgentView: View {
                         .transition(.opacity)
                 } else {
                     // Normal Chat Mode
-                    VStack(spacing: 0) {
-                        // Agent Phase Indicator (animated status bar)
-                        if agent.agentPhase != .idle {
-                            agentPhaseBar
-                        }
-                        
-                        ZStack(alignment: .bottom) {
-                            // Chat Scroll
-                            AgentChatStage(messages: agent.messages, isLoading: agent.isLoading, domain: agent.domain, currentToolExecution: agent.currentToolExecution, onApplyChange: { change in applyChange(change) }, onRejectChange: { change in rejectChange(change) }, onSuggestionTap: { suggestion in inputText = suggestion; sendMessage() })
+                    if agent.messages.isEmpty && !agent.isLoading {
+                        // Centered Empty State (Matching media_1787685889495.png)
+                        VStack(spacing: 0) {
+                            Spacer()
                             
-                            VStack(spacing: 0) {
-                                // Suggested Action (after completion)
-                                if let suggestion = agent.suggestedAction {
-                                    suggestedActionBar(suggestion)
+                            VStack(alignment: .leading, spacing: 8) {
+                                // Project Workspace Pill Selector
+                                Button(action: { showProjectDropdown.toggle() }) {
+                                    HStack(spacing: 5) {
+                                        Image(systemName: "folder")
+                                            .font(.system(size: 11))
+                                            .foregroundColor(.secondary)
+                                        Text(currentProjectName)
+                                            .font(.system(size: 12, weight: .medium))
+                                            .foregroundColor(.primary.opacity(0.85))
+                                        Image(systemName: "chevron.down")
+                                            .font(.system(size: 8, weight: .semibold))
+                                            .foregroundColor(.secondary.opacity(0.7))
+                                    }
+                                    .padding(.horizontal, 8)
+                                    .padding(.vertical, 4)
+                                    .background(Color.primary.opacity(0.04))
+                                    .cornerRadius(6)
                                 }
+                                .buttonStyle(.plain)
+                                .popover(isPresented: $showProjectDropdown, arrowEdge: .top) {
+                                    ProjectWorkspaceSelectorMenu(isPresented: $showProjectDropdown)
+                                        .environmentObject(appState)
+                                }
+                                .padding(.leading, 2)
                                 
-                                // Input Container
-                                inputArea
+                                // Clean Floating Input Box
+                                inputCardView
                             }
+                            .frame(maxWidth: 620)
+                            .padding(.horizontal, 20)
+                            
+                            Spacer()
                         }
-                        
-                        // Activity Log (always visible when active)
-                        if !agent.activityLog.isEmpty {
-                            activityLogStrip
+                        .frame(maxWidth: .infinity, maxHeight: .infinity)
+                    } else {
+                        // Active Chat Mode (Messages on top, Input docked cleanly at bottom)
+                        VStack(spacing: 0) {
+                            // Chat Scroll
+                            AgentChatStage(
+                                messages: agent.messages,
+                                isLoading: agent.isLoading,
+                                domain: agent.domain,
+                                currentToolExecution: agent.currentToolExecution,
+                                onApplyChange: { change in applyChange(change) },
+                                onRejectChange: { change in rejectChange(change) },
+                                onSuggestionTap: { suggestion in inputText = suggestion; sendMessage() }
+                            )
+                            
+                            // Suggested Action (after completion)
+                            if let suggestion = agent.suggestedAction {
+                                suggestedActionBar(suggestion)
+                            }
+                            
+                            // Input Container (Docked at bottom)
+                            inputArea
                         }
                     }
                 }
@@ -125,7 +204,7 @@ struct AIAgentView: View {
                     .font(.system(size: 10, weight: .bold))
                     .foregroundColor(.secondary)
                 Spacer()
-                Button(action: { _ = agent.createNewChat() }) {
+                Button(action: { _ = agent.createNewChat(projectPath: appState.workspaceFolder?.path) }) {
                     Text("New")
                         .font(.system(size: 10))
                         .foregroundColor(.secondary)
@@ -138,22 +217,83 @@ struct AIAgentView: View {
             
             Divider()
             
-            // Chat List
+            // Chat List Grouped By Project (Active Project Accordion Focus)
             ScrollView {
-                LazyVStack(spacing: 2) {
-                    ForEach(agent.chatSessions) { chat in
-                        ChatListRow(
-                            chat: chat,
-                            isActive: agent.activeChatId == chat.id,
-                            onSelect: { agent.switchChat(to: chat.id) },
-                            onDelete: { agent.deleteChat(chat.id) }
-                        )
+                LazyVStack(alignment: .leading, spacing: 6) {
+                    ForEach(agent.projectGroups) { group in
+                        chatSidebarGroupView(group: group)
                     }
                 }
                 .padding(8)
             }
         }
         .background(paneColor.opacity(0.5))
+    }
+    
+    @ViewBuilder
+    private func chatSidebarGroupView(group: ProjectChatGroup) -> some View {
+        let isExpanded = isChatSidebarGroupExpanded(group)
+        VStack(alignment: .leading, spacing: 2) {
+            Button(action: {
+                withAnimation(.easeInOut(duration: 0.18)) {
+                    if collapsedProjectsInChatSidebar.contains(group.id) {
+                        collapsedProjectsInChatSidebar.remove(group.id)
+                    } else {
+                        collapsedProjectsInChatSidebar.insert(group.id)
+                    }
+                }
+            }) {
+                HStack(spacing: 4) {
+                    Image(systemName: isExpanded ? "chevron.down" : "chevron.right")
+                        .font(.system(size: 7, weight: .semibold))
+                        .foregroundColor(.secondary.opacity(0.6))
+                        .frame(width: 8)
+                    
+                    Image(systemName: "folder.fill")
+                        .font(.system(size: 9))
+                        .foregroundColor(isExpanded ? .accentColor : .secondary)
+                    
+                    Text(group.projectName)
+                        .font(.system(size: 10, weight: isExpanded ? .bold : .medium))
+                        .foregroundColor(isExpanded ? .primary : .secondary)
+                        .lineLimit(1)
+                    
+                    Spacer()
+                    
+                    if !isExpanded && !group.chats.isEmpty {
+                        Text("\(group.chats.count)")
+                            .font(.system(size: 8, design: .monospaced))
+                            .foregroundColor(.secondary.opacity(0.6))
+                            .padding(.horizontal, 4)
+                            .padding(.vertical, 1)
+                            .background(Color.primary.opacity(0.04))
+                            .cornerRadius(3)
+                    }
+                }
+                .padding(.horizontal, 4)
+                .padding(.vertical, 3)
+                .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            
+            if isExpanded {
+                ForEach(group.chats) { chat in
+                    ChatListRow(
+                        chat: chat,
+                        isActive: agent.activeChatId == chat.id,
+                        onSelect: {
+                            agent.switchChat(to: chat.id)
+                            collapsedProjectsInChatSidebar.remove(group.id)
+                        },
+                        onDelete: { agent.deleteChat(chat.id) }
+                    )
+                }
+            }
+        }
+    }
+    
+    private func isChatSidebarGroupExpanded(_ group: ProjectChatGroup) -> Bool {
+        return !collapsedProjectsInChatSidebar.contains(group.id)
     }
     
     // MARK: - Header Bar
@@ -177,7 +317,7 @@ struct AIAgentView: View {
                     }
                     
                     // New Chat
-                    Button(action: { _ = agent.createNewChat() }) {
+                    Button(action: { _ = agent.createNewChat(projectPath: appState.workspaceFolder?.path) }) {
                         Text("New")
                             .font(.system(size: 10))
                             .foregroundColor(.secondary)
@@ -299,9 +439,9 @@ struct AIAgentView: View {
                     .frame(maxWidth: .infinity)
                 } else {
                     VStack(alignment: .leading, spacing: 6) {
-                        ForEach(Array(planSteps.enumerated()), id: \.offset) { idx, step in
+                        ForEach(planSteps) { step in
                             HStack(alignment: .top, spacing: 10) {
-                                Text(String(format: "%02d", idx + 1))
+                                Text(String(format: "%02d", step.id + 1))
                                     .font(.system(size: 10, weight: .medium, design: .monospaced))
                                     .foregroundColor(.secondary)
                                     .frame(width: 24, alignment: .leading)
@@ -331,7 +471,8 @@ struct AIAgentView: View {
         .background(Color(nsColor: .controlBackgroundColor).opacity(0.3))
     }
     
-    private struct PlanStep {
+    private struct PlanStep: Identifiable {
+        let id: Int  // Stable identity based on insertion order
         let title: String
         let detail: String
         let isDone: Bool
@@ -340,18 +481,18 @@ struct AIAgentView: View {
     private func extractPlanSteps() -> [PlanStep] {
         // Extract plan steps from agent activity log
         var steps: [PlanStep] = []
-        for activity in agent.activityLog {
+        for (i, activity) in agent.activityLog.enumerated() {
             switch activity.type {
             case .fileChange:
-                steps.append(PlanStep(title: "File Change", detail: activity.message, isDone: true))
+                steps.append(PlanStep(id: i, title: "File Change", detail: activity.message, isDone: true))
             case .tool:
-                steps.append(PlanStep(title: "Tool Execution", detail: activity.message, isDone: true))
+                steps.append(PlanStep(id: i, title: "Tool Execution", detail: activity.message, isDone: true))
             case .thinking:
-                steps.append(PlanStep(title: "Analysis", detail: activity.message, isDone: true))
+                steps.append(PlanStep(id: i, title: "Analysis", detail: activity.message, isDone: true))
             case .success:
-                steps.append(PlanStep(title: "Completed", detail: activity.message, isDone: true))
+                steps.append(PlanStep(id: i, title: "Completed", detail: activity.message, isDone: true))
             case .error:
-                steps.append(PlanStep(title: "Error", detail: activity.message, isDone: false))
+                steps.append(PlanStep(id: i, title: "Error", detail: activity.message, isDone: false))
             default:
                 break
             }
@@ -359,45 +500,254 @@ struct AIAgentView: View {
         return steps
     }
     
-    // MARK: - Task Editor View
+    // MARK: - Task Editor & Autonomous Task Runner
     
     @State private var taskMdText: String = ""
     @State private var agentMdText: String = ""
     @State private var activeTaskTab: Int = 0 // 0 = task.md, 1 = agent.md
+    @State private var taskViewMode: Int = 0  // 0 = Checklist Dashboard, 1 = Raw Markdown
+    
+    private struct ParsedTaskStep: Identifiable {
+        let id: Int  // Stable identity based on line index — NOT UUID() which regenerates every render
+        let lineIndex: Int
+        let text: String
+        var isCompleted: Bool
+    }
+    
+    private func parseTaskSteps(from text: String) -> [ParsedTaskStep] {
+        var steps: [ParsedTaskStep] = []
+        let lines = text.components(separatedBy: .newlines)
+        for (idx, line) in lines.enumerated() {
+            let trimmed = line.trimmingCharacters(in: .whitespaces)
+            if trimmed.hasPrefix("- [ ] ") || trimmed.hasPrefix("* [ ] ") {
+                let stepText = String(trimmed.dropFirst(6))
+                steps.append(ParsedTaskStep(id: idx, lineIndex: idx, text: stepText, isCompleted: false))
+            } else if trimmed.hasPrefix("- [x] ") || trimmed.hasPrefix("- [X] ") || trimmed.hasPrefix("* [x] ") || trimmed.hasPrefix("* [X] ") {
+                let stepText = String(trimmed.dropFirst(6))
+                steps.append(ParsedTaskStep(id: idx, lineIndex: idx, text: stepText, isCompleted: true))
+            }
+        }
+        return steps
+    }
+    
+    private func toggleStepCompletion(lineIndex: Int) {
+        var lines = taskMdText.components(separatedBy: .newlines)
+        guard lineIndex >= 0 && lineIndex < lines.count else { return }
+        let line = lines[lineIndex]
+        if line.contains("- [ ]") {
+            lines[lineIndex] = line.replacingOccurrences(of: "- [ ]", with: "- [x]")
+        } else if line.contains("- [x]") {
+            lines[lineIndex] = line.replacingOccurrences(of: "- [x]", with: "- [ ]")
+        } else if line.contains("- [X]") {
+            lines[lineIndex] = line.replacingOccurrences(of: "- [X]", with: "- [ ]")
+        } else if line.contains("* [ ]") {
+            lines[lineIndex] = line.replacingOccurrences(of: "* [ ]", with: "* [x]")
+        } else if line.contains("* [x]") {
+            lines[lineIndex] = line.replacingOccurrences(of: "* [x]", with: "* [ ]")
+        }
+        taskMdText = lines.joined(separator: "\n")
+        saveTaskFiles()
+    }
     
     private var taskEditorView: some View {
         VStack(spacing: 0) {
-            // Tab bar
-            HStack(spacing: 0) {
+            // Task Control Toolbar
+            HStack(spacing: 6) {
                 taskEditorTab("task.md", idx: 0)
                 taskEditorTab("agent.md", idx: 1)
+                
+                if activeTaskTab == 0 {
+                    Divider().frame(height: 14).padding(.horizontal, 4).opacity(0.3)
+                    
+                    // View Mode Switcher
+                    Button(action: { withAnimation { taskViewMode = 0 } }) {
+                        HStack(spacing: 3) {
+                            Image(systemName: "checklist")
+                            Text("Checklist")
+                        }
+                        .font(.system(size: 10, weight: taskViewMode == 0 ? .semibold : .regular))
+                        .foregroundColor(taskViewMode == 0 ? .primary : .secondary)
+                        .padding(.horizontal, 8)
+                        .padding(.vertical, 4)
+                        .background(taskViewMode == 0 ? Color.primary.opacity(0.08) : Color.clear)
+                        .cornerRadius(4)
+                    }
+                    .buttonStyle(.plain)
+                    
+                    Button(action: { withAnimation { taskViewMode = 1 } }) {
+                        HStack(spacing: 3) {
+                            Image(systemName: "doc.plaintext")
+                            Text("Raw Markdown")
+                        }
+                        .font(.system(size: 10, weight: taskViewMode == 1 ? .semibold : .regular))
+                        .foregroundColor(taskViewMode == 1 ? .primary : .secondary)
+                        .padding(.horizontal, 8)
+                        .padding(.vertical, 4)
+                        .background(taskViewMode == 1 ? Color.primary.opacity(0.08) : Color.clear)
+                        .cornerRadius(4)
+                    }
+                    .buttonStyle(.plain)
+                }
+                
                 Spacer()
+                
+                // Autonomous Execution Action
+                if agent.isLoading {
+                    Button(action: { AgentService.shared.stopGeneration() }) {
+                        HStack(spacing: 4) {
+                            Image(systemName: "stop.fill")
+                                .font(.system(size: 8))
+                            Text("Stop Task")
+                                .font(.system(size: 10, weight: .medium))
+                        }
+                        .foregroundColor(.red.opacity(0.9))
+                        .padding(.horizontal, 8)
+                        .padding(.vertical, 4)
+                        .background(Color.red.opacity(0.12))
+                        .cornerRadius(4)
+                    }
+                    .buttonStyle(.plain)
+                } else {
+                    Button(action: executeCurrentTaskPlan) {
+                        HStack(spacing: 4) {
+                            Image(systemName: "play.fill")
+                                .font(.system(size: 8))
+                            Text("Run Task with Agent")
+                                .font(.system(size: 10, weight: .medium))
+                        }
+                        .foregroundColor(.primary)
+                        .padding(.horizontal, 10)
+                        .padding(.vertical, 4)
+                        .background(Color.accentColor.opacity(0.2))
+                        .cornerRadius(4)
+                        .overlay(
+                            RoundedRectangle(cornerRadius: 4)
+                                .stroke(Color.accentColor.opacity(0.4), lineWidth: 1)
+                        )
+                    }
+                    .buttonStyle(.plain)
+                }
                 
                 // Save button
                 Button(action: saveTaskFiles) {
                     Text("Save")
-                    .font(.system(size: 10, weight: .medium))
-                    .foregroundColor(.primary)
-                    .padding(.horizontal, 10)
-                    .padding(.vertical, 4)
-                    .background(Color.primary.opacity(0.09))
-                    .cornerRadius(4)
+                        .font(.system(size: 10, weight: .medium))
+                        .foregroundColor(.secondary)
+                        .padding(.horizontal, 8)
+                        .padding(.vertical, 4)
+                        .background(Color.primary.opacity(0.06))
+                        .cornerRadius(4)
                 }
                 .buttonStyle(.plain)
-                .padding(.trailing, 12)
             }
-            .padding(.leading, 12)
+            .padding(.horizontal, 12)
             .padding(.vertical, 6)
             .background(Color(nsColor: .controlBackgroundColor).opacity(0.5))
             
             Divider().opacity(0.3)
             
-            // Editor
+            // Content Area
             if activeTaskTab == 0 {
-                TextEditor(text: $taskMdText)
-                    .font(.system(size: 12, design: .monospaced))
-                    .scrollContentBackground(.hidden)
-                    .background(Color(nsColor: .textBackgroundColor).opacity(0.3))
+                if taskViewMode == 0 {
+                    // Checklist Dashboard View
+                    let parsedSteps = parseTaskSteps(from: taskMdText)
+                    let completedCount = parsedSteps.filter { $0.isCompleted }.count
+                    let totalCount = parsedSteps.count
+                    
+                    VStack(spacing: 0) {
+                        // Progress Bar Header
+                        if totalCount > 0 {
+                            HStack {
+                                Text("\(completedCount) of \(totalCount) steps completed")
+                                    .font(.system(size: 11, weight: .medium))
+                                    .foregroundColor(.secondary)
+                                
+                                Spacer()
+                                
+                                Text("\(Int((Double(completedCount) / Double(totalCount)) * 100))%")
+                                    .font(.system(size: 11, weight: .semibold, design: .monospaced))
+                                    .foregroundColor(.primary)
+                            }
+                            .padding(.horizontal, 16)
+                            .padding(.top, 10)
+                            .padding(.bottom, 6)
+                            
+                            ProgressView(value: Double(completedCount), total: Double(totalCount))
+                                .progressViewStyle(.linear)
+                                .padding(.horizontal, 16)
+                                .padding(.bottom, 10)
+                            
+                            Divider().opacity(0.25)
+                        }
+                        
+                        // Steps List
+                        ScrollView {
+                            LazyVStack(alignment: .leading, spacing: 6) {
+                                if parsedSteps.isEmpty {
+                                    VStack(spacing: 8) {
+                                        Image(systemName: "list.bullet.rectangle")
+                                            .font(.system(size: 24))
+                                            .foregroundColor(.secondary.opacity(0.5))
+                                        Text("No checklist steps found in task.md")
+                                            .font(.system(size: 11.5))
+                                            .foregroundColor(.secondary)
+                                        Text("Add lines starting with `- [ ] Your step description`")
+                                            .font(.system(size: 10))
+                                            .foregroundColor(.secondary.opacity(0.7))
+                                    }
+                                    .frame(maxWidth: .infinity)
+                                    .padding(.top, 40)
+                                } else {
+                                    ForEach(parsedSteps) { step in
+                                        HStack(alignment: .top, spacing: 10) {
+                                            Button(action: { toggleStepCompletion(lineIndex: step.lineIndex) }) {
+                                                Image(systemName: step.isCompleted ? "checkmark.square.fill" : "square")
+                                                    .font(.system(size: 14))
+                                                    .foregroundColor(step.isCompleted ? .accentColor : .secondary)
+                                            }
+                                            .buttonStyle(.plain)
+                                            .padding(.top, 1)
+                                            
+                                            Text(step.text)
+                                                .font(.system(size: 12))
+                                                .foregroundColor(step.isCompleted ? .secondary : .primary)
+                                                .strikethrough(step.isCompleted, color: .secondary.opacity(0.6))
+                                                .frame(maxWidth: .infinity, alignment: .leading)
+                                            
+                                            if !step.isCompleted && !agent.isLoading {
+                                                Button(action: { executeSingleStep(step.text) }) {
+                                                    HStack(spacing: 3) {
+                                                        Image(systemName: "play.fill")
+                                                            .font(.system(size: 7))
+                                                        Text("Run Step")
+                                                            .font(.system(size: 9.5))
+                                                    }
+                                                    .foregroundColor(.secondary)
+                                                    .padding(.horizontal, 6)
+                                                    .padding(.vertical, 3)
+                                                    .background(Color.primary.opacity(0.05))
+                                                    .cornerRadius(4)
+                                                }
+                                                .buttonStyle(.plain)
+                                            }
+                                        }
+                                        .padding(.horizontal, 16)
+                                        .padding(.vertical, 8)
+                                        .background(step.isCompleted ? Color.primary.opacity(0.015) : Color.primary.opacity(0.035))
+                                        .cornerRadius(6)
+                                    }
+                                }
+                            }
+                            .padding(14)
+                        }
+                    }
+                    .background(Color(nsColor: .textBackgroundColor).opacity(0.15))
+                } else {
+                    TextEditor(text: $taskMdText)
+                        .font(.system(size: 12, design: .monospaced))
+                        .scrollContentBackground(.hidden)
+                        .background(Color(nsColor: .textBackgroundColor).opacity(0.3))
+                }
             } else {
                 TextEditor(text: $agentMdText)
                     .font(.system(size: 12, design: .monospaced))
@@ -408,15 +758,56 @@ struct AIAgentView: View {
         .onAppear { loadTaskFiles() }
     }
     
+    private func executeCurrentTaskPlan() {
+        saveTaskFiles()
+        let providerString = appState.aiProvider
+        let model = appState.aiModel.isEmpty ? "gemini-3.7-flash" : appState.aiModel
+        let apiKey = appState.apiKeys[providerString] ?? ""
+        
+        Task {
+            await agent.executeTaskPlan(
+                provider: providerString,
+                model: model,
+                apiKey: apiKey
+            )
+        }
+    }
+    
+    private func executeSingleStep(_ stepText: String) {
+        saveTaskFiles()
+        let providerString = appState.aiProvider
+        let model = appState.aiModel.isEmpty ? "gemini-3.7-flash" : appState.aiModel
+        let apiKey = appState.apiKeys[providerString] ?? ""
+        
+        let directive = """
+        Execute this single task step from .microcode/task.md:
+        
+        Target Step: \(stepText)
+        
+        Instructions:
+        1. Execute the necessary actions/tools to complete this specific step.
+        2. Once completed, update .microcode/task.md to check off this step.
+        """
+        
+        Task {
+            await agent.sendMessage(
+                directive,
+                provider: providerString,
+                model: model,
+                apiKey: apiKey
+            )
+        }
+    }
+    
     private func taskEditorTab(_ label: String, idx: Int) -> some View {
         Button(action: { withAnimation { activeTaskTab = idx } }) {
             Text(label)
                 .font(.system(size: 10, weight: .medium, design: .monospaced))
-            .foregroundColor(activeTaskTab == idx ? .primary : .secondary)
-            .padding(.horizontal, 10)
-            .padding(.vertical, 5)
-            .background(activeTaskTab == idx ? Color.primary.opacity(0.09) : Color.clear)
-            .cornerRadius(4)
+                .foregroundColor(activeTaskTab == idx ? .primary : .secondary)
+                .padding(.horizontal, 10)
+                .padding(.vertical, 5)
+                .background(activeTaskTab == idx ? Color.primary.opacity(0.09) : Color.clear)
+                .cornerRadius(4)
         }
         .buttonStyle(.plain)
     }
@@ -450,179 +841,436 @@ struct AIAgentView: View {
     
     // MARK: - Input Area
     
+    @ViewBuilder
+    private var inputCardView: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            // Multiline text input
+            if #available(macOS 13.0, *) {
+                TextField("Ask anything, @ to mention, / for actions", text: $inputText, axis: .vertical)
+                    .textFieldStyle(.plain)
+                    .font(.system(size: 13))
+                    .lineLimit(1...8)
+                    .focused($isInputFocused)
+                    .padding(.horizontal, 4)
+                    .padding(.top, 4)
+                    .onSubmit {
+                        if !NSEvent.modifierFlags.contains(.shift) && !inputText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                            sendMessage()
+                        }
+                    }
+            } else {
+                TextField("Ask anything, @ to mention, / for actions", text: $inputText)
+                    .textFieldStyle(.plain)
+                    .font(.system(size: 13))
+                    .focused($isInputFocused)
+                    .padding(.horizontal, 4)
+                    .padding(.top, 4)
+                    .onSubmit {
+                        if !inputText.isEmpty { sendMessage() }
+                    }
+            }
+            
+            // Bottom Toolbar inside the Input Box
+            inputBottomToolbar
+            
+            // Sub-bar (Local on left, Main Agent on right as in media_1787685889495.png)
+            HStack {
+                HStack(spacing: 4) {
+                    Image(systemName: "square")
+                        .font(.system(size: 9))
+                    Text("Local")
+                        .font(.system(size: 10))
+                    Image(systemName: "chevron.down")
+                        .font(.system(size: 7))
+                }
+                .foregroundColor(.secondary.opacity(0.7))
+                
+                Spacer()
+                
+                // SubAgent Dropdown Pill Button
+                Button(action: { showSubAgentDropdown.toggle() }) {
+                    HStack(spacing: 4) {
+                        let runningCount = SubAgentHarness.shared.activeSubagents.filter { $0.state == .running }.count
+                        if runningCount > 0 {
+                            Circle()
+                                .fill(Color.green)
+                                .frame(width: 6, height: 6)
+                        }
+                        Text(selectedSubAgentDisplayName)
+                            .font(.system(size: 10, weight: selectedSubAgentType == "main" ? .regular : .medium))
+                        Image(systemName: "chevron.down")
+                            .font(.system(size: 7))
+                    }
+                    .foregroundColor(selectedSubAgentType == "main" ? .secondary.opacity(0.85) : .accentColor)
+                    .padding(.horizontal, 6)
+                    .padding(.vertical, 2)
+                    .background(selectedSubAgentType == "main" ? Color.clear : Color.accentColor.opacity(0.1))
+                    .cornerRadius(4)
+                }
+                .buttonStyle(.plain)
+                .popover(isPresented: $showSubAgentDropdown, arrowEdge: .bottom) {
+                    SubAgentSelectorMenu(
+                        selectedType: $selectedSubAgentType,
+                        isPresented: $showSubAgentDropdown
+                    )
+                }
+            }
+            .padding(.horizontal, 4)
+            .padding(.top, 2)
+        }
+        .padding(10)
+        .background(isDropTargeted ? Color.accentColor.opacity(0.12) : Color(nsColor: .controlBackgroundColor).opacity(0.5))
+        .cornerRadius(12)
+        .overlay(
+            RoundedRectangle(cornerRadius: 12)
+                .stroke(isDropTargeted ? Color.accentColor : (isInputFocused ? Color.primary.opacity(0.28) : Color.primary.opacity(0.1)), lineWidth: isDropTargeted ? 1.5 : 1)
+        )
+        .onDrop(of: ["public.file-url", "public.image", "public.data"], isTargeted: $isDropTargeted) { providers in
+            handleDroppedProviders(providers)
+        }
+    }
+    
+    // MARK: - Active Agent Status HUD & Queue Indicator
+    
+    @ViewBuilder
+    private var activeAgentStatusHUD: some View {
+        if agent.isLoading || agent.isProcessingQueue {
+            HStack(spacing: 8) {
+                // Animated Breathing Indicator
+                Circle()
+                    .fill(Color.accentColor)
+                    .frame(width: 7, height: 7)
+                    .scaleEffect(1.1)
+                
+                // Active Action Label
+                Text(agent.currentToolExecution ?? "Analyzing & executing actions...")
+                    .font(.system(size: 11, weight: .medium, design: agent.currentToolExecution != nil ? .monospaced : .default))
+                    .foregroundColor(.primary.opacity(0.9))
+                    .lineLimit(1)
+                
+                Spacer()
+                
+                // Stop Button
+                Button(action: { agent.stopGeneration() }) {
+                    HStack(spacing: 3) {
+                        Image(systemName: "stop.fill")
+                            .font(.system(size: 8))
+                        Text("Stop")
+                            .font(.system(size: 10, weight: .semibold))
+                    }
+                    .foregroundColor(.red.opacity(0.9))
+                    .padding(.horizontal, 7)
+                    .padding(.vertical, 3)
+                    .background(Color.red.opacity(0.12))
+                    .cornerRadius(5)
+                }
+                .buttonStyle(.plain)
+                .help("Stop active AI task")
+            }
+            .padding(.horizontal, 12)
+            .padding(.vertical, 6)
+            .background(Color(nsColor: .controlBackgroundColor).opacity(0.85))
+            .cornerRadius(8)
+            .overlay(
+                RoundedRectangle(cornerRadius: 8)
+                    .stroke(Color.accentColor.opacity(0.25), lineWidth: 1)
+            )
+            .padding(.horizontal, 14)
+            .padding(.top, 6)
+            .transition(.opacity.combined(with: .move(edge: .bottom)))
+        }
+    }
+    
+    @ViewBuilder
+    private var queueIndicatorBar: some View {
+        if !agent.messageQueue.isEmpty {
+            HStack(spacing: 8) {
+                Image(systemName: "list.bullet.clipboard")
+                    .font(.system(size: 11))
+                    .foregroundColor(.orange)
+                
+                Text("\(agent.messageQueue.count) message\(agent.messageQueue.count > 1 ? "s" : "") queued:")
+                    .font(.system(size: 10.5, weight: .semibold))
+                    .foregroundColor(.orange)
+                
+                if let first = agent.messageQueue.first {
+                    Text("\"\(first.text)\"")
+                        .font(.system(size: 10.5))
+                        .foregroundColor(.secondary)
+                        .lineLimit(1)
+                }
+                
+                Spacer()
+                
+                // Steer Now (Stop current and execute immediately)
+                Button(action: {
+                    guard let first = agent.messageQueue.first else { return }
+                    agent.stopGeneration()
+                    executeMessage(first.text, attachments: first.attachments)
+                    agent.messageQueue.removeFirst()
+                }) {
+                    Text("Steer Now")
+                        .font(.system(size: 9.5, weight: .medium))
+                        .foregroundColor(.accentColor)
+                        .padding(.horizontal, 6)
+                        .padding(.vertical, 2)
+                        .background(Color.accentColor.opacity(0.1))
+                        .cornerRadius(4)
+                }
+                .buttonStyle(.plain)
+                .help("Interrupt active task and execute this queued message immediately")
+                
+                // Clear Queue
+                Button(action: { agent.clearQueue() }) {
+                    Image(systemName: "xmark")
+                        .font(.system(size: 9, weight: .semibold))
+                        .foregroundColor(.secondary)
+                        .padding(3)
+                }
+                .buttonStyle(.plain)
+                .help("Clear all queued messages")
+            }
+            .padding(.horizontal, 12)
+            .padding(.vertical, 5)
+            .background(Color.orange.opacity(0.08))
+            .cornerRadius(6)
+            .overlay(
+                RoundedRectangle(cornerRadius: 6)
+                    .stroke(Color.orange.opacity(0.2), lineWidth: 1)
+            )
+            .padding(.horizontal, 14)
+            .padding(.top, 4)
+            .transition(.opacity.combined(with: .move(edge: .bottom)))
+        }
+    }
+    
     private var inputArea: some View {
         VStack(spacing: 0) {
             Divider()
             
+            // Realtime Active Status HUD (Above Input Box)
+            activeAgentStatusHUD
+            
+            // Queue Indicator Bar
+            queueIndicatorBar
+            
             // Attachment Pills
             if !attachments.isEmpty {
-                ScrollView(.horizontal, showsIndicators: false) {
-                    HStack(spacing: 6) {
-                        ForEach(attachments.indices, id: \.self) { index in
-                            if index < attachments.count {
-                                let file = attachments[index]
-                                HStack(spacing: 4) {
-                                    Text(file.name)
-                                        .font(.system(size: 10))
-                                        .lineLimit(1)
-                                    Button(action: { attachments.remove(at: index) }) {
-                                        Text("×")
-                                            .font(.system(size: 11))
-                                            .foregroundColor(.secondary)
-                                    }
-                                    .buttonStyle(.plain)
-                                }
-                                .padding(.horizontal, 8)
-                                .padding(.vertical, 4)
-                                .background(Color.primary.opacity(0.06))
-                                .cornerRadius(4)
-                            }
-                        }
-                    }
-                    .padding(.horizontal, 14)
-                    .padding(.top, 8)
-                }
+                attachmentsBar
             }
             
-            // Input row
-            HStack(alignment: .bottom, spacing: 8) {
-                // Attach
-                Button(action: pickFile) {
-                    Text("Attach")
-                        .font(.system(size: 10))
-                        .foregroundColor(.secondary)
-                        .frame(height: 28)
-                }
-                .buttonStyle(.plain)
-                
-                // Context file pill
-                if let file = appState.currentFile {
-                    Text(file.name)
-                        .font(.system(size: 9))
-                    .foregroundColor(.secondary)
-                    .padding(.horizontal, 6)
-                    .padding(.vertical, 3)
-                    .background(Color.white.opacity(0.04))
-                    .cornerRadius(4)
-                }
-                
-                // Text Field
-                if #available(macOS 13.0, *) {
-                    TextField(agent.domain == .science ? "Ask about this project, structure, dataset, or paper…" : "Ask anything or give instructions...", text: $inputText, axis: .vertical)
-                        .textFieldStyle(.plain)
-                        .font(.system(size: 13))
-                        .lineLimit(1...6)
-                        .focused($isInputFocused)
-                        .padding(.horizontal, 12)
-                        .padding(.vertical, 8)
-                        .background(Color(nsColor: .textBackgroundColor))
-                        .cornerRadius(6)
-                        .overlay(
-                            RoundedRectangle(cornerRadius: 6)
-                                .stroke(isInputFocused ? Color.primary.opacity(0.35) : borderColor, lineWidth: 1)
-                        )
-                        .onSubmit {
-                            if !inputText.isEmpty { sendMessage() }
-                        }
-                } else {
-                    TextField("Ask anything...", text: $inputText)
-                        .textFieldStyle(.plain)
-                        .font(.system(size: 13))
-                        .focused($isInputFocused)
-                        .padding(.horizontal, 12)
-                        .padding(.vertical, 8)
-                        .background(Color(nsColor: .textBackgroundColor))
-                        .cornerRadius(6)
-                        .overlay(
-                            RoundedRectangle(cornerRadius: 6)
-                                .stroke(isInputFocused ? Color.primary.opacity(0.35) : borderColor, lineWidth: 1)
-                        )
-                        .onSubmit {
-                            if !inputText.isEmpty { sendMessage() }
-                        }
-                }
-                
-                // Send or Stop Button
-                if agent.isLoading {
-                    Button(action: { agent.stopGeneration() }) {
-                        Text("Stop")
-                            .font(.system(size: 10, weight: .medium))
-                            .foregroundColor(.primary)
-                            .padding(.horizontal, 10)
-                            .frame(height: 32)
-                            .background(Color.primary.opacity(0.09))
-                            .cornerRadius(5)
-                    }
-                    .buttonStyle(.plain)
-                    .help("Stop Generation")
-                } else {
-                    Button(action: sendMessage) {
-                        Text("Send")
-                            .font(.system(size: 10, weight: .medium))
-                            .foregroundColor(.primary)
-                            .padding(.horizontal, 10)
-                            .frame(height: 32)
-                            .background(Color.primary.opacity(0.09))
-                            .cornerRadius(5)
-                    }
-                    .buttonStyle(.plain)
-                    .disabled(inputText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty && attachments.isEmpty)
-                    .opacity((inputText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty && attachments.isEmpty) ? 0.4 : 1.0)
+            // Modern Floating Input Container Card
+            inputCardView
+                .padding(.horizontal, 14)
+                .padding(.vertical, 8)
+        }
+        .background(Color.clear)
+    }
+     private var attachmentsBar: some View {
+        ScrollView(.horizontal, showsIndicators: false) {
+            HStack(spacing: 8) {
+                ForEach(attachments) { file in
+                    AttachmentChipView(file: file, onRemove: {
+                        attachments.removeAll(where: { $0.id == file.id })
+                    })
                 }
             }
-            .padding(.horizontal, 12)
-            .padding(.vertical, 10)
-            
-            // Queue indicator
-            Group {
-                if !agent.messageQueue.isEmpty {
-                    HStack(spacing: 6) {
-                        ProgressView().scaleEffect(0.5).frame(width: 12, height: 12)
-                        Text("\(agent.messageQueue.count) message\(agent.messageQueue.count > 1 ? "s" : "") queued")
-                            .font(.system(size: 10))
-                            .foregroundColor(.orange)
-                        Spacer()
-                        Button("Clear Queue") { agent.messageQueue.removeAll() }
-                            .font(.system(size: 9))
-                            .buttonStyle(.bordered)
-                            .controlSize(.mini)
-                    }
-                    .padding(.horizontal, 14)
-                    .padding(.bottom, 6)
-                }
-            }
-            .background(paneColor)
+            .padding(.horizontal, 14)
+            .padding(.top, 6)
         }
     }
     
-    // MARK: - Agent Phase Bar (Animated Status)
-    
-    private var agentPhaseBar: some View {
+    private var inputBottomToolbar: some View {
         HStack(spacing: 8) {
-            ProgressView()
-                .controlSize(.mini)
+            plusActionMenu
+            modelSelectorDropdown
             
-            Text(agent.agentPhase.displayText)
-                .font(.system(size: 10, weight: .medium))
-                .foregroundColor(.secondary)
+            if let file = appState.currentFile {
+                HStack(spacing: 3) {
+                    Circle().fill(Color.blue.opacity(0.7)).frame(width: 5, height: 5)
+                    Text(file.name)
+                        .font(.system(size: 10, design: .monospaced))
+                        .foregroundColor(.secondary)
+                        .lineLimit(1)
+                }
+                .padding(.horizontal, 6)
+                .padding(.vertical, 3)
+                .background(Color.primary.opacity(0.03))
+                .cornerRadius(4)
+            }
             
             Spacer()
             
-            // Files modified counter
-            if !agent.filesModified.isEmpty {
-                Text("\(agent.filesModified.count) files changed")
-                    .font(.system(size: 9))
-                    .foregroundColor(.secondary)
-                .padding(.horizontal, 6)
-                .padding(.vertical, 2)
-                .background(Color.primary.opacity(0.05))
-                .cornerRadius(3)
+            sendOrStopButton
+        }
+        .padding(.top, 2)
+    }
+    
+    private var plusActionMenu: some View {
+        Menu {
+            Button(action: pickFile) {
+                Label("Add Files or Images...", systemImage: "paperclip")
+            }
+            Button(action: {
+                if let file = appState.currentFile {
+                    inputText = "@\(file.name) " + inputText
+                }
+            }) {
+                Label("Mention Active File", systemImage: "doc.text")
+            }
+            Divider()
+            Button(action: {
+                inputText = "/plan " + inputText
+            }) {
+                Label("Plan Mode (/plan)", systemImage: "list.bullet.rectangle")
+            }
+            Button(action: {
+                inputText = "/review " + inputText
+            }) {
+                Label("Code Review (/review)", systemImage: "checkmark.shield")
+            }
+        } label: {
+            Image(systemName: "plus")
+                .font(.system(size: 12, weight: .semibold))
+                .foregroundColor(.secondary)
+                .frame(width: 24, height: 24)
+                .background(Color.primary.opacity(0.04))
+                .clipShape(Circle())
+        }
+        .menuStyle(.borderlessButton)
+        .frame(width: 24, height: 24)
+    }
+    
+    private var isDotminiSubscribed: Bool {
+        BillingService.shared.currentTier == .pro ||
+        !(UserDefaults.standard.string(forKey: "dotminiLicenseKey")?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ?? true)
+    }
+    
+    private var availableProvidersForDropdown: [AIProviderDefinition] {
+        let allProviders = AIModelCatalog.shared.providers
+        var result: [AIProviderDefinition] = []
+        
+        // 1. If user is subscribed to Dotmini Cloud, put Dotmini Cloud on top
+        if isDotminiSubscribed {
+            if let omni = allProviders.first(where: { $0.id == "omni" }) {
+                result.append(omni)
             }
         }
-        .padding(.horizontal, 12)
-        .padding(.vertical, 5)
-        .background(Color.primary.opacity(0.035))
-        .transition(.move(edge: .top).combined(with: .opacity))
+        
+        // 2. BYOK Providers (Google Gemini, Claude, OpenAI, DeepSeek, Grok, Qwen, GLM)
+        let byokProviders = allProviders.filter { $0.id != "omni" }
+        
+        // Sort providers that have a configured API key first
+        let withKey = byokProviders.filter { !(appState.apiKeys[$0.id]?.isEmpty ?? true) }
+        let withoutKey = byokProviders.filter { appState.apiKeys[$0.id]?.isEmpty ?? true }
+        
+        result.append(contentsOf: withKey)
+        result.append(contentsOf: withoutKey)
+        
+        return result
+    }
+    
+    private var modelSelectorDropdown: some View {
+        Menu {
+            ForEach(availableProvidersForDropdown) { providerDef in
+                let hasKey = !(appState.apiKeys[providerDef.id]?.isEmpty ?? true)
+                let isOmni = providerDef.id == "omni"
+                let headerTitle = isOmni ? "Dotmini Cloud (Active Subscription)" : (hasKey ? "\(providerDef.name) (Key Configured)" : providerDef.name)
+                
+                Section(headerTitle) {
+                    ForEach(providerDef.models) { modelDef in
+                        Button(action: {
+                            let normalized = AIModelCatalog.shared.normalizedSelection(provider: providerDef.id, model: modelDef.id)
+                            appState.aiProvider = normalized.provider
+                            appState.aiModel = normalized.model
+                            appState.saveSettings()
+                        }) {
+                            HStack {
+                                Text(modelDef.name)
+                                if appState.aiModel == modelDef.id {
+                                    Image(systemName: "checkmark")
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            
+            Divider()
+            
+            Button(action: {
+                appState.showingSettingsDialog = true
+            }) {
+                Label("Configure API Keys in Settings...", systemImage: "gearshape")
+            }
+        } label: {
+            HStack(spacing: 4) {
+                Text(currentModelDisplayName)
+                    .font(.system(size: 11, weight: .medium))
+                    .foregroundColor(.secondary)
+                Image(systemName: "chevron.up.chevron.down")
+                    .font(.system(size: 8, weight: .semibold))
+                    .foregroundColor(.secondary.opacity(0.7))
+            }
+            .padding(.horizontal, 8)
+            .padding(.vertical, 4)
+            .background(Color.primary.opacity(0.04))
+            .cornerRadius(6)
+        }
+        .menuStyle(.borderlessButton)
+    }
+    
+    private var sendOrStopButton: some View {
+        Group {
+            let hasInput = !inputText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || !attachments.isEmpty
+            
+            if agent.isLoading {
+                if hasInput {
+                    // Queue Button (Adds prompt to queue without stopping current task)
+                    Button(action: sendMessage) {
+                        ZStack {
+                            Circle()
+                                .fill(Color.orange)
+                                .frame(width: 26, height: 26)
+                            Image(systemName: "plus")
+                                .font(.system(size: 12, weight: .bold))
+                                .foregroundColor(.white)
+                        }
+                    }
+                    .buttonStyle(.plain)
+                    .help("Add to Queue (Runs automatically after active task finishes)")
+                } else {
+                    // Stop Button (Only when input is empty)
+                    Button(action: { agent.stopGeneration() }) {
+                        ZStack {
+                            Circle()
+                                .fill(Color.red.opacity(0.85))
+                                .frame(width: 26, height: 26)
+                            Rectangle()
+                                .fill(Color.white)
+                                .frame(width: 8, height: 8)
+                                .cornerRadius(1.5)
+                        }
+                    }
+                    .buttonStyle(.plain)
+                    .help("Stop active AI task")
+                }
+            } else {
+                Button(action: sendMessage) {
+                    ZStack {
+                        Circle()
+                            .fill(hasInput ? Color.accentColor : Color.primary.opacity(0.12))
+                            .frame(width: 26, height: 26)
+                        Image(systemName: "arrow.up")
+                            .font(.system(size: 11, weight: .bold))
+                            .foregroundColor(hasInput ? .white : .secondary.opacity(0.6))
+                    }
+                }
+                .buttonStyle(.plain)
+                .disabled(!hasInput)
+                .help("Send Message")
+            }
+        }
     }
     
     // MARK: - Suggested Action Bar
@@ -669,53 +1317,6 @@ struct AIAgentView: View {
         .transition(.move(edge: .bottom).combined(with: .opacity))
     }
     
-    // MARK: - Activity Log Strip
-    
-    private var activityLogStrip: some View {
-        ScrollView(.horizontal, showsIndicators: false) {
-            HStack(spacing: 6) {
-                // Token savings indicator
-                let stats = TokenOptimizer.shared.stats
-                if stats.savedTokens > 0 {
-                    Text(stats.formattedSavings)
-                        .font(.system(size: 8, weight: .medium))
-                        .foregroundColor(.secondary)
-                    .padding(.horizontal, 5)
-                    .padding(.vertical, 2)
-                    .background(Color.primary.opacity(0.05))
-                    .cornerRadius(3)
-                }
-                
-                // Memory count
-                let memCount = AgentMemoryService.shared.memories.count
-                if memCount > 0 {
-                    Text("Memory \(memCount)")
-                        .font(.system(size: 8))
-                        .foregroundColor(.secondary)
-                    .padding(.horizontal, 5)
-                    .padding(.vertical, 2)
-                    .background(Color.primary.opacity(0.05))
-                    .cornerRadius(3)
-                }
-                
-                ForEach(agent.activityLog.suffix(8)) { activity in
-                    Text(activity.message)
-                        .font(.system(size: 8))
-                        .foregroundColor(.secondary)
-                        .lineLimit(1)
-                    .padding(.horizontal, 5)
-                    .padding(.vertical, 2)
-                    .background(Color.primary.opacity(0.04))
-                    .cornerRadius(3)
-                }
-            }
-            .padding(.horizontal, 12)
-        }
-        .frame(height: 22)
-        .background(Color(nsColor: .controlBackgroundColor).opacity(0.5))
-        .transition(.move(edge: .bottom).combined(with: .opacity))
-    }
-    
     // MARK: - File Attachment Logic
     
     private func pickFile() {
@@ -723,6 +1324,16 @@ struct AIAgentView: View {
         panel.allowsMultipleSelection = true
         panel.canChooseDirectories = false
         panel.canChooseFiles = true
+        panel.allowedContentTypes = [
+            .image,
+            .png,
+            .jpeg,
+            .pdf,
+            .plainText,
+            .sourceCode,
+            .json,
+            .data
+        ]
         
         if panel.runModal() == .OK {
             for url in panel.urls {
@@ -739,12 +1350,13 @@ struct AIAgentView: View {
             
             var type: AIAttachment.AttachmentType = .text
             
-            if ["png", "jpg", "jpeg", "webp", "heic"].contains(ext) {
-                type = .image(format: ext == "jpg" ? "jpeg" : ext)
+            if ["png", "jpg", "jpeg", "webp", "heic", "gif", "bmp", "tiff", "svg"].contains(ext) {
+                let fmt = (ext == "jpg" || ext == "jpeg") ? "jpeg" : (ext == "svg" ? "svg+xml" : ext)
+                type = .image(format: fmt)
             } else if ext == "pdf" {
                 type = .pdf
             } else {
-                type = .text // Default to text for code files
+                type = .text // Default to text for code/markdown/data files
             }
             
             let attachment = AIAttachment(name: fileName, data: data, type: type)
@@ -754,11 +1366,47 @@ struct AIAgentView: View {
         }
     }
     
-    private func fileIcon(for type: AIAttachment.AttachmentType) -> String {
-        switch type {
-        case .image: return "photo"
-        case .pdf: return "doc.text.fill" // Generic doc
-        case .text: return "doc.text"
+    private func handleDroppedProviders(_ providers: [NSItemProvider]) -> Bool {
+        for provider in providers {
+            if provider.hasItemConformingToTypeIdentifier("public.file-url") {
+                provider.loadItem(forTypeIdentifier: "public.file-url", options: nil) { item, error in
+                    guard let data = item as? Data, let url = URL(dataRepresentation: data, relativeTo: nil) else {
+                        if let url = item as? URL {
+                            DispatchQueue.main.async { self.processFile(url) }
+                        }
+                        return
+                    }
+                    DispatchQueue.main.async { self.processFile(url) }
+                }
+            } else if provider.hasItemConformingToTypeIdentifier("public.image") {
+                provider.loadDataRepresentation(forTypeIdentifier: "public.image") { data, error in
+                    guard let data = data else { return }
+                    DispatchQueue.main.async {
+                        let name = "dropped_image_\(Int(Date().timeIntervalSince1970)).png"
+                        let attachment = AIAttachment(name: name, data: data, type: .image(format: "png"))
+                        self.attachments.append(attachment)
+                    }
+                }
+            }
+        }
+        return true
+    }
+    
+    private func pasteClipboardContent() {
+        let pb = NSPasteboard.general
+        if let images = pb.readObjects(forClasses: [NSImage.self], options: nil) as? [NSImage], let firstImg = images.first {
+            if let tiff = firstImg.tiffRepresentation, let bitmap = NSBitmapImageRep(data: tiff), let pngData = bitmap.representation(using: .png, properties: [:]) {
+                let name = "pasted_image_\(Int(Date().timeIntervalSince1970)).png"
+                let attachment = AIAttachment(name: name, data: pngData, type: .image(format: "png"))
+                attachments.append(attachment)
+                return
+            }
+        }
+        
+        if let urls = pb.readObjects(forClasses: [NSURL.self], options: nil) as? [URL] {
+            for url in urls {
+                processFile(url)
+            }
         }
     }
     
@@ -799,7 +1447,7 @@ struct AIAgentView: View {
         }
         
         let providerString = appState.aiProvider
-        let model = appState.aiModel.isEmpty ? (StreamableAIProvider(rawValue: providerString) ?? .gemini).defaultModel : appState.aiModel
+        let model = appState.aiModel.isEmpty ? "gemini-3.7-flash" : appState.aiModel
         let apiKey = appState.apiKeys[providerString] ?? ""
         
         if appState.agentMode {
@@ -1756,20 +2404,24 @@ struct HeaderIconButton: View {
 // MARK: - Rich Message Renderer
 
 enum MessageBlock: Identifiable {
+    case thought(String, Int?) // Content, duration in seconds
     case text(String)
     case code(String, String) // Language, Content
     case heading(Int, String) // Level (1-6), Content
     case list([String], Bool) // Items, isOrdered
+    case table([String], [[String]]) // Headers, Rows
     case blockquote(String)
     case latex(String, Bool) // Expression, isBlock ($$...$$ vs $...$)
     case html(String)
     
     var id: String {
         switch self {
+        case .thought(let c, _): return "thought-\(c.hashValue)"
         case .text(let c): return "text-\(c.hashValue)"
         case .code(let l, let c): return "code-\(l)-\(c.hashValue)"
         case .heading(let lv, let c): return "h\(lv)-\(c.hashValue)"
         case .list(let items, _): return "list-\(items.hashValue)"
+        case .table(let h, let r): return "table-\(h.joined())-\(r.count)"
         case .blockquote(let c): return "quote-\(c.hashValue)"
         case .latex(let e, _): return "latex-\(e.hashValue)"
         case .html(let c): return "html-\(c.hashValue)"
@@ -1778,15 +2430,109 @@ enum MessageBlock: Identifiable {
 }
 
 struct MessageContentParser {
+    private static var parseCache: [String: [MessageBlock]] = [:]
+    private static var parseOrder: [String] = []
+    private static let lock = NSLock()
+    
+    // Pre-compiled static regexes to eliminate repeated allocations and compilation on every streamed token
+    private static let thoughtRegex: NSRegularExpression? = try? NSRegularExpression(
+        pattern: "<thought>([\\s\\S]*?)</thought>|<thinking>([\\s\\S]*?)</thinking>",
+        options: [.caseInsensitive]
+    )
+    private static let latexRegex: NSRegularExpression? = try? NSRegularExpression(
+        pattern: "\\$\\$([\\s\\S]*?)\\$\\$|\\\\\\[([\\s\\S]*?)\\\\\\]",
+        options: []
+    )
+    private static let codeRegex: NSRegularExpression? = try? NSRegularExpression(
+        pattern: "```([a-zA-Z0-9\\+\\-\\_\\#]*)[ \\t]*\\r?\\n([\\s\\S]*?)```",
+        options: []
+    )
+    private static let orderedListRegex: NSRegularExpression? = try? NSRegularExpression(
+        pattern: "^\\d+\\.\\s+",
+        options: []
+    )
+    
     static func parse(_ content: String) -> [MessageBlock] {
-        var blocks: [MessageBlock] = []
-        var remaining = content
+        lock.lock()
+        if let cached = parseCache[content] {
+            lock.unlock()
+            return cached
+        }
+        lock.unlock()
         
-        // First, extract LaTeX blocks ($$...$$) - can be multi-line
-        // First, extract LaTeX blocks ($$...$$ or \[...\])
-        // Regex captures content INSIDE the delimiters
-        let latexPattern = "\\$\\$([\\s\\S]*?)\\$\\$|\\\\\\[([\\s\\S]*?)\\\\\\]"
-        if let latexRegex = try? NSRegularExpression(pattern: latexPattern, options: []) {
+        let blocks = doParse(content)
+        
+        lock.lock()
+        if parseCache.count > 500 {
+            if let first = parseOrder.first {
+                parseCache.removeValue(forKey: first)
+                parseOrder.removeFirst()
+            }
+        }
+        parseCache[content] = blocks
+        parseOrder.append(content)
+        lock.unlock()
+        
+        return blocks
+    }
+    
+    private static func doParse(_ content: String) -> [MessageBlock] {
+        let remaining = content
+        
+        // 0. Extract <thought>...</thought> or <thinking>...</thinking>
+        if let thoughtRegex = thoughtRegex {
+            let nsContent = remaining as NSString
+            let thoughtMatches = thoughtRegex.matches(in: remaining, options: [], range: NSRange(location: 0, length: nsContent.length))
+            
+            if !thoughtMatches.isEmpty {
+                var lastEnd = 0
+                var parsedList: [MessageBlock] = []
+                
+                for match in thoughtMatches {
+                    if match.range.location > lastEnd {
+                        let beforeRange = NSRange(location: lastEnd, length: match.range.location - lastEnd)
+                        let beforeText = nsContent.substring(with: beforeRange)
+                        if !beforeText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                            parsedList.append(contentsOf: parseLatexAndCode(beforeText))
+                        }
+                    }
+                    
+                    var thoughtBody = ""
+                    if match.numberOfRanges > 1, match.range(at: 1).location != NSNotFound {
+                        thoughtBody = nsContent.substring(with: match.range(at: 1))
+                    } else if match.numberOfRanges > 2, match.range(at: 2).location != NSNotFound {
+                        thoughtBody = nsContent.substring(with: match.range(at: 2))
+                    }
+                    
+                    let clean = thoughtBody.trimmingCharacters(in: .whitespacesAndNewlines)
+                    if !clean.isEmpty {
+                        let estimatedSec = max(1, clean.count / 120)
+                        parsedList.append(.thought(clean, estimatedSec))
+                    }
+                    
+                    lastEnd = match.range.location + match.range.length
+                }
+                
+                if lastEnd < nsContent.length {
+                    let afterText = nsContent.substring(from: lastEnd)
+                    if !afterText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                        parsedList.append(contentsOf: parseLatexAndCode(afterText))
+                    }
+                }
+                
+                return parsedList
+            }
+        }
+        
+        return parseLatexAndCode(remaining)
+    }
+    
+    private static func parseLatexAndCode(_ content: String) -> [MessageBlock] {
+        var blocks: [MessageBlock] = []
+        let remaining = content
+        
+        // Extract LaTeX blocks ($$...$$ or \[...\])
+        if let latexRegex = latexRegex {
             let nsContent = remaining as NSString
             let latexMatches = latexRegex.matches(in: remaining, options: [], range: NSRange(location: 0, length: nsContent.length))
             
@@ -1795,14 +2541,12 @@ struct MessageContentParser {
             var tempBlocks: [MessageBlock] = []
             
             for match in latexMatches {
-                // Text before LaTeX block
                 if match.range.location > lastEnd {
                     let beforeRange = NSRange(location: lastEnd, length: match.range.location - lastEnd)
                     let beforeText = nsContent.substring(with: beforeRange)
                     tempBlocks.append(.text(beforeText))
                 }
                 
-                // LaTeX block content (check which group matched)
                 var latexContent = ""
                 if match.numberOfRanges > 1, match.range(at: 1).location != NSNotFound {
                     latexContent = nsContent.substring(with: match.range(at: 1))
@@ -1816,13 +2560,11 @@ struct MessageContentParser {
                 processedRanges.append(match.range)
             }
             
-            // Remaining text
             if lastEnd < nsContent.length {
                 let afterText = nsContent.substring(from: lastEnd)
                 tempBlocks.append(.text(afterText))
             }
             
-            // If we found LaTeX blocks, process the text portions for code blocks
             if !processedRanges.isEmpty {
                 for block in tempBlocks {
                     switch block {
@@ -1845,8 +2587,7 @@ struct MessageContentParser {
         var blocks: [MessageBlock] = []
         
         // Extract code blocks, converting latex/math to LaTeX blocks
-        let codePattern = "```([a-zA-Z0-9\\+\\-\\_\\#]*)[ \\t]*\\r?\\n([\\s\\S]*?)```"
-        if let regex = try? NSRegularExpression(pattern: codePattern, options: []) {
+        if let regex = codeRegex {
             let nsContent = content as NSString
             let matches = regex.matches(in: content, options: [], range: NSRange(location: 0, length: nsContent.length))
             
@@ -1895,18 +2636,59 @@ struct MessageContentParser {
         var currentText: [String] = []
         var listItems: [String] = []
         var isOrderedList = false
+        var lineIndex = 0
         
-        for line in lines {
+        while lineIndex < lines.count {
+            let line = lines[lineIndex]
             let trimmed = line.trimmingCharacters(in: .whitespaces)
+            
+            // Check for Markdown Table (| col1 | col2 |)
+            if trimmed.hasPrefix("|") && trimmed.hasSuffix("|") && trimmed.contains("|") && lineIndex + 1 < lines.count {
+                let nextLine = lines[lineIndex + 1].trimmingCharacters(in: .whitespaces)
+                if nextLine.hasPrefix("|") && (nextLine.contains("---") || nextLine.contains("-|-") || nextLine.contains(":--") || nextLine.contains("--:")) {
+                    // Flush current text
+                    if !currentText.isEmpty {
+                        blocks.append(.text(currentText.joined(separator: "\n")))
+                        currentText = []
+                    }
+                    // Flush list
+                    if !listItems.isEmpty {
+                        blocks.append(.list(listItems, isOrderedList))
+                        listItems = []
+                    }
+                    
+                    // Parse headers from current line
+                    let headers = trimmed.split(separator: "|", omittingEmptySubsequences: true).map { String($0).trimmingCharacters(in: .whitespaces) }
+                    
+                    var tableRows: [[String]] = []
+                    lineIndex += 2 // Skip header line and separator line
+                    
+                    while lineIndex < lines.count {
+                        let rowLine = lines[lineIndex].trimmingCharacters(in: .whitespaces)
+                        if rowLine.hasPrefix("|") && rowLine.hasSuffix("|") {
+                            let cells = rowLine.split(separator: "|", omittingEmptySubsequences: true).map { String($0).trimmingCharacters(in: .whitespaces) }
+                            if !cells.isEmpty {
+                                tableRows.append(cells)
+                            }
+                            lineIndex += 1
+                        } else {
+                            break
+                        }
+                    }
+                    
+                    if !headers.isEmpty {
+                        blocks.append(.table(headers, tableRows))
+                    }
+                    continue
+                }
+            }
             
             // Check for headings (# H1, ## H2, etc.)
             if let match = trimmed.range(of: "^#{1,6}\\s+", options: .regularExpression) {
-                // Flush current text
                 if !currentText.isEmpty {
                     blocks.append(.text(currentText.joined(separator: "\n")))
                     currentText = []
                 }
-                // Flush list
                 if !listItems.isEmpty {
                     blocks.append(.list(listItems, isOrderedList))
                     listItems = []
@@ -1915,6 +2697,7 @@ struct MessageContentParser {
                 let level = trimmed.prefix(while: { $0 == "#" }).count
                 let heading = String(trimmed[match.upperBound...])
                 blocks.append(.heading(level, heading))
+                lineIndex += 1
                 continue
             }
             
@@ -1926,6 +2709,7 @@ struct MessageContentParser {
                 }
                 let latex = String(trimmed.dropFirst(2).dropLast(2))
                 blocks.append(.latex(latex, true))
+                lineIndex += 1
                 continue
             }
             
@@ -1940,6 +2724,22 @@ struct MessageContentParser {
                     listItems = []
                 }
                 blocks.append(.blockquote(String(trimmed.dropFirst(2))))
+                lineIndex += 1
+                continue
+            }
+            
+            // Check for horizontal divider line (--- or ***)
+            if trimmed == "---" || trimmed == "***" || trimmed == "___" {
+                if !currentText.isEmpty {
+                    blocks.append(.text(currentText.joined(separator: "\n")))
+                    currentText = []
+                }
+                if !listItems.isEmpty {
+                    blocks.append(.list(listItems, isOrderedList))
+                    listItems = []
+                }
+                blocks.append(.html("<hr/>"))
+                lineIndex += 1
                 continue
             }
             
@@ -1951,6 +2751,7 @@ struct MessageContentParser {
                 }
                 isOrderedList = false
                 listItems.append(String(trimmed.dropFirst(2)))
+                lineIndex += 1
                 continue
             }
             
@@ -1962,6 +2763,7 @@ struct MessageContentParser {
                 }
                 isOrderedList = true
                 listItems.append(String(trimmed.drop(while: { $0.isNumber || $0 == "." || $0 == " " })))
+                lineIndex += 1
                 continue
             }
             
@@ -1973,6 +2775,7 @@ struct MessageContentParser {
             
             // Regular text
             currentText.append(line)
+            lineIndex += 1
         }
         
         // Flush remaining
@@ -2004,7 +2807,7 @@ struct AgentChatStage: View {
     var body: some View {
         ScrollViewReader { proxy in
             ScrollView {
-                LazyVStack(spacing: 0) {
+                VStack(spacing: 0) {
                     if messages.isEmpty && !isLoading {
                         VStack(spacing: 20) {
                             Spacer().frame(height: 40)
@@ -2062,6 +2865,7 @@ struct AgentChatStage: View {
                     } else {
                         ForEach(messages) { message in
                             RichMessageRow(message: message, onApplyChange: onApplyChange, onRejectChange: onRejectChange)
+                                .equatable()
                                 .id(message.id)
                         }
                     }
@@ -2071,16 +2875,25 @@ struct AgentChatStage: View {
                             .id("thinking-indicator")
                     }
                 }
-                .padding(.bottom, 120)
+                .padding(.bottom, 16)
             }
             .onChange(of: messages.count) { _ in
                 if let lastId = messages.last?.id {
-                    proxy.scrollTo(lastId, anchor: .bottom)
+                    withAnimation(.easeOut(duration: 0.12)) {
+                        proxy.scrollTo(lastId, anchor: .bottom)
+                    }
                 }
             }
             .onChange(of: currentToolExecution) { _ in
-                withAnimation(.easeInOut(duration: 0.2)) {
+                withAnimation(.easeInOut(duration: 0.12)) {
                     proxy.scrollTo("thinking-indicator", anchor: .bottom)
+                }
+            }
+            .onChange(of: isLoading) { loading in
+                if loading {
+                    withAnimation(.easeInOut(duration: 0.12)) {
+                        proxy.scrollTo("thinking-indicator", anchor: .bottom)
+                    }
                 }
             }
         }
@@ -2254,6 +3067,8 @@ struct PaperContentView: View {
             
             ForEach(blocks) { block in
                 switch block {
+                case .thought:
+                    EmptyView()
                 case .text(let text):
                     if !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
                         PaperTextView(text: text)
@@ -2281,6 +3096,9 @@ struct PaperContentView: View {
                             }
                         }
                     }
+                    
+                case .table(let headers, let rows):
+                    TableBlockView(headers: headers, rows: rows)
                     
                 case .blockquote(let quote):
                     HStack(spacing: 0) {
@@ -2482,10 +3300,19 @@ struct LatexBlockWebView: NSViewRepresentable {
 
 // MARK: - Rich Message Row
 
-struct RichMessageRow: View {
+struct RichMessageRow: View, Equatable {
     let message: AgentMessageModel
     var onApplyChange: ((PendingChangeModel) -> Void)? = nil
     var onRejectChange: ((PendingChangeModel) -> Void)? = nil
+    @EnvironmentObject var appState: AppState
+    
+    static func == (lhs: RichMessageRow, rhs: RichMessageRow) -> Bool {
+        return lhs.message.id == rhs.message.id &&
+               lhs.message.content == rhs.message.content &&
+               lhs.message.toolResults.count == rhs.message.toolResults.count &&
+               lhs.message.pendingChanges.count == rhs.message.pendingChanges.count &&
+               lhs.message.role == rhs.message.role
+    }
     
     private var isUser: Bool { message.role == .user }
     
@@ -2496,11 +3323,11 @@ struct RichMessageRow: View {
                 Spacer(minLength: 40)
                 
                 Text(message.content)
-                    .font(.system(size: 13))
+                    .font(Font.custom(appState.agentFontName, size: appState.agentFontSize))
                     .foregroundColor(.primary)
-                    .padding(10)
+                    .padding(12)
                     .background(Color.primary.opacity(0.09))
-                    .cornerRadius(6, corners: [.topLeft, .topRight, .bottomLeft])
+                    .cornerRadius(8, corners: [.topLeft, .topRight, .bottomLeft])
             }
             .padding(.horizontal, 14)
             .padding(.vertical, 6)
@@ -2534,6 +3361,8 @@ struct RichMessageRow: View {
     @ViewBuilder
     private func aiBlockView(_ block: MessageBlock) -> some View {
         switch block {
+        case .thought(let content, let duration):
+            AntigravityThoughtBlockView(content: content, durationSeconds: duration)
         case .text(let text):
             if !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
                 MarkdownTextView(text: text)
@@ -2544,6 +3373,8 @@ struct RichMessageRow: View {
             HeadingView(level: level, content: content)
         case .list(let items, let isOrdered):
             ListView(items: items, isOrdered: isOrdered)
+        case .table(let headers, let rows):
+            TableBlockView(headers: headers, rows: rows)
         case .blockquote(let content):
             BlockquoteView(content: content)
         case .latex(let expression, let isBlock):
@@ -2565,43 +3396,33 @@ struct RichMessageRow: View {
             
             ForEach(message.pendingChanges) { change in
                 PendingChangeCard(change: change, onApply: onApplyChange, onReject: onRejectChange)
+                    .equatable()
             }
         }
         .padding(.top, 8)
     }
 }
 
-// MARK: - Pending Change Card (Extracted for type-checker)
+// MARK: - Pending Change Card (Modern Antigravity / Cursor Diff View)
 
-private struct PendingChangeCard: View {
+private struct PendingChangeCard: View, Equatable {
     let change: PendingChangeModel
     var onApply: ((PendingChangeModel) -> Void)?
     var onReject: ((PendingChangeModel) -> Void)?
     @State private var showDiff = true  // Auto-expand diff
     
+    static func == (lhs: PendingChangeCard, rhs: PendingChangeCard) -> Bool {
+        return lhs.change.id == rhs.change.id &&
+               lhs.change.status == rhs.change.status &&
+               lhs.change.additions == rhs.change.additions &&
+               lhs.change.deletions == rhs.change.deletions &&
+               lhs.change.oldContent == rhs.change.oldContent &&
+               lhs.change.newContent == rhs.change.newContent
+    }
+    
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
             changeCardHeader
-            
-            // Always show diff stats bar
-            HStack(spacing: 12) {
-                HStack(spacing: 3) {
-                    Circle().fill(.green).frame(width: 6, height: 6)
-                    Text("+\(change.additions) additions")
-                        .font(.system(size: 9, design: .monospaced))
-                        .foregroundColor(.green)
-                }
-                HStack(spacing: 3) {
-                    Circle().fill(.red).frame(width: 6, height: 6)
-                    Text("-\(change.deletions) deletions")
-                        .font(.system(size: 9, design: .monospaced))
-                        .foregroundColor(.red)
-                }
-                Spacer()
-            }
-            .padding(.horizontal, 10)
-            .padding(.vertical, 4)
-            .background(Color.primary.opacity(0.02))
             
             if showDiff {
                 codeDiffSection
@@ -2613,14 +3434,14 @@ private struct PendingChangeCard: View {
                 changeCardActions
             }
         }
-        .background(Color(nsColor: .controlBackgroundColor).opacity(0.5))
+        .background(Color(nsColor: .controlBackgroundColor).opacity(0.75))
         .cornerRadius(10)
         .overlay(
             RoundedRectangle(cornerRadius: 10)
                 .stroke(
-                    change.status == .accepted ? Color.green.opacity(0.3) :
-                    change.status == .rejected ? Color.red.opacity(0.3) :
-                    Color.blue.opacity(0.2),
+                    change.status == .accepted ? Color.green.opacity(0.35) :
+                    change.status == .rejected ? Color.red.opacity(0.35) :
+                    Color.primary.opacity(0.12),
                     lineWidth: 1
                 )
         )
@@ -2628,13 +3449,39 @@ private struct PendingChangeCard: View {
     
     private var changeCardHeader: some View {
         HStack(spacing: 8) {
-            Image(systemName: change.status == .accepted ? "checkmark.circle.fill" : change.status == .rejected ? "xmark.circle.fill" : "doc.badge.gearshape.fill")
+            Image(systemName: change.status == .accepted ? "checkmark.circle.fill" : change.status == .rejected ? "xmark.circle.fill" : "doc.text.fill")
                 .foregroundColor(change.status == .accepted ? .green : change.status == .rejected ? .red : .blue)
                 .font(.system(size: 13))
             
             VStack(alignment: .leading, spacing: 1) {
-                Text(URL(fileURLWithPath: change.filePath).lastPathComponent)
-                    .font(.system(size: 11, weight: .semibold, design: .monospaced))
+                HStack(spacing: 6) {
+                    Text(URL(fileURLWithPath: change.filePath).lastPathComponent)
+                        .font(.system(size: 11, weight: .semibold, design: .monospaced))
+                        .foregroundColor(.primary)
+                    
+                    // Additions / Deletions pills
+                    HStack(spacing: 4) {
+                        if change.additions > 0 {
+                            Text("+\(change.additions)")
+                                .font(.system(size: 9, weight: .semibold, design: .monospaced))
+                                .foregroundColor(.green)
+                                .padding(.horizontal, 4)
+                                .padding(.vertical, 1)
+                                .background(Color.green.opacity(0.12))
+                                .cornerRadius(3)
+                        }
+                        if change.deletions > 0 {
+                            Text("-\(change.deletions)")
+                                .font(.system(size: 9, weight: .semibold, design: .monospaced))
+                                .foregroundColor(.red)
+                                .padding(.horizontal, 4)
+                                .padding(.vertical, 1)
+                                .background(Color.red.opacity(0.12))
+                                .cornerRadius(3)
+                        }
+                    }
+                }
+                
                 Text(change.description)
                     .font(.system(size: 9))
                     .foregroundColor(.secondary)
@@ -2644,11 +3491,18 @@ private struct PendingChangeCard: View {
             Spacer()
             
             // Toggle diff
-            Button(action: { withAnimation(.easeInOut(duration: 0.2)) { showDiff.toggle() } }) {
-                Image(systemName: showDiff ? "chevron.up" : "chevron.down")
-                    .font(.system(size: 9))
-                    .foregroundColor(.secondary)
-                    .frame(width: 20, height: 20)
+            Button(action: { withAnimation(.easeInOut(duration: 0.15)) { showDiff.toggle() } }) {
+                HStack(spacing: 3) {
+                    Text(showDiff ? "Hide Diff" : "Show Diff")
+                        .font(.system(size: 10, weight: .medium))
+                    Image(systemName: showDiff ? "chevron.up" : "chevron.down")
+                        .font(.system(size: 8, weight: .semibold))
+                }
+                .foregroundColor(.secondary)
+                .padding(.horizontal, 6)
+                .padding(.vertical, 3)
+                .background(Color.primary.opacity(0.04))
+                .cornerRadius(4)
             }
             .buttonStyle(.plain)
             
@@ -2656,25 +3510,31 @@ private struct PendingChangeCard: View {
         }
         .padding(.horizontal, 10)
         .padding(.vertical, 8)
-        .background(
-            LinearGradient(
-                colors: [
-                    change.status == .accepted ? Color.green.opacity(0.05) :
-                    change.status == .rejected ? Color.red.opacity(0.05) :
-                    Color.blue.opacity(0.03),
-                    Color.clear
-                ],
-                startPoint: .leading, endPoint: .trailing
-            )
-        )
+        .background(Color.primary.opacity(0.02))
     }
     
     @ViewBuilder
     private var changeCardStatusLabel: some View {
         if change.status == .accepted {
-            Text("Applied ✓").font(.caption2).foregroundColor(.green)
+            HStack(spacing: 3) {
+                Image(systemName: "checkmark")
+                    .font(.system(size: 8, weight: .bold))
+                Text("Applied")
+                    .font(.system(size: 10, weight: .semibold))
+            }
+            .foregroundColor(.green)
+            .padding(.horizontal, 6)
+            .padding(.vertical, 2)
+            .background(Color.green.opacity(0.12))
+            .cornerRadius(4)
         } else if change.status == .rejected {
-            Text("Rejected").font(.caption2).foregroundColor(.red)
+            Text("Rejected")
+                .font(.system(size: 10, weight: .semibold))
+                .foregroundColor(.red)
+                .padding(.horizontal, 6)
+                .padding(.vertical, 2)
+                .background(Color.red.opacity(0.12))
+                .cornerRadius(4)
         }
     }
     
@@ -2687,188 +3547,69 @@ private struct PendingChangeCard: View {
         .padding(8)
     }
     
-    // MARK: - Code Diff (GitHub-style Unified Diff)
+    // MARK: - Code Diff (Modern High-Contrast Unified Code Diff with Memoization)
     
     private var codeDiffSection: some View {
-        VStack(spacing: 0) {
-            // Diff header
-            HStack(spacing: 6) {
-                Image(systemName: "arrow.left.arrow.right")
-                    .font(.system(size: 9))
-                    .foregroundColor(.secondary)
-                Text(URL(fileURLWithPath: change.filePath).lastPathComponent)
-                    .font(.system(size: 10, weight: .medium, design: .monospaced))
-                    .foregroundColor(.primary.opacity(0.7))
-                Spacer()
-                Text("\(change.additions) additions, \(change.deletions) deletions")
-                    .font(.system(size: 9, design: .monospaced))
-                    .foregroundColor(.secondary)
-            }
-            .padding(.horizontal, 10)
-            .padding(.vertical, 5)
-            .background(Color.primary.opacity(0.03))
-            
-            Divider().opacity(0.3)
-            
-            // Diff content
-            ScrollView(.vertical, showsIndicators: true) {
-                ScrollView(.horizontal, showsIndicators: false) {
-                    VStack(alignment: .leading, spacing: 0) {
-                        let lines = buildUnifiedDiff()
-                        ForEach(Array(lines.enumerated()), id: \.offset) { _, line in
-                            HStack(spacing: 0) {
-                                // Old line number
-                                Text(line.oldNum)
-                                    .font(.system(size: 9, design: .monospaced))
-                                    .foregroundColor(.secondary.opacity(0.35))
-                                    .frame(width: 32, alignment: .trailing)
-                                
-                                // New line number
-                                Text(line.newNum)
-                                    .font(.system(size: 9, design: .monospaced))
-                                    .foregroundColor(.secondary.opacity(0.35))
-                                    .frame(width: 32, alignment: .trailing)
-                                
-                                // Prefix (+/-/space)
-                                Text(line.prefix)
-                                    .font(.system(size: 10, weight: .bold, design: .monospaced))
-                                    .foregroundColor(line.prefixColor)
-                                    .frame(width: 16, alignment: .center)
-                                
-                                // Code text
-                                Text(line.text)
-                                    .font(.system(size: 10, design: .monospaced))
-                                    .foregroundColor(line.textColor)
-                                    .lineLimit(1)
-                                
-                                Spacer(minLength: 20)
-                            }
-                            .padding(.vertical, 0.5)
-                            .frame(maxWidth: .infinity, alignment: .leading)
-                            .background(line.bgColor)
-                        }
-                    }
-                    .padding(.vertical, 4)
-                }
-            }
-            .frame(maxHeight: 300)
-            .background(Color(nsColor: .textBackgroundColor).opacity(0.4))
-        }
-        .cornerRadius(6)
-        .overlay(
-            RoundedRectangle(cornerRadius: 6)
-                .stroke(Color.primary.opacity(0.06), lineWidth: 1)
+        let lines: [UnifiedDiffLine] = DiffCacheManager.getOrComputeDiff(
+            id: change.id,
+            old: change.oldContent,
+            new: change.newContent
         )
-    }
-    
-    private struct UnifiedDiffLine {
-        let oldNum: String
-        let newNum: String
-        let prefix: String
-        let text: String
-        let type: DiffLineType
         
-        enum DiffLineType {
-            case context, addition, deletion, hunkHeader
-        }
-        
-        var prefixColor: Color {
-            switch type {
-            case .addition: return .green
-            case .deletion: return .red
-            case .hunkHeader: return .cyan
-            case .context: return .secondary.opacity(0.3)
-            }
-        }
-        
-        var textColor: Color {
-            switch type {
-            case .addition: return Color.green.opacity(0.9)
-            case .deletion: return Color.red.opacity(0.8)
-            case .hunkHeader: return Color.cyan.opacity(0.7)
-            case .context: return Color.primary.opacity(0.55)
-            }
-        }
-        
-        var bgColor: Color {
-            switch type {
-            case .addition: return Color.green.opacity(0.08)
-            case .deletion: return Color.red.opacity(0.06)
-            case .hunkHeader: return Color.cyan.opacity(0.04)
-            case .context: return Color.clear
-            }
-        }
-    }
-    
-    /// Build a unified diff using LCS (Longest Common Subsequence) algorithm
-    private func buildUnifiedDiff() -> [UnifiedDiffLine] {
-        let oldLines = change.oldContent.components(separatedBy: "\n")
-        let newLines = change.newContent.components(separatedBy: "\n")
-        
-        // LCS table
-        let m = oldLines.count
-        let n = newLines.count
-        var dp = Array(repeating: Array(repeating: 0, count: n + 1), count: m + 1)
-        
-        for i in 1...max(1, m) {
-            for j in 1...max(1, n) {
-                if i <= m && j <= n && oldLines[i-1] == newLines[j-1] {
-                    dp[i][j] = dp[i-1][j-1] + 1
-                } else {
-                    dp[i][j] = max(dp[i-1][j], dp[i][j-1])
-                }
-            }
-        }
-        
-        // Backtrack to produce diff
-        enum DiffOp { case equal(String), delete(String), insert(String) }
-        var ops: [DiffOp] = []
-        var i = m, j = n
-        while i > 0 || j > 0 {
-            if i > 0 && j > 0 && oldLines[i-1] == newLines[j-1] {
-                ops.append(.equal(oldLines[i-1]))
-                i -= 1; j -= 1
-            } else if j > 0 && (i == 0 || dp[i][j-1] >= dp[i-1][j]) {
-                ops.append(.insert(newLines[j-1]))
-                j -= 1
-            } else if i > 0 {
-                ops.append(.delete(oldLines[i-1]))
-                i -= 1
-            }
-        }
-        ops.reverse()
-        
-        // Convert to UnifiedDiffLine with context awareness
-        var result: [UnifiedDiffLine] = []
-        var oldLineNum = 1
-        var newLineNum = 1
-        
-        for op in ops {
-            switch op {
-            case .equal(let text):
-                result.append(UnifiedDiffLine(
-                    oldNum: "\(oldLineNum)", newNum: "\(newLineNum)",
-                    prefix: " ", text: text, type: .context
-                ))
-                oldLineNum += 1; newLineNum += 1
-            case .delete(let text):
-                result.append(UnifiedDiffLine(
-                    oldNum: "\(oldLineNum)", newNum: "",
-                    prefix: "-", text: text, type: .deletion
-                ))
-                oldLineNum += 1
-            case .insert(let text):
-                result.append(UnifiedDiffLine(
-                    oldNum: "", newNum: "\(newLineNum)",
-                    prefix: "+", text: text, type: .addition
-                ))
-                newLineNum += 1
-            }
+        return VStack(spacing: 0) {
+            Divider().opacity(0.4)
             
-            if result.count > 200 { break } // Safety cap
+            ScrollView(.horizontal, showsIndicators: false) {
+                VStack(alignment: .leading, spacing: 0) {
+                    ForEach(lines) { (diffLine: UnifiedDiffLine) in
+                        HStack(spacing: 0) {
+                            // Status accent strip (2.5pt)
+                            Rectangle()
+                                .fill(diffLine.accentColor)
+                                .frame(width: 2.5)
+                            
+                            // Gutter: Old line number
+                            Text(diffLine.oldNum)
+                                .font(.system(size: 10, design: .monospaced))
+                                .foregroundColor(.secondary.opacity(0.4))
+                                .frame(width: 32, alignment: .trailing)
+                                .padding(.trailing, 4)
+                            
+                            // Gutter: New line number
+                            Text(diffLine.newNum)
+                                .font(.system(size: 10, design: .monospaced))
+                                .foregroundColor(.secondary.opacity(0.4))
+                                .frame(width: 32, alignment: .trailing)
+                                .padding(.trailing, 6)
+                            
+                            // Gutter divider line
+                            Rectangle()
+                                .fill(Color.primary.opacity(0.08))
+                                .frame(width: 1)
+                            
+                            // Prefix (+/-)
+                            Text(diffLine.prefix)
+                                .font(.system(size: 11, weight: .bold, design: .monospaced))
+                                .foregroundColor(diffLine.prefixColor)
+                                .frame(width: 18, alignment: .center)
+                            
+                            // Code text
+                            Text(diffLine.text)
+                                .font(.system(size: 11, design: .monospaced))
+                                .foregroundColor(diffLine.textColor)
+                                .lineLimit(1)
+                            
+                            Spacer(minLength: 24)
+                        }
+                        .frame(height: 18)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .background(diffLine.bgColor)
+                    }
+                }
+                .padding(.vertical, 2)
+            }
+            .background(Color(nsColor: .textBackgroundColor).opacity(0.6))
         }
-        
-        return result
     }
     
     private var changeCardActions: some View {
@@ -2896,9 +3637,8 @@ private struct PendingChangeCard: View {
                 .foregroundColor(.red)
                 .padding(.horizontal, 12)
                 .padding(.vertical, 6)
-                .background(Color.red.opacity(0.08))
+                .background(Color.red.opacity(0.1))
                 .cornerRadius(6)
-                .overlay(RoundedRectangle(cornerRadius: 6).stroke(Color.red.opacity(0.2)))
             }
             .buttonStyle(.plain)
             
@@ -2906,6 +3646,161 @@ private struct PendingChangeCard: View {
         }
         .padding(.horizontal, 10)
         .padding(.vertical, 8)
+        .background(Color.primary.opacity(0.02))
+    }
+}
+
+// MARK: - Memoized Diff Cache Manager
+
+public struct UnifiedDiffLine: Identifiable, Equatable {
+    public let id: String
+    public let oldNum: String
+    public let newNum: String
+    public let prefix: String
+    public let text: String
+    public let type: DiffLineType
+    
+    public enum DiffLineType {
+        case context, addition, deletion, hunkHeader
+    }
+    
+    var accentColor: Color {
+        switch type {
+        case .addition: return .green
+        case .deletion: return .red
+        case .hunkHeader: return .cyan
+        case .context: return .clear
+        }
+    }
+    
+    var prefixColor: Color {
+        switch type {
+        case .addition: return .green
+        case .deletion: return .red
+        case .hunkHeader: return .cyan
+        case .context: return .secondary.opacity(0.25)
+        }
+    }
+    
+    var textColor: Color {
+        switch type {
+        case .addition: return Color.primary
+        case .deletion: return Color.primary.opacity(0.7)
+        case .hunkHeader: return Color.cyan
+        case .context: return Color.primary.opacity(0.85)
+        }
+    }
+    
+    var bgColor: Color {
+        switch type {
+        case .addition: return Color.green.opacity(0.12)
+        case .deletion: return Color.red.opacity(0.10)
+        case .hunkHeader: return Color.cyan.opacity(0.06)
+        case .context: return Color.clear
+        }
+    }
+}
+
+public final class DiffCacheManager {
+    private static var cache: [String: [UnifiedDiffLine]] = [:]
+    private static let lock = NSLock()
+    
+    public static func getOrComputeDiff(id: String, old: String, new: String) -> [UnifiedDiffLine] {
+        let key = "\(id)-\(old.hashValue)-\(new.hashValue)"
+        lock.lock()
+        if let found = cache[key] {
+            lock.unlock()
+            return found
+        }
+        lock.unlock()
+        
+        let computed = computeDiff(old: old, new: new)
+        
+        lock.lock()
+        if cache.count > 250 { cache.removeAll(keepingCapacity: true) }
+        cache[key] = computed
+        lock.unlock()
+        
+        return computed
+    }
+    
+    private static func computeDiff(old: String, new: String) -> [UnifiedDiffLine] {
+        let oldLines = old.components(separatedBy: "\n")
+        let newLines = new.components(separatedBy: "\n")
+        
+        // Fast path for identical content
+        if old == new {
+            return oldLines.prefix(100).enumerated().map { idx, line in
+                UnifiedDiffLine(id: "ctx-\(idx)", oldNum: "\(idx + 1)", newNum: "\(idx + 1)", prefix: " ", text: line, type: .context)
+            }
+        }
+        
+        // Capped DP matrix to guarantee sub-millisecond execution
+        let m = min(oldLines.count, 150)
+        let n = min(newLines.count, 150)
+        var dp = Array(repeating: Array(repeating: 0, count: n + 1), count: m + 1)
+        
+        for i in 1...max(1, m) {
+            for j in 1...max(1, n) {
+                if i <= m && j <= n && oldLines[i-1] == newLines[j-1] {
+                    dp[i][j] = dp[i-1][j-1] + 1
+                } else {
+                    dp[i][j] = max(dp[i-1][j], dp[i][j-1])
+                }
+            }
+        }
+        
+        enum DiffOp { case equal(String), delete(String), insert(String) }
+        var ops: [DiffOp] = []
+        var i = m, j = n
+        while i > 0 || j > 0 {
+            if i > 0 && j > 0 && oldLines[i-1] == newLines[j-1] {
+                ops.append(.equal(oldLines[i-1]))
+                i -= 1; j -= 1
+            } else if j > 0 && (i == 0 || dp[i][j-1] >= dp[i-1][j]) {
+                ops.append(.insert(newLines[j-1]))
+                j -= 1
+            } else if i > 0 {
+                ops.append(.delete(oldLines[i-1]))
+                i -= 1
+            }
+        }
+        ops.reverse()
+        
+        var result: [UnifiedDiffLine] = []
+        var oldLineNum = 1
+        var newLineNum = 1
+        var lineIdx = 0
+        
+        for op in ops {
+            lineIdx += 1
+            switch op {
+            case .equal(let text):
+                result.append(UnifiedDiffLine(
+                    id: "eq-\(lineIdx)",
+                    oldNum: "\(oldLineNum)", newNum: "\(newLineNum)",
+                    prefix: " ", text: text, type: .context
+                ))
+                oldLineNum += 1; newLineNum += 1
+            case .delete(let text):
+                result.append(UnifiedDiffLine(
+                    id: "del-\(lineIdx)",
+                    oldNum: "\(oldLineNum)", newNum: "",
+                    prefix: "-", text: text, type: .deletion
+                ))
+                oldLineNum += 1
+            case .insert(let text):
+                result.append(UnifiedDiffLine(
+                    id: "ins-\(lineIdx)",
+                    oldNum: "", newNum: "\(newLineNum)",
+                    prefix: "+", text: text, type: .addition
+                ))
+                newLineNum += 1
+            }
+            if result.count > 150 { break }
+        }
+        
+        return result
     }
 }
 
@@ -2966,70 +3861,50 @@ extension View {
 
 // MARK: - Rich Text Components
 
-/// Renders inline markdown (bold, italic, links)
-struct MarkdownTextView: View {
+final class MarkdownAttrCache {
+    private static var cache: [String: AttributedString] = [:]
+    private static let lock = NSLock()
+    
+    static func getOrParse(_ text: String) -> AttributedString {
+        lock.lock()
+        if let found = cache[text] {
+            lock.unlock()
+            return found
+        }
+        lock.unlock()
+        
+        let parsed = (try? AttributedString(markdown: text, options: .init(interpretedSyntax: .inlineOnlyPreservingWhitespace))) ?? AttributedString(text)
+        
+        lock.lock()
+        if cache.count > 500 { cache.removeAll(keepingCapacity: true) }
+        cache[text] = parsed
+        lock.unlock()
+        return parsed
+    }
+}
+
+/// Renders inline markdown (bold, italic, code, links)
+struct MarkdownTextView: View, Equatable {
     let text: String
+    @EnvironmentObject var appState: AppState
+    
+    static func == (lhs: MarkdownTextView, rhs: MarkdownTextView) -> Bool {
+        return lhs.text == rhs.text
+    }
+    
+    private var fontSize: CGFloat {
+        appState.agentFontSize
+    }
     
     var body: some View {
-        Text(attributedText)
-            .font(.system(size: 13))
+        let font = Font.custom(appState.agentFontName, size: fontSize)
+        let attr = MarkdownAttrCache.getOrParse(text)
+        Text(attr)
+            .font(font)
             .frame(maxWidth: .infinity, alignment: .leading)
             .foregroundColor(.primary)
             .lineSpacing(5)
             .textSelection(.enabled)
-    }
-    
-    private var attributedText: AttributedString {
-        var str = AttributedString(text)
-        let nsText = text as NSString
-        
-        // Apply bold (**text** or __text__)
-        if let boldRegex = try? NSRegularExpression(pattern: "\\*\\*(.+?)\\*\\*|__(.+?)__", options: []) {
-            let matches = boldRegex.matches(in: text, options: [], range: NSRange(location: 0, length: nsText.length))
-            for match in matches {
-                let matchedString = nsText.substring(with: match.range)
-                if let range = str.range(of: matchedString) {
-                    str[range].font = .system(size: 13, weight: .bold)
-                }
-            }
-        }
-        
-        // Apply italic (*text* or _text_)
-        if let italicRegex = try? NSRegularExpression(pattern: "(?<![*_])\\*([^*]+)\\*(?![*_])|(?<![*_])_([^_]+)_(?![*_])", options: []) {
-            let matches = italicRegex.matches(in: text, options: [], range: NSRange(location: 0, length: nsText.length))
-            for match in matches {
-                let matchedString = nsText.substring(with: match.range)
-                if let range = str.range(of: matchedString) {
-                    str[range].font = .system(size: 13).italic()
-                }
-            }
-        }
-        
-        // Apply inline code (`code`)
-        if let codeRegex = try? NSRegularExpression(pattern: "`([^`]+)`", options: []) {
-            let matches = codeRegex.matches(in: text, options: [], range: NSRange(location: 0, length: nsText.length))
-            for match in matches {
-                let matchedString = nsText.substring(with: match.range)
-                if let range = str.range(of: matchedString) {
-                    str[range].font = .system(size: 12, design: .monospaced)
-                    str[range].backgroundColor = Color(nsColor: .controlBackgroundColor)
-                }
-            }
-        }
-        
-        // Apply inline LaTeX ($formula$) - styled as italic blue
-        if let latexRegex = try? NSRegularExpression(pattern: "\\$([^$]+)\\$", options: []) {
-            let matches = latexRegex.matches(in: text, options: [], range: NSRange(location: 0, length: nsText.length))
-            for match in matches {
-                let matchedString = nsText.substring(with: match.range)
-                if let range = str.range(of: matchedString) {
-                    str[range].font = .system(size: 13, design: .serif).italic()
-                    str[range].foregroundColor = Color.accentColor
-                }
-            }
-        }
-        
-        return str
     }
 }
 
@@ -3037,6 +3912,7 @@ struct MarkdownTextView: View {
 struct HeadingView: View {
     let level: Int
     let content: String
+    @EnvironmentObject var appState: AppState
     
     var body: some View {
         Text(content)
@@ -3048,18 +3924,18 @@ struct HeadingView: View {
     }
     
     private var fontSize: CGFloat {
+        let base = appState.agentFontSize
         switch level {
-        case 1: return 24
-        case 2: return 20
-        case 3: return 17
-        case 4: return 15
-        case 5: return 14
-        default: return 13
+        case 1: return base * 1.5
+        case 2: return base * 1.3
+        case 3: return base * 1.15
+        case 4: return base * 1.05
+        default: return base
         }
     }
     
     private var topPadding: CGFloat {
-        level <= 2 ? 8 : 4
+        level <= 2 ? 12 : 6
     }
 }
 
@@ -3067,30 +3943,30 @@ struct HeadingView: View {
 struct ListView: View {
     let items: [String]
     let isOrdered: Bool
+    @EnvironmentObject var appState: AppState
     
     var body: some View {
-        VStack(alignment: .leading, spacing: 4) {
+        VStack(alignment: .leading, spacing: 6) {
             ForEach(items.indices, id: \.self) { index in
                 HStack(alignment: .top, spacing: 8) {
                     Text(isOrdered ? "\(index + 1)." : "•")
-                        .font(.system(size: 13))
+                        .font(.system(size: appState.agentFontSize, weight: .semibold))
                         .foregroundColor(.secondary)
-                        .frame(width: 20, alignment: isOrdered ? .trailing : .center)
+                        .frame(width: isOrdered ? 24 : 14, alignment: .trailing)
                     
-                    Text(items[index])
-                        .font(.system(size: 13))
-                        .foregroundColor(.primary)
-                        .frame(maxWidth: .infinity, alignment: .leading)
+                    MarkdownTextView(text: items[index])
                 }
             }
         }
-        .padding(.leading, 8)
+        .padding(.leading, 6)
+        .padding(.vertical, 2)
     }
 }
 
 /// Renders blockquote
 struct BlockquoteView: View {
     let content: String
+    @EnvironmentObject var appState: AppState
     
     var body: some View {
         HStack(spacing: 0) {
@@ -3099,7 +3975,7 @@ struct BlockquoteView: View {
                 .frame(width: 3)
             
             Text(content)
-                .font(.system(size: 13))
+                .font(.system(size: appState.agentFontSize))
                 .foregroundColor(.secondary)
                 .italic()
                 .padding(.leading, 12)
@@ -3125,15 +4001,86 @@ struct LaTeXBlockView: View {
     }
 }
 
-/// Renders HTML content
+/// Renders HTML content or divider
 struct HTMLBlockView: View {
     let content: String
     
     var body: some View {
-        HTMLWebView(content: content)
-            .frame(minHeight: 100)
-            .frame(maxWidth: .infinity)
+        if content == "<hr/>" || content == "<hr>" || content == "<hr />" {
+            Divider()
+                .padding(.vertical, 8)
+        } else {
+            HTMLWebView(content: content)
+                .frame(minHeight: 100)
+                .frame(maxWidth: .infinity)
+                .cornerRadius(6)
+        }
+    }
+}
+
+/// Renders Markdown Table with sleek macOS typography
+struct TableBlockView: View {
+    let headers: [String]
+    let rows: [[String]]
+    
+    var body: some View {
+        ScrollView(.horizontal, showsIndicators: true) {
+            VStack(alignment: .leading, spacing: 0) {
+                // Header Row
+                HStack(spacing: 0) {
+                    ForEach(headers.indices, id: \.self) { idx in
+                        HStack {
+                            Text(headers[idx])
+                                .font(.system(size: 12, weight: .bold))
+                                .foregroundColor(.primary)
+                            Spacer(minLength: 0)
+                        }
+                        .padding(.horizontal, 12)
+                        .padding(.vertical, 8)
+                        .frame(minWidth: 110, alignment: .leading)
+                        
+                        if idx < headers.count - 1 {
+                            Divider()
+                        }
+                    }
+                }
+                .background(Color.primary.opacity(0.06))
+                
+                Divider()
+                
+                // Data Rows
+                ForEach(rows.indices, id: \.self) { rowIdx in
+                    let row = rows[rowIdx]
+                    HStack(spacing: 0) {
+                        ForEach(headers.indices, id: \.self) { colIdx in
+                            let cellText = colIdx < row.count ? row[colIdx] : ""
+                            HStack {
+                                MarkdownTextView(text: cellText)
+                                Spacer(minLength: 0)
+                            }
+                            .padding(.horizontal, 12)
+                            .padding(.vertical, 7)
+                            .frame(minWidth: 110, alignment: .leading)
+                            
+                            if colIdx < headers.count - 1 {
+                                Divider()
+                            }
+                        }
+                    }
+                    .background(rowIdx % 2 == 1 ? Color.primary.opacity(0.02) : Color.clear)
+                    
+                    if rowIdx < rows.count - 1 {
+                        Divider().opacity(0.5)
+                    }
+                }
+            }
+            .overlay(
+                RoundedRectangle(cornerRadius: 6)
+                    .stroke(Color.primary.opacity(0.12), lineWidth: 1)
+            )
             .cornerRadius(6)
+        }
+        .padding(.vertical, 4)
     }
 }
 
@@ -3448,12 +4395,17 @@ struct DynamicTag: Equatable {
     }
 }
 
-struct NativeCodeBlockView: View {
+struct NativeCodeBlockView: View, Equatable {
     let language: String
     let code: String
     
+    static func == (lhs: NativeCodeBlockView, rhs: NativeCodeBlockView) -> Bool {
+        return lhs.language == rhs.language && lhs.code == rhs.code
+    }
+    
     @State private var isCopied = false
     @State private var isHovering = false
+    @State private var isExpanded = false
     
     // Auto-color based on language
     private var autoColorTheme: CellColorTheme {
@@ -3487,10 +4439,10 @@ struct NativeCodeBlockView: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
             HStack(alignment: .top, spacing: 0) {
-                // Left Gutter
+                // Left Gutter (Single Unified Text Block)
                 gutterView
                 
-                // Main Cell Content
+                // Main Cell Content (Single Unified Text Block)
                 VStack(spacing: 0) {
                     headerView
                     codeContentView
@@ -3503,14 +4455,11 @@ struct NativeCodeBlockView: View {
             RoundedRectangle(cornerRadius: 8)
                 .stroke(blockBorder, lineWidth: 1)
         )
-        .shadow(color: Color.black.opacity(0.2), radius: 4, x: 0, y: 2)
         .padding(.vertical, 8)
         .onHover { isHovering = $0 }
     }
     
     // MARK: - Subviews
-    
-    // MARK: - Computed Properties
     
     private var lineCount: Int {
         code.components(separatedBy: "\n").count
@@ -3521,25 +4470,18 @@ struct NativeCodeBlockView: View {
     }
     
     private var gutterView: some View {
-        VStack(alignment: .trailing, spacing: 0) {
-            ForEach(1...min(lineCount, isExpanded ? lineCount : 15), id: \.self) { lineNum in
-                Text("\(lineNum)")
-                    .font(.system(size: 10, design: .monospaced))
-                    .foregroundColor(.secondary.opacity(0.6))
-                    .frame(height: 18)
-            }
-            
-            if isLongCode && !isExpanded {
-                Text("...")
-                    .font(.system(size: 10, design: .monospaced))
-                    .foregroundColor(.secondary.opacity(0.4))
-                    .frame(height: 18)
-            }
-        }
-        .padding(.vertical, 8)
-        .padding(.horizontal, 4)
-        .frame(width: 36)
-        .background(autoColorTheme.color.opacity(0.3))
+        let maxLines = min(lineCount, isExpanded ? lineCount : 15)
+        let gutterText = (1...max(1, maxLines)).map { "\($0)" }.joined(separator: "\n") + (isLongCode && !isExpanded ? "\n..." : "")
+        
+        return Text(gutterText)
+            .font(.system(size: 11, design: .monospaced))
+            .lineSpacing(4)
+            .foregroundColor(.secondary.opacity(0.55))
+            .multilineTextAlignment(.trailing)
+            .padding(.vertical, 8)
+            .padding(.horizontal, 6)
+            .frame(minWidth: 32, alignment: .trailing)
+            .background(autoColorTheme.color.opacity(0.3))
     }
     
     private var headerView: some View {
@@ -3657,11 +4599,8 @@ struct NativeCodeBlockView: View {
     // MARK: - Run Actions
     
     private func runInPlayground() {
-        // Copy code to clipboard and switch to playground mode
         NSPasteboard.general.clearContents()
         NSPasteboard.general.setString(code, forType: .string)
-        
-        // Get appState from environment and switch mode
         NotificationCenter.default.post(
             name: Notification.Name("OpenInPlayground"), 
             object: nil, 
@@ -3670,10 +4609,8 @@ struct NativeCodeBlockView: View {
     }
     
     private func runInCellMode() {
-        // Copy code and switch to cell mode
         NSPasteboard.general.clearContents()
         NSPasteboard.general.setString(code, forType: .string)
-        
         NotificationCenter.default.post(
             name: Notification.Name("OpenInCellMode"), 
             object: nil, 
@@ -3682,11 +4619,9 @@ struct NativeCodeBlockView: View {
     }
     
     private func openInEditor() {
-        // Create a new temp file and open it
         let ext = languageExtension(for: language)
         let fileName = "ai_code_\(Int(Date().timeIntervalSince1970)).\(ext)"
         let tempURL = FileManager.default.temporaryDirectory.appendingPathComponent(fileName)
-        
         do {
             try code.write(to: tempURL, atomically: true, encoding: .utf8)
             NotificationCenter.default.post(
@@ -3720,25 +4655,19 @@ struct NativeCodeBlockView: View {
         }
     }
     
-    @State private var isExpanded = false
-    
     private var codeContentView: some View {
         let lines = code.components(separatedBy: "\n")
-        let displayLines = isExpanded || !isLongCode ? lines : Array(lines.prefix(15))
+        let displayCode = isExpanded || !isLongCode ? code : lines.prefix(15).joined(separator: "\n")
         
         return VStack(alignment: .leading, spacing: 0) {
             ScrollView(.horizontal, showsIndicators: false) {
-                VStack(alignment: .leading, spacing: 0) {
-                    ForEach(displayLines.indices, id: \.self) { idx in
-                        Text(displayLines[idx].isEmpty ? " " : displayLines[idx])
-                            .font(.custom("Menlo", size: 12))
-                            .foregroundColor(Color(nsColor: .textColor))
-                            .frame(height: 18, alignment: .leading)
-                            .textSelection(.enabled)
-                    }
-                }
-                .padding(.vertical, 8)
-                .padding(.horizontal, 12)
+                Text(displayCode)
+                    .font(.custom("Menlo", size: 12))
+                    .lineSpacing(4)
+                    .foregroundColor(Color(nsColor: .textColor))
+                    .padding(.vertical, 8)
+                    .padding(.horizontal, 12)
+                    .textSelection(.enabled)
             }
             
             // Expand indicator
@@ -3842,183 +4771,827 @@ struct ChatListRow: View {
     }
 }
 
-// MARK: - Agent Thinking View (Live Tool Execution)
+// MARK: - Antigravity-Style Thinking & Reasoning Block
+
+struct AntigravityThoughtBlockView: View {
+    let content: String
+    let durationSeconds: Int?
+    
+    @State private var isExpanded: Bool = false
+    
+    private var durationText: String {
+        if let d = durationSeconds, d > 0 {
+            return isExpanded ? "Thinking for \(d)s" : "Thought for \(d)s"
+        }
+        return isExpanded ? "Thinking" : "Thought process"
+    }
+    
+    var body: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            // Collapsible Header
+            Button(action: {
+                withAnimation(.easeInOut(duration: 0.18)) {
+                    isExpanded.toggle()
+                }
+            }) {
+                HStack(spacing: 5) {
+                    Text(durationText)
+                        .font(.system(size: 11.5, weight: .regular))
+                        .foregroundColor(.secondary)
+                    
+                    Image(systemName: isExpanded ? "chevron.down" : "chevron.right")
+                        .font(.system(size: 8.5, weight: .semibold))
+                        .foregroundColor(.secondary.opacity(0.7))
+                    
+                    Spacer()
+                }
+                .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            
+            // Expanded Thought Body
+            if isExpanded {
+                VStack(alignment: .leading, spacing: 8) {
+                    let sections = parseThoughtSections(content)
+                    ForEach(sections, id: \.id) { sec in
+                        VStack(alignment: .leading, spacing: 4) {
+                            if let title = sec.title, !title.isEmpty {
+                                Text(title)
+                                    .font(.system(size: 12, weight: .semibold))
+                                    .foregroundColor(.primary.opacity(0.9))
+                            }
+                            
+                            Text(sec.body)
+                                .font(.system(size: 11.5))
+                                .foregroundColor(.secondary.opacity(0.85))
+                                .lineSpacing(3)
+                                .fixedSize(horizontal: false, vertical: true)
+                        }
+                    }
+                }
+                .padding(.leading, 8)
+                .padding(.top, 2)
+                .transition(.opacity)
+            }
+        }
+        .padding(.vertical, 4)
+    }
+    
+    private struct ThoughtSection: Identifiable {
+        let id = UUID()
+        let title: String?
+        let body: String
+    }
+    
+    private func parseThoughtSections(_ text: String) -> [ThoughtSection] {
+        let paragraphs = text.components(separatedBy: "\n\n")
+        var result: [ThoughtSection] = []
+        
+        for para in paragraphs {
+            let trimmed = para.trimmingCharacters(in: .whitespacesAndNewlines)
+            if trimmed.isEmpty { continue }
+            
+            // Check for markdown bold heading at start: **Title**\nBody or **Title** Body
+            if trimmed.hasPrefix("**") {
+                let parts = trimmed.components(separatedBy: "**")
+                if parts.count >= 3 {
+                    let title = parts[1].trimmingCharacters(in: .whitespacesAndNewlines)
+                    let remainingBody = parts.dropFirst(2).joined(separator: "**").trimmingCharacters(in: .whitespacesAndNewlines)
+                    result.append(ThoughtSection(title: title, body: remainingBody.isEmpty ? trimmed : remainingBody))
+                    continue
+                }
+            } else if trimmed.hasPrefix("### ") || trimmed.hasPrefix("## ") || trimmed.hasPrefix("# ") {
+                let lines = trimmed.components(separatedBy: .newlines)
+                let title = lines.first?.replacingOccurrences(of: "#", with: "").trimmingCharacters(in: .whitespaces)
+                let body = lines.dropFirst().joined(separator: "\n").trimmingCharacters(in: .whitespacesAndNewlines)
+                result.append(ThoughtSection(title: title, body: body.isEmpty ? trimmed : body))
+                continue
+            }
+            
+            result.append(ThoughtSection(title: nil, body: trimmed))
+        }
+        
+        return result.isEmpty ? [ThoughtSection(title: nil, body: text)] : result
+    }
+}
+
+// MARK: - Antigravity-Style Live Agent Thinking & Activity Tree
 
 struct AgentThinkingView: View {
     let currentTool: String?
     let phase: AgentPhase
     
-    @State private var pulsePhase = false
-    @State private var dotCount = 0
+    @State private var elapsedSeconds: Int = 1
+    @State private var isExpanded: Bool = true
+    @State private var dotCount: Int = 1
+    @State private var isPulsing: Bool = false
+    @State private var rotationAngle: Double = 0
+    @State private var elapsedTimer: Timer? = nil
+    @State private var dotAnimTimer: Timer? = nil
     
-    private let timer = Timer.publish(every: 0.5, on: .main, in: .common).autoconnect()
-    
-    private var statusText: String {
-        guard let tool = currentTool else {
-            let dots = String(repeating: ".", count: (dotCount % 3) + 1)
-            let baseText = phase == .validating ? "Validating changes" : "Thinking"
-            return "\(baseText)\(dots)"
+    private var workingText: String {
+        let dots = String(repeating: ".", count: dotCount)
+        if let tool = currentTool, !tool.isEmpty {
+            return "\(tool)\(dots)"
         }
-        return tool
+        return "Autonomous agent executing\(dots)"
     }
     
     var body: some View {
-        HStack(alignment: .top, spacing: 8) {
-            VStack(alignment: .leading, spacing: 6) {
-                HStack(spacing: 8) {
-                    ProgressView()
-                        .scaleEffect(0.45)
-                        .frame(width: 14, height: 14)
+        VStack(alignment: .leading, spacing: 6) {
+            HStack(spacing: 8) {
+                // Spinning active gear/ring indicator
+                Image(systemName: "arrow.triangle.2.circlepath")
+                    .font(.system(size: 11, weight: .semibold))
+                    .foregroundColor(.accentColor)
+                    .rotationEffect(.degrees(rotationAngle))
+                    .animation(.linear(duration: 1.2).repeatForever(autoreverses: false), value: rotationAngle)
+                
+                Text(elapsedSeconds > 0 ? "Agent Working • \(elapsedSeconds)s" : "Agent Working")
+                    .font(.system(size: 11.5, weight: .medium))
+                    .foregroundColor(.primary)
+                
+                // Pulsing live badge
+                HStack(spacing: 4) {
+                    Circle()
+                        .fill(Color.green)
+                        .frame(width: 5, height: 5)
+                        .opacity(isPulsing ? 1.0 : 0.3)
+                        .animation(.easeInOut(duration: 0.6).repeatForever(autoreverses: true), value: isPulsing)
                     
-                    Text(statusText)
-                        .font(.system(size: 11, weight: .medium, design: .monospaced))
+                    Text("LIVE")
+                        .font(.system(size: 8.5, weight: .bold))
+                        .foregroundColor(.green)
+                }
+                .padding(.horizontal, 5)
+                .padding(.vertical, 2)
+                .background(Color.green.opacity(0.12))
+                .cornerRadius(4)
+                
+                Spacer()
+                
+                Button(action: {
+                    withAnimation(.easeInOut(duration: 0.15)) {
+                        isExpanded.toggle()
+                    }
+                }) {
+                    Image(systemName: isExpanded ? "chevron.down" : "chevron.right")
+                        .font(.system(size: 8.5, weight: .semibold))
+                        .foregroundColor(.secondary)
+                }
+                .buttonStyle(.plain)
+            }
+            
+            if isExpanded {
+                HStack(spacing: 6) {
+                    Image(systemName: "terminal")
+                        .font(.system(size: 9.5))
                         .foregroundColor(.secondary)
                     
-                    Spacer()
+                    Text(workingText)
+                        .font(.system(size: 11, weight: .regular, design: .monospaced))
+                        .foregroundColor(.secondary)
+                        .lineLimit(2)
                 }
-                
-                // Animated progress bar
-                GeometryReader { geo in
-                    RoundedRectangle(cornerRadius: 1.5)
-                        .fill(Color.primary.opacity(0.08))
-                        .frame(height: 3)
-                        .overlay(alignment: .leading) {
-                            RoundedRectangle(cornerRadius: 1.5)
-                                .fill(Color.primary.opacity(0.28))
-                                .frame(width: geo.size.width * 0.3, height: 3)
-                                .offset(x: pulsePhase ? geo.size.width * 0.7 : 0)
-                                .animation(.easeInOut(duration: 1.2).repeatForever(autoreverses: true), value: pulsePhase)
-                        }
-                }
-                .frame(height: 3)
-            }
-            .padding(.vertical, 4)
-        }
-        .padding(.horizontal, 16)
-        .padding(.vertical, 12)
-        .onAppear { pulsePhase = true }
-        .onReceive(timer) { _ in dotCount += 1 }
-    }
-}
-
-// MARK: - Tool Execution Steps View (Completed Results)
-
-struct ToolExecutionStepsView: View {
-    let results: [ToolResultModel]
-    
-    var body: some View {
-        VStack(alignment: .leading, spacing: 0) {
-            ForEach(Array(results.enumerated()), id: \.element.toolCallId) { index, result in
-                ToolStepRow(result: result, stepNumber: index + 1, isLast: index == results.count - 1)
+                .padding(.leading, 4)
+                .padding(.top, 2)
             }
         }
-        .padding(.vertical, 6)
-        .padding(.horizontal, 4)
-        .background(Color(nsColor: .windowBackgroundColor).opacity(0.4))
+        .padding(.horizontal, 12)
+        .padding(.vertical, 8)
+        .background(Color.primary.opacity(0.04))
         .cornerRadius(6)
         .overlay(
             RoundedRectangle(cornerRadius: 6)
-                .stroke(Color.secondary.opacity(0.15), lineWidth: 1)
+                .stroke(Color.accentColor.opacity(0.3), lineWidth: 1)
         )
+        .padding(.horizontal, 14)
+        .padding(.vertical, 4)
+        .onAppear {
+            isPulsing = true
+            rotationAngle = 360
+            // Start timers ONLY when this view is actually on screen
+            elapsedTimer = Timer.scheduledTimer(withTimeInterval: 1.0, repeats: true) { _ in
+                Task { @MainActor in elapsedSeconds += 1 }
+            }
+            dotAnimTimer = Timer.scheduledTimer(withTimeInterval: 0.45, repeats: true) { _ in
+                Task { @MainActor in dotCount = (dotCount % 3) + 1 }
+            }
+        }
+        .onDisappear {
+            // Kill timers immediately when view leaves the hierarchy
+            elapsedTimer?.invalidate()
+            elapsedTimer = nil
+            dotAnimTimer?.invalidate()
+            dotAnimTimer = nil
+        }
     }
 }
 
-struct ToolStepRow: View {
-    let result: ToolResultModel
-    let stepNumber: Int
-    let isLast: Bool
+// MARK: - Antigravity-Style Activity Summary & Tool Tree
+
+struct ToolExecutionStepsView: View {
+    let results: [ToolResultModel]
+    @State private var isExpanded: Bool = true
     
-    @State private var isExpanded = false
-    
-    private var label: String {
-        switch result.toolName {
-        case "file_read": return "FILE_READ"
-        case "file_write": return "FILE_WRITE"
-        case "replace_in_file": return "EDIT_FILE"
-        case "shell": return "RUN_COMMAND"
-        case "grep_search": return "GREP_SEARCH"
-        case "file_search": return "FILE_SEARCH"
-        case "list_directory_tree": return "LIST_DIR"
-        case "git_status": return "GIT_STATUS"
-        case "web_fetch": return "WEB_FETCH"
-        default: return result.toolName.uppercased()
+    private var headerTitle: String {
+        let fileCount = results.filter { $0.toolName.contains("file") || $0.toolName.contains("read") || $0.toolName.contains("write") }.count
+        if fileCount > 0 {
+            return "Exploring \(fileCount) file\(fileCount > 1 ? "s" : "")"
         }
-    }
-    
-    // Extract filepath from output for display
-    private var filePath: String? {
-        let output = result.output
-        // Look for common patterns
-        if let range = output.range(of: #"/[^\s\n]+"#, options: .regularExpression) {
-            let path = String(output[range])
-            if path.contains("/") {
-                let url = URL(fileURLWithPath: path)
-                return url.lastPathComponent
-            }
-        }
-        return nil
-    }
-    
-    private var outputPreview: String {
-        let output = result.success ? result.output : (result.error ?? "Unknown error")
-        if output.count > 500 {
-            return String(output.prefix(500)) + "\n..."
-        }
-        return output
+        return "Executed \(results.count) step\(results.count > 1 ? "s" : "")"
     }
     
     var body: some View {
-        VStack(alignment: .leading, spacing: 0) {
-            // Step Header (always visible, clickable)
-            Button(action: { withAnimation(.easeInOut(duration: 0.15)) { isExpanded.toggle() } }) {
-                HStack(spacing: 8) {
-                    Text(String(format: "%02d", stepNumber))
-                        .font(.system(size: 9, design: .monospaced))
-                        .foregroundColor(.secondary.opacity(0.7))
-                    
-                    // Label
-                    Text(label)
-                        .font(.system(size: 10, weight: .bold, design: .monospaced))
+        VStack(alignment: .leading, spacing: 4) {
+            Button(action: {
+                withAnimation(.easeInOut(duration: 0.18)) {
+                    isExpanded.toggle()
+                }
+            }) {
+                HStack(spacing: 6) {
+                    Text(headerTitle)
+                        .font(.system(size: 11.5, weight: .regular))
                         .foregroundColor(.secondary)
                     
-                    // File name (if detected)
-                    if let file = filePath {
-                        Text(file)
-                            .font(.system(size: 10, design: .monospaced))
-                            .foregroundColor(.secondary.opacity(0.8))
-                            .lineLimit(1)
-                    }
+                    Image(systemName: isExpanded ? "chevron.down" : "chevron.right")
+                        .font(.system(size: 8.5, weight: .semibold))
+                        .foregroundColor(.secondary.opacity(0.7))
                     
                     Spacer()
-                    
-                    Text(isExpanded ? "Hide" : "Details")
-                        .font(.system(size: 9))
-                        .foregroundColor(.secondary.opacity(0.7))
                 }
-                .padding(.horizontal, 10)
-                .padding(.vertical, 6)
                 .contentShape(Rectangle())
             }
             .buttonStyle(.plain)
             
-            // Expanded Output
-            if isExpanded && !outputPreview.isEmpty {
-                Text(outputPreview)
-                    .font(.system(size: 10, design: .monospaced))
-                    .foregroundColor(result.success ? .secondary : .red.opacity(0.8))
-                    .lineLimit(20)
-                    .fixedSize(horizontal: false, vertical: true)
-                    .textSelection(.enabled)
-                    .padding(.horizontal, 10)
-                    .padding(.leading, 16) // Align with content after timeline dot
-                    .padding(.vertical, 6)
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                    .background(Color.black.opacity(0.08))
+            if isExpanded {
+                VStack(alignment: .leading, spacing: 6) {
+                    ForEach(Array(results.enumerated()), id: \.element.toolCallId) { index, result in
+                        ToolActivityItemRow(result: result)
+                    }
+                }
+                .padding(.leading, 8)
+                .padding(.top, 3)
             }
+        }
+        .padding(.vertical, 4)
+    }
+}
+
+struct ToolActivityItemRow: View {
+    let result: ToolResultModel
+    @State private var showDetails: Bool = false
+    
+    private var displayItem: (verb: String, detail: String, lineInfo: String?) {
+        let output = result.output
+        let params = result.toolParams ?? [:]
+        var lineInfo: String? = nil
+        
+        if let startLine = params["StartLine"] as? Int, let endLine = params["EndLine"] as? Int {
+            lineInfo = "#L\(startLine)-\(endLine)"
+        } else if let lineMatch = output.range(of: #"#L\d+(-\d+)?"#, options: .regularExpression) {
+            lineInfo = String(output[lineMatch])
+        }
+        
+        let targetFile = (params["path"] as? String) ?? (params["TargetFile"] as? String) ?? (params["AbsolutePath"] as? String) ?? (params["file_path"] as? String)
+        let resolvedFileName = targetFile != nil ? URL(fileURLWithPath: targetFile!).lastPathComponent : extractFileName(output)
+        
+        switch result.toolName {
+        case "file_read", "read_file", "view_file":
+            let name = resolvedFileName ?? "source file"
+            let lines = lineInfo ?? (output.contains("\n") ? "#L1-\(min(350, output.components(separatedBy: .newlines).count))" : nil)
+            return ("Analyzed", name, lines)
             
-            if !isLast {
-                Divider().opacity(0.3)
+        case "multi_file_read":
+            if let paths = params["paths"] as? [String], let first = paths.first {
+                let name = URL(fileURLWithPath: first).lastPathComponent
+                let countStr = paths.count > 1 ? " (+\(paths.count - 1) more)" : ""
+                return ("Analyzed", "\(name)\(countStr)", nil)
+            }
+            return ("Analyzed", "project files", nil)
+            
+        case "file_write", "replace_in_file", "write_to_file", "patch_file":
+            let name = resolvedFileName ?? "file"
+            return ("Edited", name, nil)
+            
+        case "shell", "run_command":
+            if let cmd = params["command"] as? String ?? params["CommandLine"] as? String {
+                let cleanCmd = cmd.trimmingCharacters(in: .whitespacesAndNewlines).components(separatedBy: .newlines).first ?? cmd
+                return ("Executed", String(cleanCmd.prefix(40)), nil)
+            }
+            return ("Executed", "terminal task", nil)
+            
+        case "grep_search", "file_search", "find_symbol":
+            let query = (params["query"] as? String) ?? (params["symbol"] as? String) ?? extractQuery(output)
+            return ("Searched", "\"\(query.prefix(30))\"", nil)
+            
+        case "list_directory_tree", "list_dir":
+            return ("Scanned directory", "project structure", nil)
+            
+        case "git_status":
+            return ("Inspected", "Git repository state", nil)
+            
+        case "git_diff":
+            return ("Inspected", "Git diff changes", nil)
+            
+        default:
+            let cleanName = result.toolName.replacingOccurrences(of: "_", with: " ")
+            return ("Applied", cleanName, nil)
+        }
+    }
+    
+    private func extractFileName(_ text: String) -> String? {
+        if let range = text.range(of: #"/[^\s\n:]+\.[a-zA-Z0-9]+"#, options: .regularExpression) {
+            let path = String(text[range])
+            return URL(fileURLWithPath: path).lastPathComponent
+        }
+        return nil
+    }
+    
+    private func extractQuery(_ text: String) -> String {
+        if let firstLine = text.components(separatedBy: .newlines).first, !firstLine.isEmpty {
+            return String(firstLine.prefix(40))
+        }
+        return "codebase"
+    }
+    
+    private func extractCommand(_ id: String, output: String) -> String {
+        if let firstLine = output.components(separatedBy: .newlines).first(where: { !$0.trimmingCharacters(in: .whitespaces).isEmpty }) {
+            return String(firstLine.prefix(45))
+        }
+        return "command"
+    }
+    
+    var body: some View {
+        VStack(alignment: .leading, spacing: 3) {
+            Button(action: {
+                withAnimation(.easeInOut(duration: 0.15)) {
+                    showDetails.toggle()
+                }
+            }) {
+                HStack(spacing: 6) {
+                    Text(displayItem.verb)
+                        .font(.system(size: 13, weight: .regular))
+                        .foregroundColor(.secondary)
+                    
+                    Text(displayItem.detail)
+                        .font(.system(size: 13, weight: .medium, design: .monospaced))
+                        .foregroundColor(Color(nsColor: .labelColor).opacity(0.9))
+                    
+                    if let lines = displayItem.lineInfo {
+                        Text(lines)
+                            .font(.system(size: 11.5, design: .monospaced))
+                            .foregroundColor(.secondary.opacity(0.7))
+                    }
+                    
+                    Spacer()
+                }
+                .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            
+            if showDetails {
+                Text(result.success ? result.output : (result.error ?? "Failed"))
+                    .font(.system(size: 11.5, design: .monospaced))
+                    .foregroundColor(result.success ? .secondary : .red.opacity(0.8))
+                    .lineLimit(15)
+                    .padding(8)
+                    .background(Color.primary.opacity(0.04))
+                    .cornerRadius(6)
+                    .padding(.leading, 12)
             }
         }
     }
 }
+
+// MARK: - Sleek Project Workspace Dropdown (Matching media_1787685893773.png)
+
+struct ProjectWorkspaceSelectorMenu: View {
+    @EnvironmentObject var appState: AppState
+    @ObservedObject var agent = AgentService.shared
+    @Binding var isPresented: Bool
+    @State private var searchText = ""
+    
+    private var availableProjects: [(name: String, path: String)] {
+        var list: [(name: String, path: String)] = []
+        var seen = Set<String>()
+        
+        if let current = appState.workspaceFolder?.path, !current.isEmpty {
+            list.append((URL(fileURLWithPath: current).lastPathComponent, current))
+            seen.insert(current)
+        }
+        
+        for g in agent.projectGroups {
+            if let p = g.projectPath, !p.isEmpty, !seen.contains(p) {
+                list.append((g.projectName, p))
+                seen.insert(p)
+            }
+        }
+        
+        if searchText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            return list
+        } else {
+            let q = searchText.lowercased()
+            return list.filter { $0.name.lowercased().contains(q) || $0.path.lowercased().contains(q) }
+        }
+    }
+    
+    var body: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            // Search Bar
+            HStack(spacing: 6) {
+                Image(systemName: "magnifyingglass")
+                    .font(.system(size: 11))
+                    .foregroundColor(.secondary)
+                TextField("Search", text: $searchText)
+                    .textFieldStyle(.plain)
+                    .font(.system(size: 11.5))
+            }
+            .padding(.horizontal, 8)
+            .padding(.vertical, 5)
+            .background(Color(nsColor: .controlBackgroundColor).opacity(0.8))
+            .cornerRadius(6)
+            .overlay(RoundedRectangle(cornerRadius: 6).stroke(Color.primary.opacity(0.12), lineWidth: 1))
+            .padding(.horizontal, 8)
+            .padding(.top, 8)
+            
+            // Projects List
+            ScrollView {
+                VStack(alignment: .leading, spacing: 2) {
+                    ForEach(availableProjects, id: \.path) { proj in
+                        let isSelected = (appState.workspaceFolder?.path == proj.path)
+                        Button(action: {
+                            selectProject(proj.path)
+                        }) {
+                            HStack(spacing: 8) {
+                                Image(systemName: "folder")
+                                    .font(.system(size: 11))
+                                    .foregroundColor(.secondary)
+                                Text(proj.name)
+                                    .font(.system(size: 11.5, weight: isSelected ? .semibold : .regular))
+                                    .foregroundColor(.primary)
+                                Spacer()
+                                if isSelected {
+                                    Image(systemName: "checkmark")
+                                        .font(.system(size: 10, weight: .bold))
+                                        .foregroundColor(.accentColor)
+                                }
+                            }
+                            .padding(.horizontal, 8)
+                            .padding(.vertical, 4)
+                            .background(isSelected ? Color.primary.opacity(0.08) : Color.clear)
+                            .cornerRadius(5)
+                        }
+                        .buttonStyle(.plain)
+                    }
+                }
+                .padding(.horizontal, 6)
+            }
+            .frame(maxHeight: 180)
+            
+            Divider().padding(.horizontal, 4)
+            
+            // Actions matching user's screenshot
+            VStack(alignment: .leading, spacing: 2) {
+                Button(action: openNewProjectPicker) {
+                    HStack(spacing: 8) {
+                        Image(systemName: "folder.badge.plus")
+                            .font(.system(size: 11))
+                            .foregroundColor(.secondary)
+                        Text("New Project")
+                            .font(.system(size: 11.5))
+                            .foregroundColor(.primary)
+                        Spacer()
+                    }
+                    .padding(.horizontal, 8)
+                    .padding(.vertical, 4)
+                }
+                .buttonStyle(.plain)
+                
+                Button(action: { isPresented = false }) {
+                    HStack(spacing: 8) {
+                        Image(systemName: "bolt")
+                            .font(.system(size: 11))
+                            .foregroundColor(.secondary)
+                        Text("Quick Start")
+                            .font(.system(size: 11.5))
+                            .foregroundColor(.primary)
+                        Spacer()
+                    }
+                    .padding(.horizontal, 8)
+                    .padding(.vertical, 4)
+                }
+                .buttonStyle(.plain)
+                
+                Button(action: noProjectAction) {
+                    HStack(spacing: 8) {
+                        Image(systemName: "slash.circle")
+                            .font(.system(size: 11))
+                            .foregroundColor(.secondary)
+                        Text("No Project")
+                            .font(.system(size: 11.5))
+                            .foregroundColor(.primary)
+                        Spacer()
+                    }
+                    .padding(.horizontal, 8)
+                    .padding(.vertical, 4)
+                }
+                .buttonStyle(.plain)
+            }
+            .padding(.horizontal, 6)
+            .padding(.bottom, 6)
+        }
+        .frame(width: 250)
+        .background(Color(nsColor: .windowBackgroundColor))
+    }
+    
+    private func selectProject(_ path: String) {
+        guard !path.isEmpty else { return }
+        let url = URL(fileURLWithPath: path)
+        Task { @MainActor in
+            await appState.openWorkspace(url: url)
+            agent.setWorkspace(path)
+            _ = agent.createNewChat(projectPath: path)
+        }
+        isPresented = false
+    }
+    
+    private func openNewProjectPicker() {
+        isPresented = false
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.12) {
+            let panel = NSOpenPanel()
+            panel.canChooseFiles = false
+            panel.canChooseDirectories = true
+            panel.canCreateDirectories = true
+            panel.allowsMultipleSelection = false
+            panel.prompt = "Select Project Folder"
+            panel.message = "Select an existing folder or create a new project directory"
+            
+            if panel.runModal() == .OK, let url = panel.url {
+                selectProject(url.path)
+            }
+        }
+    }
+    
+    private func noProjectAction() {
+        appState.workspaceFolder = nil
+        agent.setWorkspace("")
+        isPresented = false
+    }
+}
+
+// MARK: - SubAgent Selector & Deployment Dropdown Menu
+
+struct SubAgentSelectorMenu: View {
+    @Binding var selectedType: String
+    @Binding var isPresented: Bool
+    @ObservedObject private var harness = SubAgentHarness.shared
+    
+    var body: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            // Header
+            HStack {
+                Text("Select Agent Mode")
+                    .font(.system(size: 11, weight: .semibold))
+                    .foregroundColor(.secondary)
+                
+                Spacer()
+                
+                let activeCount = harness.activeSubagents.filter { $0.state == .running }.count
+                if activeCount > 0 {
+                    HStack(spacing: 4) {
+                        Circle().fill(Color.green).frame(width: 5, height: 5)
+                        Text("\(activeCount) Running")
+                            .font(.system(size: 9.5, weight: .medium))
+                            .foregroundColor(.green)
+                    }
+                    .padding(.horizontal, 6)
+                    .padding(.vertical, 2)
+                    .background(Color.green.opacity(0.12))
+                    .cornerRadius(4)
+                }
+            }
+            .padding(.horizontal, 12)
+            .padding(.vertical, 8)
+            
+            Divider()
+                .opacity(0.4)
+            
+            ScrollView {
+                VStack(spacing: 2) {
+                    // Main Agent
+                    agentOptionRow(
+                        type: "main",
+                        icon: "bolt.fill",
+                        title: "Main Agent",
+                        subtitle: "Autonomous orchestrator with multi-agent delegation"
+                    )
+                    
+                    Divider()
+                        .opacity(0.3)
+                        .padding(.vertical, 4)
+                    
+                    Text("SPECIALIZED SUBAGENTS")
+                        .font(.system(size: 8.5, weight: .bold))
+                        .foregroundColor(.secondary.opacity(0.6))
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .padding(.horizontal, 8)
+                        .padding(.top, 2)
+                        .padding(.bottom, 2)
+                    
+                    // Built-in & Registered SubAgents
+                    ForEach(Array(harness.registeredDefinitions.values.sorted(by: { $0.name < $1.name }))) { def in
+                        agentOptionRow(
+                            type: def.name,
+                            icon: subagentIcon(def.name),
+                            title: def.role,
+                            subtitle: def.description
+                        )
+                    }
+                }
+                .padding(6)
+            }
+            .frame(maxHeight: 270)
+            
+            Divider()
+                .opacity(0.4)
+            
+            // Bottom Action Controls
+            HStack {
+                Button(action: {
+                    isPresented = false
+                    harness.showSubAgentMonitor = true
+                }) {
+                    HStack(spacing: 5) {
+                        Image(systemName: "cpu")
+                            .font(.system(size: 10))
+                        Text("Open Monitor HUD")
+                            .font(.system(size: 11, weight: .regular))
+                    }
+                    .foregroundColor(.secondary)
+                }
+                .buttonStyle(.plain)
+                
+                Spacer()
+                
+                if !harness.activeSubagents.filter({ $0.state == .running }).isEmpty {
+                    Button(action: {
+                        harness.killAllSubagents()
+                        isPresented = false
+                    }) {
+                        Text("Kill All")
+                            .font(.system(size: 10, weight: .medium))
+                            .foregroundColor(.red.opacity(0.9))
+                    }
+                    .buttonStyle(.plain)
+                }
+            }
+            .padding(.horizontal, 12)
+            .padding(.vertical, 8)
+            .background(Color.primary.opacity(0.02))
+        }
+        .frame(width: 300)
+        .background(Color(nsColor: .windowBackgroundColor))
+    }
+    
+    @ViewBuilder
+    private func agentOptionRow(type: String, icon: String, title: String, subtitle: String) -> some View {
+        let isSelected = selectedType == type
+        Button(action: {
+            selectedType = type
+            isPresented = false
+        }) {
+            HStack(alignment: .top, spacing: 8) {
+                Image(systemName: icon)
+                    .font(.system(size: 11))
+                    .foregroundColor(isSelected ? .primary : .secondary.opacity(0.8))
+                    .frame(width: 16, height: 16)
+                    .padding(.top, 2)
+                
+                VStack(alignment: .leading, spacing: 2) {
+                    HStack {
+                        Text(title)
+                            .font(.system(size: 11.5, weight: isSelected ? .semibold : .regular))
+                            .foregroundColor(.primary)
+                        
+                        Spacer()
+                        
+                        if isSelected {
+                            Image(systemName: "checkmark")
+                                .font(.system(size: 9, weight: .bold))
+                                .foregroundColor(.primary)
+                        }
+                    }
+                    
+                    Text(subtitle)
+                        .font(.system(size: 9.5))
+                        .foregroundColor(.secondary.opacity(0.85))
+                        .lineLimit(2)
+                }
+            }
+            .padding(.horizontal, 8)
+            .padding(.vertical, 6)
+            .background(isSelected ? Color.primary.opacity(0.07) : Color.clear)
+            .cornerRadius(6)
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+    }
+    
+    private func subagentIcon(_ name: String) -> String {
+        switch name {
+        case "architect": return "square.stack.3d.up"
+        case "frontend_engineer": return "macwindow"
+        case "backend_engineer": return "server.rack"
+        case "bug_hunter": return "wrench.and.screwdriver"
+        case "test_runner": return "checkmark.seal"
+        case "security_auditor": return "shield"
+        default: return "cube"
+        }
+    }
+}
+
+// MARK: - Rich Attachment Chip View
+
+struct AttachmentChipView: View {
+    let file: AIAttachment
+    var onRemove: () -> Void
+    
+    var body: some View {
+        HStack(spacing: 6) {
+            // Real Image thumbnail or category icon
+            if let image = file.nsImage {
+                Image(nsImage: image)
+                    .resizable()
+                    .aspectRatio(contentMode: .fill)
+                    .frame(width: 24, height: 24)
+                    .cornerRadius(4)
+                    .clipped()
+            } else {
+                Image(systemName: iconName)
+                    .font(.system(size: 12))
+                    .foregroundColor(iconColor)
+            }
+            
+            VStack(alignment: .leading, spacing: 1) {
+                Text(file.name)
+                    .font(.system(size: 11, weight: .medium))
+                    .foregroundColor(.primary)
+                    .lineLimit(1)
+                
+                Text(subtitle)
+                    .font(.system(size: 9))
+                    .foregroundColor(.secondary)
+                    .lineLimit(1)
+            }
+            
+            Button(action: onRemove) {
+                Image(systemName: "xmark")
+                    .font(.system(size: 8, weight: .bold))
+                    .foregroundColor(.secondary)
+                    .padding(3)
+                    .background(Color.primary.opacity(0.08))
+                    .clipShape(Circle())
+            }
+            .buttonStyle(.plain)
+            .help("Remove attachment")
+        }
+        .padding(.horizontal, 8)
+        .padding(.vertical, 4)
+        .background(Color(nsColor: .controlBackgroundColor).opacity(0.85))
+        .cornerRadius(6)
+        .overlay(
+            RoundedRectangle(cornerRadius: 6)
+                .stroke(Color.primary.opacity(0.12), lineWidth: 1)
+        )
+    }
+    
+    private var iconName: String {
+        switch file.type {
+        case .image: return "photo"
+        case .pdf: return "doc.text.fill"
+        case .text: return "doc.plaintext"
+        }
+    }
+    
+    private var iconColor: Color {
+        switch file.type {
+        case .image: return .cyan
+        case .pdf: return .red.opacity(0.85)
+        case .text: return .accentColor
+        }
+    }
+    
+    private var subtitle: String {
+        switch file.type {
+        case .image:
+            return "Image • \(file.formattedSize)"
+        case .pdf:
+            let pages = file.pdfPageCount
+            return "PDF • \(pages > 0 ? "\(pages) p • " : "")\(file.formattedSize)"
+        case .text:
+            return "File • \(file.formattedSize)"
+        }
+    }
+}
+

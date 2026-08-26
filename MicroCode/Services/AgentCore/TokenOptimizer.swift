@@ -516,6 +516,63 @@ class TokenOptimizer: ObservableObject {
     
     // MARK: - Token Cost Estimation
     
+    // MARK: - Smart Iterative Context Window for Agent Loops
+    
+    /// Compresses tool history dynamically during long-running multi-turn loops.
+    /// Preserves the original goal and the latest 2-3 turns in full fidelity,
+    /// while summarizing older tool outputs to avoid context blowup and AI slop.
+    func compressIterativeToolHistory(
+        _ history: [(role: String, content: String)],
+        budget: Int = 18000
+    ) -> [(role: String, content: String)] {
+        guard history.count > 4 else { return history }
+        
+        let totalTokens = history.reduce(0) { $0 + estimateTokens($1.content) }
+        if totalTokens <= budget { return history }
+        
+        var optimized: [(role: String, content: String)] = []
+        
+        // 1. Keep the first user prompt intact (the primary goal)
+        if let first = history.first {
+            optimized.append(first)
+        }
+        
+        // 2. Determine slice of older turns vs recent turns
+        let recentCount = min(4, history.count - 1)
+        let middleTurns = history.dropFirst().dropLast(recentCount)
+        let recentTurns = history.suffix(recentCount)
+        
+        // 3. Summarize middle tool turns
+        for item in middleTurns {
+            if item.role == "user" && item.content.contains("Tool execution results:") {
+                // Compress old tool result
+                let lines = item.content.components(separatedBy: "\n")
+                let compactLines = lines.filter { line in
+                    line.hasPrefix("✅") || line.hasPrefix("❌") || line.contains("Modified:") || line.contains("Created:")
+                }
+                let summaryContent = compactLines.isEmpty
+                    ? "[Prior tools completed: \(lines.prefix(3).joined(separator: " "))]"
+                    : "Prior tool summary:\n" + compactLines.joined(separator: "\n")
+                optimized.append((role: "user", content: summaryContent))
+            } else if item.role == "assistant" {
+                // Compact old thoughts
+                let trimmed = item.content.prefix(300)
+                optimized.append((role: "assistant", content: String(trimmed) + (item.content.count > 300 ? "..." : "")))
+            } else {
+                optimized.append(item)
+            }
+        }
+        
+        // 4. Append recent turns with full fidelity
+        for recent in recentTurns {
+            optimized.append(recent)
+        }
+        
+        let finalTokens = optimized.reduce(0) { $0 + estimateTokens($1.content) }
+        stats.savedTokens += max(0, totalTokens - finalTokens)
+        return optimized
+    }
+
     nonisolated func estimateCost(inputTokens: Int, outputTokens: Int, model: String) -> Double {
         // Approximate pricing per 1M tokens (input/output)
         let pricing: (input: Double, output: Double) = {

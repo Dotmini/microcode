@@ -1,6 +1,7 @@
 import SwiftUI
 
 struct SASProcedureView: View {
+    @EnvironmentObject var appState: AppState
     @ObservedObject var cell: NotebookCellModel
     let onRun: () -> Void
     @State private var moduleType: SASModuleType = .dataStep
@@ -23,7 +24,7 @@ struct SASProcedureView: View {
             codePreview
         }
         .padding()
-        .background(Color(nsColor: .controlBackgroundColor))
+        .background(appState.appTheme.isGlass ? Color.white.opacity(0.05) : Color(nsColor: appState.appTheme.elevatedBackground))
         .cornerRadius(12)
         .onAppear {
             loadMetadata()

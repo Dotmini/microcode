@@ -52,6 +52,7 @@ class AgentService: ObservableObject {
     @Published var chatSessions: [ChatSession] = []
     @Published var activeChatId: String?
     @Published var showChatSidebar: Bool = false
+    var currentWorkspace: String? { toolBox.workspaceRoot }
     
     // Services
     private let aiClient = AIClient.shared
@@ -62,7 +63,12 @@ class AgentService: ObservableObject {
     private let chatStorageKey = "microcode_agent_chats"
     
     // Agent configuration
-    private let maxToolIterations = 25
+    private var maxToolIterations: Int {
+        let val = UserDefaults.standard.integer(forKey: "agentMaxIterations")
+        // 0 means Unlimited (uses 1000 safety bound to avoid accidental infinite loop)
+        if val <= 0 { return 1000 }
+        return val
+    }
     private let maxContextChars = 1200000
     private var cachedSemanticContext: (workspace: String, value: String, date: Date)?
     private let semanticContextTTL: TimeInterval = 120
@@ -94,25 +100,45 @@ class AgentService: ObservableObject {
             )
         }
         
-        // Process next in queue if any
+        // Auto process next in queue if user didn't clear
         processQueue()
     }
     
-    // MARK: - Message Queue
+    // MARK: - Message Queue (Non-Destructive Execution)
     
     func enqueueMessage(_ text: String, attachments: [AIAttachment] = []) {
-        messageQueue.append(QueuedMessage(text: text, attachments: attachments))
+        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty || !attachments.isEmpty else { return }
+        
+        let item = QueuedMessage(text: trimmed, attachments: attachments)
+        messageQueue.append(item)
+        isProcessingQueue = !messageQueue.isEmpty
+        logActivity(.info, "Queued request (\(messageQueue.count) pending)")
+        
         if !isLoading {
             processQueue()
         }
     }
     
+    func cancelQueuedMessage(id: UUID) {
+        messageQueue.removeAll(where: { $0.id == id })
+        isProcessingQueue = !messageQueue.isEmpty
+    }
+    
+    func clearQueue() {
+        messageQueue.removeAll()
+        isProcessingQueue = false
+    }
+    
     func processQueue() {
-        guard !messageQueue.isEmpty, !isLoading else { return }
+        guard !messageQueue.isEmpty, !isLoading else {
+            isProcessingQueue = !messageQueue.isEmpty
+            return
+        }
         let next = messageQueue.removeFirst()
         isProcessingQueue = !messageQueue.isEmpty
         
-        // This will be called from AIAgentView.sendMessage with proper context
+        // Post notification to execute with full app state context
         NotificationCenter.default.post(name: .agentProcessQueueItem, object: next)
     }
     
@@ -201,6 +227,8 @@ class AgentService: ObservableObject {
             9. Use find_symbol to locate function/class definitions.
             10. For multi-file changes, use patch_file for efficiency.
             11. Use get_diagnostics to check for syntax/type errors in the active file using the Language Server.
+            12. CRITICAL SAFETY GUARD: NEVER delete user files or directories blindly. Destructive commands like `rm -rf`, `find . -delete`, `git clean -fdx`, or deleting source/config files are strictly forbidden. Always make safe, targeted modifications.
+            13. TERMINAL RUNNER: You have full access to run commands with `shell`. It runs in the native macOS environment and mirrors directly into the IDE Terminal/Console. Always run build, test, and diagnostics commands to verify code.
             
             ## Planning
             For complex tasks, create a brief plan FIRST:
@@ -216,6 +244,14 @@ class AgentService: ObservableObject {
             - You MUST read `.microcode/task.md` to understand your current objectives.
             - Once you complete a task, YOU MUST edit `.microcode/task.md` to check it off (change `[ ]` to `[x]`).
             - Always follow instructions and rules declared in `.microcode/agent.md`.
+            
+            ## SubAgent Orchestration & Multi-Agent Delegation
+            You have full authority to assess complex tasks and deploy specialized SubAgents:
+            - Built-in Archetypes: `architect` (system design), `frontend_engineer` (React, Tailwind, SwiftUI), `backend_engineer` (APIs, databases), `bug_hunter` (diagnostics & repairs), `test_runner` (test suites), `security_auditor` (security review).
+            - `invoke_subagent`: Spawns concurrent background subagents to work on designated subtasks.
+            - `define_subagent`: Dynamically creates custom subagent types with scoped system prompts.
+            - `manage_subagents`: Inspects live subagent statuses or terminates subagents (`kill`, `kill_all`).
+            - `send_message`: Sends directives or context to a running subagent.
             
             ## Output Quality
             - Show code changes with ```diff blocks showing - (old) and + (new) lines.
@@ -291,6 +327,12 @@ class AgentService: ObservableObject {
             prompt += "\n\n## task.md\n\(compressed)"
         }
         
+        // Inject Active Agent Skills (Real-Time from Disk)
+        let skillsSnippet = AgentSkillsStore.shared.activeSkillsPromptSnippet()
+        if !skillsSnippet.isEmpty {
+            prompt += skillsSnippet
+        }
+        
         // Apply final compression to system prompt
         return tokenOptimizer.compressSystemPrompt(prompt, budget: budget.maxSystemTokens)
     }
@@ -299,12 +341,25 @@ class AgentService: ObservableObject {
     
     init() {
         loadChats()
-        if chatSessions.isEmpty {
+        let lastActiveId = UserDefaults.standard.string(forKey: "microcode_active_chat_id")
+        if let last = lastActiveId, let matched = chatSessions.first(where: { $0.id == last }) {
+            activeChatId = matched.id
+            messages = matched.messages.map { $0.toModel() }
+            if let path = matched.projectPath, !path.isEmpty {
+                setWorkspace(path)
+            }
+        } else if chatSessions.isEmpty {
             let newChat = ChatSession.create(name: "Chat 1")
             chatSessions.append(newChat)
             activeChatId = newChat.id
         } else if activeChatId == nil {
-            activeChatId = chatSessions.first?.id
+            if let first = chatSessions.first {
+                activeChatId = first.id
+                messages = first.messages.map { $0.toModel() }
+                if let path = first.projectPath, !path.isEmpty {
+                    setWorkspace(path)
+                }
+            }
         }
     }
     
@@ -434,6 +489,49 @@ class AgentService: ObservableObject {
         loadOrCreateArx(workspacePath)
     }
     
+    // MARK: - Autonomous Task Plan Execution
+    
+    public func executeTaskPlan(
+        provider: String,
+        model: String,
+        apiKey: String
+    ) async {
+        guard let ws = toolBox.workspaceRoot, !ws.isEmpty else {
+            logActivity(.info, "No workspace open to execute tasks.")
+            return
+        }
+        
+        let taskPath = (ws as NSString).appendingPathComponent(".microcode/task.md")
+        let taskContent = (try? String(contentsOfFile: taskPath, encoding: .utf8)) ?? taskMdContent ?? ""
+        
+        guard !taskContent.isEmpty else {
+            logActivity(.info, "task.md is empty.")
+            return
+        }
+        
+        let prompt = """
+        Autonomous Task Runner Execution:
+        Please review and execute the following task plan defined in `.microcode/task.md`:
+        
+        ```markdown
+        \(taskContent)
+        ```
+        
+        Execution Directives:
+        1. Inspect the workspace files and environment to verify current progress.
+        2. Execute each uncompleted step (`- [ ]`) in sequential order using appropriate tools (`shell`, `file_write`, `replace_in_file`, etc.).
+        3. After completing each step, immediately update `.microcode/task.md` to check off the completed step (e.g. change `- [ ]` to `- [x]`).
+        4. Continue autonomously until all objectives are satisfied and verify the final state.
+        """
+        
+        await sendMessage(
+            prompt,
+            provider: provider,
+            model: model,
+            apiKey: apiKey
+        )
+    }
+    
     // MARK: - AI.arx Storage
     
     private func loadOrCreateArx(_ workspacePath: String) {
@@ -499,6 +597,7 @@ class AgentService: ObservableObject {
             isLoading = false
             agentPhase = .idle
             saveArx()
+            saveChats()
             objectWillChange.send()
             // Auto-process queue
             Task { @MainActor in
@@ -544,6 +643,9 @@ class AgentService: ObservableObject {
             
             // Use streaming for first iteration (user sees thinking), sync for subsequent
             if iteration == 1 {
+                currentToolExecution = "Analyzing request & planning..."
+                agentPhase = .thinking
+                
                 // Streaming mode — user sees tokens in real-time
                 let result = await withCheckedContinuation { (continuation: CheckedContinuation<(String, [AIToolCall]), Never>) in
                     var toolCalls: [AIToolCall] = []
@@ -559,17 +661,17 @@ class AgentService: ObservableObject {
                         apiKey: apiKey,
                         tools: toolSchemas,
                         onToken: { token in
-                            text += token
-                            // Update the last message in real-time (streaming effect)
-                            self.updateStreamingMessage(text, toolResults: allToolResults)
+                            self.pushStreamingToken(token, currentFullText: &text, toolResults: allToolResults)
                         },
                         onToolCall: { toolCall in
                             toolCalls.append(toolCall)
                         },
                         onComplete: { fullText in
+                            self.flushStreamingToken(fullText, toolResults: allToolResults)
                             continuation.resume(returning: (fullText, toolCalls))
                         },
                         onError: { error in
+                            self.flushStreamingToken("Error: \(error)", toolResults: allToolResults)
                             continuation.resume(returning: ("Error: \(error)", []))
                         }
                     )
@@ -578,6 +680,12 @@ class AgentService: ObservableObject {
                 receivedToolCalls = result.1
             } else {
                 // Non-streaming for tool result follow-ups
+                currentToolExecution = "Evaluating tool outputs & determining next action..."
+                agentPhase = .thinking
+                
+                // Compress iterative history dynamically so context never blows up
+                history = tokenOptimizer.compressIterativeToolHistory(history, budget: budget.maxHistoryTokens)
+                
                 do {
                     // Build messages array with tool results
                     let syncMessages = buildSyncMessages(history: history, lastText: finalText, toolResults: allToolResults)
@@ -592,14 +700,27 @@ class AgentService: ObservableObject {
                     streamedText = result.text
                     receivedToolCalls = result.toolCalls
                     
-                    updateStreamingMessage(streamedText, toolResults: allToolResults)
+                    if !streamedText.isEmpty {
+                        if finalText.isEmpty {
+                            finalText = streamedText
+                        } else if !finalText.contains(streamedText) {
+                            finalText += "\n\n" + streamedText
+                        }
+                    }
+                    
+                    updateStreamingMessage(finalText, toolResults: allToolResults)
                 } catch {
-                    streamedText = "Error in tool loop iteration \(iteration): \(error.localizedDescription)"
+                    let errStr = "Error in tool loop iteration \(iteration): \(error.localizedDescription)"
+                    logActivity(.error, errStr)
+                    if finalText.isEmpty { finalText = errStr } else { finalText += "\n\n⚠️ " + errStr }
+                    updateStreamingMessage(finalText, toolResults: allToolResults)
                     break
                 }
             }
             
-            finalText = streamedText
+            if iteration == 1 {
+                finalText = streamedText
+            }
             
             // If no native tool calls, try to parse text-based tool calls (for local LLMs)
             if receivedToolCalls.isEmpty {
@@ -610,8 +731,51 @@ class AgentService: ObservableObject {
                 }
             }
             
-            // If still no tool calls, we're done
-            if receivedToolCalls.isEmpty { break }
+            // If still no tool calls, check if task is multi-step and requires auto-continuation
+            if receivedToolCalls.isEmpty {
+                let lowerText = streamedText.lowercased()
+                let promptLower = content.lowercased()
+                
+                // 1. Text markers indicating the assistant intends to take further action
+                let hasIncompleteTextIntent = lowerText.contains("let me") || lowerText.contains("now installing") ||
+                    lowerText.contains("next") || lowerText.contains("i will") || lowerText.contains("i'll") ||
+                    lowerText.contains("step 1") || lowerText.contains("step 2") || lowerText.contains("step 3") ||
+                    lowerText.contains("scaffold ready") || lowerText.contains("continue") ||
+                    lowerText.contains("let's create") || lowerText.contains("let's build") ||
+                    lowerText.contains("จะทำ") || lowerText.contains("กำลัง") || lowerText.contains("ต่อไป") ||
+                    lowerText.contains("เริ่มจาก") || lowerText.contains("จะเริ่ม") || lowerText.contains("จะอ่าน") ||
+                    lowerText.contains("จะแก้") || lowerText.contains("จะเขียน") || lowerText.contains("แล้วจึง") ||
+                    lowerText.contains("เพื่อดู") || lowerText.contains("เพื่อแก้") || lowerText.contains("ตอนนี้จะ") ||
+                    lowerText.contains("ผมจะ") || lowerText.contains("เราจะ") || lowerText.contains("ทำการแก้ไข") ||
+                    lowerText.contains("ลงมือแก้") || streamedText.trimmingCharacters(in: .whitespacesAndNewlines).hasSuffix(":")
+                
+                // 2. Goal completion check: if user asked to fix/write code, but no file has been modified yet
+                let hasModifyingToolRun = allToolResults.contains { res in
+                    ["file_write", "replace_in_file", "patch_file", "create_directory", "rename_file"].contains(res.toolName)
+                }
+                let isCodeModificationRequest = promptLower.contains("แก้") || promptLower.contains("fix") ||
+                    promptLower.contains("update") || promptLower.contains("write") || promptLower.contains("create") ||
+                    promptLower.contains("implement") || promptLower.contains("css") || promptLower.contains("html") ||
+                    promptLower.contains("layout") || promptLower.contains("bug") || promptLower.contains("style")
+                
+                let requiresContinuation = hasIncompleteTextIntent || (isCodeModificationRequest && !hasModifyingToolRun && !allToolResults.isEmpty)
+                
+                if iteration < maxToolIterations && requiresContinuation {
+                    logActivity(.info, "Autonomous continuation triggered for iteration \(iteration + 1) (hasModifyingToolRun: \(hasModifyingToolRun))")
+                    currentToolExecution = "Turn \(iteration + 1): Executing code modifications..."
+                    agentPhase = .thinking
+                    
+                    history.append((role: "assistant", content: streamedText))
+                    history.append((role: "user", content: """
+                    [Autonomous Execution System Directive]
+                    You have analyzed the issue and explored the files.
+                    Now IMMEDIATELY execute the necessary file modifications using `replace_in_file` or `file_write`.
+                    Do not provide only text explanations — execute the actual tool calls now until the task is completely finished.
+                    """))
+                    continue
+                }
+                break
+            }
             
             // Execute ALL tool calls in this batch
             var batchResults: [(name: String, output: String, success: Bool)] = []
@@ -631,7 +795,7 @@ class AgentService: ObservableObject {
                     logActivity(.info, "\(toolCall.name) reused cached result")
                     continue
                 }
-                currentToolExecution = "Running \(toolCall.name)..."
+                currentToolExecution = humanFriendlyToolTitle(toolCall.name, args: toolCall.arguments)
                 agentPhase = .executing(toolCall.name)
                 logActivity(.tool, "\(toolCall.name)", detail: truncateArgs(toolCall.arguments))
                 
@@ -651,6 +815,7 @@ class AgentService: ObservableObject {
                     allToolResults.append(ToolResultModel(
                         toolCallId: toolCall.id,
                         toolName: toolCall.name,
+                        toolParams: toolCall.arguments,
                         success: true,
                         output: output,
                         error: nil
@@ -696,6 +861,7 @@ class AgentService: ObservableObject {
                     allToolResults.append(ToolResultModel(
                         toolCallId: toolCall.id,
                         toolName: toolCall.name,
+                        toolParams: toolCall.arguments,
                         success: false,
                         output: "",
                         error: error.localizedDescription
@@ -724,7 +890,7 @@ class AgentService: ObservableObject {
             
             \(resultsText)
             
-            Now continue with the task. If you have read the files, proceed to make the requested changes using file_write or replace_in_file, then run any commands using shell. Do NOT just describe what to do — actually do it.
+            Instruction: Continue executing the user's request. If the objective requires running commands (e.g. `make run`, launch app), modifying code, or testing, IMMEDIATELY call the appropriate tool. Do NOT stop or just describe what to do — execute the actions until the objective is 100% completed.
             """))
             
             agentPhase = filesModified.isEmpty ? .thinking : .validating
@@ -770,7 +936,39 @@ class AgentService: ObservableObject {
         saveChats()
     }
     
-    // MARK: - Streaming Message Update
+    // MARK: - Streaming Message Update & 30ms Coalesced Throttle Buffer
+    
+    private var lastStreamUpdateUptime: TimeInterval = 0
+    private var pendingStreamFullText: String = ""
+    private var streamThrottleTimer: Timer? = nil
+    
+    private func pushStreamingToken(_ token: String, currentFullText: inout String, toolResults: [ToolResultModel]) {
+        currentFullText += token
+        pendingStreamFullText = currentFullText
+        
+        let now = ProcessInfo.processInfo.systemUptime
+        // 30ms throttle: drops 100Hz token redraws down to smooth 33fps without lag
+        if now - lastStreamUpdateUptime >= 0.030 {
+            lastStreamUpdateUptime = now
+            updateStreamingMessage(currentFullText, toolResults: toolResults)
+        } else if streamThrottleTimer == nil {
+            streamThrottleTimer = Timer.scheduledTimer(withTimeInterval: 0.032, repeats: false) { [weak self] _ in
+                Task { @MainActor in
+                    guard let self = self else { return }
+                    self.streamThrottleTimer = nil
+                    self.lastStreamUpdateUptime = ProcessInfo.processInfo.systemUptime
+                    self.updateStreamingMessage(self.pendingStreamFullText, toolResults: toolResults)
+                }
+            }
+        }
+    }
+    
+    private func flushStreamingToken(_ fullText: String, toolResults: [ToolResultModel]) {
+        streamThrottleTimer?.invalidate()
+        streamThrottleTimer = nil
+        lastStreamUpdateUptime = ProcessInfo.processInfo.systemUptime
+        updateStreamingMessage(fullText, toolResults: toolResults)
+    }
     
     private func updateStreamingMessage(_ text: String, toolResults: [ToolResultModel]) {
         let streamMsg = AgentMessageModel(
@@ -789,6 +987,39 @@ class AgentService: ObservableObject {
         let data = try? JSONSerialization.data(withJSONObject: call.arguments, options: [.sortedKeys])
         return call.name + ":" + (data.flatMap { String(data: $0, encoding: .utf8) } ?? String(describing: call.arguments))
     }
+
+    private func humanFriendlyToolTitle(_ name: String, args: [String: Any]) -> String {
+        switch name {
+        case "file_read", "multi_file_read":
+            if let path = args["path"] as? String {
+                return "Reading \(URL(fileURLWithPath: path).lastPathComponent)..."
+            } else if let paths = args["paths"] as? [String], let first = paths.first {
+                return "Reading \(URL(fileURLWithPath: first).lastPathComponent)..."
+            }
+            return "Reading project files..."
+        case "file_write", "replace_in_file", "patch_file":
+            if let path = args["path"] as? String {
+                return "Editing \(URL(fileURLWithPath: path).lastPathComponent)..."
+            }
+            return "Editing code..."
+        case "list_directory_tree", "list_files":
+            return "Scanning project structure..."
+        case "git_status", "git_diff":
+            return "Checking Git repository..."
+        case "grep_search", "find_symbol":
+            if let query = args["query"] as? String ?? args["symbol"] as? String {
+                return "Searching for \"\(query.prefix(30))\"..."
+            }
+            return "Searching codebase..."
+        case "shell":
+            if let cmd = args["command"] as? String {
+                return "Running \(cmd.prefix(40))..."
+            }
+            return "Running command..."
+        default:
+            return "Executing \(name)..."
+        }
+    }
     
     // MARK: - History Building
     
@@ -805,19 +1036,9 @@ class AgentService: ObservableObject {
     
     private func buildSyncMessages(history: [(role: String, content: String)], lastText: String, toolResults: [ToolResultModel]) -> [[(String, Any)]] {
         var msgs: [[(String, Any)]] = []
-        
         for h in history {
             msgs.append([("_role", h.role), ("text", h.content)])
         }
-        
-        // Add tool results context
-        if !toolResults.isEmpty {
-            let resultsText = toolResults.map { r in
-                r.success ? "[\(r.toolName)] ✅: \(r.output)" : "[\(r.toolName)] ❌: \(r.error ?? "unknown error")"
-            }.joined(separator: "\n")
-            msgs.append([("_role", "user"), ("text", "Tool results:\n\(resultsText)\n\nContinue with the task based on these results.")])
-        }
-        
         return msgs
     }
     
@@ -849,11 +1070,71 @@ class AgentService: ObservableObject {
         )
     }
     
-    // MARK: - Multi-Chat Management
+    // MARK: - Multi-Chat & Project Group Management
     
-    func createNewChat(name: String? = nil) -> ChatSession {
-        let chatName = name ?? "Chat \(chatSessions.count + 1)"
-        let newChat = ChatSession.create(name: chatName)
+    var projectGroups: [ProjectChatGroup] {
+        var groups: [String: (name: String, path: String?, chats: [ChatSession])] = [:]
+        var order: [String] = []
+        
+        let currentWs = toolBox.workspaceRoot
+        let currentWsName = currentWs != nil ? URL(fileURLWithPath: currentWs!).lastPathComponent : "Current Project"
+        
+        // Ensure active workspace folder is always first in list
+        if let ws = currentWs {
+            groups[ws] = (name: currentWsName, path: ws, chats: [])
+            order.append(ws)
+        }
+        
+        for chat in chatSessions {
+            if let path = chat.projectPath, !path.isEmpty {
+                let name = chat.projectName ?? URL(fileURLWithPath: path).lastPathComponent
+                if groups[path] == nil {
+                    groups[path] = (name: name, path: path, chats: [])
+                    order.append(path)
+                }
+                groups[path]?.chats.append(chat)
+            } else if let pName = chat.projectName, !pName.isEmpty {
+                if groups[pName] == nil {
+                    groups[pName] = (name: pName, path: nil, chats: [])
+                    order.append(pName)
+                }
+                groups[pName]?.chats.append(chat)
+            } else {
+                // Legacy unassigned chats strictly grouped under General/Other
+                let key = "legacy_general_other"
+                if groups[key] == nil {
+                    groups[key] = (name: "General / Other", path: nil, chats: [])
+                    order.append(key)
+                }
+                groups[key]?.chats.append(chat)
+            }
+        }
+        
+        return order.compactMap { key in
+            guard let g = groups[key] else { return nil }
+            return ProjectChatGroup(projectName: g.name, projectPath: g.path, chats: g.chats)
+        }
+    }
+    
+    func chats(for projectPath: String?) -> [ChatSession] {
+        guard let path = projectPath else { return chatSessions }
+        return chatSessions.filter { $0.projectPath == path }
+    }
+    
+    func createNewChat(name: String? = nil, projectPath: String? = nil, activeSkillIds: [String]? = nil) -> ChatSession {
+        let currentPath = projectPath ?? toolBox.workspaceRoot
+        let currentName = currentPath != nil ? URL(fileURLWithPath: currentPath!).lastPathComponent : "General"
+        let skills = activeSkillIds ?? AgentSkillsStore.shared.enabledSkillIds()
+        let matchingChats = chatSessions.filter { $0.projectPath == currentPath }
+        let chatName = name ?? "Task \(matchingChats.count + 1)"
+        
+        let newChat = ChatSession.create(
+            name: chatName,
+            projectPath: currentPath,
+            projectName: currentName,
+            activeSkillIds: skills
+        )
+        
         chatSessions.insert(newChat, at: 0)
         activeChatId = newChat.id
         messages = []
@@ -875,6 +1156,18 @@ class AgentService: ObservableObject {
         saveCurrentChatMessages()
         activeChatId = chatId
         messages = chat.messages.map { $0.toModel() }
+        UserDefaults.standard.set(chatId, forKey: "microcode_active_chat_id")
+        
+        // Restore project workspace if this chat has a specific projectPath
+        if let chatPath = chat.projectPath, !chatPath.isEmpty {
+            setWorkspace(chatPath)
+            NotificationCenter.default.post(name: NSNotification.Name("MicroCodeWorkspaceChanged"), object: chatPath)
+        }
+        
+        // Restore Agent Skills snapshot for this specific chat
+        if let skillIds = chat.activeSkillIds, !skillIds.isEmpty {
+            AgentSkillsStore.shared.restoreSkills(skillIds)
+        }
     }
     
     func deleteChat(_ chatId: String) {
@@ -917,6 +1210,7 @@ class AgentService: ObservableObject {
            let idx = chatSessions.firstIndex(where: { $0.id == activeId }) {
             chatSessions[idx].messages = messages.map { AgentMessageData.from($0) }
             chatSessions[idx].updatedAt = Date()
+            UserDefaults.standard.set(activeId, forKey: "microcode_active_chat_id")
         }
         if let data = try? JSONEncoder().encode(chatSessions) {
             UserDefaults.standard.set(data, forKey: chatStorageKey)
@@ -1194,15 +1488,47 @@ struct AIArxData: Codable {
 
 // MARK: - Models
 
+struct ProjectChatGroup: Identifiable, Hashable, Equatable {
+    var id: String { projectPath ?? projectName }
+    let projectName: String
+    let projectPath: String?
+    let chats: [ChatSession]
+    
+    static func == (lhs: ProjectChatGroup, rhs: ProjectChatGroup) -> Bool {
+        lhs.id == rhs.id && lhs.chats.count == rhs.chats.count
+    }
+    
+    func hash(into hasher: inout Hasher) {
+        hasher.combine(id)
+    }
+}
+
 struct ChatSession: Identifiable, Codable {
     let id: String
     var name: String
+    var projectPath: String?
+    var projectName: String?
+    var activeSkillIds: [String]?
     var messages: [AgentMessageData]
     var createdAt: Date
     var updatedAt: Date
     
-    static func create(name: String = "New Chat") -> ChatSession {
-        ChatSession(id: UUID().uuidString, name: name, messages: [], createdAt: Date(), updatedAt: Date())
+    static func create(
+        name: String = "New Task",
+        projectPath: String? = nil,
+        projectName: String? = nil,
+        activeSkillIds: [String]? = nil
+    ) -> ChatSession {
+        ChatSession(
+            id: UUID().uuidString,
+            name: name,
+            projectPath: projectPath,
+            projectName: projectName,
+            activeSkillIds: activeSkillIds,
+            messages: [],
+            createdAt: Date(),
+            updatedAt: Date()
+        )
     }
 }
 
@@ -1241,6 +1567,7 @@ struct AgentMessageModel: Identifiable {
 struct ToolResultModel {
     let toolCallId: String
     let toolName: String
+    var toolParams: [String: Any]? = nil
     let success: Bool
     let output: String
     let error: String?
@@ -1293,7 +1620,7 @@ struct ToolDefinitionModel: Codable, Identifiable {
 
 // MARK: - Queue Model
 
-struct QueuedMessage {
+struct QueuedMessage: Identifiable {
     let id = UUID()
     let text: String
     let attachments: [AIAttachment]
