@@ -12,6 +12,7 @@ struct ProjectToolbar: View {
     @EnvironmentObject var appState: AppState
     
     @State private var showingOutput: Bool = false
+    @State private var showingDeviceRuntime: Bool = false
     
     var body: some View {
         let currentType = appState.currentProjectType
@@ -64,6 +65,14 @@ struct ProjectToolbar: View {
                     ProgressView()
                         .scaleEffect(0.7)
                 }
+
+                Divider().frame(height: 20)
+                Button { showingDeviceRuntime = true } label: {
+                    Label("Device & Run", systemImage: "iphone.gen3")
+                        .font(.system(size: 11, weight: .medium))
+                }
+                .buttonStyle(.bordered)
+                .help("Run on a real Apple Simulator or Android Emulator")
             }
             
             Spacer()
@@ -82,6 +91,9 @@ struct ProjectToolbar: View {
         .sheet(isPresented: $showingOutput) {
             ProjectOutputView()
                 .environmentObject(appState)
+        }
+        .sheet(isPresented: $showingDeviceRuntime) {
+            DeviceRuntimeView().environmentObject(appState)
         }
     }
 

@@ -38,11 +38,14 @@ Packages/
 backend/target/
 extension-host/target/
 **/target/
+backend/.cargo/
 **/*.rs.bk
 Cargo.lock
 
 # ----- Node.js -----
 node_modules/
+/.build-tools/
+/Vendor/serve-sim/
 vscode-compat-host/node_modules/
 vscode-compat-host/dist/
 npm-debug.log*

@@ -14,38 +14,33 @@ struct FirstLaunchWelcomeView: View {
     @State private var statusMessage = ""
     @State private var isWorking = false
 
-    private static let secrets: [String: Any] = {
-        if let path = Bundle.main.path(forResource: "Secrets", ofType: "plist"),
-           let values = NSDictionary(contentsOfFile: path) as? [String: Any] {
-            return values
-        }
-        let developmentPath = URL(fileURLWithPath: #file)
-            .deletingLastPathComponent()
-            .deletingLastPathComponent()
-            .deletingLastPathComponent()
-            .appendingPathComponent("Secrets.plist")
-        return (NSDictionary(contentsOf: developmentPath) as? [String: Any]) ?? [:]
-    }()
-
-    private var firebaseAPIKey: String {
-        Self.secrets["FIREBASE_API_KEY"] as? String
-            ?? ProcessInfo.processInfo.environment["FIREBASE_API_KEY"]
-            ?? ""
-    }
-
     var body: some View {
         ZStack {
             Color.black.opacity(appState.appTheme.isGlass ? 0.62 : 0.72)
                 .ignoresSafeArea()
 
             VStack(alignment: .leading, spacing: 0) {
-                VStack(alignment: .leading, spacing: 10) {
-                    Text("Welcome to MicroCode")
-                        .font(.system(size: 25, weight: .semibold))
-                    Text("An agent-first workspace for understanding, changing, and shipping code.")
-                        .font(.system(size: 13))
-                        .foregroundColor(.secondary)
-                        .fixedSize(horizontal: false, vertical: true)
+                HStack(alignment: .top) {
+                    VStack(alignment: .leading, spacing: 10) {
+                        Text("Welcome to MicroCode")
+                            .font(.system(size: 25, weight: .semibold))
+                        Text("An agent-first workspace for understanding, changing, and shipping code.")
+                            .font(.system(size: 13))
+                            .foregroundColor(.secondary)
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
+                    Spacer()
+                    Button {
+                        onComplete()
+                    } label: {
+                        Image(systemName: "xmark")
+                            .font(.system(size: 12, weight: .semibold))
+                            .foregroundColor(.secondary)
+                            .padding(6)
+                            .contentShape(Rectangle())
+                    }
+                    .buttonStyle(.plain)
+                    .help("Dismiss Welcome Screen")
                 }
                 .padding(.bottom, 22)
 
@@ -188,61 +183,33 @@ struct FirstLaunchWelcomeView: View {
     }
 
     private func startGoogleSignIn() {
-        guard let url = URL(string: "https://microcode.dotmini.net/auth.html?source=macapp") else { return }
         isWorking = true
-        statusMessage = "🌐 Opening in your default browser (Chrome/Safari)... Complete Google Sign-In to continue."
-
-        // Open in system default browser (Chrome / Safari)
-        NSWorkspace.shared.open(url)
+        statusMessage = "Opening secure Dotmini sign-in…"
+        Task { @MainActor in
+            do {
+                try await SupabaseAuthService.shared.startOAuth(provider: "google")
+            } catch {
+                isWorking = false
+                statusMessage = error.localizedDescription
+            }
+        }
     }
 
     @MainActor
     private func signInWithDotminiID() async {
-        let normalizedEmail = email.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
-        if normalizedEmail == "tirawatnantamas@gmail.com" {
-            UserDefaults.standard.set("mc_live_admin_tirawatnantamas", forKey: "dotminiLicenseKey")
-            UserDefaults.standard.set("tirawatnantamas@gmail.com", forKey: "dotminiUserEmail")
-            onComplete()
-            return
-        }
-        
-        guard !firebaseAPIKey.isEmpty else {
-            statusMessage = "Dotmini ID is not configured in this build. Continue and sign in later from Settings."
-            return
-        }
-
         isWorking = true
         statusMessage = ""
         defer { isWorking = false }
-
-        guard let url = URL(string: "https://identitytoolkit.googleapis.com/v1/accounts:signInWithPassword?key=\(firebaseAPIKey)") else {
-            statusMessage = "Unable to create the sign-in request."
-            return
-        }
-        var request = URLRequest(url: url)
-        request.httpMethod = "POST"
-        request.timeoutInterval = 15
-        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
-        request.httpBody = try? JSONSerialization.data(withJSONObject: [
-            "email": email,
-            "password": password,
-            "returnSecureToken": true
-        ])
-
         do {
-            let (data, response) = try await URLSession.shared.data(for: request)
-            guard let http = response as? HTTPURLResponse,
-                  (200..<300).contains(http.statusCode),
-                  let payload = try JSONSerialization.jsonObject(with: data) as? [String: Any],
-                  let uid = payload["localId"] as? String else {
-                statusMessage = "Sign-in failed. Check your Dotmini ID and password."
-                return
-            }
-            UserDefaults.standard.set("mc_live_\(uid)", forKey: "dotminiLicenseKey")
-            UserDefaults.standard.set(email, forKey: "dotminiUserEmail")
+            let session = try await SupabaseAuthService.shared.signIn(email: email, password: password)
+            AuthService.shared.syncWithWebSession(
+                email: session.email,
+                token: session.accessToken,
+                displayName: session.email.components(separatedBy: "@").first ?? "User"
+            )
             onComplete()
         } catch {
-            statusMessage = "Unable to reach Dotmini ID. You can continue without signing in."
+            statusMessage = error.localizedDescription
         }
     }
 }

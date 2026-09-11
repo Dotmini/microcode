@@ -513,7 +513,15 @@ public func createSwiftLexer() -> StateMachineLexer {
         "internal": .keywordModifier, "open": .keywordModifier, "static": .keywordModifier,
         "override": .keywordModifier, "final": .keywordModifier, "mutating": .keywordModifier,
         "lazy": .keywordModifier, "weak": .keywordModifier, "unowned": .keywordModifier,
-        "async": .keywordModifier, "await": .keywordModifier, "@MainActor": .keywordModifier,
+        "async": .keywordModifier, "await": .keywordModifier, "nonisolated": .keywordModifier,
+        
+        // Property Wrappers & Annotations
+        "@State": .annotation, "@Binding": .annotation, "@Environment": .annotation,
+        "@EnvironmentObject": .annotation, "@ObservedObject": .annotation, "@StateObject": .annotation,
+        "@Published": .annotation, "@MainActor": .annotation, "@ViewBuilder": .annotation,
+        "@discardableResult": .annotation, "@objc": .annotation, "@available": .annotation,
+        "@frozen": .annotation, "@inlinable": .annotation, "@AppStorage": .annotation,
+        "@SceneStorage": .annotation, "@FocusState": .annotation,
         
         // Control flow
         "if": .keyword, "else": .keyword, "switch": .keyword, "case": .keyword,
@@ -524,6 +532,29 @@ public func createSwiftLexer() -> StateMachineLexer {
         
         // Error handling
         "try": .keyword, "catch": .keyword, "throws": .keyword, "rethrows": .keyword,
+        
+        // Literals & Constants
+        "true": .boolean, "false": .boolean, "nil": .null,
+        
+        // Core Swift & SwiftUI Types
+        "String": .type, "Int": .type, "Double": .type, "Float": .type, "Bool": .type,
+        "Character": .type, "Substring": .type, "Data": .type, "Date": .type, "URL": .type,
+        "UUID": .type, "Array": .type, "Dictionary": .type, "Set": .type, "Optional": .type,
+        "Result": .type, "Error": .type, "Task": .type, "MainActor": .type,
+        "Identifiable": .type, "Hashable": .type, "Equatable": .type, "Comparable": .type,
+        "Codable": .type, "Sendable": .type, "CaseIterable": .type,
+        
+        // SwiftUI Components & Primitives
+        "View": .type, "App": .type, "Scene": .type, "WindowGroup": .type,
+        "VStack": .type, "HStack": .type, "ZStack": .type, "LazyVStack": .type, "LazyHStack": .type,
+        "LazyVGrid": .type, "LazyHGrid": .type, "Grid": .type, "GridRow": .type,
+        "Text": .type, "Button": .type, "Image": .type, "Label": .type,
+        "TextField": .type, "SecureField": .type, "TextEditor": .type,
+        "Toggle": .type, "Picker": .type, "Slider": .type, "Stepper": .type, "ProgressView": .type,
+        "Spacer": .type, "Divider": .type, "List": .type, "Section": .type, "ForEach": .type,
+        "ScrollView": .type, "NavigationStack": .type, "NavigationView": .type, "NavigationLink": .type,
+        "Color": .type, "Font": .type, "Shape": .type, "Capsule": .type, "Circle": .type,
+        "Rectangle": .type, "RoundedRectangle": .type, "Ellipse": .type,
         
         // Other
         "import": .keyword, "self": .keyword, "Self": .keyword, "super": .keyword,

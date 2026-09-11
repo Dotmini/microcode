@@ -6,10 +6,10 @@
     self = [super initWithScrollView:scrollView orientation:orientation];
     if (self) {
         self.ruleThickness = 40.0;
-        // Default colors if not set
-        self.backgroundColor = [NSColor textBackgroundColor];
-        self.textColor = [NSColor secondaryLabelColor];
-        self.separatorColor = [[NSColor textColor] colorWithAlphaComponent:0.1];
+        // Default colors if not set (Pitch Black Pro Theme)
+        self.backgroundColor = [NSColor blackColor];
+        self.textColor = [NSColor colorWithWhite:0.35 alpha:1.0];
+        self.separatorColor = [NSColor colorWithWhite:1.0 alpha:0.08];
         self.font = [NSFont monospacedSystemFontOfSize:11 weight:NSFontWeightRegular];
     }
     return self;

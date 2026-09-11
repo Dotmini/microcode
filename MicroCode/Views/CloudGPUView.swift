@@ -50,15 +50,15 @@ struct CloudGPUView: View {
             HStack(spacing: 12) {
                 ZStack {
                     RoundedRectangle(cornerRadius: 10, style: .continuous)
-                        .fill(Color.accentColor.opacity(0.12))
+                        .fill(Color.primary.opacity(0.045))
                         .frame(width: 42, height: 42)
                         .overlay(
                             RoundedRectangle(cornerRadius: 10, style: .continuous)
-                                .stroke(Color.accentColor.opacity(0.3), lineWidth: 1)
+                            .stroke(Color.primary.opacity(0.10), lineWidth: 1)
                         )
-                    Image(systemName: "cpu.fill")
+                    Image(systemName: "cpu")
                         .font(.system(size: 18, weight: .semibold))
-                        .foregroundColor(.accentColor)
+                        .foregroundColor(.secondary)
                 }
 
                 VStack(alignment: .leading, spacing: 2) {
@@ -83,10 +83,10 @@ struct CloudGPUView: View {
                     }
                     .padding(.horizontal, 10)
                     .padding(.vertical, 5)
-                    .background(Color.green.opacity(0.12))
-                    .foregroundColor(.green)
-                    .cornerRadius(6)
-                    .overlay(RoundedRectangle(cornerRadius: 6).stroke(Color.green.opacity(0.25), lineWidth: 1))
+                    .background(Color.primary.opacity(0.045))
+                    .foregroundColor(.primary)
+                    .clipShape(RoundedRectangle(cornerRadius: 6, style: .continuous))
+                    .overlay(RoundedRectangle(cornerRadius: 6, style: .continuous).stroke(Color.primary.opacity(0.08), lineWidth: 1))
                 }
                 .buttonStyle(.plain)
             }
@@ -133,7 +133,7 @@ struct CloudGPUView: View {
                     VStack(alignment: .leading, spacing: 2) {
                         Text("Active Instance: \(s.gpuLabel)")
                             .font(.system(size: 13, weight: .semibold))
-                        Text("Notebook cells & jobs run on this instance. \(svc.priceText(s.pricePerMinute))")
+                        Text(sessionDetail(s))
                             .font(.system(size: 11))
                             .foregroundColor(.secondary)
                     }
@@ -144,13 +144,12 @@ struct CloudGPUView: View {
                         Text("Disconnect")
                             .font(.system(size: 11, weight: .medium))
                     }
-                    .buttonStyle(.borderedProminent)
-                    .tint(.red)
+                    .buttonStyle(.bordered)
                     .controlSize(.small)
                 }
                 .padding(12)
-                .background(RoundedRectangle(cornerRadius: 8).fill(Color.green.opacity(0.08)))
-                .overlay(RoundedRectangle(cornerRadius: 8).stroke(Color.green.opacity(0.2), lineWidth: 1))
+                .background(RoundedRectangle(cornerRadius: 8).fill(Color(nsColor: .controlBackgroundColor).opacity(0.6)))
+                .overlay(RoundedRectangle(cornerRadius: 8).stroke(Color.primary.opacity(0.08), lineWidth: 1))
             }
 
             if svc.status == .connecting {
@@ -161,10 +160,20 @@ struct CloudGPUView: View {
                         .foregroundColor(.secondary)
                 }
                 .padding(12)
-                .background(RoundedRectangle(cornerRadius: 8).fill(Color.accentColor.opacity(0.06)))
+                .background(RoundedRectangle(cornerRadius: 8).fill(Color.primary.opacity(0.035)))
             }
 
-            Text("Select an NVIDIA GPU instance. Rates are billed per minute from your GPU Wallet.")
+            if !svc.gatewayMessage.isEmpty {
+                let gatewayFailed: Bool = {
+                    if case .failed = svc.status { return true }
+                    return false
+                }()
+                Label(svc.gatewayMessage, systemImage: gatewayFailed ? "exclamationmark.triangle" : "checkmark.circle")
+                    .font(.system(size: 11))
+                    .foregroundColor(gatewayFailed ? .red : .secondary)
+            }
+
+            Text("Select a GPU instance. Rates are billed per minute from your GPU Wallet.")
                 .font(.system(size: 12))
                 .foregroundColor(.secondary)
 
@@ -172,9 +181,7 @@ struct CloudGPUView: View {
             VStack(spacing: 8) {
                 ForEach(svc.catalog) { gpuItem in
                     HStack(spacing: 14) {
-                        Image(systemName: "cpu")
-                            .font(.system(size: 16))
-                            .foregroundColor(.accentColor)
+                        gpuVendorMark(for: gpuItem.label)
 
                         VStack(alignment: .leading, spacing: 2) {
                             HStack(spacing: 8) {
@@ -184,9 +191,9 @@ struct CloudGPUView: View {
                                     .font(.system(size: 10, weight: .bold))
                                     .padding(.horizontal, 6)
                                     .padding(.vertical, 1)
-                                    .background(Color.accentColor.opacity(0.12))
-                                    .foregroundColor(.accentColor)
-                                    .cornerRadius(4)
+                                    .background(Color.primary.opacity(0.05))
+                                    .foregroundColor(.secondary)
+                                    .clipShape(Capsule())
                             }
                             Text(gpuItem.pricePerHourText + " (\(svc.priceText(gpuItem.pricePerMinute)))")
                                 .font(.system(size: 11))
@@ -206,7 +213,7 @@ struct CloudGPUView: View {
                                 .font(.system(size: 12, weight: .semibold))
                                 .padding(.horizontal, 8)
                         }
-                        .buttonStyle(.borderedProminent)
+                        .buttonStyle(.bordered)
                         .controlSize(.small)
                         .disabled(svc.activeSession != nil || svc.status == .connecting)
                     }
@@ -227,6 +234,35 @@ struct CloudGPUView: View {
         }
     }
 
+    private func elapsedText(_ seconds: Int) -> String {
+        String(format: "%02d:%02d", seconds / 60, seconds % 60)
+    }
+
+    private func sessionDetail(_ session: CloudGPUService.Session) -> String {
+        let used = svc.priceText(svc.activeSessionCostSatang)
+            .replacingOccurrences(of: "/min", with: "")
+        return "Notebook cells & jobs run on this instance. \(svc.priceText(session.pricePerMinute)) · \(elapsedText(svc.activeSessionElapsedSeconds)) · \(used) used"
+    }
+
+    /// A neutral wordmark until an approved vendor brand asset is supplied.
+    /// GPU vendor names are derived from the live catalog so AMD and Intel are
+    /// shown automatically when their instances are made available.
+    private func gpuVendorMark(for gpuLabel: String) -> some View {
+        let label = gpuLabel.lowercased()
+        let vendor: String
+        if label.contains("nvidia") { vendor = "NVIDIA" }
+        else if label.contains("amd") || label.contains("radeon") || label.contains("instinct") { vendor = "AMD" }
+        else if label.contains("intel") || label.contains("arc") || label.contains("gaudi") { vendor = "INTEL" }
+        else { vendor = "GPU" }
+
+        return Text(vendor)
+            .font(.system(size: 9, weight: .bold, design: .monospaced))
+            .foregroundColor(.secondary)
+            .frame(width: 52, height: 28)
+            .background(Color.primary.opacity(0.045))
+            .clipShape(RoundedRectangle(cornerRadius: 6, style: .continuous))
+    }
+
     // MARK: - Tab 1: GPU Wallet
     private var gpuWalletView: some View {
         VStack(alignment: .leading, spacing: 16) {
@@ -239,7 +275,7 @@ struct CloudGPUView: View {
                 HStack(alignment: .firstTextBaseline) {
                     Text(svc.balanceText)
                         .font(.system(size: 26, weight: .bold, design: .rounded))
-                        .foregroundColor(.green)
+                        .foregroundColor(.primary)
                     Spacer()
                     Button {
                         Task { await svc.loadWallet() }
@@ -281,9 +317,9 @@ struct CloudGPUView: View {
                                         .font(.system(size: 9, weight: .bold))
                                         .padding(.horizontal, 5)
                                         .padding(.vertical, 1)
-                                        .background(Color.orange.opacity(0.2))
-                                        .foregroundColor(.orange)
-                                        .cornerRadius(4)
+                                        .background(Color.primary.opacity(0.05))
+                                        .foregroundColor(.secondary)
+                                        .clipShape(Capsule())
                                 }
                             }
                             Text("฿\(pkg.amountTHB)")
@@ -335,7 +371,7 @@ struct CloudGPUView: View {
                         let amt = Int(customAmount.trimmingCharacters(in: .whitespacesAndNewlines)) ?? 300
                         executeTopUp(amountTHB: max(50, amt), packageId: "custom_\(amt)")
                     }
-                    .buttonStyle(.borderedProminent)
+                    .buttonStyle(.bordered)
                     .controlSize(.regular)
                     .disabled(topUpBusy || (Int(customAmount) ?? 0) < 20)
 
@@ -351,7 +387,7 @@ struct CloudGPUView: View {
                     .foregroundColor(topUpMsg.hasPrefix("Opened") ? .green : .red)
             }
 
-            Text("⚡️ Opens secure Beam Payment checkout (PromptPay QR / Card). Balance updates in real-time.")
+            Text("Opens secure Beam Payment checkout (PromptPay QR / Card). Balance updates in real-time.")
                 .font(.system(size: 10))
                 .foregroundColor(.secondary)
         }
@@ -426,18 +462,18 @@ struct CloudGPUView: View {
                         ProgressView().scaleEffect(0.6)
                         Text("Cloning dataset at 10Gbps...")
                     } else {
-                        Image(systemName: "arrow.down.circle.fill")
+                        Image(systemName: "arrow.down.circle")
                         Text("Start Cloud Git Ingestion")
                     }
                 }
             }
-            .buttonStyle(.borderedProminent)
+            .buttonStyle(.bordered)
             .disabled(gitRepoURL.isEmpty || isIngesting || svc.activeSession == nil)
 
             if svc.activeSession == nil {
-                Text("⚠️ Connect to a GPU instance first in the GPU Cluster tab.")
+                Label("Connect to a GPU instance first in the GPU Cluster tab.", systemImage: "exclamationmark.triangle")
                     .font(.system(size: 11))
-                    .foregroundColor(.orange)
+                    .foregroundColor(.secondary)
             }
 
             if !ingestLogs.isEmpty {
@@ -498,7 +534,7 @@ struct CloudGPUView: View {
                     Text(gpu.status == .connected ? "Connected" : "Connect via SSH")
                         .font(.system(size: 12, weight: .semibold))
                 }
-                .buttonStyle(.borderedProminent)
+                .buttonStyle(.bordered)
                 .controlSize(.small)
                 .disabled(gpu.status == .connecting || sshCmd.trimmingCharacters(in: .whitespaces).isEmpty)
 
@@ -637,4 +673,3 @@ struct CloudGPUView: View {
         }
     }
 }
-

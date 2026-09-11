@@ -148,37 +148,58 @@ struct AgenticEditorWorkspace: View {
     @State private var surface: AgenticWorkspaceSurface = .agent
 
     var body: some View {
-        CompatHSplitView {
-            if appState.sidebarVisible {
-                AgenticWorkspaceSidebar(surface: $surface)
-                    .frame(minWidth: 240, idealWidth: 270, maxWidth: 340)
-                    .transition(.move(edge: .leading).combined(with: .opacity))
-            }
+        Group {
+            if (appState.workspaceFolder == nil && appState.openFiles.isEmpty && appState.editorMode == .code) || appState.showingWelcomeHome {
+                WelcomeScreen(surface: $surface)
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+                    .background(
+                        appState.appTheme.isGlass
+                            ? AnyView(VisualEffectView(material: .sidebar, blendingMode: .behindWindow))
+                            : AnyView(Color(nsColor: appState.appTheme.workspaceBackground))
+                    )
+            } else {
+                CompatHSplitView {
+                    if appState.sidebarVisible {
+                        if surface == .editor {
+                            XcodeEditorSidebar(surface: $surface)
+                                .frame(minWidth: 240, idealWidth: 270, maxWidth: 340)
+                                .transition(.move(edge: .leading).combined(with: .opacity))
+                        } else {
+                            AgenticWorkspaceSidebar(surface: $surface)
+                                .frame(minWidth: 240, idealWidth: 270, maxWidth: 340)
+                                .transition(.move(edge: .leading).combined(with: .opacity))
+                        }
+                    }
 
-            VStack(spacing: 0) {
-                workspaceHeader
-                Divider()
+                    VStack(spacing: 0) {
+                        workspaceHeader
+                        Divider()
 
-                if surface == .agent {
-                    AIAgentView(allowsChatSidebar: false)
-                        .environmentObject(appState)
-                } else {
-                    activeEditorSurface
+                        if surface == .agent {
+                            AIAgentView(allowsChatSidebar: false)
+                                .environmentObject(appState)
+                        } else {
+                            activeEditorSurface
+                        }
+                    }
+                    .frame(minWidth: 480)
+
+                    if appState.agenticContextVisible {
+                        AgenticContextInspector(surface: $surface)
+                            .frame(minWidth: 260, idealWidth: 340, maxWidth: 520)
+                            .transition(.move(edge: .trailing).combined(with: .opacity))
+                    }
                 }
-            }
-            .frame(minWidth: 480)
-
-            if appState.agenticContextVisible {
-                AgenticContextInspector(surface: $surface)
-                    .frame(minWidth: 250, idealWidth: 290, maxWidth: 360)
-                    .transition(.move(edge: .trailing).combined(with: .opacity))
+                .background(appState.appTheme.isGlass ? Color.clear : Color(nsColor: appState.appTheme.workspaceBackground))
             }
         }
-        .background(appState.appTheme.isGlass ? Color.clear : Color(nsColor: appState.appTheme.workspaceBackground))
         .onAppear {
             if let workspace = appState.workspaceFolder {
                 agent.setWorkspace(workspace.path)
             }
+        }
+        .onChange(of: appState.editorMode) { _ in
+            surface = .editor
         }
     }
 
@@ -203,6 +224,10 @@ struct AgenticEditorWorkspace: View {
         case .embedded:
             EmbeddedStudioView()
                 .environmentObject(appState)
+        case .apiClient:
+            APIClientView()
+                .environmentObject(appState)
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
         default:
             EditorArea()
                 .environmentObject(appState)
@@ -224,7 +249,12 @@ struct AgenticEditorWorkspace: View {
     }
 
     private var workspaceHeader: some View {
-        HStack(spacing: 10) {
+        HStack(spacing: 8) {
+            // Traffic lights clearance when sidebar is collapsed
+            if !appState.sidebarVisible {
+                Spacer().frame(width: 68)
+            }
+
             // Sidebar Toggle
             Button(action: {
                 withAnimation(.easeInOut(duration: 0.18)) {
@@ -236,41 +266,168 @@ struct AgenticEditorWorkspace: View {
                     .foregroundColor(.secondary)
             }
             .buttonStyle(.plain)
+            .fixedSize()
             .help("Toggle Sidebar (⌘B)")
 
             // Breadcrumb (Antigravity-style: project / active task)
-            HStack(spacing: 6) {
+            HStack(spacing: 5) {
                 Image(systemName: "folder")
                     .font(.system(size: 11))
                     .foregroundColor(.secondary)
                 Text(activeProjectName)
                     .font(.system(size: 12, weight: .semibold))
+                    .lineLimit(1)
                 Text("/")
                     .foregroundColor(.secondary.opacity(0.6))
                     .font(.system(size: 11))
-                Text(surface == .agent ? activeTaskTitle : (appState.currentFile?.name ?? "Editor"))
+                Text(surface == .agent ? activeTaskTitle : (appState.currentFile?.name ?? (appState.editorMode == .code ? "Editor" : appState.editorMode.displayName)))
                     .font(.system(size: 12, weight: .medium))
                     .foregroundColor(.primary.opacity(0.85))
                     .lineLimit(1)
             }
+            .truncationMode(.middle)
+            .frame(maxWidth: 220, alignment: .leading)
 
-            Spacer()
+            Spacer(minLength: 4)
 
-            // Agent Phase Indicator (only when outside Agent surface)
+            // Agent Phase Indicator (only when outside Agent surface and busy)
             if surface != .agent && agent.agentPhase != .idle {
                 HStack(spacing: 5) {
                     ProgressView().scaleEffect(0.4).frame(width: 10, height: 10)
                     Text(agent.agentPhase.displayText)
                         .font(.system(size: 10, weight: .medium))
                         .foregroundColor(.secondary)
+                        .lineLimit(1)
                 }
-                .padding(.horizontal, 8)
+                .padding(.horizontal, 7)
                 .padding(.vertical, 3)
                 .background(Color.primary.opacity(0.06))
                 .cornerRadius(12)
+                .fixedSize()
             }
 
-            // Surface Toggle (Agent vs Open IDE)
+            // In Editor mode (.code only), provide Run, Build, Preview, Console quick action pills
+            if surface == .editor && appState.editorMode == .code {
+                HStack(spacing: 5) {
+                    // Run Code
+                    Button(action: { appState.runCode() }) {
+                        HStack(spacing: 4) {
+                            Image(systemName: "play.fill")
+                                .font(.system(size: 9, weight: .bold))
+                            Text("Run")
+                                .font(.system(size: 11, weight: .semibold))
+                                .lineLimit(1)
+                        }
+                        .foregroundColor(.green)
+                        .padding(.horizontal, 8)
+                        .padding(.vertical, 4)
+                        .background(Color.green.opacity(0.12))
+                        .cornerRadius(6)
+                    }
+                    .buttonStyle(.plain)
+                    .fixedSize()
+                    .help("Run Code (⌘R)")
+
+                    // Build Project
+                    Button(action: { appState.buildProject() }) {
+                        HStack(spacing: 4) {
+                            Image(systemName: "hammer.fill")
+                                .font(.system(size: 9, weight: .medium))
+                            Text("Build")
+                                .font(.system(size: 11, weight: .medium))
+                                .lineLimit(1)
+                        }
+                        .foregroundColor(.primary.opacity(0.85))
+                        .padding(.horizontal, 8)
+                        .padding(.vertical, 4)
+                        .background(Color.primary.opacity(0.06))
+                        .cornerRadius(6)
+                    }
+                    .buttonStyle(.plain)
+                    .fixedSize()
+                    .help("Build Project (⌘B)")
+
+                    // Preview Menu (Real Device & Simulator Preview)
+                    Menu {
+                        Button("WebApp Preview (Localhost)") {
+                            DeviceRuntimeService.shared.embeddedDockMode = .web
+                            DeviceRuntimeService.shared.showingEmbeddedDeviceDock = true
+                            appState.showingPreviewView = true
+                        }
+                        Button("iOS Simulator") {
+                            DeviceRuntimeService.shared.embeddedDockMode = .ios
+                            DeviceRuntimeService.shared.showingEmbeddedAppleDock = true
+                            DeviceRuntimeService.shared.showingEmbeddedDeviceDock = true
+                            appState.showingPreviewView = true
+                            Task { await DeviceRuntimeService.shared.startPreferredEmbeddedAppleSimulator() }
+                        }
+                        Button("Android Emulator") {
+                            DeviceRuntimeService.shared.embeddedDockMode = .android
+                            DeviceRuntimeService.shared.showingEmbeddedAppleDock = false
+                            DeviceRuntimeService.shared.showingEmbeddedDeviceDock = true
+                            appState.showingPreviewView = true
+                            Task { await DeviceRuntimeService.shared.startPreferredEmbeddedAndroid() }
+                        }
+                        Divider()
+                        Button("Choose Device & Run…") {
+                            DeviceRuntimeService.shared.showingDeviceRuntimeSheet = true
+                        }
+                        Button(appState.showingPreviewView ? "Hide Preview Dock (⌥⌘P)" : "Show Preview Dock (⌥⌘P)") {
+                            withAnimation {
+                                appState.showingPreviewView.toggle()
+                                DeviceRuntimeService.shared.showingEmbeddedDeviceDock = appState.showingPreviewView
+                            }
+                        }
+                        Button("Open Full Web Browser") {
+                            appState.editorMode = .browser
+                        }
+                    } label: {
+                        HStack(spacing: 3) {
+                            Image(systemName: DeviceRuntimeService.shared.showingEmbeddedAppleDock ? "iphone" : "apps.iphone")
+                                .font(.system(size: 9))
+                            Text("Preview")
+                                .font(.system(size: 11, weight: appState.showingPreviewView ? .semibold : .medium))
+                                .lineLimit(1)
+                            Image(systemName: "chevron.down")
+                                .font(.system(size: 7, weight: .semibold))
+                        }
+                        .foregroundColor(appState.showingPreviewView ? .white : .primary.opacity(0.85))
+                        .padding(.horizontal, 7)
+                        .padding(.vertical, 4)
+                        .background(appState.showingPreviewView ? Color.white.opacity(0.16) : Color.primary.opacity(0.06))
+                        .overlay(
+                            RoundedRectangle(cornerRadius: 6)
+                                .stroke(appState.showingPreviewView ? Color.white.opacity(0.22) : Color.clear, lineWidth: 1)
+                        )
+                        .cornerRadius(6)
+                    }
+                    .menuStyle(.borderlessButton)
+                    .fixedSize()
+                    .help("Live Real Device Preview (iOS Sim & Android Emu)")
+
+                    // Console Toggle
+                    Button(action: { appState.toggleConsole() }) {
+                        HStack(spacing: 4) {
+                            Image(systemName: "terminal")
+                                .font(.system(size: 9))
+                            Text("Console")
+                                .font(.system(size: 11, weight: .medium))
+                                .lineLimit(1)
+                        }
+                        .foregroundColor(appState.consoleVisible ? .accentColor : .secondary)
+                        .padding(.horizontal, 8)
+                        .padding(.vertical, 4)
+                        .background(appState.consoleVisible ? Color.accentColor.opacity(0.12) : Color.primary.opacity(0.06))
+                        .cornerRadius(6)
+                    }
+                    .buttonStyle(.plain)
+                    .fixedSize()
+                    .help("Toggle Terminal / Console (⌘J)")
+                }
+                .fixedSize()
+            }
+
+            // Surface Toggle (Agent vs Code Editor vs More Mode)
             HStack(spacing: 2) {
                 Button {
                     surface = .agent
@@ -279,58 +436,111 @@ struct AgenticEditorWorkspace: View {
                         Image(systemName: "brain")
                             .font(.system(size: 10))
                         Text("Agent")
+                            .font(.system(size: 11, weight: surface == .agent ? .semibold : .medium))
+                            .lineLimit(1)
                     }
                 }
                 .agenticTabStyle(active: surface == .agent)
 
+                Button {
+                    surface = .editor
+                    appState.setEditorMode(.code)
+                } label: {
+                    HStack(spacing: 4) {
+                        Image(systemName: "curlybraces")
+                            .font(.system(size: 10))
+                        Text("Code Editor")
+                            .font(.system(size: 11, weight: (surface == .editor && appState.editorMode == .code) ? .semibold : .medium))
+                            .lineLimit(1)
+                    }
+                }
+                .agenticTabStyle(active: surface == .editor && appState.editorMode == .code)
+
                 Menu {
-                    Button("Code Editor") {
-                        appState.setEditorMode(.code)
-                        surface = .editor
-                    }
-                    Button("Cell Mode") {
-                        appState.setEditorMode(.notebook)
-                        surface = .editor
-                    }
-                    Button("Science Mode") {
-                        appState.setEditorMode(.science)
-                        surface = .editor
-                    }
-                    Button("Playground") {
+                    Button("Playground Mode") {
+                        appState.showingWelcomeHome = false
                         appState.setEditorMode(.playground)
                         surface = .editor
                     }
-                    Button("IDE Browser") {
+                    Button("Cell Mode (Notebook)") {
+                        appState.showingWelcomeHome = false
+                        appState.setEditorMode(.notebook)
+                        surface = .editor
+                    }
+                    Button("SSH Remote Browser") {
+                        appState.showingWelcomeHome = false
+                        appState.setEditorMode(.remoteX)
+                        surface = .editor
+                    }
+                    Button("Science Mode") {
+                        appState.showingWelcomeHome = false
+                        appState.setEditorMode(.science)
+                        surface = .editor
+                    }
+                    Button("IDE Web Browser") {
+                        appState.showingWelcomeHome = false
                         appState.setEditorMode(.browser)
                         surface = .editor
                     }
+                    Button("Embed & IoT Studio") {
+                        appState.showingWelcomeHome = false
+                        appState.setEditorMode(.embedded)
+                        surface = .editor
+                    }
+                    Button("API Studio") {
+                        appState.openAPIStudio()
+                        surface = .editor
+                    }
                 } label: {
-                    HStack(spacing: 4) {
-                        Image(systemName: "square.and.pencil")
+                    HStack(spacing: 3) {
+                        Image(systemName: "square.grid.2x2")
                             .font(.system(size: 10))
-                        Text(surface == .editor ? appState.editorMode.displayName : "Open IDE")
+                        Text(surface == .editor && appState.editorMode != .code ? appState.editorMode.displayName : "More Mode")
+                            .font(.system(size: 11, weight: (surface == .editor && appState.editorMode != .code) ? .semibold : .medium))
+                            .lineLimit(1)
+                        Image(systemName: "chevron.down")
+                            .font(.system(size: 7, weight: .bold))
                     }
                 }
-                .agenticTabStyle(active: surface == .editor)
+                .agenticTabStyle(active: surface == .editor && appState.editorMode != .code)
             }
             .padding(2)
             .background(Color.primary.opacity(0.04))
             .cornerRadius(6)
+            .fixedSize()
 
-            // Secondary Tools & Settings
+            // Overflow Layout Menu [...]
             AgenticLayoutMenu()
                 .environmentObject(appState)
+                .fixedSize()
 
+            // Context & Preview Inspector [sidebar.right]
+            Button(action: {
+                withAnimation(.easeInOut(duration: 0.16)) {
+                    appState.toggleAgenticContext()
+                }
+            }) {
+                Image(systemName: "sidebar.right")
+                    .font(.system(size: 12))
+                    .foregroundColor(appState.agenticContextVisible ? .accentColor : .secondary)
+            }
+            .buttonStyle(.plain)
+            .keyboardShortcut("i", modifiers: [.command])
+            .fixedSize()
+            .help("Toggle Preview & Context Inspector (⌘I)")
+
+            // Settings [⚙]
             Button(action: { appState.showingSettingsDialog = true }) {
                 Image(systemName: "gearshape")
                     .font(.system(size: 12))
                     .foregroundColor(.secondary)
             }
             .buttonStyle(.plain)
+            .fixedSize()
             .help("Settings (⌘,)")
         }
-        .padding(.horizontal, 14)
-        .frame(height: 40)
+        .padding(.horizontal, 10)
+        .frame(height: 38)
         .background(appState.appTheme.isGlass ? Color.clear : Color(nsColor: appState.appTheme.panelBackground))
     }
 }
@@ -348,7 +558,9 @@ struct AgenticLayoutMenu: View {
 
             Section("Specialized Studios") {
                 Button { appState.showingDatabaseStudio = true } label: { Label("Database Studio", systemImage: "server.rack") }
-                Button { appState.showingAPIClient = true } label: { Label("API Client", systemImage: "network") }
+                Button { 
+                    appState.openAPIStudio()
+                } label: { Label("API Studio", systemImage: "network") }
                 Button { appState.showingContainerView = true } label: { Label("Apple Container Studio", systemImage: "shippingbox.fill") }
                 Button { appState.showingCICDView = true } label: { Label("CI/CD Pipelines", systemImage: "checklist") }
                 Button { appState.showingCollaborationView = true } label: { Label("Realtime Collaboration", systemImage: "person.2.fill") }
@@ -394,17 +606,25 @@ struct AgenticWorkspaceSidebar: View {
     @State private var isProjectsExpanded = true
     @State private var isFilesExpanded = true
     @State private var collapsedProjectIds: Set<String> = []
+    @State private var searchText: String = ""
+    @State private var isSearchVisible: Bool = false
+    @State private var renamingChatId: String? = nil
+    @State private var renameText: String = ""
 
     var body: some View {
         VStack(spacing: 0) {
             sidebarHeader
-            sidebarNewConversationButton
-            sidebarQuickActions
             
-            Divider().padding(.horizontal, 10)
+            if isSearchVisible {
+                sidebarSearchBar
+            }
+            
+            sidebarNewConversationButton
+            
+            Divider().padding(.horizontal, 10).padding(.bottom, 2)
             
             ScrollView {
-                VStack(alignment: .leading, spacing: 12) {
+                VStack(alignment: .leading, spacing: 14) {
                     projectsSection
                     Divider().padding(.horizontal, 10)
                     workspaceFilesSection
@@ -418,24 +638,96 @@ struct AgenticWorkspaceSidebar: View {
         .background(appState.appTheme.isGlass ? Color.clear : Color(nsColor: appState.appTheme.panelBackground))
     }
     
+    // MARK: - Header (Codex style: Title dropdown, Search toggle, New Chat icon)
     @ViewBuilder
     private var sidebarHeader: some View {
-        HStack(spacing: 8) {
-            Text("MicroCode AI")
-                .font(.system(size: 13, weight: .bold))
+        HStack(spacing: 6) {
+            Menu {
+                Button(action: { surface = .agent }) {
+                    Label("MicroCode AI Agent", systemImage: "sparkles")
+                }
+                Button(action: { surface = .editor }) {
+                    Label("Editor Navigator", systemImage: "chevron.left.forwardslash.chevron.right")
+                }
+                Divider()
+                Button(action: { appState.openFolder() }) {
+                    Label("Open Project…", systemImage: "folder")
+                }
+            } label: {
+                HStack(spacing: 4) {
+                    Text("MicroCode AI")
+                        .font(.system(size: 13, weight: .bold))
+                        .foregroundColor(.primary)
+                    Image(systemName: "chevron.down")
+                        .font(.system(size: 9, weight: .semibold))
+                        .foregroundColor(.secondary)
+                }
+                .contentShape(Rectangle())
+            }
+            .menuStyle(.borderlessButton)
+            .fixedSize()
+            
             Spacer()
 
-            Button(action: { appState.openFolder() }) {
-                Image(systemName: "folder.badge.plus")
-                    .font(.system(size: 11))
-                    .foregroundColor(.secondary)
+            Button(action: {
+                withAnimation(.easeInOut(duration: 0.15)) {
+                    isSearchVisible.toggle()
+                    if !isSearchVisible { searchText = "" }
+                }
+            }) {
+                Image(systemName: "magnifyingglass")
+                    .font(.system(size: 12))
+                    .foregroundColor(isSearchVisible ? .primary : .secondary)
+                    .frame(width: 24, height: 24)
+                    .contentShape(Rectangle())
             }
             .buttonStyle(.plain)
-            .help("Open Project Folder")
+            .help("Search Conversations")
+
+            Button(action: {
+                let ws = appState.workspaceFolder?.path ?? agent.currentWorkspace
+                _ = agent.createNewChat(projectPath: ws)
+                surface = .agent
+            }) {
+                Image(systemName: "square.and.pencil")
+                    .font(.system(size: 12))
+                    .foregroundColor(.secondary)
+                    .frame(width: 24, height: 24)
+                    .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .help("New Conversation (⌘N)")
         }
-        .padding(.horizontal, 14)
-        .padding(.top, 14)
-        .padding(.bottom, 10)
+        .padding(.leading, 78)
+        .padding(.trailing, 12)
+        .padding(.top, 12)
+        .padding(.bottom, 8)
+    }
+
+    @ViewBuilder
+    private var sidebarSearchBar: some View {
+        HStack(spacing: 6) {
+            Image(systemName: "magnifyingglass")
+                .font(.system(size: 10))
+                .foregroundColor(.secondary)
+            TextField("Search tasks & conversations...", text: $searchText)
+                .textFieldStyle(.plain)
+                .font(.system(size: 11))
+            if !searchText.isEmpty {
+                Button(action: { searchText = "" }) {
+                    Image(systemName: "xmark.circle.fill")
+                        .font(.system(size: 10))
+                        .foregroundColor(.secondary)
+                }
+                .buttonStyle(.plain)
+            }
+        }
+        .padding(.horizontal, 8)
+        .frame(height: 24)
+        .background(Color.primary.opacity(0.04))
+        .cornerRadius(6)
+        .padding(.horizontal, 12)
+        .padding(.bottom, 6)
     }
     
     @ViewBuilder
@@ -456,7 +748,7 @@ struct AgenticWorkspaceSidebar: View {
                     .foregroundColor(.secondary.opacity(0.7))
             }
             .padding(.horizontal, 12)
-            .frame(height: 34)
+            .frame(height: 32)
             .background(
                 RoundedRectangle(cornerRadius: 7, style: .continuous)
                     .fill(Color.primary.opacity(0.06))
@@ -468,26 +760,8 @@ struct AgenticWorkspaceSidebar: View {
         .padding(.bottom, 8)
     }
     
-    @ViewBuilder
-    private var sidebarQuickActions: some View {
-        VStack(spacing: 2) {
-            sidebarNavRow(title: "Conversation History", icon: "clock.arrow.circlepath") {
-                surface = .agent
-            }
-            sidebarNavRow(title: "SubAgent Monitor", icon: "cpu.fill") {
-                appState.showingSubAgentMonitor = true
-            }
-            sidebarNavRow(title: "Scheduled Tasks", icon: "calendar.badge.clock") {
-                appState.showingCICDView = true
-            }
-            sidebarNavRow(title: "Agent Skills & Plugins", icon: "sparkles.rectangle.stack") {
-                appState.showingSettingsDialog = true
-            }
-        }
-        .padding(.horizontal, 8)
-        .padding(.bottom, 8)
-    }
     
+    // MARK: - Projects & Conversations Section (Codex Styled)
     @ViewBuilder
     private var projectsSection: some View {
         VStack(alignment: .leading, spacing: 4) {
@@ -504,13 +778,36 @@ struct AgenticWorkspaceSidebar: View {
                 .buttonStyle(.plain)
             }
             .padding(.horizontal, 14)
-            .padding(.top, 8)
+            .padding(.top, 6)
 
             if isProjectsExpanded {
-                ForEach(agent.projectGroups) { group in
-                    projectGroupRow(group: group)
+                let groups = filteredProjectGroups
+                if groups.isEmpty {
+                    Text("No matching conversations")
+                        .font(.system(size: 11))
+                        .foregroundColor(.secondary.opacity(0.7))
+                        .padding(.horizontal, 14)
+                        .padding(.vertical, 4)
+                } else {
+                    ForEach(groups) { group in
+                        projectGroupRow(group: group)
+                    }
                 }
             }
+        }
+    }
+
+    private var filteredProjectGroups: [ProjectChatGroup] {
+        let q = searchText.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        guard !q.isEmpty else { return agent.projectGroups }
+        return agent.projectGroups.compactMap { group in
+            let matchingChats = group.chats.filter { $0.name.lowercased().contains(q) }
+            if group.projectName.lowercased().contains(q) {
+                return group
+            } else if !matchingChats.isEmpty {
+                return ProjectChatGroup(projectName: group.projectName, projectPath: group.projectPath, chats: matchingChats)
+            }
+            return nil
         }
     }
     
@@ -535,31 +832,32 @@ struct AgenticWorkspaceSidebar: View {
                     }
                 }
             }) {
-                HStack(spacing: 6) {
+                HStack(spacing: 7) {
                     Image(systemName: isExpanded ? "chevron.down" : "chevron.right")
-                        .font(.system(size: 8, weight: .semibold))
-                        .foregroundColor(.secondary.opacity(0.6))
+                        .font(.system(size: 9, weight: .semibold))
+                        .foregroundColor(.secondary.opacity(0.75))
                         .frame(width: 8)
                     
-                    Image(systemName: "folder.fill")
-                        .font(.system(size: 11))
-                        .foregroundColor(isExpanded ? .accentColor : .secondary)
+                    // Codex-style clean outline folder icon
+                    Image(systemName: isExpanded ? "folder" : "folder")
+                        .font(.system(size: 13))
+                        .foregroundColor(.secondary)
                     
                     Text(group.projectName)
-                        .font(.system(size: 11.5, weight: isExpanded ? .semibold : .regular))
-                        .foregroundColor(isExpanded ? .primary : .secondary)
+                        .font(.system(size: 12.5, weight: isExpanded ? .semibold : .regular))
+                        .foregroundColor(.primary.opacity(0.9))
                         .lineLimit(1)
                     
                     Spacer()
                     
                     if !isExpanded && !group.chats.isEmpty {
                         Text("\(group.chats.count)")
-                            .font(.system(size: 9, design: .monospaced))
-                            .foregroundColor(.secondary.opacity(0.6))
-                            .padding(.horizontal, 5)
-                            .padding(.vertical, 1)
+                            .font(.system(size: 10, weight: .medium, design: .monospaced))
+                            .foregroundColor(.secondary.opacity(0.75))
+                            .padding(.horizontal, 6)
+                            .padding(.vertical, 1.5)
                             .background(Color.primary.opacity(0.04))
-                            .cornerRadius(3)
+                            .cornerRadius(3.5)
                     }
                     
                     Button(action: {
@@ -576,14 +874,15 @@ struct AgenticWorkspaceSidebar: View {
                         surface = .agent
                     }) {
                         Image(systemName: "plus")
-                            .font(.system(size: 9))
-                            .foregroundColor(.secondary.opacity(0.8))
+                            .font(.system(size: 10, weight: .semibold))
+                            .foregroundColor(.secondary.opacity(0.75))
+                            .frame(width: 20, height: 20)
                     }
                     .buttonStyle(.plain)
-                    .help("New Task in \(group.projectName)")
+                    .help("New Conversation in \(group.projectName)")
                 }
                 .padding(.horizontal, 14)
-                .padding(.vertical, 4)
+                .padding(.vertical, 5)
                 .contentShape(Rectangle())
             }
             .buttonStyle(.plain)
@@ -594,12 +893,14 @@ struct AgenticWorkspaceSidebar: View {
                 }
             }
         }
-        .padding(.bottom, 4)
+        .padding(.bottom, 3)
     }
     
     @ViewBuilder
     private func projectChatRow(chat: ChatSession, group: ProjectChatGroup) -> some View {
         let isActive = agent.activeChatId == chat.id && surface == .agent
+        let isBusy = isActive && agent.agentPhase != .idle
+        
         Button {
             agent.switchChat(to: chat.id)
             collapsedProjectIds.remove(group.id)
@@ -614,24 +915,64 @@ struct AgenticWorkspaceSidebar: View {
             surface = .agent
         } label: {
             HStack(spacing: 8) {
-                Circle()
-                    .fill(isActive ? Color.accentColor : Color.secondary.opacity(0.3))
-                    .frame(width: 5, height: 5)
-                Text(chat.name)
-                    .font(.system(size: 11, weight: isActive ? .medium : .regular))
-                    .foregroundColor(isActive ? .primary : .secondary)
-                    .lineLimit(1)
-                Spacer()
+                // Title with enhanced readability and larger font (13pt)
+                if renamingChatId == chat.id {
+                    TextField("Chat Name", text: $renameText, onCommit: {
+                        let trimmed = renameText.trimmingCharacters(in: .whitespacesAndNewlines)
+                        if !trimmed.isEmpty {
+                            agent.renameChat(chat.id, to: trimmed)
+                        }
+                        renamingChatId = nil
+                    })
+                    .textFieldStyle(.plain)
+                    .font(.system(size: 13))
+                    .padding(.vertical, 2)
+                    .padding(.horizontal, 5)
+                    .background(Color.primary.opacity(0.1))
+                    .cornerRadius(4)
+                } else {
+                    Text(chat.name)
+                        .font(.system(size: 13, weight: isActive ? .medium : .regular))
+                        .foregroundColor(isActive ? .primary : .secondary)
+                        .lineLimit(1)
+                        .truncationMode(.tail)
+                }
+                
+                Spacer(minLength: 4)
+                
+                // Trailing Indicators: Busy spinner, purple git branch icon, or active dot
+                if isBusy {
+                    ProgressView()
+                        .scaleEffect(0.55)
+                        .frame(width: 14, height: 14)
+                } else if isActive {
+                    Image(systemName: "arrow.triangle.branch")
+                        .font(.system(size: 11, weight: .semibold))
+                        .foregroundColor(.purple.opacity(0.85))
+                }
             }
-            .padding(.leading, 28)
+            .padding(.leading, 26)
             .padding(.trailing, 10)
-            .frame(height: 24)
-            .background(isActive ? Color.primary.opacity(0.08) : Color.clear)
-            .cornerRadius(5)
+            .frame(height: 30)
+            .background(
+                isActive
+                    ? RoundedRectangle(cornerRadius: 6, style: .continuous).fill(Color.primary.opacity(0.08))
+                    : RoundedRectangle(cornerRadius: 6, style: .continuous).fill(Color.clear)
+            )
         }
         .buttonStyle(.plain)
+        .padding(.horizontal, 6)
         .contextMenu {
-            Button("Delete Task", role: .destructive) {
+            Button("Rename Conversation…") {
+                renameText = chat.name
+                renamingChatId = chat.id
+            }
+            Button("Copy Title") {
+                NSPasteboard.general.clearContents()
+                NSPasteboard.general.setString(chat.name, forType: .string)
+            }
+            Divider()
+            Button("Delete Conversation", role: .destructive) {
                 agent.deleteChat(chat.id)
             }
         }
@@ -669,56 +1010,36 @@ struct AgenticWorkspaceSidebar: View {
         }
     }
     
+    // MARK: - Footer
     @ViewBuilder
     private var sidebarFooter: some View {
         HStack(spacing: 8) {
             Button(action: { appState.showingSettingsDialog = true }) {
                 HStack(spacing: 6) {
                     Image(systemName: "gearshape")
-                        .font(.system(size: 12))
+                        .font(.system(size: 11.5))
                     Text("Settings")
-                        .font(.system(size: 11, weight: .medium))
+                        .font(.system(size: 11.5, weight: .regular))
                 }
                 .foregroundColor(.secondary)
             }
             .buttonStyle(.plain)
+            .help("MicroCode Settings")
 
             Spacer()
 
-            HStack(spacing: 4) {
-                Circle().fill(Color.green).frame(width: 5, height: 5)
-                Text("Dotmini Cloud")
-                    .font(.system(size: 9, weight: .medium))
-                    .foregroundColor(.green)
+            Button(action: { appState.showingSettingsDialog = true }) {
+                Image(systemName: "questionmark.circle")
+                    .font(.system(size: 13))
+                    .foregroundColor(.secondary)
+                    .frame(width: 22, height: 22)
             }
-            .padding(.horizontal, 6)
-            .padding(.vertical, 2)
-            .background(Color.green.opacity(0.1))
-            .cornerRadius(4)
+            .buttonStyle(.plain)
+            .help("MicroCode Help")
         }
         .padding(.horizontal, 14)
-        .padding(.vertical, 10)
+        .padding(.vertical, 8)
         .background(Color.primary.opacity(0.02))
-    }
-
-    private func sidebarNavRow(title: String, icon: String, action: @escaping () -> Void) -> some View {
-        Button(action: action) {
-            HStack(spacing: 8) {
-                Image(systemName: icon)
-                    .font(.system(size: 11))
-                    .foregroundColor(.secondary)
-                    .frame(width: 16)
-                Text(title)
-                    .font(.system(size: 11))
-                    .foregroundColor(.primary.opacity(0.85))
-                Spacer()
-            }
-            .padding(.horizontal, 10)
-            .frame(height: 28)
-            .background(Color.clear)
-            .clipShape(RoundedRectangle(cornerRadius: 5))
-        }
-        .buttonStyle(.plain)
     }
 
     private func isProjectGroupExpanded(_ group: ProjectChatGroup) -> Bool {
@@ -726,83 +1047,1186 @@ struct AgenticWorkspaceSidebar: View {
     }
 }
 
-struct AgenticContextInspector: View {
+// MARK: - Xcode-Style Native Editor Navigator Sidebar
+
+enum XcodeNavigatorTab: Int, CaseIterable {
+    case project = 0
+    case sourceControl = 1
+    case search = 2
+    case issues = 3
+    case recent = 4
+
+    var icon: String {
+        switch self {
+        case .project: return "folder"
+        case .sourceControl: return "arrow.triangle.branch"
+        case .search: return "magnifyingglass"
+        case .issues: return "exclamationmark.triangle"
+        case .recent: return "clock"
+        }
+    }
+
+    var title: String {
+        switch self {
+        case .project: return "Project Navigator"
+        case .sourceControl: return "Source Control"
+        case .search: return "Search in Workspace"
+        case .issues: return "Issue Navigator"
+        case .recent: return "Recent Projects & Files"
+        }
+    }
+}
+
+struct XcodeEditorSidebar: View {
     @EnvironmentObject var appState: AppState
-    @StateObject private var agent = AgentService.shared
     @Binding var surface: AgenticWorkspaceSurface
+    @State private var selectedTab: XcodeNavigatorTab = .project
+    @State private var filterText: String = ""
+    @State private var showRecentOnly: Bool = false
+    @State private var recentProjects: [URL] = []
+    @State private var recentFiles: [URL] = []
+
+    private var displayedFileTree: Binding<[FileNode]> {
+        if filterText.isEmpty && !showRecentOnly {
+            return $appState.fileTree
+        }
+        let filtered = filterFileNodes(appState.fileTree, query: filterText, recentOnly: showRecentOnly)
+        return Binding(
+            get: { filtered },
+            set: { _ in }
+        )
+    }
 
     var body: some View {
         VStack(spacing: 0) {
-            HStack {
-                Text("CONTEXT")
-                    .font(.system(size: 10, weight: .semibold))
-                    .foregroundColor(.secondary)
-                Spacer()
-                Text(agent.isLoading ? "Working" : "Ready")
-                    .font(.system(size: 9))
-                    .foregroundColor(.secondary)
+            navigatorTabBar
+            Divider()
+
+            projectHeaderBar
+            Divider()
+
+            Group {
+                switch selectedTab {
+                case .project:
+                    projectNavigatorContent
+                case .sourceControl:
+                    GitPanelView()
+                case .search:
+                    searchNavigatorContent
+                case .issues:
+                    issuesNavigatorContent
+                case .recent:
+                    recentNavigatorContent
+                }
             }
-            .padding(.horizontal, 12)
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
+
+            Divider()
+            bottomFilterBar
+        }
+        .background(appState.appTheme.isGlass ? Color.clear : Color(nsColor: appState.appTheme.panelBackground))
+        .onAppear {
+            refreshRecents()
+            if appState.fileTree.isEmpty && appState.workspaceFolder != nil {
+                Task { @MainActor in await appState.refreshFileTree() }
+            }
+        }
+        .onChange(of: appState.workspaceFolder) { _ in
+            refreshRecents()
+        }
+    }
+
+    // MARK: - Navigator Tab Bar (Xcode Icon Strip)
+
+    private var navigatorTabBar: some View {
+        HStack(spacing: 2) {
+            ForEach(XcodeNavigatorTab.allCases, id: \.self) { tab in
+                Button {
+                    withAnimation(.easeInOut(duration: 0.12)) {
+                        selectedTab = tab
+                    }
+                } label: {
+                    Image(systemName: selectedTab == tab ? "\(tab.icon).fill" : tab.icon)
+                        .font(.system(size: 11, weight: selectedTab == tab ? .semibold : .regular))
+                        .foregroundColor(selectedTab == tab ? .accentColor : .secondary)
+                        .frame(maxWidth: .infinity, minHeight: 26)
+                        .background(selectedTab == tab ? Color.primary.opacity(0.08) : Color.clear)
+                        .cornerRadius(4)
+                }
+                .buttonStyle(.plain)
+                .help(tab.title)
+            }
+        }
+        .padding(.horizontal, 6)
+        .padding(.top, 7)
+        .padding(.bottom, 5)
+    }
+
+    // MARK: - Project Header Bar
+
+    private var projectHeaderBar: some View {
+        HStack(spacing: 6) {
+            Image(systemName: appState.workspaceFolder != nil ? "folder.fill" : "folder")
+                .foregroundColor(appState.workspaceFolder != nil ? .accentColor : .secondary)
+                .font(.system(size: 11))
+
+            Text(appState.workspaceFolder?.lastPathComponent ?? "No Project")
+                .font(.system(size: 11.5, weight: .semibold))
+                .lineLimit(1)
+                .foregroundColor(.primary)
+
+            Spacer()
+
+            Menu {
+                Button {
+                    appState.openFolder()
+                } label: {
+                    Label("Open Project or Folder…", systemImage: "folder.badge.plus")
+                }
+
+                Button {
+                    appState.openFile()
+                } label: {
+                    Label("Open File…", systemImage: "doc.badge.plus")
+                }
+
+                if !recentProjects.isEmpty {
+                    Divider()
+                    Menu("Recent Projects") {
+                        ForEach(recentProjects.prefix(8), id: \.self) { url in
+                            Button(url.lastPathComponent) {
+                                Task { @MainActor in await appState.openWorkspace(url: url) }
+                            }
+                        }
+                    }
+                }
+
+                if !recentFiles.isEmpty {
+                    Menu("Recent Files") {
+                        ForEach(recentFiles.prefix(10), id: \.self) { url in
+                            Button(url.lastPathComponent) {
+                                Task { @MainActor in await appState.loadFile(url: url) }
+                            }
+                        }
+                    }
+                }
+
+                Divider()
+
+                Button {
+                    appState.newFile()
+                } label: {
+                    Label("New File", systemImage: "doc.badge.plus")
+                }
+
+                Button {
+                    Task { @MainActor in await appState.refreshFileTree() }
+                } label: {
+                    Label("Refresh File Tree", systemImage: "arrow.clockwise")
+                }
+
+                if appState.workspaceFolder != nil {
+                    Divider()
+                    Button("Close Project", role: .destructive) {
+                        appState.closeWorkspace()
+                    }
+                }
+
+                Divider()
+                Button {
+                    surface = .agent
+                } label: {
+                    Label("Switch to AI Agent Mode", systemImage: "brain")
+                }
+            } label: {
+                Image(systemName: "ellipsis.circle")
+                    .font(.system(size: 12))
+                    .foregroundColor(.secondary)
+                    .frame(width: 20, height: 20)
+            }
+            .menuStyle(.borderlessButton)
+            .fixedSize()
+            .help("Project Options")
+        }
+        .padding(.horizontal, 10)
+        .padding(.vertical, 6)
+        .background(Color.primary.opacity(0.02))
+    }
+
+    // MARK: - Project Navigator Content
+
+    @ViewBuilder
+    private var projectNavigatorContent: some View {
+        if appState.workspaceFolder != nil {
+            VStack(spacing: 0) {
+                AuthenticFileTree(
+                    fileTree: displayedFileTree,
+                    revision: appState.fileTreeRevision,
+                    backgroundColor: appState.appTheme.isGlass ? .clear : appState.appTheme.panelBackground,
+                    onAction: { action in
+                        handleAction(action)
+                    }
+                )
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+
+                if let warning = appState.fileTreeLimitWarning {
+                    Text(warning)
+                        .font(.system(size: 9))
+                        .foregroundColor(.secondary)
+                        .lineLimit(2)
+                        .padding(.horizontal, 10)
+                        .padding(.vertical, 4)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .background(Color.primary.opacity(0.035))
+                }
+            }
+        } else {
+            emptyProjectStateView
+        }
+    }
+
+    // MARK: - Empty Project Navigator (Xcode Style)
+
+    private var emptyProjectStateView: some View {
+        ScrollView {
+            VStack(spacing: 16) {
+                VStack(spacing: 8) {
+                    Image(systemName: "folder.badge.gearshape")
+                        .font(.system(size: 34))
+                        .foregroundColor(.accentColor.opacity(0.85))
+                        .padding(.top, 24)
+
+                    Text("Xcode Project Navigator")
+                        .font(.system(size: 13, weight: .semibold))
+
+                    Text("Open a folder or file to explore and edit your code.")
+                        .font(.system(size: 11))
+                        .foregroundColor(.secondary)
+                        .multilineTextAlignment(.center)
+                        .padding(.horizontal, 16)
+
+                    HStack(spacing: 10) {
+                        Button(action: { appState.openFolder() }) {
+                            HStack(spacing: 5) {
+                                Image(systemName: "folder.badge.plus")
+                                Text("Open Folder…")
+                            }
+                            .font(.system(size: 11, weight: .medium))
+                            .padding(.horizontal, 10)
+                            .padding(.vertical, 5)
+                            .background(Color.accentColor.opacity(0.12))
+                            .foregroundColor(.accentColor)
+                            .cornerRadius(6)
+                        }
+                        .buttonStyle(.plain)
+
+                        Button(action: { appState.openFile() }) {
+                            HStack(spacing: 5) {
+                                Image(systemName: "doc")
+                                Text("Open File…")
+                            }
+                            .font(.system(size: 11, weight: .medium))
+                            .padding(.horizontal, 10)
+                            .padding(.vertical, 5)
+                            .background(Color.primary.opacity(0.06))
+                            .foregroundColor(.primary)
+                            .cornerRadius(6)
+                        }
+                        .buttonStyle(.plain)
+                    }
+                    .padding(.top, 4)
+                }
+
+                if !recentProjects.isEmpty {
+                    VStack(alignment: .leading, spacing: 6) {
+                        HStack {
+                            Text("RECENT PROJECTS")
+                                .font(.system(size: 9.5, weight: .bold))
+                                .foregroundColor(.secondary)
+                            Spacer()
+                        }
+                        .padding(.horizontal, 14)
+
+                        VStack(spacing: 2) {
+                            ForEach(recentProjects.prefix(6), id: \.self) { url in
+                                Button {
+                                    Task { @MainActor in await appState.openWorkspace(url: url) }
+                                } label: {
+                                    HStack(spacing: 8) {
+                                        Image(systemName: "folder.fill")
+                                            .foregroundColor(.accentColor)
+                                            .font(.system(size: 12))
+                                        VStack(alignment: .leading, spacing: 1) {
+                                            Text(url.lastPathComponent)
+                                                .font(.system(size: 11.5, weight: .medium))
+                                                .foregroundColor(.primary)
+                                                .lineLimit(1)
+                                            Text(url.path)
+                                                .font(.system(size: 9.5))
+                                                .foregroundColor(.secondary)
+                                                .lineLimit(1)
+                                                .truncationMode(.middle)
+                                        }
+                                        Spacer()
+                                    }
+                                    .padding(.horizontal, 10)
+                                    .padding(.vertical, 5)
+                                    .background(Color.primary.opacity(0.03))
+                                    .cornerRadius(6)
+                                }
+                                .buttonStyle(.plain)
+                            }
+                        }
+                        .padding(.horizontal, 10)
+                    }
+                }
+
+                if !recentFiles.isEmpty {
+                    VStack(alignment: .leading, spacing: 6) {
+                        HStack {
+                            Text("RECENT FILES")
+                                .font(.system(size: 9.5, weight: .bold))
+                                .foregroundColor(.secondary)
+                            Spacer()
+                        }
+                        .padding(.horizontal, 14)
+
+                        VStack(spacing: 2) {
+                            ForEach(recentFiles.prefix(6), id: \.self) { url in
+                                Button {
+                                    Task { @MainActor in await appState.loadFile(url: url) }
+                                } label: {
+                                    HStack(spacing: 8) {
+                                        Image(systemName: "doc.text.fill")
+                                            .foregroundColor(.secondary)
+                                            .font(.system(size: 12))
+                                        VStack(alignment: .leading, spacing: 1) {
+                                            Text(url.lastPathComponent)
+                                                .font(.system(size: 11.5, weight: .medium))
+                                                .foregroundColor(.primary)
+                                                .lineLimit(1)
+                                            Text(url.path)
+                                                .font(.system(size: 9.5))
+                                                .foregroundColor(.secondary)
+                                                .lineLimit(1)
+                                                .truncationMode(.middle)
+                                        }
+                                        Spacer()
+                                    }
+                                    .padding(.horizontal, 10)
+                                    .padding(.vertical, 5)
+                                    .background(Color.primary.opacity(0.03))
+                                    .cornerRadius(6)
+                                }
+                                .buttonStyle(.plain)
+                            }
+                        }
+                        .padding(.horizontal, 10)
+                    }
+                }
+            }
+            .padding(.bottom, 16)
+        }
+    }
+
+    // MARK: - Search Navigator Content
+
+    private var searchNavigatorContent: some View {
+        VStack(spacing: 8) {
+            HStack(spacing: 6) {
+                Image(systemName: "magnifyingglass")
+                    .foregroundColor(.secondary)
+                    .font(.system(size: 11))
+                TextField("Search in Workspace…", text: $filterText)
+                    .textFieldStyle(.plain)
+                    .font(.system(size: 11.5))
+                if !filterText.isEmpty {
+                    Button(action: { filterText = "" }) {
+                        Image(systemName: "xmark.circle.fill")
+                            .foregroundColor(.secondary)
+                            .font(.system(size: 10))
+                    }
+                    .buttonStyle(.plain)
+                }
+            }
+            .padding(.horizontal, 8)
+            .padding(.vertical, 6)
+            .background(Color.primary.opacity(0.05))
+            .cornerRadius(6)
+            .padding(.horizontal, 8)
+            .padding(.top, 8)
+
+            if appState.workspaceFolder == nil {
+                VStack(spacing: 6) {
+                    Text("No Workspace Open")
+                        .font(.system(size: 11))
+                        .foregroundColor(.secondary)
+                }
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+            } else {
+                ScrollView {
+                    LazyVStack(alignment: .leading, spacing: 2) {
+                        ForEach(matchingFileNodes(in: appState.fileTree, query: filterText), id: \.id) { node in
+                            Button {
+                                Task { @MainActor in
+                                    await appState.loadFile(url: URL(fileURLWithPath: node.path))
+                                }
+                            } label: {
+                                HStack(spacing: 6) {
+                                    Image(systemName: node.isDirectory ? "folder.fill" : "doc.text.fill")
+                                        .foregroundColor(node.isDirectory ? .accentColor : .secondary)
+                                        .font(.system(size: 11))
+                                    Text(node.name)
+                                        .font(.system(size: 11))
+                                        .foregroundColor(.primary)
+                                        .lineLimit(1)
+                                    Spacer()
+                                }
+                                .padding(.horizontal, 8)
+                                .padding(.vertical, 4)
+                                .background(Color.primary.opacity(0.03))
+                                .cornerRadius(4)
+                            }
+                            .buttonStyle(.plain)
+                        }
+                    }
+                    .padding(.horizontal, 8)
+                }
+            }
+        }
+    }
+
+    // MARK: - Issues Navigator Content
+
+    private var issuesNavigatorContent: some View {
+        ScrollView {
+            VStack(alignment: .leading, spacing: 8) {
+                HStack {
+                    Image(systemName: "exclamationmark.triangle")
+                        .font(.system(size: 10))
+                        .foregroundColor(.secondary)
+                    Text("ISSUES & DIAGNOSTICS")
+                        .font(.system(size: 10, weight: .bold))
+                        .foregroundColor(.secondary)
+                    Spacer()
+                }
+                .padding(.horizontal, 12)
+                .padding(.top, 8)
+
+                if let warning = appState.fileTreeLimitWarning {
+                    HStack(alignment: .top, spacing: 8) {
+                        Image(systemName: "exclamationmark.triangle.fill")
+                            .foregroundColor(.yellow)
+                            .font(.system(size: 11))
+                        Text(warning)
+                            .font(.system(size: 11))
+                            .foregroundColor(.secondary)
+                    }
+                    .padding(8)
+                    .background(Color.yellow.opacity(0.08))
+                    .cornerRadius(6)
+                    .padding(.horizontal, 8)
+                }
+
+                VStack(spacing: 6) {
+                    Image(systemName: "checkmark.circle.fill")
+                        .font(.system(size: 24))
+                        .foregroundColor(.green.opacity(0.8))
+                    Text("No build or analysis errors detected")
+                        .font(.system(size: 11))
+                        .foregroundColor(.secondary)
+                }
+                .frame(maxWidth: .infinity)
+                .padding(.top, 40)
+            }
+        }
+    }
+
+    // MARK: - Recent Navigator Content
+
+    private var recentNavigatorContent: some View {
+        ScrollView {
+            VStack(alignment: .leading, spacing: 14) {
+                if !recentProjects.isEmpty {
+                    VStack(alignment: .leading, spacing: 6) {
+                        HStack {
+                            Image(systemName: "folder")
+                                .font(.system(size: 10))
+                                .foregroundColor(.secondary)
+                            Text("RECENT PROJECTS")
+                                .font(.system(size: 10, weight: .bold))
+                                .foregroundColor(.secondary)
+                            Spacer()
+                            Text("\(recentProjects.count)")
+                                .font(.system(size: 9, design: .monospaced))
+                                .foregroundColor(.secondary)
+                        }
+                        .padding(.horizontal, 12)
+                        .padding(.top, 8)
+
+                        ForEach(recentProjects, id: \.self) { url in
+                            Button {
+                                Task { @MainActor in await appState.openWorkspace(url: url) }
+                            } label: {
+                                HStack(spacing: 8) {
+                                    Image(systemName: "folder.fill")
+                                        .foregroundColor(.accentColor)
+                                        .font(.system(size: 12))
+                                    VStack(alignment: .leading, spacing: 1) {
+                                        Text(url.lastPathComponent)
+                                            .font(.system(size: 11.5, weight: .medium))
+                                            .foregroundColor(.primary)
+                                            .lineLimit(1)
+                                        Text(url.path)
+                                            .font(.system(size: 9.5))
+                                            .foregroundColor(.secondary)
+                                            .lineLimit(1)
+                                            .truncationMode(.middle)
+                                    }
+                                    Spacer()
+                                }
+                                .padding(.horizontal, 10)
+                                .padding(.vertical, 5)
+                                .background(Color.primary.opacity(0.03))
+                                .cornerRadius(5)
+                            }
+                            .buttonStyle(.plain)
+                        }
+                        .padding(.horizontal, 8)
+                    }
+                }
+
+                if !recentFiles.isEmpty {
+                    VStack(alignment: .leading, spacing: 6) {
+                        HStack {
+                            Image(systemName: "doc")
+                                .font(.system(size: 10))
+                                .foregroundColor(.secondary)
+                            Text("RECENT FILES")
+                                .font(.system(size: 10, weight: .bold))
+                                .foregroundColor(.secondary)
+                            Spacer()
+                            Text("\(recentFiles.count)")
+                                .font(.system(size: 9, design: .monospaced))
+                                .foregroundColor(.secondary)
+                        }
+                        .padding(.horizontal, 12)
+
+                        ForEach(recentFiles, id: \.self) { url in
+                            Button {
+                                Task { @MainActor in await appState.loadFile(url: url) }
+                            } label: {
+                                HStack(spacing: 8) {
+                                    Image(systemName: "doc.text.fill")
+                                        .foregroundColor(.secondary)
+                                        .font(.system(size: 12))
+                                    VStack(alignment: .leading, spacing: 1) {
+                                        Text(url.lastPathComponent)
+                                            .font(.system(size: 11.5, weight: .medium))
+                                            .foregroundColor(.primary)
+                                            .lineLimit(1)
+                                        Text(url.path)
+                                            .font(.system(size: 9.5))
+                                            .foregroundColor(.secondary)
+                                            .lineLimit(1)
+                                            .truncationMode(.middle)
+                                    }
+                                    Spacer()
+                                }
+                                .padding(.horizontal, 10)
+                                .padding(.vertical, 5)
+                                .background(Color.primary.opacity(0.03))
+                                .cornerRadius(5)
+                            }
+                            .buttonStyle(.plain)
+                        }
+                        .padding(.horizontal, 8)
+                    }
+                }
+
+                if recentProjects.isEmpty && recentFiles.isEmpty {
+                    VStack(spacing: 8) {
+                        Image(systemName: "clock")
+                            .font(.system(size: 24))
+                            .foregroundColor(.secondary.opacity(0.5))
+                        Text("No Recent Items")
+                            .font(.system(size: 11))
+                            .foregroundColor(.secondary)
+                    }
+                    .frame(maxWidth: .infinity)
+                    .padding(.top, 40)
+                }
+            }
+            .padding(.vertical, 6)
+        }
+    }
+
+    // MARK: - Bottom Filter Bar (Xcode Style)
+
+    private var bottomFilterBar: some View {
+        HStack(spacing: 8) {
+            Menu {
+                Button {
+                    appState.newFile()
+                } label: {
+                    Label("New File…", systemImage: "doc.badge.plus")
+                }
+
+                Button {
+                    if let ws = appState.workspaceFolder {
+                        Task { @MainActor in
+                            await appState.createFolder(at: ws.path, name: "New Folder")
+                        }
+                    } else {
+                        appState.openFolder()
+                    }
+                } label: {
+                    Label("New Folder…", systemImage: "folder.badge.plus")
+                }
+
+                Divider()
+
+                Button {
+                    appState.openFile()
+                } label: {
+                    Label("Open File…", systemImage: "doc")
+                }
+
+                Button {
+                    appState.openFolder()
+                } label: {
+                    Label("Open Folder…", systemImage: "folder")
+                }
+            } label: {
+                Image(systemName: "plus")
+                    .font(.system(size: 11, weight: .medium))
+                    .foregroundColor(.secondary)
+                    .frame(width: 18, height: 18)
+            }
+            .menuStyle(.borderlessButton)
+            .fixedSize()
+            .help("Add file or folder")
+
+            // Filter
+            HStack(spacing: 4) {
+                Image(systemName: "magnifyingglass")
+                    .foregroundColor(.secondary)
+                    .font(.system(size: 10))
+                TextField("Filter", text: $filterText)
+                    .textFieldStyle(.plain)
+                    .font(.system(size: 11))
+                if !filterText.isEmpty {
+                    Button(action: { filterText = "" }) {
+                        Image(systemName: "xmark.circle.fill")
+                            .foregroundColor(.secondary)
+                            .font(.system(size: 9))
+                    }
+                    .buttonStyle(.plain)
+                }
+            }
+            .padding(.horizontal, 6)
+            .padding(.vertical, 3)
+            .background(Color.primary.opacity(0.04))
+            .cornerRadius(4)
+
+            Button(action: {
+                withAnimation(.easeInOut(duration: 0.15)) {
+                    showRecentOnly.toggle()
+                }
+            }) {
+                Image(systemName: showRecentOnly ? "clock.fill" : "clock")
+                    .font(.system(size: 11))
+                    .foregroundColor(showRecentOnly ? .accentColor : .secondary)
+                    .frame(width: 18, height: 18)
+            }
+            .buttonStyle(.plain)
+            .help("Show only recently opened files")
+        }
+        .padding(.horizontal, 8)
+        .padding(.vertical, 6)
+        .background(Color.primary.opacity(0.02))
+    }
+
+    // MARK: - Actions & Helpers
+
+    private func refreshRecents() {
+        recentProjects = AppState.getRecentWorkspaces()
+        recentFiles = AppState.getRecentFiles()
+    }
+
+    private func handleAction(_ action: FileTreeAction) {
+        switch action {
+        case .openFile(let node):
+            Task { @MainActor in
+                await appState.loadFile(url: URL(fileURLWithPath: node.path))
+            }
+        case .loadChildren(let node):
+            Task { @MainActor in await appState.loadChildren(for: node.id) }
+        case .createFolder(let node, let name):
+            Task { @MainActor in await appState.createFolder(at: node.path, name: name) }
+        case .rename(let node, let newName):
+            Task { @MainActor in await appState.renameFile(at: node.path, to: newName) }
+        case .delete(let node):
+            try? FileManager.default.trashItem(at: URL(fileURLWithPath: node.path), resultingItemURL: nil)
+            Task { @MainActor in await appState.refreshFileTree() }
+        }
+    }
+
+    private func matchingFileNodes(in nodes: [FileNode], query: String) -> [FileNode] {
+        guard !query.trimmingCharacters(in: .whitespaces).isEmpty else { return [] }
+        var matches: [FileNode] = []
+        func traverse(_ list: [FileNode]) {
+            for item in list {
+                if item.name.localizedCaseInsensitiveContains(query) {
+                    matches.append(item)
+                }
+                traverse(item.children)
+            }
+        }
+        traverse(nodes)
+        return Array(matches.prefix(50))
+    }
+
+    private func filterFileNodes(_ nodes: [FileNode], query: String, recentOnly: Bool) -> [FileNode] {
+        var result: [FileNode] = []
+        let cleanQuery = query.trimmingCharacters(in: .whitespaces)
+        let recentPaths = Set(recentFiles.map { $0.path } + appState.openFiles.map { $0.path })
+
+        for node in nodes {
+            if node.isDirectory {
+                let filteredChildren = filterFileNodes(node.children, query: query, recentOnly: recentOnly)
+                if !filteredChildren.isEmpty {
+                    var copy = node
+                    copy.children = filteredChildren
+                    result.append(copy)
+                }
+            } else {
+                let matchesQuery = cleanQuery.isEmpty || node.name.localizedCaseInsensitiveContains(cleanQuery)
+                let matchesRecent = !recentOnly || recentPaths.contains(node.path)
+                if matchesQuery && matchesRecent {
+                    result.append(node)
+                }
+            }
+        }
+        return result
+    }
+}
+
+enum AgenticInspectorTab: String, CaseIterable {
+    case context = "Context"
+    case preview = "Preview"
+    case tasks = "Tasks & Plan"
+}
+
+struct AgenticContextInspector: View {
+    @EnvironmentObject var appState: AppState
+    @StateObject private var agent = AgentService.shared
+    @ObservedObject private var deviceRuntime = DeviceRuntimeService.shared
+    @Binding var surface: AgenticWorkspaceSurface
+    @State private var selectedTab: AgenticInspectorTab = .context
+    @State private var taskMarkdownContent: String = ""
+    @State private var walkthroughMarkdownContent: String = ""
+    @State private var taskSubTab: Int = 0 // 0 = Task, 1 = Walkthrough
+
+    var body: some View {
+        VStack(spacing: 0) {
+            // Header Bar with Tab Switcher
+            HStack(spacing: 6) {
+                ForEach(AgenticInspectorTab.allCases, id: \.self) { tab in
+                    Button {
+                        withAnimation(.easeInOut(duration: 0.16)) {
+                            selectedTab = tab
+                            if tab == .preview && !deviceRuntime.showingEmbeddedDeviceDock {
+                                deviceRuntime.showingEmbeddedDeviceDock = true
+                            }
+                        }
+                    } label: {
+                        HStack(spacing: 3) {
+                            switch tab {
+                            case .context:
+                                Image(systemName: "sidebar.right")
+                                    .font(.system(size: 9))
+                            case .preview:
+                                Image(systemName: deviceRuntime.embeddedDockMode == .web ? "globe" : (deviceRuntime.showingEmbeddedAppleDock ? "iphone" : "candybarphone"))
+                                    .font(.system(size: 9))
+                            case .tasks:
+                                Image(systemName: "checklist")
+                                    .font(.system(size: 9))
+                            }
+                            Text(tab.rawValue)
+                                .font(.system(size: 10, weight: selectedTab == tab ? .semibold : .regular))
+                                .lineLimit(1)
+                                .fixedSize(horizontal: true, vertical: false)
+                        }
+                        .padding(.horizontal, 7)
+                        .padding(.vertical, 4)
+                        .foregroundColor(selectedTab == tab ? .primary : .secondary)
+                        .background(selectedTab == tab ? Color.primary.opacity(0.1) : Color.clear)
+                        .cornerRadius(4)
+                    }
+                    .buttonStyle(.plain)
+                }
+
+                Spacer()
+
+                if selectedTab == .preview {
+                    Menu {
+                        Section("Preview Target") {
+                            Button("WebApp Preview") {
+                                deviceRuntime.embeddedDockMode = .web
+                                deviceRuntime.showingEmbeddedDeviceDock = true
+                            }
+                            Button("iOS Simulator") {
+                                deviceRuntime.embeddedDockMode = .ios
+                                deviceRuntime.showingEmbeddedDeviceDock = true
+                                deviceRuntime.showingEmbeddedAppleDock = true
+                                Task { await deviceRuntime.startEmbeddedAppleSimulator() }
+                            }
+                            Button("Android Emulator") {
+                                deviceRuntime.embeddedDockMode = .android
+                                deviceRuntime.showingEmbeddedDeviceDock = true
+                                deviceRuntime.showingEmbeddedAppleDock = false
+                                Task { await deviceRuntime.startEmbeddedAndroid() }
+                            }
+                        }
+
+                        Divider()
+
+                        Button("Choose Device & Run…") {
+                            deviceRuntime.showingDeviceRuntimeSheet = true
+                        }
+                        Divider()
+                        let appleSimulators = deviceRuntime.devices.filter(\.isAppleSimulator)
+                        let androidDevices = deviceRuntime.devices.filter { $0.platform == .android }
+                        if !appleSimulators.isEmpty {
+                            Section("iOS Simulators") {
+                                ForEach(appleSimulators.prefix(6)) { device in
+                                    Button(device.name) {
+                                        Task {
+                                            deviceRuntime.selectedDeviceID = device.id
+                                            deviceRuntime.stopEmbeddedAndroid()
+                                            deviceRuntime.showingEmbeddedDeviceDock = true
+                                            deviceRuntime.showingEmbeddedAppleDock = true
+                                            await deviceRuntime.startEmbeddedAppleSimulator()
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                        if !androidDevices.isEmpty {
+                            Section("Android Emulators") {
+                                ForEach(androidDevices.prefix(6)) { device in
+                                    Button(device.name) {
+                                        Task {
+                                            deviceRuntime.selectedDeviceID = device.id
+                                            deviceRuntime.showingEmbeddedDeviceDock = true
+                                            deviceRuntime.showingEmbeddedAppleDock = false
+                                            await deviceRuntime.startEmbeddedAndroid()
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                        Divider()
+                        Button("Refresh Devices") {
+                            Task { await deviceRuntime.refresh(workspace: appState.workspaceFolder) }
+                        }
+                    } label: {
+                        Image(systemName: "ellipsis.circle")
+                            .font(.system(size: 11))
+                            .foregroundColor(.secondary)
+                    }
+                    .menuStyle(.borderlessButton)
+                    .frame(width: 18)
+                } else {
+                    Text(agent.isLoading ? "Working" : "Ready")
+                        .font(.system(size: 9))
+                        .foregroundColor(.secondary)
+                }
+
+                // Standard macOS HIG Close button [✕] at top-right
+                Button {
+                    withAnimation(.easeInOut(duration: 0.16)) {
+                        appState.agenticContextVisible = false
+                    }
+                } label: {
+                    Image(systemName: "xmark")
+                        .font(.system(size: 9, weight: .bold))
+                        .foregroundColor(.secondary)
+                        .frame(width: 18, height: 18)
+                        .background(Color.primary.opacity(0.06))
+                        .clipShape(Circle())
+                }
+                .buttonStyle(.plain)
+                .help("Close Inspector (⌘I)")
+            }
+            .padding(.horizontal, 10)
             .frame(height: 38)
 
             Divider()
 
-            ScrollView {
-                LazyVStack(alignment: .leading, spacing: 18) {
-                    inspectorSection("CURRENT FILE") {
-                        if let file = appState.currentFile {
-                            contextFileRow(path: file.path, status: file.isUnsaved ? "Modified" : file.language)
-                        } else {
-                            emptyLabel("No file selected")
+            // Tab Content
+            switch selectedTab {
+            case .context:
+                contextTabView
+            case .preview:
+                previewTabView
+            case .tasks:
+                tasksAndWalkthroughTabView
+            }
+        }
+        .background(appState.appTheme.isGlass ? Color.clear : Color(nsColor: appState.appTheme.panelBackground))
+        .onAppear {
+            reloadTaskAndWalkthrough()
+        }
+        .onChange(of: deviceRuntime.showingEmbeddedDeviceDock) { showing in
+            if !showing && selectedTab == .preview {
+                withAnimation(.easeInOut(duration: 0.16)) {
+                    selectedTab = .context
+                }
+            }
+        }
+    }
+
+    // MARK: - Context Tab View
+    private var contextTabView: some View {
+        ScrollView {
+            LazyVStack(alignment: .leading, spacing: 18) {
+                inspectorSection("CURRENT FILE") {
+                    if let file = appState.currentFile {
+                        contextFileRow(path: file.path, status: file.isUnsaved ? "Modified" : file.language)
+                    } else {
+                        emptyLabel("No file selected")
+                    }
+                }
+
+                inspectorSection("FILES CHANGED \(changedFiles.count)") {
+                    if changedFiles.isEmpty {
+                        emptyLabel("No changes in this task")
+                    } else {
+                        ForEach(changedFiles.prefix(12), id: \.self) { path in
+                            contextFileRow(path: path, status: "Changed")
                         }
                     }
+                }
 
-                    inspectorSection("FILES CHANGED \(changedFiles.count)") {
-                        if changedFiles.isEmpty {
-                            emptyLabel("No changes in this task")
-                        } else {
-                            ForEach(changedFiles.prefix(12), id: \.self) { path in
-                                contextFileRow(path: path, status: "Changed")
-                            }
+                inspectorSection("OPEN FILES \(appState.openFiles.count)") {
+                    if appState.openFiles.isEmpty {
+                        emptyLabel("No open files")
+                    } else {
+                        ForEach(appState.openFiles.prefix(10)) { file in
+                            contextFileRow(path: file.path, status: file.isUnsaved ? "Unsaved" : nil)
                         }
                     }
+                }
 
-                    inspectorSection("OPEN FILES \(appState.openFiles.count)") {
-                        if appState.openFiles.isEmpty {
-                            emptyLabel("No open files")
-                        } else {
-                            ForEach(appState.openFiles.prefix(10)) { file in
-                                contextFileRow(path: file.path, status: file.isUnsaved ? "Unsaved" : nil)
-                            }
-                        }
-                    }
-
-                    inspectorSection("AGENT ACTIVITY") {
-                        if agent.activityLog.isEmpty {
-                            emptyLabel("Activity will appear here")
-                        } else {
-                            ForEach(agent.activityLog.suffix(8).reversed()) { activity in
-                                VStack(alignment: .leading, spacing: 2) {
-                                    Text(activity.message)
-                                        .font(.system(size: 10))
+                inspectorSection("AGENT ACTIVITY") {
+                    if agent.activityLog.isEmpty {
+                        emptyLabel("Activity will appear here")
+                    } else {
+                        ForEach(agent.activityLog.suffix(8).reversed()) { activity in
+                            VStack(alignment: .leading, spacing: 2) {
+                                Text(activity.message)
+                                    .font(.system(size: 10))
+                                    .lineLimit(2)
+                                if let detail = activity.detail, !detail.isEmpty {
+                                    Text(detail)
+                                        .font(.system(size: 9))
+                                        .foregroundColor(.secondary)
                                         .lineLimit(2)
-                                    if let detail = activity.detail, !detail.isEmpty {
-                                        Text(detail)
-                                            .font(.system(size: 9))
-                                            .foregroundColor(.secondary)
-                                            .lineLimit(2)
-                                    }
                                 }
-                                .frame(maxWidth: .infinity, alignment: .leading)
-                                .padding(.vertical, 3)
                             }
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                            .padding(.vertical, 3)
                         }
+                    }
+                }
+            }
+            .padding(12)
+        }
+    }
+
+    // MARK: - Live Preview Tab View
+    private var previewTabView: some View {
+        VStack(spacing: 0) {
+            EmbeddedDeviceDockView()
+                .environmentObject(appState)
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+    }
+
+    // MARK: - Tasks & Walkthrough Tab View
+    private var tasksAndWalkthroughTabView: some View {
+        VStack(spacing: 0) {
+            HStack(spacing: 4) {
+                Button {
+                    withAnimation { taskSubTab = 0 }
+                } label: {
+                    Text("task.md")
+                        .font(.system(size: 10, weight: taskSubTab == 0 ? .semibold : .regular, design: .monospaced))
+                        .foregroundColor(taskSubTab == 0 ? .primary : .secondary)
+                        .padding(.horizontal, 8)
+                        .padding(.vertical, 4)
+                        .background(taskSubTab == 0 ? Color.primary.opacity(0.08) : Color.clear)
+                        .cornerRadius(4)
+                }
+                .buttonStyle(.plain)
+
+                Button {
+                    withAnimation { taskSubTab = 1 }
+                } label: {
+                    Text("walkthrough.md")
+                        .font(.system(size: 10, weight: taskSubTab == 1 ? .semibold : .regular, design: .monospaced))
+                        .foregroundColor(taskSubTab == 1 ? .primary : .secondary)
+                        .padding(.horizontal, 8)
+                        .padding(.vertical, 4)
+                        .background(taskSubTab == 1 ? Color.primary.opacity(0.08) : Color.clear)
+                        .cornerRadius(4)
+                }
+                .buttonStyle(.plain)
+
+                Spacer()
+
+                Button {
+                    reloadTaskAndWalkthrough()
+                } label: {
+                    Image(systemName: "arrow.clockwise")
+                        .font(.system(size: 10))
+                        .foregroundColor(.secondary)
+                }
+                .buttonStyle(.plain)
+                .help("Reload Task & Walkthrough")
+            }
+            .padding(.horizontal, 10)
+            .padding(.vertical, 6)
+            .background(Color.primary.opacity(0.03))
+
+            Divider()
+
+            ScrollView {
+                VStack(alignment: .leading, spacing: 10) {
+                    if taskSubTab == 0 {
+                        renderTaskChecklist()
+                    } else {
+                        renderWalkthrough()
                     }
                 }
                 .padding(12)
             }
         }
-        .background(appState.appTheme.isGlass ? Color.clear : Color(nsColor: appState.appTheme.panelBackground))
+    }
+
+    @ViewBuilder
+    private func renderTaskChecklist() -> some View {
+        let lines = taskMarkdownContent.components(separatedBy: .newlines)
+        let checklistItems = lines.compactMap { line -> (isCompleted: Bool, text: String)? in
+            let trimmed = line.trimmingCharacters(in: .whitespaces)
+            if trimmed.hasPrefix("- [ ] ") || trimmed.hasPrefix("* [ ] ") {
+                return (false, String(trimmed.dropFirst(6)))
+            } else if trimmed.hasPrefix("- [x] ") || trimmed.hasPrefix("- [X] ") || trimmed.hasPrefix("* [x] ") || trimmed.hasPrefix("* [X] ") {
+                return (true, String(trimmed.dropFirst(6)))
+            }
+            return nil
+        }
+
+        if checklistItems.isEmpty {
+            VStack(spacing: 8) {
+                Image(systemName: "checklist")
+                    .font(.system(size: 24))
+                    .foregroundColor(.secondary.opacity(0.5))
+                Text("No task steps found")
+                    .font(.system(size: 11))
+                    .foregroundColor(.secondary)
+                Text(taskMarkdownContent.isEmpty ? "No .microcode/task.md file" : taskMarkdownContent)
+                    .font(.system(size: 9.5, design: .monospaced))
+                    .foregroundColor(.secondary.opacity(0.7))
+                    .lineLimit(8)
+            }
+            .frame(maxWidth: .infinity)
+            .padding(.top, 24)
+        } else {
+            let completedCount = checklistItems.filter { $0.isCompleted }.count
+            let totalCount = checklistItems.count
+
+            HStack {
+                Text("\(completedCount)/\(totalCount) Tasks Done")
+                    .font(.system(size: 11, weight: .semibold))
+                Spacer()
+                Text("\(Int((Double(completedCount) / Double(max(1, totalCount))) * 100))%")
+                    .font(.system(size: 10, weight: .bold, design: .monospaced))
+                    .foregroundColor(.secondary)
+            }
+
+            ProgressView(value: Double(completedCount), total: Double(totalCount))
+                .progressViewStyle(.linear)
+
+            Divider().padding(.vertical, 4)
+
+            ForEach(Array(checklistItems.enumerated()), id: \.offset) { index, item in
+                HStack(alignment: .top, spacing: 8) {
+                    Image(systemName: item.isCompleted ? "checkmark.circle.fill" : "circle")
+                        .font(.system(size: 12))
+                        .foregroundColor(item.isCompleted ? .accentColor : .secondary.opacity(0.6))
+                        .padding(.top, 1)
+
+                    Text(item.text)
+                        .font(.system(size: 11))
+                        .foregroundColor(item.isCompleted ? .secondary : .primary)
+                        .strikethrough(item.isCompleted, color: .secondary.opacity(0.6))
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                }
+                .padding(.vertical, 3)
+            }
+        }
+    }
+
+    @ViewBuilder
+    private func renderWalkthrough() -> some View {
+        if walkthroughMarkdownContent.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            VStack(spacing: 8) {
+                Image(systemName: "doc.text.magnifyingglass")
+                    .font(.system(size: 24))
+                    .foregroundColor(.secondary.opacity(0.5))
+                Text("No walkthrough recorded yet")
+                    .font(.system(size: 11))
+                    .foregroundColor(.secondary)
+                Text("AI Walkthroughs and verification summaries will be displayed here as the task progresses.")
+                    .font(.system(size: 9.5))
+                    .foregroundColor(.secondary.opacity(0.7))
+                    .multilineTextAlignment(.center)
+            }
+            .frame(maxWidth: .infinity)
+            .padding(.top, 24)
+        } else {
+            VStack(alignment: .leading, spacing: 8) {
+                HStack {
+                    Image(systemName: "sparkles")
+                        .foregroundColor(.accentColor)
+                        .font(.system(size: 11))
+                    Text("Execution Walkthrough")
+                        .font(.system(size: 11, weight: .bold))
+                    Spacer()
+                }
+
+                Divider().opacity(0.5)
+
+                Text(walkthroughMarkdownContent)
+                    .font(.system(size: 10.5, design: .monospaced))
+                    .foregroundColor(.primary.opacity(0.9))
+                    .textSelection(.enabled)
+                    .lineSpacing(3)
+            }
+        }
+    }
+
+    private func reloadTaskAndWalkthrough() {
+        guard let workspace = appState.workspaceFolder?.path ?? AgentService.shared.currentWorkspace else { return }
+        let microcodeDir = (workspace as NSString).appendingPathComponent(".microcode")
+        let taskPath = (microcodeDir as NSString).appendingPathComponent("task.md")
+        let walkthroughPath = (microcodeDir as NSString).appendingPathComponent("walkthrough.md")
+
+        taskMarkdownContent = (try? String(contentsOfFile: taskPath, encoding: .utf8)) ?? ""
+        walkthroughMarkdownContent = (try? String(contentsOfFile: walkthroughPath, encoding: .utf8)) ?? ""
     }
 
     private var changedFiles: [String] {
@@ -1034,9 +2458,12 @@ struct MainToolbar: View {
                 .help("Toggle Console (⌘J)")
                 
                 ToolbarButton(icon: "sidebar.right", isActive: appState.showingPreviewView) {
-                    appState.showingPreviewView.toggle()
+                    withAnimation {
+                        appState.showingPreviewView.toggle()
+                        DeviceRuntimeService.shared.showingEmbeddedDeviceDock = appState.showingPreviewView
+                    }
                 }
-                .help("Toggle Canvas Preview (⌥⌘P)")
+                .help("Toggle Device Preview (⌥⌘P)")
                 
                 Divider().frame(height: 16).padding(.horizontal, 6)
                 
@@ -1139,10 +2566,14 @@ struct MainToolbar: View {
                 }
                 .help("Database Studio")
                 
-                ToolbarButton(icon: "network", color: .purple) {
-                    appState.showingAPIClient = true
+                ToolbarButton(icon: "network", isActive: appState.editorMode == .apiClient, color: appState.editorMode == .apiClient ? .accentColor : .primary) {
+                    if appState.editorMode == .apiClient {
+                        appState.setEditorMode(.code)
+                    } else {
+                        appState.openAPIStudio()
+                    }
                 }
-                .help("API Client")
+                .help("API Studio")
                 
                 ToolbarButton(icon: "checklist", color: .green) {
                     appState.showingCICDView = true
@@ -1583,6 +3014,10 @@ struct EditorArea: View {
             case .browser:
                 IDEBrowserView()
                     .environmentObject(appState)
+            case .apiClient:
+                APIClientView()
+                    .environmentObject(appState)
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
             case .code:
                 CompatHSplitView {
                     VStack(spacing: 0) {
@@ -1590,21 +3025,28 @@ struct EditorArea: View {
                             EditorTabBar()
                         }
                         
-                        // Xcode Breadcrumb bar!
-                        if appState.currentFile != nil {
-                            EditorBreadcrumbBar()
-                        }
-                        
                         if let file = appState.currentFile,
                            appState.currentFileIndex >= 0,
                            appState.currentFileIndex < appState.openFiles.count {
                             let fileURL = URL(fileURLWithPath: file.path)
                             let ext = fileURL.pathExtension.lowercased()
-                            let previewExtensions = ["png", "jpg", "jpeg", "pdf", "gif", "bmp", "tiff", "webp"]
+                            let previewExtensions = ["png", "jpg", "jpeg", "pdf", "gif", "bmp", "tiff", "webp", "xlsx", "xls", "csv", "tsv", "numbers", "svg"]
                             
                             if previewExtensions.contains(ext) {
-                                UniversalFilePreview(url: fileURL)
-                                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+                                let fileType = PreviewFileType.detect(url: fileURL)
+                                Group {
+                                    switch fileType {
+                                    case .image:
+                                        InteractiveImagePreviewView(url: fileURL)
+                                    case .pdf:
+                                        InteractivePDFPreviewView(url: fileURL)
+                                    case .spreadsheet:
+                                        UniversalSpreadsheetView(url: fileURL)
+                                    default:
+                                        UniversalFilePreview(url: fileURL)
+                                    }
+                                }
+                                .frame(maxWidth: .infinity, maxHeight: .infinity)
                             } else {
                                 CodeEditor(file: file)
                                     .id(file.id) // Force fresh NSTextView per file to prevent stale highlight crash
@@ -1771,175 +3213,56 @@ struct EditorBreadcrumbBar: View {
     }
 }
 
-// MARK: - Right Preview Panel (Collapsible Simulator View)
+// MARK: - Right Preview Panel (Genuine Real-Device Simulator & Emulator View)
 
 struct RightPreviewPanel: View {
     @EnvironmentObject var appState: AppState
-    @State private var zoomLevel: CGFloat = 0.5
-    @State private var isLandscape: Bool = false
-    @State private var isDarkMode: Bool = false
-    @State private var refreshId: UUID = UUID()
-    
-    var body: some View {
-        VStack(spacing: 0) {
-            // Header toolbar
-            HStack(spacing: 12) {
-                Text("Canvas")
-                    .font(.system(size: 11, weight: .bold))
-                    .foregroundColor(.secondary)
-                
-                Spacer()
-                
-                // Refresh button
-                Button(action: { refreshId = UUID() }) {
-                    Image(systemName: "arrow.clockwise")
-                        .font(.system(size: 10))
-                }
-                .buttonStyle(.plain)
-                .help("Refresh Canvas")
-                
-                // Orientation toggle
-                Button(action: { isLandscape.toggle() }) {
-                    Image(systemName: isLandscape ? "ipad.landscape" : "iphone")
-                        .font(.system(size: 10))
-                        .foregroundColor(isLandscape ? .accentColor : .secondary)
-                }
-                .buttonStyle(.plain)
-                .help("Toggle Orientation")
-                
-                // Light/Dark mode toggle
-                Button(action: { isDarkMode.toggle() }) {
-                    Image(systemName: isDarkMode ? "moon.fill" : "sun.max.fill")
-                        .font(.system(size: 10))
-                        .foregroundColor(isDarkMode ? .purple : .orange)
-                }
-                .buttonStyle(.plain)
-                .help("Toggle Color Scheme")
-                
-                Divider()
-                    .frame(height: 12)
-                
-                // Zoom out
-                Button(action: { zoomLevel = max(0.2, zoomLevel - 0.1) }) {
-                    Image(systemName: "minus")
-                        .font(.system(size: 9))
-                }
-                .buttonStyle(.plain)
-                .disabled(zoomLevel <= 0.2)
-                
-                Text("\(Int(zoomLevel * 100))%")
-                    .font(.system(size: 10, design: .monospaced))
-                    .frame(width: 32)
-                
-                // Zoom in
-                Button(action: { zoomLevel = min(1.5, zoomLevel + 0.1) }) {
-                    Image(systemName: "plus")
-                        .font(.system(size: 9))
-                }
-                .buttonStyle(.plain)
-                .disabled(zoomLevel >= 1.5)
-            }
-            .padding(.horizontal, 12)
-            .padding(.vertical, 8)
-            .background(Color.black.opacity(0.15))
-            .overlay(
-                Rectangle()
-                    .fill(Color.black.opacity(0.2))
-                    .frame(height: 1),
-                alignment: .bottom
-            )
-            
-            // Preview viewport
-            ScrollView([.horizontal, .vertical]) {
-                ZStack {
-                    // Grid background
-                    CanvasGridBackground()
-                        .opacity(0.04)
-                    
-                    if let file = appState.currentFile {
-                        // iPhone device frame mockup
-                        DeviceFrameView(
-                            device: DeviceFrame.allDevices[0], // Default: iPhone 15 Pro
-                            isLandscape: isLandscape,
-                            isDarkMode: isDarkMode,
-                            scale: zoomLevel
-                        ) {
-                            // Live Interactive Code Preview Mockup
-                            VStack(spacing: 20) {
-                                Image(systemName: "swift")
-                                    .font(.system(size: 64))
-                                    .foregroundColor(.orange)
-                                    .shadow(color: .orange.opacity(0.4), radius: 10)
-                                
-                                Text(file.name)
-                                    .font(.title2)
-                                    .fontWeight(.bold)
-                                    .foregroundColor(isDarkMode ? .white : .black)
-                                
-                                Text("SwiftUI Live Preview Active")
-                                    .font(.subheadline)
-                                    .foregroundColor(.secondary)
-                                
-                                VStack(alignment: .leading, spacing: 10) {
-                                    HStack {
-                                        Circle().fill(Color.green).frame(width: 8, height: 8)
-                                        Text("Render Engine: CoreGraphics")
-                                            .font(.caption)
-                                            .foregroundColor(.secondary)
-                                    }
-                                    HStack {
-                                        Circle().fill(Color.blue).frame(width: 8, height: 8)
-                                        Text("Host: Apple Silicon Metal")
-                                            .font(.caption)
-                                            .foregroundColor(.secondary)
-                                    }
-                                }
-                                .padding(12)
-                                .background(Color.secondary.opacity(0.1))
-                                .cornerRadius(8)
-                            }
-                            .id(refreshId)
-                        }
-                        .padding(40)
-                    } else {
-                        VStack(spacing: 12) {
-                            Image(systemName: "iphone.slash")
-                                .font(.system(size: 32))
-                                .foregroundColor(.secondary)
-                            Text("No Swift File Active")
-                                .font(.system(size: 12))
-                                .foregroundColor(.secondary)
-                        }
-                    }
-                }
-                .frame(minWidth: 500, minHeight: 700)
-            }
-            .background(Color.black.opacity(0.1))
-        }
-        .frame(minWidth: 320, idealWidth: 380, maxWidth: 500)
-        .background(
-            VisualEffectView(material: .sidebar, blendingMode: .behindWindow)
-        )
-    }
-}
+    @ObservedObject private var deviceRuntime = DeviceRuntimeService.shared
 
-struct CanvasGridBackground: View {
-    var body: some View {
-        GeometryReader { geometry in
-            Path { path in
-                let step: CGFloat = 20
-                // Vertical lines
-                for x in stride(from: 0, to: geometry.size.width, by: step) {
-                    path.move(to: CGPoint(x: x, y: 0))
-                    path.addLine(to: CGPoint(x: x, y: geometry.size.height))
-                }
-                // Horizontal lines
-                for y in stride(from: 0, to: geometry.size.height, by: step) {
-                    path.move(to: CGPoint(x: 0, y: y))
-                    path.addLine(to: CGPoint(x: geometry.size.width, y: y))
-                }
+    private var currentDeviceName: String {
+        if deviceRuntime.showingEmbeddedAppleDock {
+            return deviceRuntime.selectedApplePreviewTitle
+        } else {
+            if let serial = deviceRuntime.embeddedAndroidSerial, !serial.isEmpty {
+                return "Android: \(serial)"
             }
-            .stroke(Color.primary, lineWidth: 0.5)
+            if let dev = deviceRuntime.selectedDevice, dev.platform == .android {
+                return dev.name
+            }
+            return "Android Emulator"
+        }
+    }
+
+    var body: some View {
+        EmbeddedDeviceDockView()
+            .environmentObject(appState)
+            .frame(minWidth: 380, idealWidth: 440, maxWidth: 540)
+            .background(
+                Color(nsColor: appState.appTheme.editorBackground)
+            )
+        .onAppear {
+            autoSelectPlatform()
+            Task {
+                await deviceRuntime.refresh(workspace: appState.workspaceFolder)
+            }
+        }
+        .onChange(of: appState.currentFile?.path) { _ in
+            autoSelectPlatform()
+        }
+    }
+
+    private func autoSelectPlatform() {
+        guard let file = appState.currentFile else { return }
+        let ext = (file.name as NSString).pathExtension.lowercased()
+        let path = file.path.lowercased()
+        if ["kt", "kts", "java", "xml"].contains(ext) || path.contains("/android/") || path.contains("/res/") {
+            deviceRuntime.showingEmbeddedAppleDock = false
+            deviceRuntime.showingEmbeddedDeviceDock = true
+            Task { await deviceRuntime.startPreferredEmbeddedAndroid() }
+        } else if ["swift", "storyboard", "xib", "plist"].contains(ext) || path.contains("/ios/") {
+            deviceRuntime.showingEmbeddedAppleDock = true
+            deviceRuntime.showingEmbeddedDeviceDock = true
+            Task { await deviceRuntime.startPreferredEmbeddedAppleSimulator() }
         }
     }
 }
@@ -2710,6 +4033,8 @@ enum WelcomeTab {
 
 struct WelcomeScreen: View {
     @EnvironmentObject var appState: AppState
+    var surface: Binding<AgenticWorkspaceSurface>? = nil
+    
     @State private var recentProjects: [URL] = []
     @State private var selectedTab: WelcomeTab = .projects
     @State private var aiPrompt: String = ""
@@ -2722,46 +4047,71 @@ struct WelcomeScreen: View {
     @State private var cloneError: String? = nil
     
     var body: some View {
-        if appState.openFiles.isEmpty && appState.workspaceFolder == nil {
-            GeometryReader { geometry in
-                HStack(spacing: 0) {
-                    // Left Sidebar Panel (Translucent)
-                    leftSidebarView
-                    
-                    Divider()
-                        .background(Color.white.opacity(0.15))
-                    
-                    // Right Main Panel (Frosted Glass)
-                    rightMainView
-                }
-                .frame(maxWidth: .infinity, maxHeight: .infinity)
-                .background(
-                    VisualEffectView(material: .sidebar, blendingMode: .behindWindow)
-                )
+        GeometryReader { geometry in
+            HStack(spacing: 0) {
+                // Left Sidebar Panel
+                leftSidebarView
+                
+                Divider()
+                    .background(Color.primary.opacity(0.1))
+                
+                // Right Main Panel
+                rightMainView
             }
-            .onAppear {
-                loadRecentProjects()
-                appState.checkDerivedDataSize()
-            }
-            .sheet(isPresented: $showCloneSheet) {
-                cloneSheetView
-            }
-            .transition(.opacity.animation(.easeInOut(duration: 0.4)))
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
+            .background(
+                appState.appTheme.isGlass
+                    ? AnyView(VisualEffectView(material: .sidebar, blendingMode: .behindWindow))
+                    : AnyView(Color(nsColor: appState.appTheme.workspaceBackground))
+            )
+        }
+        .onAppear {
+            loadRecentProjects()
+            appState.checkDerivedDataSize()
+        }
+        .sheet(isPresented: $showCloneSheet) {
+            cloneSheetView
         }
     }
     
     private func loadRecentProjects() {
-        recentProjects = NSDocumentController.shared.recentDocumentURLs
-    }
-    
-    private func buildWithAI() {
-        guard !aiPrompt.isEmpty else { return }
-        let prompt = "Please create a project structure for: \(aiPrompt). Use shell commands (mkdir, touch, etc.) to generate the folders and initial files in the current workspace."
-        selectFolderAndRunAI(prompt: prompt)
+        recentProjects = AppState.getRecentWorkspaces()
     }
     
     private func createProject(_ type: String) {
-        let prompt = "Please initialize a new \(type) project in a new folder here. Use the standard CLI tool (e.g. npx create-next-app, npm create vite, etc.) with default/non-interactive flags."
+        let prompt: String
+        switch type {
+        case "nextjs":
+            prompt = "Please scaffold a new Next.js 14 App (TypeScript, Tailwind CSS, App Router) in this workspace. Initialize standard project structure and packages."
+        case "vite":
+            prompt = "Please scaffold a new Vite + React + TypeScript web app in this workspace with Tailwind CSS and standard config."
+        case "fastapi":
+            prompt = "Please scaffold a modern Python 3.12 FastAPI project in this workspace with main.py, requirements.txt, Pydantic models, and sample endpoints."
+        case "rust-axum":
+            prompt = "Please initialize a new Rust Axum asynchronous web microservice in this workspace with Cargo.toml and src/main.rs."
+        case "swift":
+            prompt = "Please create a new native Apple macOS/iOS SwiftUI application in this workspace with Package.swift or Xcode structure."
+        case "ardium":
+            prompt = "Please create a new Ardium v2.3 project with CoreUI in this workspace."
+        case "express":
+            prompt = "Please scaffold a TypeScript Express.js REST API in this workspace with package.json, src/index.ts, and routing."
+        case "go":
+            prompt = "Please initialize a new Go microservice with Gin in this workspace with go.mod and main.go."
+        case "flutter":
+            prompt = "Please scaffold a cross-platform Flutter app in this workspace with pubspec.yaml and lib/main.dart."
+        case "spring":
+            prompt = "Please scaffold a Java 21 Spring Boot 3 microservice in this workspace with pom.xml and Application.java."
+        case "pytorch":
+            prompt = "Please scaffold a Python PyTorch machine learning pipeline in this workspace with model definition, train.py, and requirements.txt."
+        case "docker":
+            prompt = "Please generate a Dockerized multi-service development stack with docker-compose.yml, PostgreSQL, Redis, and sample API."
+        case "vue":
+            prompt = "Please scaffold a Vue 3 + Vite + TypeScript application in this workspace with App.vue and main.ts."
+        case "nestjs":
+            prompt = "Please scaffold a NestJS enterprise TypeScript API in this workspace with nest-cli config, modules, and controllers."
+        default:
+            prompt = "Please initialize a new \(type) project in this workspace."
+        }
         selectFolderAndRunAI(prompt: prompt)
     }
     
@@ -2774,9 +4124,14 @@ struct WelcomeScreen: View {
         panel.prompt = "Select Workspace"
         
         if panel.runModal() == .OK, let url = panel.url {
-            appState.workspaceFolder = url
+            AppState.recordRecentWorkspace(url: url)
+            loadRecentProjects()
+            appState.showingWelcomeHome = false
+            Task { @MainActor in
+                await appState.openWorkspace(url: url)
+            }
+            surface?.wrappedValue = .agent
             
-            // Allow UI state to settle before triggering AI
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
                 appState.aiChatVisible = true
                 Task {
@@ -2784,30 +4139,35 @@ struct WelcomeScreen: View {
                 }
             }
         }
-        aiPrompt = ""
     }
     
     private func openFolder() {
         appState.openFolder()
+    }
+
+    private var appVersionString: String {
+        let version = Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "2.3.0"
+        let build = Bundle.main.object(forInfoDictionaryKey: "CFBundleVersion") as? String ?? "1"
+        return "Version \(version) · Build \(build)"
     }
     
     // MARK: - Left Sidebar View
     
     private var leftSidebarView: some View {
         VStack(alignment: .leading, spacing: 20) {
-            // Glowing neon-tinted MicroCode 2.0 app header
+            // Header
             HStack(spacing: 12) {
                 VStack(alignment: .leading, spacing: 2) {
                     Text("MicroCode")
                         .font(.system(size: 18, weight: .bold))
                         .foregroundColor(.primary)
                     
-                    Text("Version 2.0")
+                    Text(appVersionString)
                         .font(.system(size: 10, weight: .semibold))
                         .foregroundColor(.secondary)
                         .padding(.horizontal, 6)
                         .padding(.vertical, 2)
-                        .background(Color.accentColor.opacity(0.15))
+                        .background(Color.primary.opacity(0.08))
                         .cornerRadius(4)
                 }
             }
@@ -2833,7 +4193,7 @@ struct WelcomeScreen: View {
                 
                 HStack(spacing: 4) {
                     Circle()
-                        .fill(Color.green)
+                        .fill(Color.primary.opacity(0.6))
                         .frame(width: 6, height: 6)
                     Text("LSP Services Active")
                         .font(.system(size: 9))
@@ -2844,7 +4204,11 @@ struct WelcomeScreen: View {
             .padding(.bottom, 25)
         }
         .frame(width: 210)
-        .background(VisualEffectView(material: .sidebar, blendingMode: .behindWindow).opacity(0.5))
+        .background(
+            appState.appTheme.isGlass
+                ? AnyView(VisualEffectView(material: .sidebar, blendingMode: .behindWindow).opacity(0.5))
+                : AnyView(Color(nsColor: appState.appTheme.panelBackground))
+        )
     }
     
     private func sidebarButton(title: String, icon: String, tab: WelcomeTab) -> some View {
@@ -2852,7 +4216,7 @@ struct WelcomeScreen: View {
             HStack(spacing: 12) {
                 Image(systemName: icon)
                     .font(.system(size: 14, weight: selectedTab == tab ? .semibold : .regular))
-                    .foregroundColor(selectedTab == tab ? .accentColor : .secondary)
+                    .foregroundColor(selectedTab == tab ? .primary : .secondary)
                     .frame(width: 20)
                 
                 Text(title)
@@ -2865,7 +4229,7 @@ struct WelcomeScreen: View {
             .padding(.vertical, 10)
             .background(
                 selectedTab == tab
-                ? Color.accentColor.opacity(0.12)
+                ? Color.primary.opacity(0.1)
                 : Color.clear
             )
             .cornerRadius(8)
@@ -2878,26 +4242,35 @@ struct WelcomeScreen: View {
     
     private var rightMainView: some View {
         ZStack {
-            VisualEffectView(material: .hudWindow, blendingMode: .behindWindow)
-            
-            ScrollView {
-                VStack(alignment: .leading, spacing: 30) {
-                    switch selectedTab {
-                    case .projects:
-                        projectsTabContent
-                    case .templates:
-                        templatesTabContent
-                    case .aiArchitect:
-                        aiArchitectTabContent
-                    case .settings:
-                        settingsTabContent
+            if selectedTab == .aiArchitect {
+                AIAgentView(allowsChatSidebar: true)
+                    .environmentObject(appState)
+            } else {
+                ScrollView {
+                    VStack(alignment: .leading, spacing: 30) {
+                        switch selectedTab {
+                        case .projects:
+                            projectsTabContent
+                        case .templates:
+                            templatesTabContent
+                        case .settings:
+                            settingsTabContent
+                        case .aiArchitect:
+                            EmptyView()
+                        }
                     }
+                    .padding(.horizontal, 40)
+                    .padding(.vertical, 35)
+                    .frame(maxWidth: .infinity, alignment: .leading)
                 }
-                .padding(.horizontal, 40)
-                .padding(.vertical, 35)
-                .frame(maxWidth: .infinity, alignment: .leading)
             }
         }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .background(
+            appState.appTheme.isGlass
+                ? AnyView(VisualEffectView(material: .hudWindow, blendingMode: .behindWindow))
+                : AnyView(Color(nsColor: appState.appTheme.workspaceBackground))
+        )
     }
     
     // MARK: - Projects Tab
@@ -2909,27 +4282,29 @@ struct WelcomeScreen: View {
                     .font(.system(size: 28, weight: .bold))
                     .foregroundColor(.primary)
                 
-                Text("Start a new project, open a workspace, or check out from git.")
+                Text("Start a new project, run interactive scratchpads, or connect remote cloud instances.")
                     .font(.system(size: 14))
                     .foregroundColor(.secondary)
             }
-            .padding(.bottom, 10)
+            .padding(.bottom, 6)
             
-            LazyVGrid(columns: [GridItem(.flexible(), spacing: 16), GridItem(.flexible(), spacing: 16), GridItem(.flexible(), spacing: 16)], spacing: 16) {
+            LazyVGrid(columns: [
+                GridItem(.flexible(), spacing: 14),
+                GridItem(.flexible(), spacing: 14),
+                GridItem(.flexible(), spacing: 14)
+            ], spacing: 14) {
                 QuickActionCard(
                     title: "New Project",
-                    subtitle: "Choose from boilerplates",
-                    icon: "plus.circle.fill",
-                    gradient: Gradient(colors: [Color.blue, Color.cyan])
+                    subtitle: "Choose from 14+ boilerplates",
+                    icon: "plus.square"
                 ) {
                     selectedTab = .templates
                 }
                 
                 QuickActionCard(
                     title: "Open Folder",
-                    subtitle: "Open an existing project",
-                    icon: "folder.fill.badge.plus",
-                    gradient: Gradient(colors: [Color.purple, Color.pink])
+                    subtitle: "Open an existing workspace",
+                    icon: "folder"
                 ) {
                     openFolder()
                 }
@@ -2937,10 +4312,80 @@ struct WelcomeScreen: View {
                 QuickActionCard(
                     title: "Clone Repo",
                     subtitle: "Checkout from Git remote",
-                    icon: "arrow.down.circle.fill",
-                    gradient: Gradient(colors: [Color.orange, Color.yellow])
+                    icon: "arrow.down.circle"
                 ) {
                     showCloneSheet = true
+                }
+                
+                QuickActionCard(
+                    title: "New Playground Mode",
+                    subtitle: "Scratchpad & live code execution",
+                    icon: "play.laptopcomputer",
+                    badge: "Instant"
+                ) {
+                    surface?.wrappedValue = .editor
+                    appState.showingWelcomeHome = false
+                    appState.setEditorMode(.playground)
+                }
+                
+                QuickActionCard(
+                    title: "New Cell Mode",
+                    subtitle: "Multi-language interactive notebook",
+                    icon: "square.split.1x2.fill",
+                    badge: "Cells"
+                ) {
+                    surface?.wrappedValue = .editor
+                    appState.showingWelcomeHome = false
+                    appState.setEditorMode(.notebook)
+                }
+                
+                QuickActionCard(
+                    title: "SSH Remote Browser",
+                    subtitle: "Cloud instances & remote shell",
+                    icon: "terminal.fill",
+                    badge: "Remote"
+                ) {
+                    surface?.wrappedValue = .editor
+                    appState.showingWelcomeHome = false
+                    appState.setEditorMode(.remoteX)
+                }
+                
+                QuickActionCard(
+                    title: "Embed & IoT Studio",
+                    subtitle: "Hardware flashing, serial & GPIO monitor",
+                    icon: "cpu.fill",
+                    badge: "IoT"
+                ) {
+                    surface?.wrappedValue = .editor
+                    appState.showingWelcomeHome = false
+                    appState.setEditorMode(.embedded)
+                }
+                
+                QuickActionCard(
+                    title: "AI Architect",
+                    subtitle: "Chat & autonomous scaffolding",
+                    icon: "sparkles",
+                    badge: "Agent"
+                ) {
+                    selectedTab = .aiArchitect
+                }
+                
+                QuickActionCard(
+                    title: "IDE Web Browser",
+                    subtitle: "Built-in live browser & previews",
+                    icon: "globe"
+                ) {
+                    surface?.wrappedValue = .editor
+                    appState.showingWelcomeHome = false
+                    appState.setEditorMode(.browser)
+                }
+                
+                QuickActionCard(
+                    title: "Settings & Cache",
+                    subtitle: "Manage DerivedData & disk quotas",
+                    icon: "gearshape"
+                ) {
+                    selectedTab = .settings
                 }
             }
             
@@ -2960,17 +4405,21 @@ struct WelcomeScreen: View {
                     }
                     .frame(maxWidth: .infinity)
                     .padding(.vertical, 30)
-                    .background(Color.white.opacity(0.02))
+                    .background(Color.primary.opacity(0.02))
                     .cornerRadius(10)
                     .overlay(
                         RoundedRectangle(cornerRadius: 10)
-                            .stroke(Color.white.opacity(0.05), lineWidth: 1)
+                            .stroke(Color.primary.opacity(0.05), lineWidth: 1)
                     )
                 } else {
                     VStack(spacing: 8) {
-                        ForEach(recentProjects.prefix(6), id: \.self) { url in
+                        ForEach(recentProjects.prefix(8), id: \.self) { url in
                             RecentProjectRow(url: url) {
-                                appState.workspaceFolder = url
+                                surface?.wrappedValue = .editor
+                                appState.showingWelcomeHome = false
+                                Task { @MainActor in
+                                    await appState.openWorkspace(url: url)
+                                }
                             }
                         }
                     }
@@ -2989,91 +4438,31 @@ struct WelcomeScreen: View {
                     .font(.system(size: 24, weight: .bold))
                     .foregroundColor(.primary)
                 
-                Text("Bootstrap projects instantly using built-in command line presets.")
+                Text("Bootstrap projects instantly with built-in presets. Conforms strictly to your active theme.")
                     .font(.system(size: 13))
                     .foregroundColor(.secondary)
             }
             
             LazyVGrid(columns: [GridItem(.flexible(), spacing: 14), GridItem(.flexible(), spacing: 14)], spacing: 14) {
-                TemplateDetailCard(title: "Vite + React", subtitle: "Fast modern frontend web application with Hot Module Replacement.", icon: "atom", color: .cyan) { createProject("vite") }
-                TemplateDetailCard(title: "Next.js App", subtitle: "Fullstack React framework with server-side rendering.", icon: "n.square.fill", color: .white) { createProject("nextjs") }
-                TemplateDetailCard(title: "Express API", subtitle: "Lightweight, high-performance Node.js backend api server.", icon: "server.rack", color: .green) { createProject("express") }
-                TemplateDetailCard(title: "Spring Boot", subtitle: "Production-ready Java service with Spring MVC and DI.", icon: "leaf.fill", color: .green) { createProject("spring") }
-                TemplateDetailCard(title: "React Native", subtitle: "Cross-platform mobile application builder for iOS and Android.", icon: "iphone", color: .blue) { createProject("react-native") }
-                TemplateDetailCard(title: "SwiftUI App", subtitle: "Native Apple platforms application using SwiftUI declarative framework.", icon: "swift", color: .orange) { createProject("swift") }
-                TemplateDetailCard(title: "Go Gin", subtitle: "Blazing fast HTTP web API microservice using Gin framework.", icon: "g.circle.fill", color: .cyan) { createProject("go") }
+                TemplateDetailCard(title: "Next.js 14 App", subtitle: "Fullstack React framework with App Router, TypeScript, and Server Components.", icon: "n.square.fill", tag: "Fullstack") { createProject("nextjs") }
+                TemplateDetailCard(title: "Vite + React", subtitle: "Blazing fast frontend SPA with TypeScript and Hot Module Replacement.", icon: "atom", tag: "Frontend") { createProject("vite") }
+                TemplateDetailCard(title: "FastAPI Backend", subtitle: "High-performance async Python API with Pydantic v2 and OpenAPI docs.", icon: "bolt.fill", tag: "Python") { createProject("fastapi") }
+                TemplateDetailCard(title: "Rust Axum Service", subtitle: "Ultra-fast asynchronous microservice powered by Tokio runtime.", icon: "gearshape.2.fill", tag: "Rust") { createProject("rust-axum") }
+                TemplateDetailCard(title: "SwiftUI App", subtitle: "Native Apple platforms application using SwiftUI declarative framework.", icon: "swift", tag: "Apple Native") { createProject("swift") }
+                TemplateDetailCard(title: "Ardium CoreUI", subtitle: "High-performance native GUI using Dotmini's Ardium v2.3 language.", icon: "cpu.fill", tag: "Ardium") { createProject("ardium") }
+                TemplateDetailCard(title: "Express.js API", subtitle: "Lightweight, scalable Node.js microservice API with TypeScript.", icon: "server.rack", tag: "Node.js") { createProject("express") }
+                TemplateDetailCard(title: "Go Gin Microservice", subtitle: "High-throughput compiled HTTP web API with minimal footprint.", icon: "speedometer", tag: "Go") { createProject("go") }
+                TemplateDetailCard(title: "Flutter Multiplatform", subtitle: "Cross-platform mobile, desktop, and web application with Dart.", icon: "apps.iphone", tag: "Dart") { createProject("flutter") }
+                TemplateDetailCard(title: "Spring Boot 3", subtitle: "Enterprise-grade Java service with Spring MVC and Virtual Threads.", icon: "leaf.fill", tag: "Java") { createProject("spring") }
+                TemplateDetailCard(title: "PyTorch / ML Pipeline", subtitle: "Machine learning training and inference pipeline with Apple MPS.", icon: "brain.head.profile", tag: "AI / ML") { createProject("pytorch") }
+                TemplateDetailCard(title: "Docker Microservices", subtitle: "Production Docker compose stack with PostgreSQL and Redis.", icon: "shippingbox.fill", tag: "DevOps") { createProject("docker") }
+                TemplateDetailCard(title: "Vue 3 + Vite", subtitle: "Lightweight reactive frontend with Pinia and Vue Router.", icon: "v.circle.fill", tag: "Frontend") { createProject("vue") }
+                TemplateDetailCard(title: "NestJS Enterprise", subtitle: "Structured TypeScript enterprise architecture with dependency injection.", icon: "shield.fill", tag: "TypeScript") { createProject("nestjs") }
             }
-        }
-    }
-    
-    // MARK: - AI Architect Tab
-    
-    private var aiArchitectTabContent: some View {
-        VStack(alignment: .leading, spacing: 24) {
-            VStack(alignment: .leading, spacing: 6) {
-                Text("AI Architect")
-                    .font(.system(size: 24, weight: .bold))
-                    .foregroundColor(.primary)
-                
-                Text("Describe your app, and our agent will structure the workspace and initialize files.")
-                    .font(.system(size: 13))
-                    .foregroundColor(.secondary)
-            }
-            
-            VStack(spacing: 14) {
-                ZStack(alignment: .topLeading) {
-                    if aiPrompt.isEmpty {
-                        Text("Example: Build a chat application using Node.js and WebSocket with a premium client landing page...")
-                            .foregroundColor(.secondary.opacity(0.6))
-                            .font(.system(size: 13))
-                            .padding(12)
-                    }
-                    
-                    TextEditor(text: $aiPrompt)
-                        .font(.system(size: 13))
-                        .frame(height: 120)
-                        .cornerRadius(6)
-                }
-                .padding(8)
-                .background(Color.black.opacity(0.2))
-                .cornerRadius(8)
-                .overlay(
-                    RoundedRectangle(cornerRadius: 8)
-                        .stroke(isHoveringAI ? Color.accentColor.opacity(0.5) : Color.white.opacity(0.1), lineWidth: 1)
-                )
-                .onHover { isHoveringAI = $0 }
-                
-                HStack {
-                    Spacer()
-                    
-                    Button(action: buildWithAI) {
-                        HStack {
-                            Image(systemName: "sparkles")
-                            Text("Generate Workspace")
-                        }
-                        .padding(.horizontal, 16)
-                        .padding(.vertical, 8)
-                        .background(aiPrompt.isEmpty ? Color.secondary.opacity(0.3) : Color.accentColor)
-                        .foregroundColor(.white)
-                        .cornerRadius(6)
-                    }
-                    .buttonStyle(.plain)
-                    .disabled(aiPrompt.isEmpty)
-                }
-            }
-            .padding(16)
-            .background(Color.white.opacity(0.02))
-            .cornerRadius(12)
-            .overlay(
-                RoundedRectangle(cornerRadius: 12)
-                    .stroke(Color.white.opacity(0.06), lineWidth: 1)
-            )
         }
     }
     
     // MARK: - Settings Tab
-    
-    // MARK: - Settings Tab Helpers
     
     private var settingsHeader: some View {
         VStack(alignment: .leading, spacing: 6) {
@@ -3275,7 +4664,8 @@ struct QuickActionCard: View {
     let title: String
     let subtitle: String
     let icon: String
-    let gradient: Gradient
+    var badge: String? = nil
+    var gradient: Gradient? = nil
     let action: () -> Void
     @State private var isHovering = false
     
@@ -3285,45 +4675,52 @@ struct QuickActionCard: View {
                 HStack {
                     ZStack {
                         Circle()
-                            .fill(LinearGradient(gradient: gradient, startPoint: .topLeading, endPoint: .bottomTrailing))
+                            .fill(Color.primary.opacity(isHovering ? 0.12 : 0.06))
                             .frame(width: 38, height: 38)
                         
                         Image(systemName: icon)
-                            .font(.system(size: 18, weight: .medium))
-                            .foregroundColor(.white)
+                            .font(.system(size: 16, weight: .medium))
+                            .foregroundColor(.primary)
                     }
                     Spacer()
+                    
+                    if let badge = badge {
+                        Text(badge)
+                            .font(.system(size: 9, weight: .semibold))
+                            .foregroundColor(.secondary)
+                            .padding(.horizontal, 6)
+                            .padding(.vertical, 2)
+                            .background(Color.primary.opacity(0.06))
+                            .cornerRadius(4)
+                    }
                 }
                 
                 VStack(alignment: .leading, spacing: 4) {
                     Text(title)
-                        .font(.system(size: 14, weight: .semibold))
+                        .font(.system(size: 13, weight: .semibold))
                         .foregroundColor(.primary)
                     
                     Text(subtitle)
                         .font(.system(size: 11))
                         .foregroundColor(.secondary)
+                        .lineLimit(2)
                 }
             }
-            .padding(16)
-            .frame(maxWidth: .infinity, alignment: .leading)
+            .padding(14)
+            .frame(maxWidth: .infinity, minHeight: 110, alignment: .topLeading)
             .background(
-                Color.white.opacity(isHovering ? 0.08 : 0.04)
+                Color.primary.opacity(isHovering ? 0.06 : 0.025)
             )
             .cornerRadius(12)
             .overlay(
                 RoundedRectangle(cornerRadius: 12)
                     .stroke(
-                        LinearGradient(
-                            gradient: gradient,
-                            startPoint: .topLeading,
-                            endPoint: .bottomTrailing
-                        ).opacity(isHovering ? 0.4 : 0.1),
+                        Color.primary.opacity(isHovering ? 0.25 : 0.08),
                         lineWidth: 1
                     )
             )
-            .scaleEffect(isHovering ? 1.02 : 1.0)
-            .animation(.spring(response: 0.25, dampingFraction: 0.6, blendDuration: 0), value: isHovering)
+            .scaleEffect(isHovering ? 1.015 : 1.0)
+            .animation(.easeOut(duration: 0.15), value: isHovering)
         }
         .buttonStyle(.plain)
         .onHover { isHovering = $0 }
@@ -3334,27 +4731,39 @@ struct TemplateDetailCard: View {
     let title: String
     let subtitle: String
     let icon: String
-    let color: Color
+    var tag: String? = nil
     let action: () -> Void
     @State private var isHovering = false
     
     var body: some View {
         Button(action: action) {
-            HStack(spacing: 16) {
+            HStack(spacing: 14) {
                 ZStack {
                     RoundedRectangle(cornerRadius: 10)
-                        .fill(color.opacity(0.12))
-                        .frame(width: 44, height: 44)
+                        .fill(Color.primary.opacity(isHovering ? 0.08 : 0.04))
+                        .frame(width: 42, height: 42)
                     
                     Image(systemName: icon)
-                        .font(.system(size: 20))
-                        .foregroundColor(color)
+                        .font(.system(size: 18, weight: .medium))
+                        .foregroundColor(.primary)
                 }
                 
-                VStack(alignment: .leading, spacing: 4) {
-                    Text(title)
-                        .font(.system(size: 14, weight: .semibold))
-                        .foregroundColor(.primary)
+                VStack(alignment: .leading, spacing: 3) {
+                    HStack(spacing: 6) {
+                        Text(title)
+                            .font(.system(size: 13, weight: .semibold))
+                            .foregroundColor(.primary)
+                        
+                        if let tag = tag {
+                            Text(tag)
+                                .font(.system(size: 9, weight: .medium))
+                                .foregroundColor(.secondary)
+                                .padding(.horizontal, 6)
+                                .padding(.vertical, 2)
+                                .background(Color.primary.opacity(0.06))
+                                .cornerRadius(4)
+                        }
+                    }
                     
                     Text(subtitle)
                         .font(.system(size: 11))
@@ -3363,14 +4772,14 @@ struct TemplateDetailCard: View {
                 }
                 Spacer()
             }
-            .padding(14)
-            .background(Color.white.opacity(isHovering ? 0.08 : 0.04))
+            .padding(12)
+            .background(Color.primary.opacity(isHovering ? 0.06 : 0.025))
             .cornerRadius(10)
             .overlay(
                 RoundedRectangle(cornerRadius: 10)
-                    .stroke(Color.white.opacity(isHovering ? 0.15 : 0.06), lineWidth: 1)
+                    .stroke(Color.primary.opacity(isHovering ? 0.22 : 0.06), lineWidth: 1)
             )
-            .scaleEffect(isHovering ? 1.015 : 1.0)
+            .scaleEffect(isHovering ? 1.01 : 1.0)
             .animation(.easeInOut(duration: 0.15), value: isHovering)
         }
         .buttonStyle(.plain)
@@ -3386,13 +4795,14 @@ struct RecentProjectRow: View {
     var body: some View {
         Button(action: action) {
             HStack(spacing: 12) {
-                Image(systemName: "folder.fill")
-                    .foregroundColor(.accentColor)
-                    .font(.system(size: 16))
+                Image(systemName: "folder")
+                    .foregroundColor(.primary.opacity(0.8))
+                    .font(.system(size: 15))
                 
                 VStack(alignment: .leading, spacing: 2) {
                     Text(url.lastPathComponent)
                         .font(.system(size: 13, weight: .medium))
+                        .foregroundColor(.primary)
                     Text(url.deletingLastPathComponent().path)
                         .font(.system(size: 11))
                         .foregroundColor(.secondary)
@@ -3401,9 +4811,11 @@ struct RecentProjectRow: View {
                 }
                 Spacer()
             }
-            .padding(10)
-            .background(isHovering ? Color.accentColor.opacity(0.1) : Color.clear)
+            .padding(.horizontal, 12)
+            .padding(.vertical, 8)
+            .background(Color.primary.opacity(isHovering ? 0.06 : 0.02))
             .cornerRadius(8)
+            .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
         .onHover { isHovering = $0 }
@@ -4064,32 +5476,16 @@ struct AIChatPanel: View {
                 
                 // Model Selector Pill
                 Menu {
-                    Section("Google Gemini") {
-                        Button("Gemini 3.1 Pro ✨") { setModel("gemini-3.1-pro", provider: "gemini") }
-                        Button("Gemini 2.5 Pro") { setModel("gemini-2.5-pro-preview-05-06", provider: "gemini") }
-                        Button("Gemini 2.5 Flash") { setModel("gemini-2.5-flash", provider: "gemini") }
-                    }
-                    Section("OpenAI") {
-                        Button("GPT‑5 ✨") { setModel("gpt-5", provider: "openai") }
-                        Button("GPT‑4.5 Preview") { setModel("gpt-4.5-preview", provider: "openai") }
-                        Button("GPT‑4o") { setModel("gpt-4o", provider: "openai") }
-                        Button("o3-mini") { setModel("o3-mini", provider: "openai") }
-                        Button("o4‑mini") { setModel("o4-mini", provider: "openai") }
-                    }
-                    Section("Anthropic Claude") {
-                        Button("Claude 4.7 Opus ✨") { setModel("claude-4.7-opus-20260501", provider: "anthropic") }
-                        Button("Claude 3.7 Sonnet") { setModel("claude-3-7-sonnet-20250219", provider: "anthropic") }
-                        Button("Claude 3.5 Haiku") { setModel("claude-3-5-haiku-20241022", provider: "anthropic") }
-                    }
-                    Section("DeepSeek") {
-                        Button("DeepSeek V4 ✨") { setModel("deepseek-chat-v4", provider: "deepseek") }
-                        Button("DeepSeek Chat") { setModel("deepseek-chat", provider: "deepseek") }
-                        Button("DeepSeek Coder") { setModel("deepseek-coder", provider: "deepseek") }
-                    }
-                    Section("Others") {
-                        Button("Grok 3") { setModel("grok-3", provider: "grok") }
-                        Button("Qwen3 235B") { setModel("qwen3-235b-a22b", provider: "qwen") }
-                        Button("GLM‑4.6") { setModel("glm-4.6", provider: "glm") }
+                    let activeProviders = AIModelCatalog.shared.providers.filter { $0.id != "omni" && !(appState.apiKeys[$0.id]?.isEmpty ?? true) }
+                    let providersToDisplay = activeProviders.isEmpty ? AIModelCatalog.shared.providers.filter { $0.id != "omni" } : activeProviders
+                    ForEach(providersToDisplay) { prov in
+                        Section(prov.name) {
+                            ForEach(prov.models) { m in
+                                Button(m.name) {
+                                    setModel(m.id, provider: prov.id)
+                                }
+                            }
+                        }
                     }
                 } label: {
                     HStack(spacing: 4) {
@@ -4239,29 +5635,10 @@ struct AIChatPanel: View {
     }
     
     private var modelDisplayName: String {
-        switch appState.aiModel {
-        case let m where m.contains("gemini-3.1"): return "Gemini 3.1"
-        case "gemini-2.5-flash": return "Gemini 2.5"
-        case let m where m.contains("gemini-2.5-pro"): return "Gemini Pro"
-        case "gpt-5": return "GPT‑5"
-        case "gpt-4.5-preview": return "GPT‑4.5"
-        case "gpt-4o": return "GPT‑4o"
-        case "gpt-4o-mini": return "GPT‑4o Mini"
-        case "o3-mini": return "o3‑mini"
-        case "o4-mini": return "o4‑mini"
-        case let m where m.contains("claude-4.7"): return "Claude Opus"
-        case let m where m.contains("claude-3-7-sonnet"): return "Sonnet 3.7"
-        case let m where m.contains("claude-3-5-sonnet"): return "Sonnet 3.5"
-        case let m where m.contains("claude-3-5-haiku"): return "Haiku 3.5"
-        case "deepseek-chat-v4": return "DS V4"
-        case "deepseek-chat": return "DeepSeek"
-        case "deepseek-coder": return "DS Coder"
-        case "deepseek-reasoner": return "DS Reason"
-        case let m where m.contains("grok"): return "Grok 3"
-        case let m where m.contains("qwen"): return "Qwen3"
-        case let m where m.contains("glm"): return "GLM‑4"
-        default: return String(appState.aiModel.prefix(12))
+        if let m = AIModelCatalog.shared.model(id: appState.aiModel) {
+            return m.name
         }
+        return AIModelCatalog.formatModelName(appState.aiModel)
     }
     
     private func setModel(_ model: String, provider: String) {
@@ -4455,7 +5832,7 @@ struct SettingsView: View {
     @State private var agentAutoApproveTools: Bool = false
     @State private var agentCustomInstructions: String = ""
     @State private var agentMaxIterations: Int = 0
-    @State private var selectedTab: Int = 0
+    @State private var selectedTab: Int = 2
     @State private var hasChanges: Bool = false
     @State private var microRentToken: String = ""
     @State private var authEmail = ""
@@ -4561,7 +5938,16 @@ struct SettingsView: View {
         .frame(minWidth: 880, idealWidth: 1000, maxWidth: 1240,
                minHeight: 600, idealHeight: 700, maxHeight: 920)
         .onAppear {
+            selectedTab = appState.settingsSelectedTab
             loadCurrentSettings()
+        }
+        .onChange(of: selectedTab) { newTab in
+            appState.settingsSelectedTab = newTab
+        }
+        .sheet(item: $webLoginProvider) { prov in
+            WebSubscriptionLoginSheet(provider: prov) {
+                hasChanges = true
+            }
         }
         .onDisappear {
             appState.showingSettingsDialog = false
@@ -5064,22 +6450,24 @@ struct SettingsView: View {
     
     @State private var providerKeys: [String: String] = [:]
     @State private var showAPIKey: [String: Bool] = [:]
-    @State private var aiKeyMode: String = "cloud"  // "cloud" = Dotmini proxy, "direct" = user's own key
+    @State private var aiKeyMode: String = "direct"  // "cloud" = Dotmini proxy, "direct" = user's own key, "subscription" = ChatGPT/Claude/Gemini/DeepSeek subscription, "local" = local LLM
     @State private var dotminiLicenseKey: String = ""
+    @ObservedObject private var subscriptionAuth = SubscriptionAuthManager.shared
     
     private var aiSettingsContent: some View {
-        VStack(alignment: .leading, spacing: 20) {
-            // ── 1. Mode Switcher (Dotmini Cloud vs BYOK vs Local) ──
-            VStack(alignment: .leading, spacing: 12) {
+        VStack(alignment: .leading, spacing: 18) {
+            // ── 1. Formal Mode Switcher (Dotmini Cloud vs Subscription vs BYOK vs Local) ──
+            VStack(alignment: .leading, spacing: 10) {
                 HStack(spacing: 8) {
-                    Image(systemName: "cpu.fill")
-                        .foregroundColor(.accentColor)
-                        .font(.system(size: 13))
+                    Image(systemName: "slider.horizontal.3")
+                        .font(.system(size: 12, weight: .semibold))
+                        .foregroundColor(.primary)
                     Text("AI Mode & Provider")
-                        .font(.system(size: 13, weight: .bold))
+                        .font(.system(size: 13, weight: .semibold))
                 }
                 
                 HStack(spacing: 8) {
+                    // Mode Button: Cloud
                     Button {
                         aiKeyMode = "cloud"
                         selectedProvider = "omni"
@@ -5089,20 +6477,51 @@ struct SettingsView: View {
                         hasChanges = true
                     } label: {
                         HStack(spacing: 6) {
-                            Image(systemName: "sparkles")
-                            Text("Dotmini Cloud (Omni AI)")
-                                .font(.system(size: 12, weight: .semibold))
+                            AIProviderBrandIcon(provider: "omni", size: 15)
+                            Text("Dotmini Cloud")
+                                .font(.system(size: 11.5, weight: aiKeyMode == "cloud" ? .semibold : .regular))
+                                .lineLimit(1)
                         }
-                        .frame(maxWidth: .infinity)
-                        .padding(.vertical, 8)
+                        .frame(maxWidth: .infinity, minHeight: 34, maxHeight: 34)
                         .background(
-                            RoundedRectangle(cornerRadius: 7)
-                                .fill(aiKeyMode == "cloud" ? Color.accentColor : Color.primary.opacity(0.05))
+                            RoundedRectangle(cornerRadius: 6, style: .continuous)
+                                .fill(aiKeyMode == "cloud" ? Color.primary.opacity(0.12) : Color.primary.opacity(0.03))
                         )
-                        .foregroundColor(aiKeyMode == "cloud" ? .white : .primary)
+                        .overlay(
+                            RoundedRectangle(cornerRadius: 6, style: .continuous)
+                                .stroke(aiKeyMode == "cloud" ? Color.primary.opacity(0.25) : Color.primary.opacity(0.06), lineWidth: 1)
+                        )
+                        .foregroundColor(.primary)
+                    }
+                    .buttonStyle(.plain)
+
+                    // Mode Button: Web Subscription (No API)
+                    Button {
+                        aiKeyMode = "subscription"
+                        hasChanges = true
+                    } label: {
+                        HStack(spacing: 6) {
+                            Image(systemName: "sparkles.rectangle.stack")
+                                .font(.system(size: 12))
+                                .foregroundColor(.orange)
+                            Text("Web Subscription")
+                                .font(.system(size: 11.5, weight: aiKeyMode == "subscription" ? .semibold : .regular))
+                                .lineLimit(1)
+                        }
+                        .frame(maxWidth: .infinity, minHeight: 34, maxHeight: 34)
+                        .background(
+                            RoundedRectangle(cornerRadius: 6, style: .continuous)
+                                .fill(aiKeyMode == "subscription" ? Color.primary.opacity(0.12) : Color.primary.opacity(0.03))
+                        )
+                        .overlay(
+                            RoundedRectangle(cornerRadius: 6, style: .continuous)
+                                .stroke(aiKeyMode == "subscription" ? Color.primary.opacity(0.25) : Color.primary.opacity(0.06), lineWidth: 1)
+                        )
+                        .foregroundColor(.primary)
                     }
                     .buttonStyle(.plain)
                     
+                    // Mode Button: BYOK
                     Button {
                         aiKeyMode = "direct"
                         if selectedProvider == "omni" || selectedProvider == "local" {
@@ -5114,20 +6533,27 @@ struct SettingsView: View {
                         hasChanges = true
                     } label: {
                         HStack(spacing: 6) {
-                            Image(systemName: "key.fill")
-                            Text("BYOK (Your Own Keys)")
-                                .font(.system(size: 12, weight: .semibold))
+                            Image(systemName: "key")
+                                .font(.system(size: 12))
+                                .foregroundColor(.secondary)
+                            Text("Direct API Key")
+                                .font(.system(size: 11.5, weight: aiKeyMode == "direct" ? .semibold : .regular))
+                                .lineLimit(1)
                         }
-                        .frame(maxWidth: .infinity)
-                        .padding(.vertical, 8)
+                        .frame(maxWidth: .infinity, minHeight: 34, maxHeight: 34)
                         .background(
-                            RoundedRectangle(cornerRadius: 7)
-                                .fill(aiKeyMode == "direct" ? Color.accentColor : Color.primary.opacity(0.05))
+                            RoundedRectangle(cornerRadius: 6, style: .continuous)
+                                .fill(aiKeyMode == "direct" ? Color.primary.opacity(0.12) : Color.primary.opacity(0.03))
                         )
-                        .foregroundColor(aiKeyMode == "direct" ? .white : .primary)
+                        .overlay(
+                            RoundedRectangle(cornerRadius: 6, style: .continuous)
+                                .stroke(aiKeyMode == "direct" ? Color.primary.opacity(0.25) : Color.primary.opacity(0.06), lineWidth: 1)
+                        )
+                        .foregroundColor(.primary)
                     }
                     .buttonStyle(.plain)
                     
+                    // Mode Button: Local
                     Button {
                         aiKeyMode = "local"
                         selectedProvider = "local"
@@ -5135,37 +6561,45 @@ struct SettingsView: View {
                         hasChanges = true
                     } label: {
                         HStack(spacing: 6) {
-                            Image(systemName: "desktopcomputer")
-                            Text("Local LLM (Offline)")
-                                .font(.system(size: 12, weight: .semibold))
+                            AIProviderBrandIcon(provider: "local", size: 15)
+                            Text("Local LLM")
+                                .font(.system(size: 11.5, weight: aiKeyMode == "local" ? .semibold : .regular))
+                                .lineLimit(1)
                         }
-                        .frame(maxWidth: .infinity)
-                        .padding(.vertical, 8)
+                        .frame(maxWidth: .infinity, minHeight: 34, maxHeight: 34)
                         .background(
-                            RoundedRectangle(cornerRadius: 7)
-                                .fill(aiKeyMode == "local" ? Color.accentColor : Color.primary.opacity(0.05))
+                            RoundedRectangle(cornerRadius: 6, style: .continuous)
+                                .fill(aiKeyMode == "local" ? Color.primary.opacity(0.12) : Color.primary.opacity(0.03))
                         )
-                        .foregroundColor(aiKeyMode == "local" ? .white : .primary)
+                        .overlay(
+                            RoundedRectangle(cornerRadius: 6, style: .continuous)
+                                .stroke(aiKeyMode == "local" ? Color.primary.opacity(0.25) : Color.primary.opacity(0.06), lineWidth: 1)
+                        )
+                        .foregroundColor(.primary)
                     }
                     .buttonStyle(.plain)
                 }
             }
-            .padding(18)
+            .padding(14)
             .background(
-                RoundedRectangle(cornerRadius: 10, style: .continuous)
+                RoundedRectangle(cornerRadius: 8, style: .continuous)
                     .fill(Color(nsColor: .controlBackgroundColor))
-                    .overlay(RoundedRectangle(cornerRadius: 10, style: .continuous).stroke(Color.primary.opacity(0.06), lineWidth: 1))
+                    .overlay(RoundedRectangle(cornerRadius: 8, style: .continuous).stroke(Color.primary.opacity(0.08), lineWidth: 1))
             )
             
             // ── 2. Mode-Specific Configuration ──
             if aiKeyMode == "cloud" {
                 // Dotmini Cloud Dedicated Panel
                 VStack(alignment: .leading, spacing: 14) {
-                    HStack(spacing: 8) {
-                        Image(systemName: "cloud.fill")
-                            .foregroundColor(.orange)
-                        Text("Dotmini Cloud Models (api.dotmini.net/v1)")
-                            .font(.system(size: 13, weight: .bold))
+                    HStack(spacing: 10) {
+                        AIProviderBrandIcon(provider: "omni", size: 18)
+                        VStack(alignment: .leading, spacing: 1) {
+                            Text("Dotmini Cloud Models")
+                                .font(.system(size: 13, weight: .semibold))
+                            Text("api.dotmini.net/v1")
+                                .font(.system(size: 10, design: .monospaced))
+                                .foregroundColor(.secondary)
+                        }
                         Spacer()
                         Text(modelCatalog.source)
                             .font(.system(size: 10))
@@ -5183,14 +6617,13 @@ struct SettingsView: View {
                         .disabled(modelCatalog.isRefreshing)
                     }
                     
-                    Text("Access all Dotmini Omni AI & live cloud models directly via unified server-side proxy.")
-                        .font(.system(size: 12))
-                        .foregroundColor(.secondary)
+                    Divider().opacity(0.6)
                     
                     HStack(spacing: 12) {
                         Text("Active Model:")
-                            .font(.system(size: 12, weight: .semibold))
+                            .font(.system(size: 12, weight: .medium))
                             .foregroundColor(.secondary)
+                            .frame(width: 110, alignment: .leading)
                         
                         Picker("", selection: $selectedModel) {
                             if let omniProvider = modelCatalog.provider("omni") {
@@ -5214,8 +6647,9 @@ struct SettingsView: View {
                     
                     HStack(spacing: 12) {
                         Text("License / Token:")
-                            .font(.system(size: 12, weight: .semibold))
+                            .font(.system(size: 12, weight: .medium))
                             .foregroundColor(.secondary)
+                            .frame(width: 110, alignment: .leading)
                         
                         SecureField("Optional Dotmini Cloud License / Bearer Token", text: $dotminiLicenseKey)
                             .textFieldStyle(.roundedBorder)
@@ -5228,36 +6662,39 @@ struct SettingsView: View {
                         Circle().fill(Color.green).frame(width: 6, height: 6)
                         Text(dotminiLicenseKey.isEmpty ? "Dotmini Cloud Active (Tier: Pro / Master Admin)" : "Dotmini Cloud Authenticated")
                             .font(.system(size: 11, weight: .medium))
-                            .foregroundColor(.green)
+                            .foregroundColor(.secondary)
                     }
+                    .padding(.top, 2)
                 }
-                .padding(18)
+                .padding(16)
                 .background(
-                    RoundedRectangle(cornerRadius: 10, style: .continuous)
+                    RoundedRectangle(cornerRadius: 8, style: .continuous)
                         .fill(Color(nsColor: .controlBackgroundColor))
-                        .overlay(RoundedRectangle(cornerRadius: 10, style: .continuous).stroke(Color.primary.opacity(0.06), lineWidth: 1))
+                        .overlay(RoundedRectangle(cornerRadius: 8, style: .continuous).stroke(Color.primary.opacity(0.08), lineWidth: 1))
                 )
             } else if aiKeyMode == "direct" {
                 // BYOK Dedicated Panel
                 VStack(alignment: .leading, spacing: 14) {
                     HStack(spacing: 8) {
-                        Image(systemName: "key.fill")
-                            .foregroundColor(.accentColor)
+                        Image(systemName: "key")
+                            .font(.system(size: 12, weight: .semibold))
+                            .foregroundColor(.primary)
                         Text("Bring Your Own Key (BYOK)")
-                            .font(.system(size: 13, weight: .bold))
+                            .font(.system(size: 13, weight: .semibold))
                         Spacer()
                     }
                     
-                    Text("Connect directly to third-party AI providers using your personal API keys.")
+                    Text("Connect directly to official AI providers using your own API credentials.")
                         .font(.system(size: 12))
                         .foregroundColor(.secondary)
                     
-                    HStack(spacing: 24) {
+                    HStack(spacing: 20) {
                         // Provider Picker
                         HStack(spacing: 8) {
-                            Text("Provider:")
-                                .font(.system(size: 12, weight: .semibold))
+                            Text("Active Provider:")
+                                .font(.system(size: 12, weight: .medium))
                                 .foregroundColor(.secondary)
+                                .fixedSize()
                             
                             Picker("", selection: $selectedProvider) {
                                 ForEach(aiProviders.filter { $0.id != "omni" && $0.id != "local" }, id: \.id) { p in
@@ -5266,6 +6703,7 @@ struct SettingsView: View {
                             }
                             .labelsHidden()
                             .pickerStyle(.menu)
+                            .frame(maxWidth: .infinity)
                             .onChange(of: selectedProvider) { newValue in
                                 hasChanges = true
                                 if let provider = aiProviders.first(where: { $0.id == newValue }),
@@ -5274,12 +6712,14 @@ struct SettingsView: View {
                                 }
                             }
                         }
+                        .frame(maxWidth: .infinity, alignment: .leading)
                         
                         // Model Picker
                         HStack(spacing: 8) {
                             Text("Model:")
-                                .font(.system(size: 12, weight: .semibold))
+                                .font(.system(size: 12, weight: .medium))
                                 .foregroundColor(.secondary)
+                                .fixedSize()
                             
                             Picker("", selection: $selectedModel) {
                                 if let provider = aiProviders.first(where: { $0.id == selectedProvider }) {
@@ -5295,14 +6735,16 @@ struct SettingsView: View {
                             }
                             .labelsHidden()
                             .pickerStyle(.menu)
+                            .frame(maxWidth: .infinity)
                             .onChange(of: selectedModel) { _ in hasChanges = true }
                         }
+                        .frame(maxWidth: .infinity, alignment: .leading)
                     }
                     
-                    Divider()
+                    Divider().opacity(0.6)
                     
-                    Text("Enter API Key for Providers:")
-                        .font(.system(size: 11, weight: .bold))
+                    Text("Provider API Keys")
+                        .font(.system(size: 11, weight: .semibold))
                         .foregroundColor(.secondary)
                     
                     VStack(spacing: 6) {
@@ -5311,12 +6753,15 @@ struct SettingsView: View {
                         }
                     }
                 }
-                .padding(18)
+                .padding(16)
                 .background(
-                    RoundedRectangle(cornerRadius: 10, style: .continuous)
+                    RoundedRectangle(cornerRadius: 8, style: .continuous)
                         .fill(Color(nsColor: .controlBackgroundColor))
-                        .overlay(RoundedRectangle(cornerRadius: 10, style: .continuous).stroke(Color.primary.opacity(0.06), lineWidth: 1))
+                        .overlay(RoundedRectangle(cornerRadius: 8, style: .continuous).stroke(Color.primary.opacity(0.08), lineWidth: 1))
                 )
+            } else if aiKeyMode == "subscription" {
+                // Web Subscription Panel (ChatGPT Plus/Team, Claude Pro, Zhipu GLM)
+                subscriptionAISettingsPanel
             } else {
                 // Local LLM Panel
                 localLLMSettingsPanel
@@ -5450,6 +6895,342 @@ struct SettingsView: View {
         .cornerRadius(4)
     }
     
+    @State private var subscriptionTokenInputs: [String: String] = [:]
+    @State private var subscriptionEmailInputs: [String: String] = [:]
+    @State private var expandedProviderGuide: [String: Bool] = [:]
+    @State private var copiedSnippetProvider: String? = nil
+    @State private var webLoginProvider: SubscriptionProviderType? = nil
+
+    private var subscriptionAISettingsPanel: some View {
+        VStack(alignment: .leading, spacing: 16) {
+            // Header
+            HStack(spacing: 10) {
+                Image(systemName: "sparkles.rectangle.stack")
+                    .font(.system(size: 16))
+                    .foregroundColor(.orange)
+                VStack(alignment: .leading, spacing: 2) {
+                    Text("Web Subscription Mode (No API Billing)")
+                        .font(.system(size: 13, weight: .semibold))
+                    Text("Connect your active ChatGPT, Claude, Gemini, DeepSeek, or GitHub Copilot accounts without API usage fees.")
+                        .font(.system(size: 11))
+                        .foregroundColor(.secondary)
+                }
+                Spacer()
+                HStack(spacing: 8) {
+                    if subscriptionAuth.hasAnyConnected {
+                        Button(role: .destructive) {
+                            subscriptionAuth.clearAllAccounts()
+                        } label: {
+                            Text("Disconnect All")
+                                .font(.system(size: 11))
+                        }
+                        .controlSize(.small)
+                    }
+
+                    Button {
+                        Task {
+                            await subscriptionAuth.detectLocalCLISessions()
+                        }
+                    } label: {
+                        HStack(spacing: 5) {
+                            Image(systemName: "wand.and.stars")
+                                .font(.system(size: 10))
+                            Text("Auto-detect & Verify CLI Auth")
+                                .font(.system(size: 11, weight: .medium))
+                        }
+                    }
+                    .buttonStyle(.borderedProminent)
+                    .controlSize(.small)
+                }
+            }
+            .padding(.bottom, 2)
+
+            if !subscriptionAuth.lastDetectionMessage.isEmpty {
+                HStack(spacing: 8) {
+                    Image(systemName: subscriptionAuth.detectedSessionCount > 0 ? "checkmark.circle.fill" : "info.circle")
+                        .font(.system(size: 12))
+                        .foregroundColor(subscriptionAuth.detectedSessionCount > 0 ? .green : .secondary)
+                    Text(subscriptionAuth.lastDetectionMessage)
+                        .font(.system(size: 11))
+                        .foregroundColor(.secondary)
+                    Spacer()
+                }
+                .padding(8)
+                .background(RoundedRectangle(cornerRadius: 6).fill(Color.primary.opacity(0.04)))
+            }
+
+            Divider().opacity(0.6)
+
+            // Active Subscription Model Selection Card
+            VStack(alignment: .leading, spacing: 10) {
+                HStack {
+                    Image(systemName: "cpu")
+                        .font(.system(size: 13, weight: .semibold))
+                        .foregroundColor(.blue)
+                    Text("Active Subscription Model")
+                        .font(.system(size: 12, weight: .semibold))
+                    Spacer()
+                    if subscriptionAuth.hasAnyConnected {
+                        Text("\(subscriptionAuth.connectedModelInfos().count) Models Available")
+                            .font(.system(size: 10, weight: .medium, design: .monospaced))
+                            .foregroundColor(.secondary)
+                            .padding(.horizontal, 6)
+                            .padding(.vertical, 2)
+                            .background(Color.primary.opacity(0.04))
+                            .cornerRadius(4)
+                    }
+                }
+                
+                if subscriptionAuth.hasAnyConnected {
+                    let connectedModels = subscriptionAuth.connectedModelInfos()
+                    
+                    VStack(alignment: .leading, spacing: 8) {
+                        Picker("", selection: Binding(
+                            get: {
+                                if connectedModels.contains(where: { $0.modelID == selectedModel }) {
+                                    return selectedModel
+                                }
+                                return connectedModels.first?.modelID ?? ""
+                            },
+                            set: { newModelID in
+                                selectedModel = newModelID
+                                if let info = connectedModels.first(where: { $0.modelID == newModelID }) {
+                                    selectedProvider = info.aiProviderID
+                                    appState.aiModel = info.modelID
+                                    appState.aiProvider = info.aiProviderID
+                                    subscriptionAuth.activeProvider = info.provider
+                                    UserDefaults.standard.set(info.provider.rawValue, forKey: "subscriptionActiveProvider")
+                                    UserDefaults.standard.set("subscription", forKey: "aiKeyMode")
+                                    hasChanges = true
+                                }
+                            }
+                        )) {
+                            ForEach(subscriptionAuth.connectedProviders()) { prov in
+                                Section(prov.displayName) {
+                                    ForEach(prov.modelInfos) { m in
+                                        HStack {
+                                            Text(m.name)
+                                            if !m.badge.isEmpty {
+                                                Text("[\(m.badge)]")
+                                            }
+                                        }
+                                        .tag(m.modelID)
+                                    }
+                                }
+                            }
+                        }
+                        .labelsHidden()
+                        .pickerStyle(.menu)
+                        
+                        // Active Model Detail Banner
+                        if let activeInfo = subscriptionAuth.findModel(id: selectedModel) {
+                            let account = subscriptionAuth.getAccount(activeInfo.provider)
+                            HStack(spacing: 8) {
+                                Image(systemName: "checkmark.seal.fill")
+                                    .font(.system(size: 11))
+                                    .foregroundColor(.green)
+                                VStack(alignment: .leading, spacing: 2) {
+                                    HStack(spacing: 6) {
+                                        Text(activeInfo.name)
+                                            .font(.system(size: 11, weight: .semibold))
+                                        Text("[\(activeInfo.badge)]")
+                                            .font(.system(size: 9, weight: .bold, design: .monospaced))
+                                            .foregroundColor(.blue)
+                                        Text("via \(activeInfo.provider.displayName)")
+                                            .font(.system(size: 10))
+                                            .foregroundColor(.secondary)
+                                    }
+                                    Text(activeInfo.description)
+                                        .font(.system(size: 10))
+                                        .foregroundColor(.secondary)
+                                }
+                                Spacer()
+                                if let account = account {
+                                    Text(account.emailOrUser)
+                                        .font(.system(size: 9, design: .monospaced))
+                                        .foregroundColor(.secondary)
+                                        .padding(.horizontal, 6)
+                                        .padding(.vertical, 2)
+                                        .background(Color.primary.opacity(0.04))
+                                        .cornerRadius(4)
+                                }
+                            }
+                            .padding(10)
+                            .background(RoundedRectangle(cornerRadius: 6).fill(Color.green.opacity(0.06)))
+                            .overlay(RoundedRectangle(cornerRadius: 6).stroke(Color.green.opacity(0.2), lineWidth: 1))
+                        }
+                    }
+                } else {
+                    HStack(spacing: 8) {
+                        Image(systemName: "exclamationmark.triangle.fill")
+                            .font(.system(size: 12))
+                            .foregroundColor(.orange)
+                        Text("No active web subscriptions connected. Sign in or connect at least one account below to enable subscription models.")
+                            .font(.system(size: 11))
+                            .foregroundColor(.secondary)
+                        Spacer()
+                    }
+                    .padding(10)
+                    .background(RoundedRectangle(cornerRadius: 6).fill(Color.orange.opacity(0.06)))
+                    .overlay(RoundedRectangle(cornerRadius: 6).stroke(Color.orange.opacity(0.2), lineWidth: 1))
+                }
+            }
+            .padding(12)
+            .background(RoundedRectangle(cornerRadius: 8).fill(Color.primary.opacity(0.03)))
+            .overlay(RoundedRectangle(cornerRadius: 8).stroke(Color.primary.opacity(0.08), lineWidth: 1))
+
+            Divider().opacity(0.6)
+
+            // Provider Cards
+            VStack(spacing: 12) {
+                ForEach(SubscriptionProviderType.allCases) { provider in
+                    let isConn = subscriptionAuth.isConnected(provider)
+                    let account = subscriptionAuth.getAccount(provider)
+                    let isGuideExpanded = expandedProviderGuide[provider.rawValue] ?? false
+                    
+                    VStack(alignment: .leading, spacing: 10) {
+                        // Top Bar: Brand, Info, and Status
+                        HStack(spacing: 10) {
+                            AIProviderBrandIcon(provider: provider.providerIcon, size: 22)
+                            VStack(alignment: .leading, spacing: 2) {
+                                HStack(spacing: 6) {
+                                    Text(provider.displayName)
+                                        .font(.system(size: 12, weight: .semibold))
+                                    if isConn {
+                                        Text("ACTIVE")
+                                            .font(.system(size: 9, weight: .bold))
+                                            .foregroundColor(.green)
+                                            .padding(.horizontal, 5)
+                                            .padding(.vertical, 1)
+                                            .background(Color.green.opacity(0.12))
+                                            .cornerRadius(3)
+                                        
+                                        if let src = account?.source, !src.isEmpty {
+                                            Text(src)
+                                                .font(.system(size: 9, weight: .medium))
+                                                .foregroundColor(.secondary)
+                                                .padding(.horizontal, 4)
+                                                .padding(.vertical, 1)
+                                                .background(Color.primary.opacity(0.05))
+                                                .cornerRadius(3)
+                                        }
+                                    }
+                                }
+                                Text(account?.emailOrUser ?? provider.helpInstruction)
+                                    .font(.system(size: 10))
+                                    .foregroundColor(.secondary)
+                                    .lineLimit(2)
+                            }
+                            Spacer()
+                        }
+                            
+                        // Action Row
+                        HStack(spacing: 8) {
+                            if isConn {
+                                HStack(spacing: 6) {
+                                    Image(systemName: "checkmark.shield.fill")
+                                        .foregroundColor(.green)
+                                        .font(.system(size: 13))
+                                    Text("Auto-Synced & Ready")
+                                        .font(.system(size: 11.5, weight: .medium))
+                                        .foregroundColor(.green)
+                                }
+                                
+                                Spacer()
+                                
+                                Button("Disconnect") {
+                                    subscriptionAuth.disconnect(provider: provider)
+                                    hasChanges = true
+                                }
+                                .buttonStyle(.bordered)
+                                .controlSize(.small)
+                            } else {
+                                // 🌟 Primary 1-Click Sign In & Auto-Sync
+                                Button {
+                                    webLoginProvider = provider
+                                } label: {
+                                    HStack(spacing: 6) {
+                                        Image(systemName: "person.crop.circle.badge.checkmark")
+                                            .font(.system(size: 12))
+                                        Text("1-Click Sign In (Auto-Detect)")
+                                            .font(.system(size: 12, weight: .bold))
+                                    }
+                                    .padding(.horizontal, 8)
+                                    .padding(.vertical, 4)
+                                }
+                                .buttonStyle(.borderedProminent)
+                                .tint(.accentColor)
+                                .controlSize(.regular)
+                                
+                                Spacer()
+                                
+                                // Advanced manual toggle (Hidden by default for non-technical users)
+                                Button {
+                                    withAnimation(.easeInOut(duration: 0.15)) {
+                                        expandedProviderGuide[provider.rawValue] = !isGuideExpanded
+                                    }
+                                } label: {
+                                    HStack(spacing: 3) {
+                                        Image(systemName: isGuideExpanded ? "chevron.up" : "gearshape")
+                                            .font(.system(size: 9.5))
+                                        Text(isGuideExpanded ? "Close Manual" : "Manual / Dev Mode")
+                                            .font(.system(size: 10))
+                                    }
+                                    .foregroundColor(.secondary)
+                                }
+                                .buttonStyle(.plain)
+                            }
+                        }
+                        .padding(.top, 2)
+
+                        // Advanced Manual Token Entry (Only when user explicitly clicks "Manual / Dev Mode")
+                        if !isConn && isGuideExpanded {
+                            VStack(spacing: 8) {
+                                HStack(spacing: 8) {
+                                    SecureField("Paste Token / Cookie manually (optional)", text: Binding(
+                                        get: { subscriptionTokenInputs[provider.rawValue] ?? "" },
+                                        set: { subscriptionTokenInputs[provider.rawValue] = $0 }
+                                    ))
+                                    .textFieldStyle(.roundedBorder)
+                                    .font(.system(size: 11))
+                                    
+                                    Button("Connect") {
+                                        let token = subscriptionTokenInputs[provider.rawValue] ?? ""
+                                        let email = subscriptionEmailInputs[provider.rawValue] ?? ""
+                                        if !token.isEmpty {
+                                            subscriptionAuth.saveAccount(provider: provider, emailOrUser: email, sessionToken: token, source: "Manual Input")
+                                            subscriptionTokenInputs[provider.rawValue] = ""
+                                            hasChanges = true
+                                        }
+                                    }
+                                    .buttonStyle(.borderedProminent)
+                                    .controlSize(.small)
+                                    .disabled((subscriptionTokenInputs[provider.rawValue] ?? "").isEmpty)
+                                }
+                            }
+                            .padding(.top, 4)
+                        }
+                    }
+                    .padding(12)
+                    .background(
+                        RoundedRectangle(cornerRadius: 8, style: .continuous)
+                            .fill(Color.primary.opacity(0.03))
+                            .overlay(
+                                RoundedRectangle(cornerRadius: 8, style: .continuous)
+                                    .stroke(isConn ? Color.green.opacity(0.3) : Color.primary.opacity(0.08), lineWidth: 1)
+                            )
+                    )
+                }
+            }
+        }
+        .padding(16)
+        .background(
+            RoundedRectangle(cornerRadius: 8, style: .continuous)
+                .fill(Color(nsColor: .controlBackgroundColor))
+                .overlay(RoundedRectangle(cornerRadius: 8, style: .continuous).stroke(Color.primary.opacity(0.08), lineWidth: 1))
+        )
+    }
+
     @ObservedObject private var localLLM = LocalLLMService.shared
     
     @State private var showModelBrowser = false
@@ -5600,34 +7381,41 @@ struct SettingsView: View {
         let isDefault = selectedProvider == provider.id
         
         return HStack(spacing: 12) {
-            // Col 1: Provider Info (Fixed 190pt)
+            // Col 1: Provider Info (Fixed 195pt) with authentic brand icon
             HStack(spacing: 10) {
-                Image(systemName: provider.icon)
-                    .font(.system(size: 13))
-                    .foregroundColor(provider.color)
-                    .frame(width: 28, height: 28)
-                    .background(provider.color.opacity(0.12))
-                    .clipShape(RoundedRectangle(cornerRadius: 6))
+                ZStack {
+                    RoundedRectangle(cornerRadius: 6, style: .continuous)
+                        .fill(Color.primary.opacity(0.04))
+                        .frame(width: 28, height: 28)
+                        .overlay(
+                            RoundedRectangle(cornerRadius: 6, style: .continuous)
+                                .stroke(Color.primary.opacity(0.08), lineWidth: 0.5)
+                        )
+                    AIProviderBrandIcon(provider: provider.id, size: 18)
+                }
                 
                 VStack(alignment: .leading, spacing: 2) {
-                    HStack(spacing: 4) {
+                    HStack(spacing: 5) {
                         Text(provider.name)
                             .font(.system(size: 12, weight: .semibold))
+                            .lineLimit(1)
                         if isDefault {
-                            Text("DEFAULT")
+                            Text("ACTIVE")
                                 .font(.system(size: 8, weight: .bold))
-                                .foregroundColor(.accentColor)
-                                .padding(.horizontal, 4).padding(.vertical, 1)
-                                .background(Color.accentColor.opacity(0.12))
+                                .foregroundColor(.primary)
+                                .padding(.horizontal, 4).padding(.vertical, 1.5)
+                                .background(Color.primary.opacity(0.1))
                                 .cornerRadius(3)
                         }
                     }
                     Text(provider.endpoint)
-                        .font(.system(size: 9))
+                        .font(.system(size: 9.5, design: .monospaced))
                         .foregroundColor(.secondary)
+                        .lineLimit(1)
+                        .truncationMode(.middle)
                 }
             }
-            .frame(width: 190, alignment: .leading)
+            .frame(width: 195, alignment: .leading)
             
             // Col 2: Key Input Field (Flexible)
             HStack(spacing: 8) {
@@ -5644,7 +7432,7 @@ struct SettingsView: View {
                 Button {
                     showAPIKey[provider.id] = !isVisible
                 } label: {
-                    Image(systemName: isVisible ? "eye.slash.fill" : "eye.fill")
+                    Image(systemName: isVisible ? "eye.slash" : "eye")
                         .font(.system(size: 11))
                         .foregroundColor(.secondary)
                 }
@@ -5654,52 +7442,51 @@ struct SettingsView: View {
             .padding(.horizontal, 10)
             .padding(.vertical, 6)
             .background(
-                RoundedRectangle(cornerRadius: 6)
+                RoundedRectangle(cornerRadius: 6, style: .continuous)
                     .fill(Color(nsColor: .textBackgroundColor))
-                    .overlay(RoundedRectangle(cornerRadius: 6).stroke(Color.primary.opacity(0.08), lineWidth: 1))
+                    .overlay(RoundedRectangle(cornerRadius: 6, style: .continuous).stroke(Color.primary.opacity(0.08), lineWidth: 1))
             )
             
-            // Col 3: Status Icon (Fixed 24pt)
-            Group {
-                if hasKey {
-                    Image(systemName: "checkmark.circle.fill")
-                        .foregroundColor(.green)
-                        .font(.system(size: 14))
-                } else {
-                    Image(systemName: "circle.dashed")
-                        .foregroundColor(.secondary.opacity(0.35))
-                        .font(.system(size: 14))
-                }
-            }
-            .frame(width: 24)
-            
-            // Col 4: Action (Fixed 44pt)
-            Group {
-                if hasKey && !isDefault {
+            // Col 3: Status / Action (Fixed 72pt, perfectly aligned)
+            HStack(spacing: 6) {
+                if isDefault {
+                    HStack(spacing: 4) {
+                        Image(systemName: "checkmark.circle.fill")
+                            .foregroundColor(.green)
+                            .font(.system(size: 12))
+                        Text("Active")
+                            .font(.system(size: 10, weight: .semibold))
+                            .foregroundColor(.green)
+                    }
+                } else if hasKey {
                     Button {
                         selectedProvider = provider.id
                         if let first = provider.models.first { selectedModel = first.id }
                         hasChanges = true
                     } label: {
-                        Text("Use")
-                            .font(.system(size: 10, weight: .semibold))
-                            .foregroundColor(.accentColor)
-                            .padding(.horizontal, 8).padding(.vertical, 4)
-                            .background(Color.accentColor.opacity(0.12))
+                        Text("Select")
+                            .font(.system(size: 10.5, weight: .medium))
+                            .foregroundColor(.primary)
+                            .padding(.horizontal, 10).padding(.vertical, 3.5)
+                            .background(Color.primary.opacity(0.08))
                             .cornerRadius(4)
+                            .overlay(RoundedRectangle(cornerRadius: 4).stroke(Color.primary.opacity(0.12), lineWidth: 0.5))
                     }
                     .buttonStyle(.plain)
                 } else {
-                    Spacer().frame(width: 44)
+                    Image(systemName: "circle.dashed")
+                        .foregroundColor(.secondary.opacity(0.35))
+                        .font(.system(size: 12))
                 }
             }
-            .frame(width: 44)
+            .frame(width: 72, alignment: .trailing)
         }
+        .frame(minHeight: 38, maxHeight: 38)
         .padding(.horizontal, 12)
-        .padding(.vertical, 7)
+        .padding(.vertical, 4)
         .background(
-            RoundedRectangle(cornerRadius: 8)
-                .fill(isDefault ? Color.accentColor.opacity(0.05) : Color.primary.opacity(0.02))
+            RoundedRectangle(cornerRadius: 6, style: .continuous)
+                .fill(isDefault ? Color.primary.opacity(0.05) : Color.clear)
         )
     }
     
@@ -5761,7 +7548,8 @@ struct SettingsView: View {
             providerKeys["openai"] = legacyKey
         }
         apiKey = providerKeys[selectedProvider] ?? ""
-        aiKeyMode = UserDefaults.standard.string(forKey: "aiKeyMode") ?? "cloud"
+        let savedKeyMode = UserDefaults.standard.string(forKey: "aiKeyMode")
+        aiKeyMode = savedKeyMode ?? "direct"
         microRentToken = UserDefaults.standard.string(forKey: "microRentToken") ?? ""
         dotminiLicenseKey = UserDefaults.standard.string(forKey: "dotminiLicenseKey") ?? ""
     }
@@ -6558,11 +8346,6 @@ struct StudioSheetsModifier: ViewModifier {
             }
             .sheet(isPresented: $appState.showingDatabaseStudio) {
                 DatabaseStudioView()
-                    .environmentObject(appState)
-                    .frame(minWidth: 1000, minHeight: 700)
-            }
-            .sheet(isPresented: $appState.showingAPIClient) {
-                APIClientView()
                     .environmentObject(appState)
                     .frame(minWidth: 1000, minHeight: 700)
             }

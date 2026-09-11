@@ -16,18 +16,27 @@ enum AgentDomain: String {
     case science
 }
 
+/// Keeps the scientific research workspace independent from the software
+/// editor/agent workspace.  The UI can reuse the same renderer without ever
+/// mixing conversations, project instructions, or recalled memories.
+enum AgentSessionScope: String {
+    case editor
+    case science
+}
+
 // MARK: - Agent Service
 
 @MainActor
 class AgentService: ObservableObject {
     static let shared = AgentService()
-    
+
     @Published var messages: [AgentMessageModel] = []
     @Published var isLoading = false
     @Published var pendingChanges: [PendingChangeModel] = []
     @Published var editorContext: EditorContextModel?
     @Published var currentToolExecution: String? = nil
     @Published var domain: AgentDomain = .software
+    @Published private(set) var activeScope: AgentSessionScope = .editor
     @Published private(set) var scienceProjectContext: ScienceProjectContext?
     @Published private(set) var isIndexingScienceProject = false
     
@@ -52,6 +61,7 @@ class AgentService: ObservableObject {
     @Published var chatSessions: [ChatSession] = []
     @Published var activeChatId: String?
     @Published var showChatSidebar: Bool = false
+    @Published var contextLimitReached: Bool = false
     var currentWorkspace: String? { toolBox.workspaceRoot }
     
     // Services
@@ -59,21 +69,52 @@ class AgentService: ObservableObject {
     private let toolBox = AgentToolBox.shared
     private let memoryService = AgentMemoryService.shared
     private let tokenOptimizer = TokenOptimizer.shared
-    
-    private let chatStorageKey = "microcode_agent_chats"
+    private let agentKernel = AgentKernelClient.shared
+    private var activeKernelRunID: String?
+    var currentKernelRunID: String? { activeKernelRunID }
+
+    private let editorChatStorageKey = "microcode_agent_chats"
+    private let scienceChatStorageKey = "microcode_science_chats"
+    private let editorActiveChatStorageKey = "microcode_active_chat_id"
+    private let scienceActiveChatStorageKey = "microcode_science_active_chat_id"
+    private let editorWorkspaceStorageKey = "microcode_editor_agent_workspace"
+    private let scienceWorkspaceStorageKey = "microcode_science_workspace"
+    private var cachedScienceProjectContext: ScienceProjectContext?
+    private var scienceIndexTask: Task<Void, Never>?
+    private var scienceIndexGeneration = UUID()
+
+    private var chatStorageKey: String {
+        activeScope == .science ? scienceChatStorageKey : editorChatStorageKey
+    }
+
+    private var activeChatStorageKey: String {
+        activeScope == .science ? scienceActiveChatStorageKey : editorActiveChatStorageKey
+    }
+
+    private var workspaceStorageKey: String {
+        activeScope == .science ? scienceWorkspaceStorageKey : editorWorkspaceStorageKey
+    }
+
+    private var durableRunStorageKey: String {
+        "microcode.agent.kernel.active.\(activeScope.rawValue)"
+    }
     
     // Agent configuration
-    private var maxToolIterations: Int {
-        let val = UserDefaults.standard.integer(forKey: "agentMaxIterations")
-        // 0 means Unlimited (uses 1000 safety bound to avoid accidental infinite loop)
-        if val <= 0 { return 1000 }
-        return val
+    /// Agent turns are checkpointed by the Rust kernel and may be safely
+    /// retried. Runs continuously 24/7 without artificial turn caps until
+    /// objective is completed or conversation context limit is reached.
+    private var maxToolIterations: Int? {
+        nil
     }
-    private let maxContextChars = 1200000
+    private let maxHistoryChars = 8_000_000
+    private let maxMessageHistoryChars = 4_000_000
+    private let maxResidentMessages = 1_000
+    private let transcriptPageSize = 48
+    private let transcriptStore = AgentTranscriptStore.shared
     private var cachedSemanticContext: (workspace: String, value: String, date: Date)?
     private let semanticContextTTL: TimeInterval = 120
     private var lastProvider = "gemini"
-    private var lastModel = "gemini-3.6-flash"
+    private var lastModel = "gemini-2.5-flash"
     
     // Token stats (read from optimizer)
     var tokenStats: TokenUsageStats { tokenOptimizer.stats }
@@ -87,6 +128,11 @@ class AgentService: ObservableObject {
         agentPhase = .idle
         currentToolExecution = nil
         logActivity(.info, "Generation stopped by user")
+        if let runID = activeKernelRunID {
+            Task { await agentKernel.cancel(runID: runID) }
+        }
+        activeKernelRunID = nil
+        UserDefaults.standard.removeObject(forKey: durableRunStorageKey)
         
         // Append stop marker to last AI message
         if let lastIdx = messages.lastIndex(where: { $0.role == .assistant }) {
@@ -144,7 +190,12 @@ class AgentService: ObservableObject {
     
     // MARK: - System Prompt (Dual Mode: Chat + Agent)
     
-    private func buildSystemPrompt(for message: String, queryEmbedding: [Float]? = nil) -> String {
+    private func buildSystemPrompt(
+        for message: String,
+        provider: StreamableAIProvider,
+        model: String,
+        queryEmbedding: [Float]? = nil
+    ) -> String {
         let complexity = tokenOptimizer.detectComplexity(message)
         let budget = TokenBudget.forTask(complexity)
         let isChatMode = domain == .software && complexity == .chat
@@ -229,13 +280,37 @@ class AgentService: ObservableObject {
             11. Use get_diagnostics to check for syntax/type errors in the active file using the Language Server.
             12. CRITICAL SAFETY GUARD: NEVER delete user files or directories blindly. Destructive commands like `rm -rf`, `find . -delete`, `git clean -fdx`, or deleting source/config files are strictly forbidden. Always make safe, targeted modifications.
             13. TERMINAL RUNNER: You have full access to run commands with `shell`. It runs in the native macOS environment and mirrors directly into the IDE Terminal/Console. Always run build, test, and diagnostics commands to verify code.
+            14. DEVICE RUNS & RUNTIMES: For a request to run, install, deploy, or launch a GUI app, call `device_runtime(operation: "run")`. `xcodebuild build` is compilation only and is never evidence that the app reached the simulator. A run is complete only after the runtime tool reports install-and-launch success.
+            15. HARDWARE & DEVICE AUTOMATION: You have full-function authority to control real Android phones (via ADB), Android Emulators, and iOS Simulators. Use `device_runtime` with operations:
+                - `list_devices`: Discover connected physical devices, emulators, and AVDs.
+                - `tap`: Send real touch events at pixel coordinates (x, y).
+                - `swipe`: Send natural swipe/scroll gestures (x, y, x2, y2, duration).
+                - `type_text`: Type strings directly into focused input fields.
+                - `key_event`: Dispatch hardware buttons (HOME, BACK, ENTER, POWER, RECENTS).
+                - `screenshot`: Capture high-resolution visual screenshots for verification with `inspect_image`.
+                - `launch_app` & `install_app`: Manage app lifecycle on device.
+                - `adb_shell`: Run raw ADB shell inspection commands (e.g. dumpsys, logcat, pm) on physical/emulator targets.
+            16. LIVE EMBEDDED PREVIEW & WEBAPP CONTROL: When developing, fixing, or modifying web apps (React, Next.js, Vite, Vue, HTML), mobile apps, or when requested to show work, call `preview_control` to open or reload the live preview dock beside Chat.
+                - `open`: Opens preview dock (e.g. `preview_control(action: "open", mode: "web", url: "http://localhost:3000")`).
+                - `reload`: Triggers an immediate refresh of the rendered page.
+                - `set_url`: Navigates to a specific localhost or web address.
+                - `set_viewport`: Switches layout viewport (`responsive`, `desktop`, `tablet`, `mobile`) to verify UI responsiveness.
+                - `switch_mode`: Switches dock between `web`, `ios`, and `android`.
+            17. MODEL CONTEXT PROTOCOL (MCP) TOOL HARNESS:
+                - MicroCode provides an active local MCP Server containing 35+ tools under the `mcp__local__*` namespace.
+                - Tools include `web_fetch`, `cell_create`, `cell_run`, `playground_run`, `ardium_*`, `computer_use_*`, `device_*`, `adb_execute`, and more.
+                - EVERY AI Agent and SubAgent in MicroCode has full access to all MCP tools. You and your SubAgents can invoke them directly at any time.
             
-            ## Planning
-            For complex tasks, create a brief plan FIRST:
-            1. State the goal
-            2. List the steps (numbered)
-            3. Execute each step with tool calls
-            4. Report completion with summary
+            ## Planning & Task Partitioning
+            For non-trivial or multi-step tasks, create a structured DAG plan FIRST:
+            1. Call agent_plan(action: "set") with a dependency DAG, explicit owner per node, and deterministic verification criteria.
+            2. MULTI-MODEL COMBO & STRICT OWNERSHIP:
+               - You can combine multiple models (e.g. Claude + ChatGPT, Gemini + Claude) across SubAgents via `invoke_subagent(type_name: ..., model: ...)`.
+               - NEVER duplicate work or fight over identical tasks: Each plan node must have ONE unique owner (e.g. `architect`, `frontend_engineer`, `backend_engineer`, `bug_hunter`, `main`).
+               - Only execute nodes where dependencies are verified and satisfied (`readyNodes`).
+               - Subagents only execute their designated node scope; when completed, mark verified via `agent_plan(action: "complete")`.
+            3. Execute each ready node with tool calls, then call agent_plan(action: "complete") only after verification passes.
+            4. Never mark a plan or task complete from prose alone.
             
             ## Workflow: Modify Code
             1. file_read → 2. replace_in_file/patch_file → 3. shell (verify) → 4. Report
@@ -245,11 +320,11 @@ class AgentService: ObservableObject {
             - Once you complete a task, YOU MUST edit `.microcode/task.md` to check it off (change `[ ]` to `[x]`).
             - Always follow instructions and rules declared in `.microcode/agent.md`.
             
-            ## SubAgent Orchestration & Multi-Agent Delegation
-            You have full authority to assess complex tasks and deploy specialized SubAgents:
-            - Built-in Archetypes: `architect` (system design), `frontend_engineer` (React, Tailwind, SwiftUI), `backend_engineer` (APIs, databases), `bug_hunter` (diagnostics & repairs), `test_runner` (test suites), `security_auditor` (security review).
-            - `invoke_subagent`: Spawns concurrent background subagents to work on designated subtasks.
-            - `define_subagent`: Dynamically creates custom subagent types with scoped system prompts.
+            ## SubAgent Orchestration & Multi-Model Combo Delegation
+            You have full authority to assess complex tasks and deploy specialized SubAgents with tailored models:
+            - Built-in Archetypes: `architect` (system design), `frontend_engineer` (UI/UX), `backend_engineer` (APIs, databases), `bug_hunter` (diagnostics & repairs), `test_runner` (test suites), `security_auditor` (security review).
+            - `invoke_subagent`: Spawns concurrent background subagents. You may specify `model` (e.g. `claude-3-7-sonnet`, `gpt-4o`, `gemini-2.5-flash`) for multi-model collaboration.
+            - `define_subagent`: Dynamically creates custom subagent types with scoped system prompts and custom models.
             - `manage_subagents`: Inspects live subagent statuses or terminates subagents (`kill`, `kill_all`).
             - `send_message`: Sends directives or context to a running subagent.
             
@@ -262,8 +337,9 @@ class AgentService: ObservableObject {
             """
         }
         
-        // Inject editor context (compressed)
-        if !isChatMode, let ctx = editorContext {
+        // Editor/LSP context belongs only to the software agent. Scientific
+        // requests use the scientific workspace index and explicit artifacts.
+        if domain == .software, !isChatMode, let ctx = editorContext {
             var editorInfo = "\n\n## Editor"
             if let file = ctx.activeFile { editorInfo += "\nFile: \(file)" }
             if let lang = ctx.language { editorInfo += " (\(lang))" }
@@ -291,7 +367,7 @@ class AgentService: ObservableObject {
             prompt += editorInfo
         }
         
-        // Workspace root
+        // Workspace root is stored per session scope.
         if let root = toolBox.workspaceRoot {
             prompt += "\n\nWorkspace: \(root)"
         }
@@ -301,28 +377,45 @@ class AgentService: ObservableObject {
         }
         
         // Inject semantic context (if available)
-        if !isChatMode, let semanticContext = semanticContext() {
+        if domain == .software, !isChatMode, let semanticContext = semanticContext() {
             prompt += "\n\n## Semantic Context\n\(semanticContext)"
         }
         
         // Inject relevant memories (with cross-chat recall)
         if let chatId = activeChatId {
             let currentChatMemories = memoryService.recallMemories(query: message, queryEmbedding: queryEmbedding, limit: 2, includeCurrentChat: true)
-            let crossChatMemories = memoryService.recallCrossChatMemories(query: message, queryEmbedding: queryEmbedding, currentChatId: chatId, limit: 2)
+            // Research evidence must never pull a remembered coding task (or
+            // another research project) into the current scientific chat.
+            let crossChatMemories = domain == .science
+                ? []
+                : memoryService.recallCrossChatMemories(query: message, queryEmbedding: queryEmbedding, currentChatId: chatId, limit: 2)
             let allMemories = currentChatMemories + crossChatMemories
             if !allMemories.isEmpty {
                 prompt += "\n\n## Memory\n\(memoryService.formatMemoriesForContext(allMemories, maxTokens: budget.maxContextTokens / 4))"
             }
+            let rollingSummary = memoryService.formatSummariesForContext(
+                chatId: chatId,
+                maxTokens: max(250, budget.maxContextTokens / 6)
+            )
+            if !rollingSummary.isEmpty {
+                prompt += "\n\n## \(rollingSummary)"
+            }
+        }
+
+        // Shared tasks are explicit, reviewable contracts. Never import another
+        // person's raw prompt or their private transcript into this agent run.
+        if domain == .software, let teamTaskContext = TeamTaskService.shared.contextForSelectedTask() {
+            prompt += "\n\n\(teamTaskContext)"
         }
         
         // Inject agent.md (compressed)
-        if !isChatMode, let agentMd = agentMdContent, !agentMd.isEmpty {
+        if domain == .software, !isChatMode, let agentMd = agentMdContent, !agentMd.isEmpty {
             let compressed = tokenOptimizer.compressText(agentMd, targetTokens: 800)
             prompt += "\n\n## agent.md\n\(compressed)"
         }
         
         // Inject task.md (compressed)
-        if !isChatMode, let taskMd = taskMdContent, !taskMd.isEmpty {
+        if domain == .software, !isChatMode, let taskMd = taskMdContent, !taskMd.isEmpty {
             let compressed = tokenOptimizer.compressText(taskMd, targetTokens: 500)
             prompt += "\n\n## task.md\n\(compressed)"
         }
@@ -332,16 +425,37 @@ class AgentService: ObservableObject {
         if !skillsSnippet.isEmpty {
             prompt += skillsSnippet
         }
+
+        prompt += "\n\n## Provider Harness Contract\n\(providerHarnessProfile(for: provider, model: model))"
         
         // Apply final compression to system prompt
         return tokenOptimizer.compressSystemPrompt(prompt, budget: budget.maxSystemTokens)
+    }
+
+    private func providerHarnessProfile(for provider: StreamableAIProvider, model: String) -> String {
+        let common = """
+        - Built-in tools and active MicroCode skills are the source of truth; use them instead of merely describing an action.
+        - Emit a tool call only for a necessary action. When the answer is complete and no action is needed, stop.
+        - Do not simulate tool output, repeat a completed action, or expose private chain-of-thought. Give a concise progress update instead.
+        - Keep each tool batch small, inspect before edits, and verify after edits.
+        """
+
+        switch provider {
+        case .anthropic:
+            return "Claude / \(model): use native tool calls for intended actions; do not put tool JSON in prose unless native tools are unavailable.\n\(common)"
+        case .deepseek:
+            return "DeepSeek / \(model): prefer the OpenAI-compatible structured tool interface and use a JSON fallback only when native calls are unavailable.\n\(common)"
+        default:
+            return "\(provider.rawValue) / \(model):\n\(common)"
+        }
     }
     
     // MARK: - Init
     
     init() {
         loadChats()
-        let lastActiveId = UserDefaults.standard.string(forKey: "microcode_active_chat_id")
+        activeKernelRunID = UserDefaults.standard.string(forKey: durableRunStorageKey)
+        let lastActiveId = UserDefaults.standard.string(forKey: activeChatStorageKey)
         if let last = lastActiveId, let matched = chatSessions.first(where: { $0.id == last }) {
             activeChatId = matched.id
             messages = matched.messages.map { $0.toModel() }
@@ -364,28 +478,122 @@ class AgentService: ObservableObject {
     }
     
     // MARK: - Set Workspace
-    
-    func setWorkspace(_ path: String) {
-        if toolBox.workspaceRoot != path { cachedSemanticContext = nil }
-        toolBox.workspaceRoot = path
-        loadAgentWorkspaceFiles(path)
-        
-        // Start MCP Client to connect to mcp-server.py
-        MCPClient.shared.start(workspacePath: path)
-        if domain == .science { refreshScienceProjectContext() }
+
+    /// Switches the visible agent session without sharing its chats, project
+    /// root, or project-specific instructions with the other mode.
+    func activateScope(
+        _ scope: AgentSessionScope,
+        preferredWorkspace: String? = nil,
+        restorePersistedWorkspace: Bool = true
+    ) {
+        if activeScope != scope {
+            saveChats()
+            activeScope = scope
+            activeKernelRunID = UserDefaults.standard.string(forKey: durableRunStorageKey)
+            chatSessions = readChats(for: scope)
+            activeChatId = UserDefaults.standard.string(forKey: activeChatStorageKey)
+
+            if let activeChatId,
+               let chat = chatSessions.first(where: { $0.id == activeChatId }) {
+                messages = chat.messages.map { $0.toModel() }
+            } else if let first = chatSessions.first {
+                activeChatId = first.id
+                messages = first.messages.map { $0.toModel() }
+            } else {
+                messages = []
+                _ = createNewChat(name: scope == .science ? "Research 1" : "Task 1")
+            }
+        }
+
+        domain = scope == .science ? .science : .software
+        if scope == .science {
+            scienceProjectContext = cachedScienceProjectContext
+        } else {
+            scienceIndexTask?.cancel()
+            scienceIndexTask = nil
+            scienceIndexGeneration = UUID()
+            scienceProjectContext = nil
+            isIndexingScienceProject = false
+        }
+
+        let savedWorkspace = restorePersistedWorkspace ? UserDefaults.standard.string(forKey: workspaceStorageKey) : nil
+        let workspace = savedWorkspace?.isEmpty == false ? savedWorkspace : preferredWorkspace
+        if let workspace, !workspace.isEmpty {
+            setWorkspace(workspace)
+        } else if scope == .science {
+            toolBox.workspaceRoot = nil
+            agentMdContent = nil
+            taskMdContent = nil
+        }
     }
 
-    func refreshScienceProjectContext() {
-        guard let path = toolBox.workspaceRoot else { return }
-        isIndexingScienceProject = true
-        Task {
+    func setWorkspace(_ path: String) {
+        let didChangeWorkspace = toolBox.workspaceRoot != path
+        if didChangeWorkspace { cachedSemanticContext = nil }
+        toolBox.workspaceRoot = path
+        UserDefaults.standard.set(path, forKey: workspaceStorageKey)
+
+        // Editor instructions and MCP configuration must not leak into a
+        // scientific research session. Science has its own indexed evidence.
+        if activeScope == .editor {
+            loadAgentWorkspaceFiles(path)
+            MCPClient.shared.start(workspacePath: path)
+        } else {
+            agentMdContent = nil
+            taskMdContent = nil
+            if let cached = cachedScienceProjectContext,
+               cached.rootPath != path {
+                cachedScienceProjectContext = nil
+                scienceProjectContext = nil
+            }
+        }
+        if domain == .science, didChangeWorkspace {
+            refreshScienceProjectContext()
+        }
+    }
+
+    /// Schedules a bounded project inventory after the mode transition has
+    /// rendered. A newer mode/project switch cancels the pending work.
+    func refreshScienceProjectContext(force: Bool = false) {
+        guard activeScope == .science, let path = toolBox.workspaceRoot, !path.isEmpty else { return }
+        if !force, let cachedScienceProjectContext,
+           cachedScienceProjectContext.rootPath == path {
+            scienceProjectContext = cachedScienceProjectContext
+            return
+        }
+
+        scienceIndexTask?.cancel()
+        let generation = UUID()
+        scienceIndexGeneration = generation
+        isIndexingScienceProject = false
+        scienceIndexTask = Task { [weak self] in
+            // Give SwiftUI one run-loop turn to display the requested mode.
+            try? await Task.sleep(nanoseconds: 250_000_000)
+            guard !Task.isCancelled,
+                  let self,
+                  self.activeScope == .science,
+                  self.scienceIndexGeneration == generation,
+                  self.toolBox.workspaceRoot == path else { return }
+
+            self.isIndexingScienceProject = true
             let context = await Task.detached(priority: .utility) {
                 ScienceService.indexWorkspace(at: URL(fileURLWithPath: path))
             }.value
-            guard self.toolBox.workspaceRoot == path else { return }
+            guard !Task.isCancelled,
+                  self.activeScope == .science,
+                  self.scienceIndexGeneration == generation,
+                  self.toolBox.workspaceRoot == path else { return }
+            self.cachedScienceProjectContext = context
             self.scienceProjectContext = context
             self.isIndexingScienceProject = false
         }
+    }
+
+    func suspendScienceWork() {
+        scienceIndexTask?.cancel()
+        scienceIndexTask = nil
+        scienceIndexGeneration = UUID()
+        isIndexingScienceProject = false
     }
 
     private func semanticContext() -> String? {
@@ -571,7 +779,7 @@ class AgentService: ObservableObject {
     func sendMessage(
         _ content: String,
         provider: String = "gemini",
-        model: String = "gemini-3.6-flash",
+        model: String = "gemini-2.5-flash",
         apiKey: String = "",
         attachments: [AIAttachment] = []
     ) async {
@@ -585,6 +793,15 @@ class AgentService: ObservableObject {
         // Store memory
         if let chatId = activeChatId {
             memoryService.storeMemory(content: content, chatId: chatId, role: "user")
+            
+            // Auto-rename generic task names ("Task X", "New Task") to the actual descriptive prompt
+            if let idx = chatSessions.firstIndex(where: { $0.id == chatId }) {
+                let currentTitle = chatSessions[idx].name
+                if currentTitle.hasPrefix("Task ") || currentTitle == "New Task" || currentTitle.isEmpty {
+                    let newTitle = Self.generateTitle(from: content)
+                    chatSessions[idx].name = newTitle
+                }
+            }
         }
         
         isLoading = true
@@ -610,15 +827,65 @@ class AgentService: ObservableObject {
         let complexity = tokenOptimizer.detectComplexity(content)
         let budget = TokenBudget.forTask(complexity)
         let isChatMode = domain == .software && complexity == .chat
+        let requiresNativeExecution = domain == .software && !isChatMode && requestRequiresNativeExecution(content)
+        let requiresRuntimeLaunch = domain == .software && !isChatMode && requestRequiresRuntimeLaunch(content)
+        let requiresMutation = domain == .software && !isChatMode && requestRequiresMutation(content)
+
+        // The task documents are an agent-owned execution contract, not a
+        // form the user has to fill in before the agent is allowed to work.
+        // Preserve handwritten plans, but generate/refresh the managed task
+        // for each new request so every model begins from the same durable
+        // objective and verification phases.
+        if domain == .software, !isChatMode {
+            prepareAutonomousTaskArtifacts(
+                objective: content,
+                isContinuation: isContinuationRequest(content)
+            )
+        }
         
         let detectedProvider = StreamableAIProvider(rawValue: provider) ?? StreamableAIProvider.detect(from: model)
         lastProvider = detectedProvider.rawValue
         lastModel = model
+        
+        if !isChatMode {
+            await MCPClient.shared.ensureConnected(workspacePath: toolBox.workspaceRoot)
+        }
+        
         let toolSchemas = isChatMode ? [] : toolBox.toolSchemas()  // No tools in chat mode
+        let toolNames = toolSchemas.compactMap { $0["name"] as? String }
+        let kernelRunID = (!isChatMode && isContinuationRequest(content) ? activeKernelRunID : nil) ?? userMessage.id
+        activeKernelRunID = isChatMode ? nil : kernelRunID
+        if !isChatMode {
+            UserDefaults.standard.set(kernelRunID, forKey: durableRunStorageKey)
+        }
+        var kernelOnline = isChatMode
+        if !isChatMode {
+            let kernel = await agentKernel.createOrResume(
+                runID: kernelRunID,
+                objective: content,
+                workspace: toolBox.workspaceRoot ?? "",
+                provider: detectedProvider.rawValue,
+                model: model,
+                tools: toolNames,
+                skills: AgentSkillsStore.shared.enabledSkillIds(),
+                mcpServers: MCPClient.shared.isConnected ? ["local"] : []
+            )
+            kernelOnline = kernel != nil
+            if let kernel {
+                logActivity(.info, "Agent kernel \(kernel.directive.action): durable run \(kernel.run.id.prefix(8))")
+            } else {
+                logActivity(.error, "Agent kernel unavailable; continuing with the bounded native fallback")
+            }
+        }
         
         // Build optimized system prompt
         let queryEmbedding = await memoryService.fetchEmbeddingFromBackend(content)
-        let optimizedSystemPrompt = buildSystemPrompt(for: content, queryEmbedding: queryEmbedding)
+        let optimizedSystemPrompt = buildSystemPrompt(
+            for: content,
+            provider: detectedProvider,
+            model: model,
+            queryEmbedding: queryEmbedding
+        )
         
         // Build and compress conversation history
         var rawHistory = buildConversationHistory()
@@ -627,19 +894,36 @@ class AgentService: ObservableObject {
         logActivity(.info, "Mode: \(isChatMode ? "Chat" : "Agent") | Budget: \(budget.totalBudget) tokens")
         
         // === Agentic Tool Loop ===
+        let toolIterationLimit = maxToolIterations
         var iteration = 0
         var finalText = ""
         var allToolResults: [ToolResultModel] = []
         var allChanges: [PendingChangeModel] = []
         var completedToolCalls: [String: (output: String, success: Bool)] = [:]
-        
-        while iteration < maxToolIterations {
+        var terminationNotice: String? = nil
+        var usedDeterministicActionFallback = false
+        var usedRuntimeLaunchFallback = false
+        var usedAutonomousInspectionFallback = false
+        var usedPostMutationVerificationFallback = false
+        var usedFollowThroughRecovery = false
+        var kernelRecoveryCount = 0
+        var kernelVerified = false
+
+        while toolIterationLimit.map({ iteration < $0 }) ?? true {
             if isCancelled || Task.isCancelled { break }
             iteration += 1
+            if kernelOnline {
+                _ = await agentKernel.observe(
+                    runID: kernelRunID,
+                    kind: "model_start",
+                    output: "Model turn \(iteration) started"
+                )
+            }
             
             // Stream the response
             var streamedText = ""
             var receivedToolCalls: [AIToolCall] = []
+            var modelError: String?
             
             // Use streaming for first iteration (user sees thinking), sync for subsequent
             if iteration == 1 {
@@ -647,7 +931,7 @@ class AgentService: ObservableObject {
                 agentPhase = .thinking
                 
                 // Streaming mode — user sees tokens in real-time
-                let result = await withCheckedContinuation { (continuation: CheckedContinuation<(String, [AIToolCall]), Never>) in
+                let result = await withCheckedContinuation { (continuation: CheckedContinuation<(String, [AIToolCall], String?), Never>) in
                     var toolCalls: [AIToolCall] = []
                     var text = ""
                     
@@ -668,16 +952,17 @@ class AgentService: ObservableObject {
                         },
                         onComplete: { fullText in
                             self.flushStreamingToken(fullText, toolResults: allToolResults)
-                            continuation.resume(returning: (fullText, toolCalls))
+                            continuation.resume(returning: (fullText, toolCalls, nil))
                         },
                         onError: { error in
                             self.flushStreamingToken("Error: \(error)", toolResults: allToolResults)
-                            continuation.resume(returning: ("Error: \(error)", []))
+                            continuation.resume(returning: ("Error: \(error)", [], String(describing: error)))
                         }
                     )
                 }
                 streamedText = result.0
                 receivedToolCalls = result.1
+                modelError = result.2
             } else {
                 // Non-streaming for tool result follow-ups
                 currentToolExecution = "Evaluating tool outputs & determining next action..."
@@ -710,12 +995,115 @@ class AgentService: ObservableObject {
                     
                     updateStreamingMessage(finalText, toolResults: allToolResults)
                 } catch {
-                    let errStr = "Error in tool loop iteration \(iteration): \(error.localizedDescription)"
-                    logActivity(.error, errStr)
-                    if finalText.isEmpty { finalText = errStr } else { finalText += "\n\n⚠️ " + errStr }
+                    let errStr = error.localizedDescription
+                    let lowerErr = errStr.lowercased()
+                    let isContextLimit = lowerErr.contains("context_length_exceeded")
+                        || lowerErr.contains("maximum context length")
+                        || lowerErr.contains("prompt is too long")
+                        || lowerErr.contains("token limit exceeded")
+                        || lowerErr.contains("context window")
+                        || lowerErr.contains("too many tokens")
+                    let isRateLimit = lowerErr.contains("rate limit") || lowerErr.contains("429") || lowerErr.contains("too many requests")
+                    let isTransient = isTransientAgentError(errStr)
+                    logActivity(.error, "Tool loop iteration \(iteration): \(errStr)")
+                    
+                    if isContextLimit {
+                        contextLimitReached = true
+                        let limitNotice = """
+                        ⚠️ **Conversation Context Limit Reached**
+                        The current session has reached the model's maximum context capacity (\(iteration) turns executed).
+                        To continue with optimal accuracy and performance, please start a new conversation.
+                        """
+                        terminationNotice = "Context limit reached"
+                        if !finalText.contains("Context Limit Reached") {
+                            finalText = finalText.isEmpty ? limitNotice : finalText + "\n\n" + limitNotice
+                        }
+                        updateStreamingMessage(finalText, toolResults: allToolResults)
+                        logActivity(.error, "Context window saturated. Prompting user to start a new chat.")
+                        break
+                    }
+                    
+                    let response = kernelOnline ? await agentKernel.observe(
+                        runID: kernelRunID,
+                        kind: "provider_error",
+                        success: false,
+                        error: errStr,
+                        transient: isTransient
+                    ) : nil
+                    
+                    let maxRetries = isRateLimit ? 8 : 5
+                    if response?.directive.action == "retry" || isTransient || isRateLimit || (!kernelOnline && kernelRecoveryCount < maxRetries) {
+                        if kernelRecoveryCount < maxRetries {
+                            kernelRecoveryCount += 1
+                            let backoffSec = isRateLimit ? min(3 * kernelRecoveryCount, 30) : min(kernelRecoveryCount * 2, 12)
+                            let delayMs = response?.directive.retryAfterMs ?? UInt64(backoffSec * 1000)
+                            
+                            // Clean user-facing notification in agent phase rather than dumping raw error into chat
+                            currentToolExecution = isRateLimit
+                                ? "Rate limit reached. Backing off... resuming in \(backoffSec)s (attempt \(kernelRecoveryCount)/\(maxRetries))"
+                                : "Connection interrupted. Retrying in \(delayMs / 1000)s (attempt \(kernelRecoveryCount)/\(maxRetries))..."
+                            agentPhase = .thinking
+                            
+                            logActivity(.info, "Model call throttled or interrupted; retrying in \(delayMs)ms (attempt \(kernelRecoveryCount)/\(maxRetries))")
+                            try? await Task.sleep(nanoseconds: delayMs * 1_000_000)
+                            history.append((role: "user", content: "Resume from the last completed checkpoint. Do not repeat completed actions."))
+                            continue
+                        }
+                    }
+                    
+                    terminationNotice = response?.directive.reason ?? "Execution stopped: \(errStr)"
+                    let userFriendlyNotice = isRateLimit 
+                        ? "⚠️ Rate limit reached for current model provider. Please wait a few moments, switch to another model/provider, or check API quota."
+                        : "⚠️ Execution error: \(errStr)"
+                    if finalText.isEmpty { finalText = userFriendlyNotice } else { finalText += "\n\n" + userFriendlyNotice }
                     updateStreamingMessage(finalText, toolResults: allToolResults)
                     break
                 }
+            }
+
+            if let modelError {
+                let lowerErr = modelError.lowercased()
+                let isContextLimit = lowerErr.contains("context_length_exceeded")
+                    || lowerErr.contains("maximum context length")
+                    || lowerErr.contains("prompt is too long")
+                    || lowerErr.contains("token limit exceeded")
+                    || lowerErr.contains("context window")
+                    || lowerErr.contains("too many tokens")
+                if isContextLimit {
+                    contextLimitReached = true
+                    let limitNotice = """
+                    ⚠️ **Conversation Context Limit Reached**
+                    The current session has reached the model's maximum context capacity (\(iteration) turns executed).
+                    To continue with optimal accuracy and performance, please start a new conversation.
+                    """
+                    terminationNotice = "Context limit reached"
+                    if !finalText.contains("Context Limit Reached") {
+                        finalText = finalText.isEmpty ? limitNotice : finalText + "\n\n" + limitNotice
+                    }
+                    updateStreamingMessage(finalText, toolResults: allToolResults)
+                    break
+                }
+
+                let response = kernelOnline ? await agentKernel.observe(
+                    runID: kernelRunID,
+                    kind: "provider_error",
+                    success: false,
+                    error: modelError,
+                    transient: isTransientAgentError(modelError)
+                ) : nil
+                if response?.directive.action == "retry" || isTransientAgentError(modelError) || (!kernelOnline && kernelRecoveryCount < 6) {
+                    if kernelRecoveryCount < 6 {
+                        kernelRecoveryCount += 1
+                        let delay = response?.directive.retryAfterMs ?? min(UInt64(500 << min(kernelRecoveryCount - 1, 5)), 20_000)
+                        logActivity(.info, "Streaming interrupted; retrying from durable checkpoint in \(delay)ms (attempt \(kernelRecoveryCount)/6)")
+                        try? await Task.sleep(nanoseconds: delay * 1_000_000)
+                        history.append((role: "user", content: "The stream was interrupted. Resume from the last checkpoint without repeating completed work."))
+                        finalText = ""
+                        continue
+                    }
+                }
+                terminationNotice = response?.directive.reason ?? modelError
+                break
             }
             
             if iteration == 1 {
@@ -731,54 +1119,151 @@ class AgentService: ObservableObject {
                 }
             }
             
-            // If still no tool calls, check if task is multi-step and requires auto-continuation
+            // A natural-language plan is not evidence of unfinished work. Claude
+            // commonly says "I'll …" before a complete answer; using those words
+            // as a signal to continue was the source of runaway agent loops.
             if receivedToolCalls.isEmpty {
-                let lowerText = streamedText.lowercased()
-                let promptLower = content.lowercased()
-                
-                // 1. Text markers indicating the assistant intends to take further action
-                let hasIncompleteTextIntent = lowerText.contains("let me") || lowerText.contains("now installing") ||
-                    lowerText.contains("next") || lowerText.contains("i will") || lowerText.contains("i'll") ||
-                    lowerText.contains("step 1") || lowerText.contains("step 2") || lowerText.contains("step 3") ||
-                    lowerText.contains("scaffold ready") || lowerText.contains("continue") ||
-                    lowerText.contains("let's create") || lowerText.contains("let's build") ||
-                    lowerText.contains("จะทำ") || lowerText.contains("กำลัง") || lowerText.contains("ต่อไป") ||
-                    lowerText.contains("เริ่มจาก") || lowerText.contains("จะเริ่ม") || lowerText.contains("จะอ่าน") ||
-                    lowerText.contains("จะแก้") || lowerText.contains("จะเขียน") || lowerText.contains("แล้วจึง") ||
-                    lowerText.contains("เพื่อดู") || lowerText.contains("เพื่อแก้") || lowerText.contains("ตอนนี้จะ") ||
-                    lowerText.contains("ผมจะ") || lowerText.contains("เราจะ") || lowerText.contains("ทำการแก้ไข") ||
-                    lowerText.contains("ลงมือแก้") || streamedText.trimmingCharacters(in: .whitespacesAndNewlines).hasSuffix(":")
-                
-                // 2. Goal completion check: if user asked to fix/write code, but no file has been modified yet
-                let hasModifyingToolRun = allToolResults.contains { res in
-                    ["file_write", "replace_in_file", "patch_file", "create_directory", "rename_file"].contains(res.toolName)
+                let hasMutationCheckpoint = allToolResults.contains(where: didMutateWorkspace)
+                let hasVerificationCheckpoint: Bool
+                if let latestMutation = allToolResults.lastIndex(where: didMutateWorkspace) {
+                    hasVerificationCheckpoint = allToolResults
+                        .dropFirst(latestMutation + 1)
+                        .contains(where: isVerificationCheckpoint)
+                } else {
+                    hasVerificationCheckpoint = false
                 }
-                let isCodeModificationRequest = promptLower.contains("แก้") || promptLower.contains("fix") ||
-                    promptLower.contains("update") || promptLower.contains("write") || promptLower.contains("create") ||
-                    promptLower.contains("implement") || promptLower.contains("css") || promptLower.contains("html") ||
-                    promptLower.contains("layout") || promptLower.contains("bug") || promptLower.contains("style")
-                
-                let requiresContinuation = hasIncompleteTextIntent || (isCodeModificationRequest && !hasModifyingToolRun && !allToolResults.isEmpty)
-                
-                if iteration < maxToolIterations && requiresContinuation {
-                    logActivity(.info, "Autonomous continuation triggered for iteration \(iteration + 1) (hasModifyingToolRun: \(hasModifyingToolRun))")
-                    currentToolExecution = "Turn \(iteration + 1): Executing code modifications..."
-                    agentPhase = .thinking
-                    
-                    history.append((role: "assistant", content: streamedText))
-                    history.append((role: "user", content: """
-                    [Autonomous Execution System Directive]
-                    You have analyzed the issue and explored the files.
-                    Now IMMEDIATELY execute the necessary file modifications using `replace_in_file` or `file_write`.
-                    Do not provide only text explanations — execute the actual tool calls now until the task is completely finished.
-                    """))
-                    continue
+
+                // Start a safe workspace inventory when a provider answers a
+                // coding request with only "I'll inspect…" prose. This keeps
+                // agent execution autonomous without guessing source edits.
+                if requiresMutation,
+                   !hasMutationCheckpoint,
+                   !usedAutonomousInspectionFallback,
+                   let fallback = autonomousInspectionAction() {
+                    receivedToolCalls = [fallback]
+                    usedAutonomousInspectionFallback = true
+                    logActivity(.info, "Harness fallback: inspecting workspace before implementation")
+
+                // After a mutation, verification is the agent's job. A model
+                // promise to rebuild must trigger a real native build, not a
+                // "needs attention" message or a button for the user.
+                } else if requiresMutation,
+                          hasMutationCheckpoint,
+                          !hasVerificationCheckpoint,
+                          !usedPostMutationVerificationFallback,
+                          let fallback = projectAction(.build) {
+                    receivedToolCalls = [fallback]
+                    usedPostMutationVerificationFallback = true
+                    logActivity(.info, "Harness fallback: verifying changed source with native build")
+
+                // Some providers occasionally return a prose plan for a very
+                // short operational request (for example, "Build สิ") instead
+                // of issuing the native tool call.  Do not silently pretend
+                // that work happened: for an unambiguous project action, use
+                // the real local runner as a deterministic fallback.
+                } else if requiresNativeExecution,
+                          requiresRuntimeLaunch,
+                          !hasRuntimeLaunch(in: allToolResults),
+                          !usedRuntimeLaunchFallback,
+                          let fallback = runtimeLaunchAction() {
+                    receivedToolCalls = [fallback]
+                    usedRuntimeLaunchFallback = true
+                    logActivity(.info, "Harness fallback: launching the built app on the selected runtime")
+
+                } else if requiresNativeExecution,
+                   !usedDeterministicActionFallback,
+                   let fallback = inferredWorkspaceAction(for: content) {
+                    receivedToolCalls = [fallback]
+                    usedDeterministicActionFallback = true
+                    logActivity(.info, "Harness fallback: executing \(fallback.name) for the requested project action")
+                } else {
+                    let nativeWorkWasPromised = requiresNativeExecution || containsNativeWorkCommitment(finalText)
+                    let nativeWorkWasExecuted = hasNativeExecution(in: allToolResults)
+                    let verificationPassed = hasDeterministicVerification(
+                        in: allToolResults,
+                        requiresNativeExecution: nativeWorkWasPromised,
+                        nativeWorkWasExecuted: nativeWorkWasExecuted,
+                        requiresRuntimeLaunch: requiresRuntimeLaunch,
+                        requiresMutation: requiresMutation
+                    )
+
+                    if !isChatMode, verificationPassed {
+                        let response = kernelOnline ? await agentKernel.observe(
+                            runID: kernelRunID,
+                            kind: "verification",
+                            success: true,
+                            output: "Deterministic tool evidence passed",
+                            madeProgress: true
+                        ) : nil
+                        kernelVerified = response?.directive.action == "complete" || !kernelOnline
+                        logActivity(.success, "Objective verification passed")
+                        break
+                    }
+
+                    let kernelResponse = kernelOnline ? await agentKernel.observe(
+                        runID: kernelRunID,
+                        kind: "model_no_tool",
+                        success: nil,
+                        output: streamedText,
+                        madeProgress: false
+                    ) : nil
+
+                    if kernelResponse?.directive.action == "complete" {
+                        kernelVerified = true
+                        logActivity(.success, "Objective completed successfully")
+                        break
+                    }
+
+                    // If native work was explicitly promised (like build/run) but never executed,
+                    // provide recovery attempts
+                    if !isChatMode,
+                       nativeWorkWasPromised,
+                       !nativeWorkWasExecuted,
+                       kernelRecoveryCount < 2,
+                       kernelResponse?.directive.action != "blocked" {
+                        kernelRecoveryCount += 1
+                        usedFollowThroughRecovery = true
+                        if kernelResponse?.directive.action == "retry",
+                           let delay = kernelResponse?.directive.retryAfterMs {
+                            currentToolExecution = "Waiting to retry from the durable checkpoint..."
+                            agentPhase = .thinking
+                            try? await Task.sleep(nanoseconds: delay * 1_000_000)
+                        }
+                        history.append((role: "assistant", content: streamedText))
+                        history.append((role: "user", content: kernelResponse?.directive.suggestedPrompt ?? """
+                        Verification failed: the objective has no deterministic completion evidence. Execute the missing action now, then run the relevant build/test/diagnostic. Do not answer with another plan or progress-only message.
+                        """))
+                        currentToolExecution = "Recovering incomplete agent work..."
+                        agentPhase = .thinking
+                        continue
+                    }
+
+                    if nativeWorkWasPromised && !nativeWorkWasExecuted {
+                        let detail = "Requested native work was not executed. The agent inspected the workspace but did not run a build, test, run, or terminal command."
+                        terminationNotice = detail
+                        allToolResults.append(ToolResultModel(
+                            toolCallId: UUID().uuidString,
+                            toolName: "agent_harness",
+                            toolParams: [:],
+                            success: false,
+                            output: "",
+                            error: detail
+                        ))
+                        if !finalText.contains(detail) {
+                            finalText += "\n\n⚠️ \(detail)"
+                        }
+                        logActivity(.error, detail)
+                    } else {
+                        kernelVerified = true
+                        logActivity(.success, "Turn completed")
+                    }
+                    break
                 }
-                break
             }
             
             // Execute ALL tool calls in this batch
             var batchResults: [(name: String, output: String, success: Bool)] = []
+            var kernelFollowUp: String?
             
             for toolCall in receivedToolCalls {
                 if isCancelled || Task.isCancelled { break }
@@ -822,11 +1307,40 @@ class AgentService: ObservableObject {
                     ))
                     
                     batchResults.append((name: toolCall.name, output: output, success: true))
-                    completedToolCalls[signature] = (output, true)
+                    // Only memoize read-only inspections.  A build/test/run
+                    // result is invalid as soon as source changes, and caching
+                    // a failed build was causing the agent to report stale
+                    // output instead of rebuilding after its fix.
+                    if shouldCacheToolResult(toolCall.name) {
+                        completedToolCalls[signature] = (output, true)
+                    }
                     logActivity(.success, "\(toolCall.name) ✓")
+                    if kernelOnline {
+                        let kernelResponse = await agentKernel.observe(
+                            runID: kernelRunID,
+                            kind: "tool_result",
+                            toolName: toolCall.name,
+                            arguments: toolCall.arguments,
+                            success: true,
+                            output: output,
+                            madeProgress: toolMadeProgress(toolCall.name)
+                        )
+                        if let directive = kernelResponse?.directive,
+                           directive.action == "replan" || directive.action == "retry" {
+                            kernelFollowUp = directive.suggestedPrompt ?? directive.reason
+                        }
+                    }
                     
                     // Track file changes with diff
-                    if toolCall.name == "file_write" || toolCall.name == "replace_in_file" {
+                    if toolCallMutatesWorkspace(toolCall) {
+                        // Source changes invalidate every prior inspection and
+                        // verification result.  In particular, a subsequent
+                        // build must execute in Terminal again, never replay a
+                        // previous failure from this run.
+                        completedToolCalls.removeAll()
+                    }
+
+                    if toolCall.name == "file_write" || toolCall.name == "replace_in_file" || toolCall.name == "patch_file" {
                         if let path = toolCall.arguments["path"] as? String {
                             filesModified.append(path)
                             
@@ -868,8 +1382,24 @@ class AgentService: ObservableObject {
                     ))
                     
                     batchResults.append((name: toolCall.name, output: error.localizedDescription, success: false))
-                    completedToolCalls[signature] = (error.localizedDescription, false)
+                    // Failed commands must remain retryable after a repair or
+                    // a transient environment recovery.  Do not cache them.
                     logActivity(.error, "\(toolCall.name) failed: \(error.localizedDescription)")
+                    if kernelOnline {
+                        let kernelResponse = await agentKernel.observe(
+                            runID: kernelRunID,
+                            kind: "tool_result",
+                            toolName: toolCall.name,
+                            arguments: toolCall.arguments,
+                            success: false,
+                            error: error.localizedDescription,
+                            transient: isTransientAgentError(error.localizedDescription)
+                        )
+                        if let directive = kernelResponse?.directive,
+                           directive.action == "replan" || directive.action == "retry" || directive.action == "blocked" {
+                            kernelFollowUp = directive.suggestedPrompt ?? directive.reason
+                        }
+                    }
                 }
                 
                 currentToolExecution = nil
@@ -890,10 +1420,48 @@ class AgentService: ObservableObject {
             
             \(resultsText)
             
-            Instruction: Continue executing the user's request. If the objective requires running commands (e.g. `make run`, launch app), modifying code, or testing, IMMEDIATELY call the appropriate tool. Do NOT stop or just describe what to do — execute the actions until the objective is 100% completed.
+            Kernel directive: \(kernelFollowUp ?? "Continue only with the next necessary action. Do not repeat completed calls.")
+            Instruction: Continue executing the user's request. If the objective requires running commands (e.g. `make run`, launch app), modifying code, or testing, IMMEDIATELY call the appropriate tool. Do NOT stop or just describe what to do — execute the actions until the objective is verified.
             """))
             
+            if batchResults.contains(where: { result in
+                result.success && toolMadeProgress(result.name)
+            }) {
+                // A real checkpoint means a later recovery is a fresh attempt,
+                // not another strike against a previous model response.
+                kernelRecoveryCount = 0
+            }
             agentPhase = filesModified.isEmpty ? .thinking : .validating
+        }
+
+        if isCancelled {
+            let detail = "Generation was stopped by the user."
+            terminationNotice = detail
+            if !finalText.contains(detail) {
+                finalText += "\n\n⏹ \(detail)"
+            }
+            logActivity(.info, detail)
+        }
+
+        // Never manufacture a successful kernel verification at the end of a
+        // turn.  The only completion path is the evidence check above: a
+        // source mutation plus a verification command, a real build/run, or a
+        // successful read-only investigation.
+        if terminationNotice == nil, !isChatMode, !kernelVerified, kernelOnline {
+            let response = await agentKernel.observe(
+                runID: kernelRunID,
+                kind: "final_candidate",
+                success: nil,
+                output: "The model ended its turn",
+                madeProgress: false
+            )
+            if response?.directive.action == "complete" || !finalText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                kernelVerified = true
+            } else {
+                let detail = response?.directive.reason ?? "The durable plan still has unverified work"
+                terminationNotice = detail
+                if !finalText.contains(detail) { finalText += "\n\n⚠️ \(detail)" }
+            }
         }
         
         // Finalize the assistant message
@@ -911,29 +1479,41 @@ class AgentService: ObservableObject {
         
         pendingChanges.append(contentsOf: allChanges)
         
-        // Generate post-completion suggestion
-        if !filesModified.isEmpty {
-            suggestedAction = SuggestedAction(
-                title: "Run Project?",
-                icon: "play.circle.fill",
-                description: "\(filesModified.count) file(s) modified. Run to verify changes?"
-            )
-        }
+        // Verification is an Agent responsibility.  Do not turn an internal
+        // build/run step into a "Run Project?" request for the user after the
+        // agent has changed files.
+        suggestedAction = nil
         
         // Update token stats
         let inputTokens = tokenOptimizer.estimateTokens(optimizedSystemPrompt) + history.reduce(0) { $0 + tokenOptimizer.estimateTokens($1.content) }
         let outputTokens = tokenOptimizer.estimateTokens(finalText)
         tokenOptimizer.recordUsage(provider: detectedProvider.rawValue, model: model, inputTokens: inputTokens, outputTokens: outputTokens)
         
-        logActivity(.done, "Completed (\(iteration) iterations, \(allToolResults.count) tools, ~\(inputTokens + outputTokens) tokens)")
-        agentPhase = .done
+        if terminationNotice == nil {
+            logActivity(.done, "Completed (\(iteration) iterations, \(allToolResults.count) tools, ~\(inputTokens + outputTokens) tokens)")
+            agentPhase = .done
+        } else {
+            // Keep an explicit terminal outcome above the composer instead of
+            // collapsing a timeout/stop/iteration cap into a misleading
+            // normal "Done" state.
+            agentPhase = .idle
+        }
         
         // Store memory
         if let chatId = activeChatId {
             memoryService.storeMemory(content: finalText, chatId: chatId, role: "assistant")
         }
+        if activeKernelRunID == kernelRunID, terminationNotice == nil {
+            activeKernelRunID = nil
+            UserDefaults.standard.removeObject(forKey: durableRunStorageKey)
+        }
         
         saveChats()
+    }
+
+    private func isContinuationRequest(_ content: String) -> Bool {
+        let normalized = content.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        return ["ต่อ", "ทำต่อ", "ต่อไป", "continue", "resume", "keep going", "go on"].contains(normalized)
     }
     
     // MARK: - Streaming Message Update & 30ms Coalesced Throttle Buffer
@@ -988,6 +1568,350 @@ class AgentService: ObservableObject {
         return call.name + ":" + (data.flatMap { String(data: $0, encoding: .utf8) } ?? String(describing: call.arguments))
     }
 
+    private func requestRequiresNativeExecution(_ content: String) -> Bool {
+        let lower = content.lowercased()
+        let indicators = [
+            "build", "compile", "run", "test", "execute", "terminal", "shell", "command", "deploy",
+            "รัน", "สร้าง build", "คอมไพล์", "ทดสอบ", "เปิด terminal", "สั่งคำสั่ง"
+        ]
+        return indicators.contains { lower.contains($0) }
+    }
+
+    /// A successful compiler invocation is not proof that an app reached the
+    /// requested simulator/device. Keep launch as a distinct completion gate.
+    private func requestRequiresRuntimeLaunch(_ content: String) -> Bool {
+        let lower = content.lowercased()
+        let indicators = [
+            "run", "launch", "deploy", "install and launch", "simulator", "emulator",
+            "รัน", "เปิดแอป", "เปิดบน", "ลง simulator", "ลง emulator", "ติดตั้งและรัน"
+        ]
+        return indicators.contains { lower.contains($0) }
+    }
+
+    /// A file scan is valid evidence only for an explicitly read-only request.
+    /// Any request that asks us to change the project must leave a mutation
+    /// checkpoint and then verify it before it can appear as completed.
+    private func requestRequiresMutation(_ content: String) -> Bool {
+        let lower = content.lowercased()
+        let indicators = [
+            "fix", "implement", "add", "create", "edit", "modify", "change", "redesign",
+            "refactor", "rewrite", "patch", "remove", "delete", "write", "update",
+            "แก้", "ทำให้", "เพิ่ม", "สร้าง", "เขียน", "เปลี่ยน", "ออกแบบใหม่", "ลบ", "อัปเดต"
+        ]
+        return indicators.contains { lower.contains($0) }
+    }
+
+    private func containsNativeWorkCommitment(_ text: String) -> Bool {
+        let lower = text.lowercased()
+        let commitments = [
+            "will build", "will run", "will test", "building", "running", "compile now",
+            "build immediately", "run immediately", "build right away",
+            "จะ build", "จะรัน", "กำลัง build", "กำลังรัน", "เริ่ม build", "เริ่มรัน",
+            "build ทันที", "รันทันที", "ตรวจโครงสร้าง + build", "ตรวจโครงสร้างและ build"
+        ]
+        return commitments.contains { lower.contains($0) }
+    }
+
+    private func hasNativeExecution(in results: [ToolResultModel]) -> Bool {
+        results.contains { result in
+            guard result.success else { return false }
+            if result.toolName == "shell" {
+                return shellCommandIsVerification(result.toolParams?["command"] as? String ?? "")
+            }
+            if result.toolName == "device_runtime" {
+                let operation = result.toolParams?["operation"] as? String
+                return operation == "run" || operation == "start"
+            }
+            return false
+        }
+    }
+
+    private func hasRuntimeLaunch(in results: [ToolResultModel]) -> Bool {
+        results.contains { result in
+            guard result.success else { return false }
+            if result.toolName == "device_runtime" {
+                return (result.toolParams?["operation"] as? String)?.lowercased() == "run"
+            }
+            guard result.toolName == "shell" else { return false }
+            let command = (result.toolParams?["command"] as? String ?? "").lowercased()
+            return [
+                "simctl launch", "devicectl device process launch", "flutter run",
+                "xcrun simctl install", "gradlew installdebug", "npm run dev", "npm start"
+            ].contains(where: command.contains)
+        }
+    }
+
+    /// Completion is evidence-based. Read-only investigation may finish after
+    /// successful tools; mutations require a compiler/test/diagnostic pass,
+    /// and explicit build/run requests require a native execution result.
+    private func hasDeterministicVerification(
+        in results: [ToolResultModel],
+        requiresNativeExecution: Bool,
+        nativeWorkWasExecuted: Bool,
+        requiresRuntimeLaunch: Bool,
+        requiresMutation: Bool
+    ) -> Bool {
+        guard !results.isEmpty else { return false }
+        if requiresRuntimeLaunch { return hasRuntimeLaunch(in: results) }
+        if requiresNativeExecution { return nativeWorkWasExecuted }
+        if requiresMutation {
+            // Earlier build failures are diagnostics, not a permanent poison
+            // pill. What matters is a successful verification *after the most
+            // recent source mutation.
+            guard let latestMutation = results.lastIndex(where: didMutateWorkspace) else {
+                return false
+            }
+            return results.dropFirst(latestMutation + 1).contains(where: isVerificationCheckpoint)
+        }
+        // Read-only work is complete only after at least one successful tool
+        // observation, never merely because the model emitted prose.
+        return true
+    }
+
+    private func normalizeToolName(_ name: String) -> String {
+        name.replacingOccurrences(of: "mcp__local__", with: "")
+            .replacingOccurrences(of: "mcp__", with: "")
+    }
+
+    private func toolMadeProgress(_ toolName: String) -> Bool {
+        let base = normalizeToolName(toolName)
+        return [
+            "file_write", "replace_in_file", "patch_file", "rename_file", "create_directory",
+            "shell", "device_runtime", "preview_control", "playground_run", "cell_run", "ardium_run",
+            "invoke_subagent", "cell_create", "cell_update", "cell_delete", "computer_use_click",
+            "computer_use_type", "computer_use_shortcut", "device_interact", "device_app_manage", "adb_execute"
+        ].contains(base)
+    }
+
+    private func isTransientAgentError(_ message: String) -> Bool {
+        let lower = message.lowercased()
+        if ["unauthorized", "forbidden", "invalid api key", "http 401", "http 403", "permission denied"]
+            .contains(where: lower.contains) {
+            return false
+        }
+        return [
+            "timeout", "timed out", "connection reset", "connection lost", "network connection",
+            "temporarily unavailable", "rate limit", "too many requests", "http 429",
+            "http 500", "http 502", "http 503", "http 504", "eof", "stream"
+        ].contains(where: lower.contains)
+    }
+
+    /// Provides a real native build/run/test action when a provider returns a
+    /// prose promise instead of its required tool call.  This intentionally
+    /// works for long requests too: the task may be detailed, but a clear
+    /// build/run/test requirement is still unambiguous and must not be handed
+    /// back to the user as a button.
+    private func inferredWorkspaceAction(for content: String) -> AIToolCall? {
+        guard let workspace = toolBox.workspaceRoot, !workspace.isEmpty else { return nil }
+        let lower = content.lowercased()
+
+        let action: ProjectAction?
+        if lower.contains("test") || lower.contains("ทดสอบ") {
+            action = .test
+        } else if lower.contains("run") || lower.contains("รัน") || lower.contains("start") {
+            action = .run
+        } else if lower.contains("build") || lower.contains("compile") || lower.contains("คอมไพล์") || lower.contains("สร้าง build") {
+            action = .build
+        } else {
+            action = nil
+        }
+        guard let action else { return nil }
+
+        return projectAction(action)
+    }
+
+    private func runtimeLaunchAction() -> AIToolCall? {
+        guard let workspace = toolBox.workspaceRoot, !workspace.isEmpty else { return nil }
+        return AIToolCall(
+            id: UUID().uuidString,
+            name: "device_runtime",
+            arguments: ["operation": "run", "workspace": workspace]
+        )
+    }
+
+    private func isMutationTool(_ toolName: String) -> Bool {
+        let base = normalizeToolName(toolName)
+        return [
+            "file_write", "replace_in_file", "patch_file", "rename_file", "create_directory",
+            "cell_create", "cell_update", "cell_delete"
+        ].contains(base)
+    }
+
+    /// Shell is both a build runner and an editing escape hatch. Treat only
+    /// commands that write/replace/move project files as mutations; a command
+    /// such as `perl -pi` must trigger a subsequent build, not satisfy it.
+    private func toolCallMutatesWorkspace(_ toolCall: AIToolCall) -> Bool {
+        guard toolCall.name == "shell" else { return isMutationTool(toolCall.name) }
+        return shellCommandMutatesWorkspace(toolCall.arguments["command"] as? String ?? "")
+    }
+
+    private func didMutateWorkspace(_ result: ToolResultModel) -> Bool {
+        guard result.success else { return false }
+        if isMutationTool(result.toolName) { return true }
+        guard result.toolName == "shell" else { return false }
+        return shellCommandMutatesWorkspace(result.toolParams?["command"] as? String ?? "")
+    }
+
+    private func isVerificationCheckpoint(_ result: ToolResultModel) -> Bool {
+        guard result.success else { return false }
+        if result.toolName == "shell" {
+            return shellCommandIsVerification(result.toolParams?["command"] as? String ?? "")
+        }
+        return isVerificationTool(result.toolName)
+    }
+
+    private func shellCommandMutatesWorkspace(_ command: String) -> Bool {
+        let lower = command.lowercased()
+        let mutationMarkers = [
+            "perl -pi", "perl -i", "sed -i", "apply_patch", "tee ",
+            "cp ", "mv ", "rm ", "mkdir ", "touch ", "truncate ",
+            "python -c", "python3 -c", "ruby -e", "node -e", ">", ">>"
+        ]
+        return mutationMarkers.contains { lower.contains($0) }
+    }
+
+    private func shellCommandIsVerification(_ command: String) -> Bool {
+        let lower = command.lowercased()
+        let verificationMarkers = [
+            " build", " test", " check", " lint", " analyze", " typecheck",
+            " xcodebuild", " flutter", " cargo", " gradle", "./gradlew",
+            " npm run", " pnpm", " yarn", " swift test", " dotnet test",
+            " go test", " pytest", " rscript -e", " julia --project"
+        ]
+        return verificationMarkers.contains { lower.contains($0) }
+    }
+
+    private func isVerificationTool(_ toolName: String) -> Bool {
+        let base = normalizeToolName(toolName)
+        return [
+            "get_diagnostics", "device_runtime", "playground_run", "cell_run", "ardium_run",
+            "ardium_compile", "ardium_test", "ardium_diagnose", "preview_control"
+        ].contains(base)
+    }
+
+    private func shouldCacheToolResult(_ toolName: String) -> Bool {
+        [
+            "file_read", "multi_file_read", "grep_search", "list_directory_tree",
+            "list_files", "file_search", "find_symbol", "inspect_image", "extract_pdf",
+            "git_status", "git_diff"
+        ].contains(toolName)
+    }
+
+    private func autonomousInspectionAction() -> AIToolCall? {
+        guard let workspace = toolBox.workspaceRoot, !workspace.isEmpty else { return nil }
+        return AIToolCall(
+            id: UUID().uuidString,
+            name: "list_directory_tree",
+            arguments: ["path": workspace, "max_depth": 3]
+        )
+    }
+
+    private func projectAction(_ action: ProjectAction) -> AIToolCall? {
+        guard let workspace = toolBox.workspaceRoot, !workspace.isEmpty else { return nil }
+        let projectURL = URL(fileURLWithPath: workspace, isDirectory: true)
+        let projectType = ProjectManager.shared.detectProjectType(at: projectURL)
+        guard let command = ProjectManager.shared.getBuildCommand(
+            for: projectType,
+            action: action,
+            config: ProjectManager.shared.buildConfiguration,
+            projectPath: workspace
+        ) else { return nil }
+
+        func shellQuote(_ value: String) -> String {
+            "'" + value.replacingOccurrences(of: "'", with: "'\\\"'\\\"'") + "'"
+        }
+        let commandLine = ([command.executable] + command.arguments)
+            .filter { !$0.isEmpty }
+            .map(shellQuote)
+            .joined(separator: " ")
+        return AIToolCall(
+            id: UUID().uuidString,
+            name: "shell",
+            arguments: ["command": commandLine, "cwd": workspace]
+        )
+    }
+
+    /// Creates the MicroCode-managed part of agent.md/task.md before any model
+    /// turn. Existing user-authored content is preserved; only managed files
+    /// (or the old empty boilerplate) are replaced. This means the user can
+    /// simply state the goal and the agent can read, plan, execute and verify
+    /// it without requiring a separate "Run task" click.
+    private func prepareAutonomousTaskArtifacts(objective: String, isContinuation: Bool) {
+        guard let workspace = toolBox.workspaceRoot, !workspace.isEmpty else { return }
+        let trimmedObjective = objective.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmedObjective.isEmpty else { return }
+
+        let directory = URL(fileURLWithPath: workspace, isDirectory: true)
+            .appendingPathComponent(".microcode", isDirectory: true)
+        let agentURL = directory.appendingPathComponent("agent.md")
+        let taskURL = directory.appendingPathComponent("task.md")
+
+        do {
+            try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+
+            let existingAgent = (try? String(contentsOf: agentURL, encoding: .utf8)) ?? ""
+            let isLegacyBoilerplate = existingAgent.contains("This file provides project-level instructions to the MicroCode AI Agent.")
+                && existingAgent.contains("<!-- Add your project's tech stack here -->")
+            if existingAgent.isEmpty || isLegacyBoilerplate {
+                let agentMarkdown = """
+                # MicroCode Agent Instructions
+                <!-- microcode:managed-agent -->
+
+                ## Autonomous execution
+                - Read the workspace and this file before editing.
+                - Create and maintain `.microcode/task.md` from each user request.
+                - Execute required commands yourself; never ask the user to press Run for verification.
+                - After every source change, run the relevant build, test, diagnostic, or device command.
+                - Report only work backed by tool output.
+
+                ## Project-specific instructions
+                <!-- Add durable project conventions below this line. -->
+                """
+                try agentMarkdown.write(to: agentURL, atomically: true, encoding: .utf8)
+                logActivity(.info, "Generated .microcode/agent.md")
+            }
+
+            guard !isContinuation else {
+                reloadAgentWorkspaceFiles()
+                return
+            }
+
+            let existing = (try? String(contentsOf: taskURL, encoding: .utf8)) ?? ""
+            let isManaged = existing.contains("<!-- microcode:managed-task -->")
+                || existing.contains("<!-- Describe the current task here -->")
+                || existing.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+            let safeObjective = String(trimmedObjective.prefix(8_000))
+            let taskSection = """
+            # Agent Task
+            <!-- microcode:managed-task -->
+
+            ## Objective
+            \(safeObjective)
+
+            ## Autonomous plan
+            - [ ] **inspect** Read instructions and inspect the relevant workspace state.
+            - [ ] **implement** Complete the requested change with native tools.
+            - [ ] **verify** Run the relevant build, test, diagnostics, or device command and record evidence.
+
+            ## Execution policy
+            The agent owns execution. Do not ask the user to run commands that the agent can run itself.
+            """
+            let nextContent: String
+            if isManaged {
+                nextContent = taskSection
+            } else {
+                nextContent = existing.trimmingCharacters(in: .whitespacesAndNewlines)
+                    + "\n\n---\n\n"
+                    + taskSection
+            }
+            try nextContent.write(to: taskURL, atomically: true, encoding: .utf8)
+            logActivity(.info, "Generated autonomous task.md from the request")
+            reloadAgentWorkspaceFiles()
+        } catch {
+            logActivity(.error, "Could not prepare agent task files: \(error.localizedDescription)")
+        }
+    }
+
     private func humanFriendlyToolTitle(_ name: String, args: [String: Any]) -> String {
         switch name {
         case "file_read", "multi_file_read":
@@ -1024,14 +1948,31 @@ class AgentService: ObservableObject {
     // MARK: - History Building
     
     private func buildConversationHistory() -> [(role: String, content: String)] {
-        let recent = Array(messages.suffix(20))
-        return recent.compactMap { msg -> (role: String, content: String)? in
+        var remaining = maxHistoryChars
+        var result: [(role: String, content: String)] = []
+
+        for msg in messages.reversed() {
+            guard remaining > 0 else { break }
             switch msg.role {
-            case .user: return (role: "user", content: msg.content)
-            case .assistant: return (role: "assistant", content: String(msg.content.prefix(maxContextChars)))
-            case .system, .tool: return nil
+            case .user, .assistant:
+                let limit = min(maxMessageHistoryChars, remaining)
+                let content = boundedHistoryText(msg.content, limit: limit)
+                guard !content.isEmpty else { continue }
+                result.append((role: msg.role == .user ? "user" : "assistant", content: content))
+                remaining -= content.count
+            case .system, .tool:
+                continue
             }
         }
+
+        return result.reversed()
+    }
+
+    private func boundedHistoryText(_ text: String, limit: Int) -> String {
+        guard text.count > limit, limit > 64 else { return String(text.prefix(max(0, limit))) }
+        let headCount = (limit * 2) / 3
+        let tailCount = limit - headCount
+        return String(text.prefix(headCount)) + "\n…[history truncated]…\n" + String(text.suffix(tailCount))
     }
     
     private func buildSyncMessages(history: [(role: String, content: String)], lastText: String, toolResults: [ToolResultModel]) -> [[(String, Any)]] {
@@ -1138,25 +2079,27 @@ class AgentService: ObservableObject {
         chatSessions.insert(newChat, at: 0)
         activeChatId = newChat.id
         messages = []
+        contextLimitReached = false
         saveChats()
         return newChat
     }
     
     func switchChat(to chatId: String) {
         guard let chat = chatSessions.first(where: { $0.id == chatId }) else { return }
+        contextLimitReached = false
         
         // Summarize current chat before switching (if it has enough messages)
         if let currentId = activeChatId, messages.count > 6 {
             let chatMessages = messages
                 .filter { $0.role == .user || $0.role == .assistant }
-                .map { (role: $0.role.rawValue, content: $0.content) }
+                .map { (id: $0.id, role: $0.role.rawValue, content: $0.content) }
             memoryService.summarizeChat(chatId: currentId, messages: chatMessages)
         }
         
         saveCurrentChatMessages()
         activeChatId = chatId
         messages = chat.messages.map { $0.toModel() }
-        UserDefaults.standard.set(chatId, forKey: "microcode_active_chat_id")
+        UserDefaults.standard.set(chatId, forKey: activeChatStorageKey)
         
         // Restore project workspace if this chat has a specific projectPath
         if let chatPath = chat.projectPath, !chatPath.isEmpty {
@@ -1171,6 +2114,7 @@ class AgentService: ObservableObject {
     }
     
     func deleteChat(_ chatId: String) {
+        transcriptStore.remove(chatID: chatId, scope: activeScope)
         chatSessions.removeAll { $0.id == chatId }
         if activeChatId == chatId {
             if let firstChat = chatSessions.first {
@@ -1184,8 +2128,38 @@ class AgentService: ObservableObject {
     }
     
     func clearCurrentChat() {
+        if let activeChatId {
+            transcriptStore.remove(chatID: activeChatId, scope: activeScope)
+        }
         messages.removeAll()
         saveCurrentChatMessages()
+    }
+
+    /// Restores one older page only when the user explicitly asks for it.
+    /// This preserves full history while keeping startup and idle memory bounded.
+    func loadEarlierMessages() {
+        guard let chatId = activeChatId,
+              let oldestID = messages.first?.id else { return }
+        let older = transcriptStore.loadBefore(
+            chatID: chatId,
+            scope: activeScope,
+            beforeMessageID: oldestID,
+            limit: transcriptPageSize
+        )
+        guard !older.isEmpty else { return }
+        let residentIDs: Set<String> = Set(messages.map { $0.id })
+        let page = older
+            .filter { !residentIDs.contains($0.id) }
+            .map { $0.toModel() }
+        messages.insert(contentsOf: page, at: 0)
+    }
+
+    var hasEarlierMessages: Bool {
+        guard let chatId = activeChatId,
+              let session = chatSessions.first(where: { $0.id == chatId }) else { return false }
+        // The manifest count is updated whenever a message is persisted. This
+        // avoids synchronous disk I/O from SwiftUI's scrolling layout pass.
+        return (session.messageCount ?? messages.count) > messages.count
     }
     
     func renameChat(_ chatId: String, to newName: String) {
@@ -1208,23 +2182,111 @@ class AgentService: ObservableObject {
     func saveChats() {
         if let activeId = activeChatId,
            let idx = chatSessions.firstIndex(where: { $0.id == activeId }) {
+            // Persist before evicting old UI rows. The cap is now a RAM policy,
+            // never a retention policy.
+            let totalMessages = transcriptStore.upsert(
+                messages.map { AgentMessageData.from($0) },
+                chatID: activeId,
+                scope: activeScope
+            )
+            trimResidentChatMemory()
             chatSessions[idx].messages = messages.map { AgentMessageData.from($0) }
+            chatSessions[idx].messageCount = totalMessages
             chatSessions[idx].updatedAt = Date()
-            UserDefaults.standard.set(activeId, forKey: "microcode_active_chat_id")
+            UserDefaults.standard.set(activeId, forKey: activeChatStorageKey)
         }
         if let data = try? JSONEncoder().encode(chatSessions) {
             UserDefaults.standard.set(data, forKey: chatStorageKey)
         }
     }
+
+    /// Keep the live SwiftUI working set bounded. Full content has already
+    /// been committed by `saveChats()` and can be paged back from disk.
+    private func trimResidentChatMemory() {
+        if messages.count > maxResidentMessages {
+            let evictionCount = messages.count - maxResidentMessages
+            let evicted = Array(messages.prefix(evictionCount))
+            if let activeId = activeChatId,
+               let idx = chatSessions.firstIndex(where: { $0.id == activeId }),
+               let newestEvictedID = evicted.last?.id,
+               chatSessions[idx].summaryThroughMessageID != newestEvictedID {
+                let summaryInput = evicted
+                    .filter { $0.role == .user || $0.role == .assistant }
+                    .map { (id: $0.id, role: $0.role.rawValue, content: $0.content) }
+                memoryService.summarizeChat(chatId: activeId, messages: summaryInput)
+                chatSessions[idx].summaryThroughMessageID = newestEvictedID
+            }
+            messages.removeFirst(evictionCount)
+        }
+    }
     
     func loadChats() {
-        guard let data = UserDefaults.standard.data(forKey: chatStorageKey),
-              let chats = try? JSONDecoder().decode([ChatSession].self, from: data) else { return }
-        chatSessions = chats
+        chatSessions = readChats(for: activeScope)
         if let activeId = activeChatId,
            let chat = chatSessions.first(where: { $0.id == activeId }) {
             messages = chat.messages.map { $0.toModel() }
         }
+    }
+
+    // MARK: - Chat Title Auto-Generation
+    
+    static func generateTitle(from text: String) -> String {
+        // Strip markdown code blocks, headers, tags, XML, and extra whitespace
+        var cleaned = text
+            .replacingOccurrences(of: "```[\\s\\S]*?```", with: "", options: .regularExpression)
+            .replacingOccurrences(of: "<[^>]+>", with: "", options: .regularExpression)
+            .replacingOccurrences(of: "^#+\\s*", with: "", options: .regularExpression)
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        
+        // Take first non-empty line
+        let lines = cleaned.components(separatedBy: .newlines).map { $0.trimmingCharacters(in: .whitespaces) }.filter { !$0.isEmpty }
+        guard let firstLine = lines.first, !firstLine.isEmpty else { return "New Conversation" }
+        
+        cleaned = firstLine
+        // Remove leading punctuation/bullets
+        cleaned = cleaned.replacingOccurrences(of: "^[-*•>0-9.]+\\s*", with: "", options: .regularExpression)
+        
+        let maxLength = 42
+        if cleaned.count > maxLength {
+            let index = cleaned.index(cleaned.startIndex, offsetBy: maxLength)
+            return String(cleaned[..<index]).trimmingCharacters(in: .whitespaces) + "…"
+        }
+        return cleaned
+    }
+
+    private func readChats(for scope: AgentSessionScope) -> [ChatSession] {
+        let key = scope == .science ? scienceChatStorageKey : editorChatStorageKey
+        guard let data = UserDefaults.standard.data(forKey: key),
+              let chats = try? JSONDecoder().decode([ChatSession].self, from: data) else { return [] }
+
+        // Migrate legacy UserDefaults transcripts on first access, then retain
+        // only one page per chat in memory. The full record stays on disk.
+        var hasUpdatedTitles = false
+        let loadedChats: [ChatSession] = chats.map { chat in
+            var compact = chat
+            compact.messageCount = transcriptStore.bootstrap(compact, scope: scope)
+            compact.messages = transcriptStore.loadRecent(
+                chatID: compact.id,
+                scope: scope,
+                limit: transcriptPageSize
+            )
+            // Backfill descriptive titles for generic "Task X" or "New Task" chats
+            let isGenericName = compact.name.hasPrefix("Task ") || compact.name == "New Task" || compact.name.isEmpty
+            if isGenericName {
+                if let firstUserMsg = compact.messages.first(where: { $0.role == "user" }),
+                   !firstUserMsg.content.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                    compact.name = Self.generateTitle(from: firstUserMsg.content)
+                    hasUpdatedTitles = true
+                }
+            }
+            return compact
+        }
+        if hasUpdatedTitles {
+            if let updatedData = try? JSONEncoder().encode(loadedChats) {
+                UserDefaults.standard.set(updatedData, forKey: key)
+            }
+        }
+        return loadedChats
     }
     
     // MARK: - Activity Logging
@@ -1374,7 +2436,7 @@ struct AgentActivity: Identifiable {
     let detail: String?
     let timestamp: Date
     
-    enum ActivityType {
+    enum ActivityType: Equatable {
         case thinking, tool, success, error, fileChange, info, done
         
         var icon: String {
@@ -1510,6 +2572,10 @@ struct ChatSession: Identifiable, Codable {
     var projectName: String?
     var activeSkillIds: [String]?
     var messages: [AgentMessageData]
+    /// Total durable transcript length. `messages` is only the loaded page.
+    var messageCount: Int?
+    /// Last message represented by an evicted-memory summary.
+    var summaryThroughMessageID: String?
     var createdAt: Date
     var updatedAt: Date
     
@@ -1526,6 +2592,8 @@ struct ChatSession: Identifiable, Codable {
             projectName: projectName,
             activeSkillIds: activeSkillIds,
             messages: [],
+            messageCount: 0,
+            summaryThroughMessageID: nil,
             createdAt: Date(),
             updatedAt: Date()
         )

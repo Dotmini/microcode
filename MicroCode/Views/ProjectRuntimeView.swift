@@ -11,6 +11,8 @@ import SwiftUI
 struct ProjectRuntimeView: View {
     @EnvironmentObject var appState: AppState
     @Environment(\.dismiss) var dismiss
+    @ObservedObject private var runtimeManager = RuntimeManager.shared
+    @State private var selectedRuntime: RuntimeType = .nodejs
     
     var body: some View {
         VStack(spacing: 0) {
@@ -40,6 +42,9 @@ struct ProjectRuntimeView: View {
             .background(Color(nsColor: .controlBackgroundColor))
             
             Divider()
+
+            runtimeSelector
+            Divider()
             
             // Content
             Group {
@@ -61,6 +66,53 @@ struct ProjectRuntimeView: View {
             .frame(maxWidth: .infinity, maxHeight: .infinity)
         }
         .frame(width: 700, height: 500)
+        .onAppear {
+            switch appState.currentProjectType {
+            case .python: selectedRuntime = .python
+            case .nodejs: selectedRuntime = .nodejs
+            case .rust: selectedRuntime = .rust
+            case .dotnet: selectedRuntime = .dotnet
+            default: break
+            }
+            runtimeManager.detectAll()
+        }
+    }
+
+    private var runtimeSelector: some View {
+        HStack(spacing: 10) {
+            Image(systemName: "terminal.fill").foregroundColor(.accentColor)
+            Text("Active runtime").font(.system(size: 12, weight: .semibold))
+            Picker("", selection: $selectedRuntime) {
+                ForEach(RuntimeType.allCases) { runtime in
+                    Text("\(runtime.icon) \(runtime.rawValue)").tag(runtime)
+                }
+            }
+            .labelsHidden()
+            .frame(width: 175)
+
+            let status = runtimeManager.runtimes.first(where: { $0.type == selectedRuntime })
+            if let status, status.isInstalled, let path = status.path {
+                Menu {
+                    ForEach(runtimeManager.availablePaths(for: selectedRuntime), id: \.self) { candidate in
+                        Button(candidate) { runtimeManager.activateRuntime(candidate, for: selectedRuntime) }
+                    }
+                } label: {
+                    Label(status.version ?? "Detected", systemImage: "checkmark.circle.fill")
+                        .foregroundColor(.green)
+                        .lineLimit(1)
+                }
+                .help("Choose a detected \(selectedRuntime.rawValue) version. Node installs from nvm/asdf are included.")
+            } else {
+                Label("Not installed", systemImage: "exclamationmark.triangle")
+                    .foregroundColor(.orange)
+            }
+            Spacer()
+            Button { runtimeManager.detectAll() } label: { Image(systemName: "arrow.clockwise") }
+                .buttonStyle(.borderless)
+                .help("Re-detect runtimes")
+        }
+        .padding(.horizontal)
+        .padding(.vertical, 10)
     }
 }
 

@@ -122,7 +122,11 @@ struct WebBrowserView: NSViewRepresentable {
             DispatchQueue.main.async { goForwardTrigger = false }
         }
         
-        // Handle URL/Content changes if needed (complex logic omitted for brevity)
+        // Handle URL changes dynamically
+        if let targetURL = url, targetURL != context.coordinator.lastLoadedURL {
+            context.coordinator.lastLoadedURL = targetURL
+            webView.load(URLRequest(url: targetURL))
+        }
     }
     
     private func loadContent(in webView: WKWebView) {
@@ -139,9 +143,11 @@ struct WebBrowserView: NSViewRepresentable {
     
     class Coordinator: NSObject, WKNavigationDelegate, WKUIDelegate {
         var parent: WebBrowserView
+        var lastLoadedURL: URL?
         
         init(_ parent: WebBrowserView) {
             self.parent = parent
+            self.lastLoadedURL = parent.url
         }
         
         // Navigation Started

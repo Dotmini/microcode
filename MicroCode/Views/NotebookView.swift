@@ -393,6 +393,7 @@ final class NotebookCellModel: ObservableObject, Identifiable {
     @Published var customColor: CustomCellColor? = nil  // Custom RGB color
     @Published var useCustomColor: Bool = false
     @Published var tag: String = ""   // User name-tag / catalog label for selective run
+    @Published var computeTargetOverride: ComputeTarget? = nil // Per-cell heterogeneous compute target
     @Published var isCollapsed: Bool = false
     @Published var dataFramePath: String? = nil
     @Published var isDataFrame: Bool = false
@@ -457,7 +458,7 @@ final class NotebookViewModel: ObservableObject {
     @Published var isEditingName: Bool = false
     @Published var workingDirectory: URL
     @Published private(set) var scientificProjectURL: URL?
-    @Published var selectedPythonPath: String = "python3"  // Can be set from UI
+    @Published var selectedPythonPath: String = PythonEnvManager.shared.systemPythonExecutable  // Can be set from UI
     /// The .mic file this notebook is bound to (Quick Save target). nil → not
     /// yet saved to a user-chosen file (autosave still protects the work).
     @Published var currentFileURL: URL?
@@ -525,6 +526,22 @@ final class NotebookViewModel: ObservableObject {
         panel.begin { [weak self] response in
             guard response == .OK, let url = panel.url else { return }
             self?.exportAsIPYNB(notebook: notebook, to: url)
+        }
+    }
+    
+    /// Export as Git-Friendly Plain-Text Python Script with # %% cell markers
+    func exportPlainPythonScript() {
+        guard let notebook = activeNotebook else { return }
+        let panel = NSSavePanel()
+        panel.allowedContentTypes = [UTType(filenameExtension: "py") ?? .plainText]
+        let baseName = notebook.name.replacingOccurrences(of: ".mic", with: "").replacingOccurrences(of: ".ipynb", with: "")
+        panel.nameFieldStringValue = baseName + ".py"
+        panel.title = "Export as Plain-Text Python Script (# %%)"
+        panel.begin { response in
+            guard response == .OK, let url = panel.url else { return }
+            let script = PythonScriptNotebookBridge.export(cells: notebook.cells)
+            try? script.write(to: url, atomically: true, encoding: .utf8)
+            print("✅ Exported plain-text Python script to \(url.lastPathComponent)")
         }
     }
 
@@ -634,8 +651,10 @@ final class NotebookViewModel: ObservableObject {
         scheduleAutoSave()
     }
     
-    func runCell(_ cell: NotebookCellModel, computeTarget: ComputeTarget = .localCPU) {
+    func runCell(_ cell: NotebookCellModel, computeTarget: ComputeTarget? = nil) {
         guard cell.type == .code || cell.type == .procedure || cell.type == .agent else { return }
+
+        let effectiveTarget: ComputeTarget = cell.computeTargetOverride ?? computeTarget ?? AppState.shared?.currentComputeTarget ?? .localCPU
 
         // Auto-detect 3rd-party imports so the env manager always reflects what
         // the code actually needs without the user typing anything.
@@ -648,20 +667,20 @@ final class NotebookViewModel: ObservableObject {
         kernelStatus = "Running"
         
         // If it's not a local execution, route to the Compute Kernel
-        if computeTarget != .localCPU && computeTarget != .localMLX && computeTarget != .localNvidia {
+        if effectiveTarget != .localCPU && effectiveTarget != .localMLX && effectiveTarget != .localNvidia {
             Task {
                 do {
-                    let kernel = ComputeKernelRouter.shared.getKernel(for: computeTarget)
+                    if effectiveTarget == .customHPC {
+                        try await CloudGPUService.shared.ensureManagedSession()
+                    }
+                    let kernel = ComputeKernelRouter.shared.getKernel(for: effectiveTarget)
                     try await kernel.start()
                     
-                    let result = try await kernel.execute(code: cell.content, language: cell.language.rawValue) { progress in
-                        DispatchQueue.main.async {
-                            cell.appendOutput(progress)
-                        }
-                    }
+                    let result = try await kernel.execute(code: cell.content, language: cell.language.rawValue) { _ in }
                     
                     DispatchQueue.main.async {
-                        cell.appendOutput(result + "\n")
+                        let clean = result.trimmingCharacters(in: .whitespacesAndNewlines)
+                        cell.output = clean.isEmpty ? "(Executed with no output)" : clean
                         cell.isExecuting = false
                         self.kernelStatus = "Idle"
                         cell.executionCount = (cell.executionCount ?? 0) + 1
@@ -1213,9 +1232,11 @@ final class NotebookViewModel: ObservableObject {
     }
     
     private func runRCell(_ cell: NotebookCellModel) {
-        // Find Rscript
+        // Honour the R interpreter explicitly selected in Manage Environments
+        // before falling back to conventional Rscript locations.
         let rPaths = ["/opt/homebrew/bin/Rscript", "/usr/local/bin/Rscript", "/usr/bin/Rscript"]
-        guard let rPath = rPaths.first(where: { FileManager.default.fileExists(atPath: $0) }) else {
+        guard let rPath = RuntimeManager.shared.selectedExecutable(for: .r)
+            ?? rPaths.first(where: { FileManager.default.isExecutableFile(atPath: $0) }) else {
             DispatchQueue.main.async {
                 cell.output = "❌ R is not installed. Please install R from https://cran.r-project.org/"
                 cell.isExecuting = false
@@ -1264,7 +1285,10 @@ final class NotebookViewModel: ObservableObject {
                 
                 let process = Process()
                 process.executableURL = URL(fileURLWithPath: rPath)
-                process.arguments = ["--vanilla", tempFile.path]
+                let isRscript = URL(fileURLWithPath: rPath).lastPathComponent.lowercased().contains("rscript")
+                process.arguments = isRscript
+                    ? ["--vanilla", tempFile.path]
+                    : ["--vanilla", "--slave", "-f", tempFile.path]
                 process.currentDirectoryURL = workingDir
                 
                 let outputPipe = Pipe()
@@ -1519,7 +1543,7 @@ final class NotebookViewModel: ObservableObject {
     }
     
     private func runJuliaCell(_ cell: NotebookCellModel) {
-        // Find Julia executable
+        // Honour the Julia executable selected in Manage Environments.
         let juliaPaths = [
             "/Applications/Julia-1.10.app/Contents/Resources/julia/bin/julia",
             "/Applications/Julia-1.9.app/Contents/Resources/julia/bin/julia",
@@ -1527,7 +1551,8 @@ final class NotebookViewModel: ObservableObject {
             "/usr/local/bin/julia",
             "/usr/bin/julia"
         ]
-        guard let juliaPath = juliaPaths.first(where: { FileManager.default.fileExists(atPath: $0) }) else {
+        guard let juliaPath = RuntimeManager.shared.selectedExecutable(for: .julia)
+            ?? juliaPaths.first(where: { FileManager.default.isExecutableFile(atPath: $0) }) else {
             DispatchQueue.main.async {
                 cell.output = "❌ Julia is not installed. Install from https://julialang.org/downloads/"
                 cell.isExecuting = false
@@ -1585,21 +1610,48 @@ final class NotebookViewModel: ObservableObject {
     }
     
     private func runSQLCell(_ cell: NotebookCellModel) {
-        // Parse connection string from comment: -- Connect to: sqlite:///path/to/db
+        let lines = cell.content.components(separatedBy: "\n")
+        var hasExplicitConnection = false
         var dbPath = workingDirectory.appendingPathComponent("notebook.db").path
         
-        let lines = cell.content.components(separatedBy: "\n")
         for line in lines {
             if line.lowercased().contains("connect to:") {
+                hasExplicitConnection = true
                 if let range = line.range(of: "sqlite:///") {
                     dbPath = String(line[range.upperBound...]).trimmingCharacters(in: .whitespaces)
                 }
             }
         }
         
-        // Filter out comments for execution
         let sqlStatements = lines.filter { !$0.trimmingCharacters(in: .whitespaces).hasPrefix("--") }.joined(separator: "\n")
-        
+        let cellID = cell.id
+
+        // If no explicit external database connection is requested, execute directly over
+        // the Rosetta In-Memory DataFrames in POSIX Shared Memory
+        if !hasExplicitConnection {
+            let session = activeNotebookId?.uuidString ?? "default_notebook"
+            Task {
+                do {
+                    let result = try await BackendService.shared.executeInMemorySQL(sessionId: session, query: sqlStatements)
+                    if !result.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                        DispatchQueue.main.async { [weak self] in
+                            self?.handleCellOutput(cellID: cellID, result: result)
+                        }
+                        return
+                    }
+                } catch {
+                    // Fall back to local SQLite execution below
+                }
+                
+                executeLocalSqlite(dbPath: dbPath, sqlStatements: sqlStatements, cellID: cellID)
+            }
+            return
+        }
+
+        executeLocalSqlite(dbPath: dbPath, sqlStatements: sqlStatements, cellID: cellID)
+    }
+
+    private func executeLocalSqlite(dbPath: String, sqlStatements: String, cellID: UUID) {
         // Use Python's sqlite3 to execute SQL
         let pythonCode = """
         import sqlite3
@@ -1646,7 +1698,6 @@ final class NotebookViewModel: ObservableObject {
         """
         
         let pythonPath = PythonEnvManager.shared.activeEnvironment?.pythonPath ?? selectedPythonPath
-        let cellID = cell.id
         PythonEnvManager.shared.executeCode(pythonCode, pythonPath: pythonPath) { [weak self] result, success in
             self?.handleCellOutput(cellID: cellID, result: result)
         }
@@ -1932,7 +1983,9 @@ final class NotebookViewModel: ObservableObject {
             UTType(filenameExtension: "mic") ?? .data,
             UTType(filenameExtension: "mcnb") ?? .json,
             UTType(filenameExtension: "ipynb") ?? .json,
-            .json
+            UTType(filenameExtension: "py") ?? .plainText,
+            .json,
+            .plainText
         ]
         panel.nameFieldStringValue = "\(notebook.name).mic"
         panel.title = "Save Notebook"
@@ -2013,8 +2066,19 @@ final class NotebookViewModel: ObservableObject {
     // MARK: - Load MicroCode Notebook (.mcnb)
     
     func loadNotebook(from url: URL) {
-        if url.pathExtension == "mic" {
+        if url.pathExtension.lowercased() == "mic" {
             loadFromMic(url: url)
+            return
+        }
+        if url.pathExtension.lowercased() == "py" {
+            if let script = try? String(contentsOf: url, encoding: .utf8) {
+                let cells = PythonScriptNotebookBridge.parse(script: script)
+                let notebook = NotebookModel(name: url.lastPathComponent)
+                notebook.cells = cells
+                notebooks.append(notebook)
+                activeNotebookId = notebook.id
+                print("✅ Loaded plain Python script (# %%) as Notebook: \(url.lastPathComponent)")
+            }
             return
         }
         
@@ -2362,9 +2426,12 @@ struct NotebookView: View {
     @EnvironmentObject var appState: AppState
     @StateObject private var viewModel = NotebookViewModel()
     @ObservedObject private var pythonEnvManager = PythonEnvManager.shared
+    @ObservedObject private var cloudGPU = CloudGPUService.shared
+    @ObservedObject private var sharedMemory = SharedMemoryService.shared
     @State private var isReady = false
     @State private var showAIPanel = false
     @State private var showingHPCSettings = false
+    @State private var showingExportPopover = false
     private let notebookHeaderHeight: CGFloat = 34
     
     private var panelBackground: Color {
@@ -2444,6 +2511,9 @@ struct NotebookView: View {
             if let workspace = appState.workspaceFolder {
                 viewModel.configureScientificProject(workspace)
                 viewModel.syncScientificFiles(from: workspace)
+            }
+            Task {
+                await SharedMemoryService.shared.refreshList()
             }
             
             // Check if code was exported from AI Agent
@@ -2576,44 +2646,172 @@ struct NotebookView: View {
                                     .foregroundColor(.secondary)
                             }
                             
-                            // Python Env Selector - Safe access
-                            if isReady {
-                                Menu {
-                                    Button("System Python") {
-                                        pythonEnvManager.activeEnvironment = nil
-                                    }
-                                    Divider()
-                                    ForEach(pythonEnvManager.environments) { env in
-                                        Button(env.name) {
-                                            pythonEnvManager.activateEnvironment(env)
+                            // Python Env Selector - Dual Cloud & Local Support
+                            if appState.currentComputeTarget == .yourCloud {
+                                VStack(alignment: .leading, spacing: 8) {
+                                    // 1. Cloud Target Environment
+                                    VStack(alignment: .leading, spacing: 2) {
+                                        HStack {
+                                            Text("CLOUD COMPUTE")
+                                                .font(.system(size: 9, weight: .bold))
+                                                .foregroundColor(.secondary)
+                                            Spacer()
+                                            Text("Default")
+                                                .font(.system(size: 8, weight: .medium))
+                                                .padding(.horizontal, 4)
+                                                .padding(.vertical, 1)
+                                                .background(Color.green.opacity(0.15))
+                                                .foregroundColor(.green)
+                                                .cornerRadius(3)
                                         }
+
+                                        Menu {
+                                            Button(action: {}) {
+                                                Label("Cloud Auto-ENV (~/.microcode/venv)", systemImage: "checkmark")
+                                            }
+                                            Divider()
+                                            let detected = pythonEnvManager.detectedPackages
+                                            if !detected.isEmpty {
+                                                Button("Auto-Install \(detected.count) Detected Packages on Cloud") {
+                                                    Task {
+                                                        let kernel = ComputeKernelRouter.shared.getKernel(for: .yourCloud)
+                                                        let installCmd = "pip install -q " + detected.joined(separator: " ")
+                                                        _ = try? await kernel.execute(code: installCmd, language: "bash") { _ in }
+                                                    }
+                                                }
+                                            }
+                                            Button("Manage Environments...") {
+                                                let allCode = (viewModel.activeNotebook?.cells ?? [])
+                                                    .filter { $0.type == .code }
+                                                    .map { $0.content }
+                                                    .joined(separator: "\n")
+                                                _ = pythonEnvManager.detectImportsFromCode(allCode)
+                                                appState.showingPythonEnv = true
+                                            }
+                                        } label: {
+                                            HStack {
+                                                Image(systemName: "cloud.fill")
+                                                    .foregroundColor(.green)
+                                                Text("Cloud: Auto venv")
+                                                    .font(.caption)
+                                                Spacer()
+                                                Image(systemName: "chevron.down")
+                                                    .font(.caption2)
+                                            }
+                                            .padding(6)
+                                            .background(controlBackground)
+                                            .cornerRadius(4)
+                                        }
+                                        .buttonStyle(.plain)
                                     }
-                                    Divider()
-                                    Button("Manage Environments...") {
-                                        // Auto-detect required packages from ALL cells so the
-                                        // env sheet opens with them pre-filled (Auto-first UX).
-                                        let allCode = (viewModel.activeNotebook?.cells ?? [])
-                                            .filter { $0.type == .code }
-                                            .map { $0.content }
-                                            .joined(separator: "\n")
-                                        _ = pythonEnvManager.detectImportsFromCode(allCode)
-                                        appState.showingPythonEnv = true
+
+                                    // 2. Local Mac / Apple Silicon Environment (for Cells with Local / MLX override)
+                                    VStack(alignment: .leading, spacing: 2) {
+                                        HStack {
+                                            Text("LOCAL / APPLE SILICON")
+                                                .font(.system(size: 9, weight: .bold))
+                                                .foregroundColor(.secondary)
+                                            Spacer()
+                                            Text("MLX / Metal")
+                                                .font(.system(size: 8, weight: .bold))
+                                                .padding(.horizontal, 4)
+                                                .padding(.vertical, 1)
+                                                .background(Color.accentColor.opacity(0.15))
+                                                .foregroundColor(.accentColor)
+                                                .cornerRadius(3)
+                                        }
+
+                                        Menu {
+                                            Button("System Python") {
+                                                pythonEnvManager.activeEnvironment = nil
+                                                viewModel.selectedPythonPath = pythonEnvManager.systemPythonExecutable
+                                            }
+                                            Divider()
+                                            ForEach(pythonEnvManager.environments) { env in
+                                                Button(env.name) {
+                                                    pythonEnvManager.activateEnvironment(env)
+                                                    viewModel.selectedPythonPath = env.pythonPath
+                                                }
+                                            }
+                                            Divider()
+                                            Button("Manage Local Environments...") {
+                                                let allCode = (viewModel.activeNotebook?.cells ?? [])
+                                                    .filter { $0.type == .code }
+                                                    .map { $0.content }
+                                                    .joined(separator: "\n")
+                                                _ = pythonEnvManager.detectImportsFromCode(allCode)
+                                                appState.showingPythonEnv = true
+                                            }
+                                        } label: {
+                                            HStack {
+                                                Image(systemName: "cpu.fill")
+                                                    .foregroundColor(.accentColor)
+                                                Text(pythonEnvManager.activeEnvironment?.name ?? "System Python")
+                                                    .font(.caption)
+                                                Spacer()
+                                                Image(systemName: "chevron.down")
+                                                    .font(.caption2)
+                                            }
+                                            .padding(6)
+                                            .background(controlBackground)
+                                            .cornerRadius(4)
+                                        }
+                                        .buttonStyle(.plain)
                                     }
-                                } label: {
-                                    HStack {
-                                        Image(systemName: "terminal")
-                                            .foregroundColor(.green)
-                                        Text(pythonEnvManager.activeEnvironment?.name ?? "System")
-                                            .font(.caption)
-                                        Spacer()
-                                        Image(systemName: "chevron.down")
-                                            .font(.caption2)
-                                    }
-                                    .padding(6)
-                                    .background(controlBackground)
-                                    .cornerRadius(4)
                                 }
-                                .buttonStyle(.plain)
+                            } else if isReady {
+                                VStack(alignment: .leading, spacing: 2) {
+                                    HStack {
+                                        Text("LOCAL / APPLE SILICON")
+                                            .font(.system(size: 9, weight: .bold))
+                                            .foregroundColor(.secondary)
+                                        Spacer()
+                                        Text("Default")
+                                            .font(.system(size: 8, weight: .medium))
+                                            .padding(.horizontal, 4)
+                                            .padding(.vertical, 1)
+                                            .background(Color.accentColor.opacity(0.15))
+                                            .foregroundColor(.accentColor)
+                                            .cornerRadius(3)
+                                    }
+
+                                    Menu {
+                                        Button("System Python") {
+                                            pythonEnvManager.activeEnvironment = nil
+                                            viewModel.selectedPythonPath = pythonEnvManager.systemPythonExecutable
+                                        }
+                                        Divider()
+                                        ForEach(pythonEnvManager.environments) { env in
+                                            Button(env.name) {
+                                                pythonEnvManager.activateEnvironment(env)
+                                                viewModel.selectedPythonPath = env.pythonPath
+                                            }
+                                        }
+                                        Divider()
+                                        Button("Manage Environments...") {
+                                            let allCode = (viewModel.activeNotebook?.cells ?? [])
+                                                .filter { $0.type == .code }
+                                                .map { $0.content }
+                                                .joined(separator: "\n")
+                                            _ = pythonEnvManager.detectImportsFromCode(allCode)
+                                            appState.showingPythonEnv = true
+                                        }
+                                    } label: {
+                                        HStack {
+                                            Image(systemName: "cpu.fill")
+                                                .foregroundColor(.green)
+                                            Text(pythonEnvManager.activeEnvironment?.name ?? "System Python")
+                                                .font(.caption)
+                                            Spacer()
+                                            Image(systemName: "chevron.down")
+                                                .font(.caption2)
+                                        }
+                                        .padding(6)
+                                        .background(controlBackground)
+                                        .cornerRadius(4)
+                                    }
+                                    .buttonStyle(.plain)
+                                }
                             } else {
                                 Text("Loading...")
                                     .font(.caption)
@@ -2646,7 +2844,10 @@ struct NotebookView: View {
                             }
                             
                             if let notebook = viewModel.activeNotebook, !notebook.dataFiles.isEmpty {
-                                ForEach(notebook.dataFiles) { file in
+                                let displayedFiles = Array(notebook.dataFiles.prefix(5))
+                                let remainingFiles = Array(notebook.dataFiles.dropFirst(5))
+                                
+                                ForEach(displayedFiles) { file in
                                     DataFileRow(
                                         file: file,
                                         onInsertCell: { viewModel.insertLoaderCell(for: file) },
@@ -2661,6 +2862,61 @@ struct NotebookView: View {
                                         onRemove: { viewModel.removeDataFile(file) },
                                         onDelete: { viewModel.deleteDataFile(file) }
                                     )
+                                }
+                                
+                                if !remainingFiles.isEmpty {
+                                    Menu {
+                                        ForEach(remainingFiles) { file in
+                                            Menu {
+                                                Button {
+                                                    viewModel.insertLoaderCell(for: file)
+                                                } label: {
+                                                    Label("Insert Loader Cell", systemImage: "arrow.down.to.line")
+                                                }
+                                                Button {
+                                                    Task {
+                                                        await appState.loadFile(url: file.url)
+                                                        appState.setEditorMode(.science)
+                                                    }
+                                                } label: {
+                                                    Label("Preview in Science Mode", systemImage: "waveform.path.ecg")
+                                                }
+                                                Button {
+                                                    SharedMemoryService.shared.shareArtifact(file.url)
+                                                } label: {
+                                                    Label("Share to Shared Memory", systemImage: "memorychip")
+                                                }
+                                                Divider()
+                                                Button(role: .destructive) {
+                                                    viewModel.removeDataFile(file)
+                                                } label: {
+                                                    Label("Remove from List", systemImage: "trash")
+                                                }
+                                            } label: {
+                                                Label("\(file.name) (\(ByteCountFormatter.string(fromByteCount: file.size, countStyle: .file)))", systemImage: file.type.icon)
+                                            }
+                                        }
+                                    } label: {
+                                        HStack(spacing: 6) {
+                                            Image(systemName: "folder.fill")
+                                                .font(.system(size: 11))
+                                                .foregroundColor(.secondary)
+                                            Text("More Files (+\(remainingFiles.count))...")
+                                                .font(.system(size: 11, weight: .medium))
+                                                .foregroundColor(.secondary)
+                                            Spacer()
+                                            Image(systemName: "chevron.up.chevron.down")
+                                                .font(.system(size: 9))
+                                                .foregroundColor(.secondary)
+                                        }
+                                        .padding(.horizontal, 8)
+                                        .padding(.vertical, 5)
+                                        .background(appState.appTheme.isGlass ? Color.white.opacity(0.06) : Color(nsColor: appState.appTheme.elevatedBackground))
+                                        .cornerRadius(5)
+                                    }
+                                    .buttonStyle(.plain)
+                                    .help("Access remaining data files in this notebook")
+                                    .padding(.top, 2)
                                 }
                             } else {
                                 HStack {
@@ -2695,8 +2951,8 @@ struct NotebookView: View {
                                 .buttonStyle(.plain)
                             }
                             
-                            if !SharedMemoryService.shared.sharedDataFrames.isEmpty {
-                                ForEach(SharedMemoryService.shared.sharedDataFrames, id: \.self) { name in
+                            if !sharedMemory.sharedDataFrames.isEmpty {
+                                ForEach(sharedMemory.sharedDataFrames, id: \.self) { name in
                                     HStack {
                                         Image(systemName: "memorychip")
                                             .foregroundColor(.blue)
@@ -2714,7 +2970,7 @@ struct NotebookView: View {
                                     }
                                 }
                             } else {
-                                if SharedMemoryService.shared.sharedArtifacts.isEmpty {
+                                if sharedMemory.sharedArtifacts.isEmpty {
                                     Text("No shared data")
                                     .font(.caption2)
                                     .foregroundColor(.secondary)
@@ -2723,7 +2979,7 @@ struct NotebookView: View {
                                 }
                             }
 
-                            ForEach(SharedMemoryService.shared.sharedArtifacts, id: \.path) { url in
+                            ForEach(sharedMemory.sharedArtifacts, id: \.path) { url in
                                 HStack(spacing: 7) {
                                     Image(systemName: DataFile.DataFileType.from(extension: url.pathExtension).icon)
                                         .foregroundColor(DataFile.DataFileType.from(extension: url.pathExtension).color)
@@ -2884,7 +3140,11 @@ struct NotebookView: View {
             } label: {
                 HStack(spacing: 4) {
                     Image(systemName: appState.currentComputeTarget.icon)
-                        .foregroundColor(appState.currentComputeTarget.isPremium ? .orange : .secondary)
+                        .foregroundColor(appState.currentComputeTarget == .yourCloud ? .green : (appState.currentComputeTarget.isPremium ? .orange : .secondary))
+                    if appState.currentComputeTarget == .yourCloud {
+                        Text("Your Cloud")
+                            .font(.system(size: 11, weight: .medium))
+                    }
                     Image(systemName: "chevron.down")
                         .font(.system(size: 8))
                 }
@@ -2892,6 +3152,70 @@ struct NotebookView: View {
             }
             .menuIndicator(.hidden)
             .help("Select Compute Engine: \(appState.currentComputeTarget.displayName)")
+            
+            // Your Cloud SSH Server Selector (Auto-synced with Remote Explorer)
+            if appState.currentComputeTarget == .yourCloud {
+                Menu {
+                    Text("Synced SSH Servers")
+                        .font(.caption)
+                        .foregroundColor(.secondary)
+                    
+                    let servers = RemoteConnectionManager.shared.servers
+                    if servers.isEmpty {
+                        Text("No SSH servers configured")
+                            .foregroundColor(.secondary)
+                    } else {
+                        ForEach(servers) { s in
+                            Button {
+                                appState.selectedSSHComputeServer = s
+                                RemoteConnectionManager.shared.currentConnection = s
+                            } label: {
+                                HStack {
+                                    Text("\(s.name) (\(s.username)@\(s.host))")
+                                    let isSel = (appState.selectedSSHComputeServer?.id ?? RemoteConnectionManager.shared.currentConnection?.id ?? servers.first?.id) == s.id
+                                    if isSel {
+                                        Image(systemName: "checkmark")
+                                    }
+                                }
+                            }
+                        }
+                    }
+                } label: {
+                    let activeServer = appState.selectedSSHComputeServer ?? RemoteConnectionManager.shared.currentConnection ?? RemoteConnectionManager.shared.servers.first
+                    HStack(spacing: 4) {
+                        Circle()
+                            .fill(activeServer != nil ? Color.green : Color.secondary)
+                            .frame(width: 6, height: 6)
+                        Text(activeServer?.name ?? "Auto SSH")
+                            .font(.system(size: 11, weight: .semibold, design: .monospaced))
+                            .foregroundColor(.primary)
+                        Image(systemName: "chevron.down")
+                            .font(.system(size: 8))
+                            .foregroundColor(.secondary)
+                    }
+                    .padding(.horizontal, 6)
+                    .padding(.vertical, 3)
+                    .background(Color.primary.opacity(0.06))
+                    .cornerRadius(4)
+                }
+                .menuIndicator(.hidden)
+                .help("Active SSH Compute Server (Auto-synced with Remote Explorer)")
+                
+                // Auto-ENV Indicator
+                HStack(spacing: 3) {
+                    Circle()
+                        .fill(Color.green)
+                        .frame(width: 5, height: 5)
+                    Text("Auto ENV")
+                        .font(.system(size: 9, weight: .bold, design: .monospaced))
+                        .foregroundColor(.green)
+                }
+                .padding(.horizontal, 5)
+                .padding(.vertical, 2)
+                .background(Color.green.opacity(0.12))
+                .cornerRadius(4)
+                .help("Remote Python Environment: Auto venv (~/.microcode/venv) with on-demand package installation")
+            }
             
             if appState.currentComputeTarget == .customHPC {
                 Button(action: { showingHPCSettings = true }) {
@@ -2907,19 +3231,19 @@ struct NotebookView: View {
                 }
             }
             
-            // Token Balance
-            if appState.currentComputeTarget.isPremium || appState.userTokenBalance > 0 {
+            // GPU Wallet — deliberately separate from AI-token balance.
+            if appState.currentComputeTarget.isPremium {
                 HStack(spacing: 2) {
                     Image(systemName: "bolt.circle.fill")
                         .foregroundColor(.yellow)
-                    Text("\(appState.userTokenBalance)")
+                    Text(cloudGPU.balanceText)
                         .font(.system(size: 10, weight: .bold, design: .monospaced))
                 }
                 .padding(.horizontal, 4)
                 .padding(.vertical, 2)
                 .background(Color.yellow.opacity(0.1))
                 .cornerRadius(4)
-                .help("Token Balance: \(appState.userTokenBalance)")
+                .help("Cloud GPU Wallet: \(cloudGPU.balanceText). This is separate from AI tokens.")
                 
                 Divider().frame(height: 14)
             }
@@ -3060,34 +3384,51 @@ struct NotebookView: View {
             }
             .help("Open Notebook")
             
-            // Save (autosaves continuously; .mic is the default format)
-            Menu {
-                Button(action: { viewModel.quickSave() }) {
-                    Label("Quick Save (.mic)", systemImage: "bolt.fill")
-                }
-                .keyboardShortcut("s", modifiers: .command)
-                Button(action: { viewModel.saveAs() }) {
-                    Label("Save As… (.mic)", systemImage: "square.and.arrow.down")
-                }
-                .keyboardShortcut("s", modifiers: [.command, .shift])
-                Divider()
-                Button(action: { viewModel.exportIpynb() }) {
-                    Label("Export as Jupyter (.ipynb)", systemImage: "arrow.up.forward.square")
-                }
-                Divider()
-                if let t = viewModel.lastAutoSave {
-                    Text("Autosaved \(t.formatted(date: .omitted, time: .standard))")
-                } else {
-                    Text("Autosave on")
-                }
-            } label: {
+            // Export is a persistent popover: one click opens it and it stays
+            // available until the user explicitly closes it.
+            Button(action: { showingExportPopover = true }) {
                 Image(systemName: "square.and.arrow.down")
                     .font(.system(size: 11))
-            } primaryAction: {
-                viewModel.quickSave()
             }
-            .menuIndicator(.hidden)
-            .help("Save — autosaves continuously (.mic). Menu: Save As / Export .ipynb")
+            .buttonStyle(.plain)
+            .popover(isPresented: $showingExportPopover, arrowEdge: .bottom) {
+                VStack(alignment: .leading, spacing: 12) {
+                    HStack {
+                        VStack(alignment: .leading, spacing: 2) {
+                            Text("Export Notebook").font(.headline)
+                            Text("Save .mic or export a Jupyter .ipynb copy")
+                                .font(.caption).foregroundColor(.secondary)
+                        }
+                        Spacer()
+                        Button { showingExportPopover = false } label: {
+                            Image(systemName: "xmark.circle.fill").foregroundColor(.secondary)
+                        }
+                        .buttonStyle(.plain)
+                        .help("Close")
+                    }
+                    Divider()
+                    Button(action: { viewModel.quickSave() }) {
+                        Label("Quick Save (.mic)", systemImage: "bolt.fill")
+                    }
+                    .keyboardShortcut("s", modifiers: .command)
+                    Button(action: { viewModel.saveAs() }) {
+                        Label("Save As… (.mic)", systemImage: "square.and.arrow.down")
+                    }
+                    .keyboardShortcut("s", modifiers: [.command, .shift])
+                    Button(action: { viewModel.exportIpynb() }) {
+                        Label("Export as Jupyter (.ipynb)", systemImage: "arrow.up.forward.square")
+                    }
+                    Button(action: { viewModel.exportPlainPythonScript() }) {
+                        Label("Export as Git-Clean Script (.py # %%)", systemImage: "doc.text.fill")
+                    }
+                    Divider()
+                    Text(viewModel.lastAutoSave.map { "Autosaved \($0.formatted(date: .omitted, time: .standard))" } ?? "Autosave on")
+                        .font(.caption).foregroundColor(.secondary)
+                }
+                .padding(14)
+                .frame(width: 300)
+            }
+            .help("Export Notebook (.mic / .ipynb)")
             
             Divider().frame(height: 14)
             
@@ -3130,7 +3471,7 @@ struct NotebookView: View {
             if appState.availablePythonVersions.isEmpty {
                 Button("python3 (default)") {
                     appState.selectedPythonVersion = "python3"
-                    viewModel.selectedPythonPath = "python3"
+                    viewModel.selectedPythonPath = PythonEnvManager.shared.systemPythonExecutable
                     pythonEnvManager.activeEnvironment = nil
                 }
             } else {
@@ -3545,10 +3886,15 @@ struct NotebookCellView: View {
                             
                             // Text Output
                             if !cell.output.isEmpty {
+                                let hasError = cell.output.contains("Error") || cell.output.contains("Traceback") || cell.output.contains("Exception") || cell.output.contains("CUDA out of memory")
+                                if hasError {
+                                    CellSelfHealingBanner(cell: cell, onRun: onRun)
+                                }
+                                
                                 ScrollView {
                                     Text(cell.output)
                                         .font(.system(size: 12, design: .monospaced))
-                                        .foregroundColor(cell.output.contains("Error") || cell.output.contains("Traceback") ? .red : .primary)
+                                        .foregroundColor(hasError ? .red : .primary)
                                         .frame(maxWidth: .infinity, alignment: .leading)
                                         .textSelection(.enabled)
                                 }
@@ -3699,6 +4045,45 @@ struct NotebookCellView: View {
                     .cornerRadius(4)
                 }
                 .buttonStyle(.plain)
+                
+                // Per-Cell Heterogeneous Compute Target Chip
+                Menu {
+                    Button {
+                        cell.computeTargetOverride = nil
+                    } label: {
+                        HStack {
+                            Text("Default (\(appState.currentComputeTarget.displayName))")
+                            if cell.computeTargetOverride == nil { Image(systemName: "checkmark") }
+                        }
+                    }
+                    Divider()
+                    ForEach(ComputeTarget.userSelectable, id: \.self) { t in
+                        Button {
+                            cell.computeTargetOverride = t
+                        } label: {
+                            HStack {
+                                Image(systemName: t.icon)
+                                Text(t.displayName)
+                                if cell.computeTargetOverride == t { Image(systemName: "checkmark") }
+                            }
+                        }
+                    }
+                } label: {
+                    let current = cell.computeTargetOverride ?? appState.currentComputeTarget
+                    HStack(spacing: 3) {
+                        Image(systemName: cell.computeTargetOverride != nil ? current.icon : "arrow.triangle.branch")
+                            .font(.system(size: 8))
+                        Text(cell.computeTargetOverride != nil ? current.displayName : "Default")
+                            .font(.system(size: 9, weight: .medium))
+                    }
+                    .padding(.horizontal, 5)
+                    .padding(.vertical, 2)
+                    .background(cell.computeTargetOverride != nil ? Color.accentColor.opacity(0.18) : Color.secondary.opacity(0.12))
+                    .foregroundColor(cell.computeTargetOverride != nil ? .accentColor : .secondary)
+                    .cornerRadius(4)
+                }
+                .buttonStyle(.plain)
+                .help("Per-Cell Compute Engine (Overrides default target for this cell)")
             } else if cell.type == .agent {
                 HStack(spacing: 4) {
                     Image(systemName: "brain")
@@ -3930,6 +4315,199 @@ struct NotebookCellView: View {
         }
     }
 }
+
+// MARK: - Cell Self-Healing Banner
+
+struct CellSelfHealingBanner: View {
+    @ObservedObject var cell: NotebookCellModel
+    let onRun: () -> Void
+    
+    @State private var isFixing = false
+    @State private var fixStatus = ""
+    @State private var showCopied = false
+    
+    var body: some View {
+        HStack(spacing: 8) {
+            HStack(spacing: 5) {
+                Image(systemName: "exclamationmark.triangle")
+                    .font(.system(size: 11))
+                    .foregroundColor(.secondary)
+                Text("Cell Error")
+                    .font(.system(size: 11, weight: .medium))
+                    .foregroundColor(.primary)
+            }
+            
+            if isFixing {
+                HStack(spacing: 5) {
+                    ProgressView()
+                        .scaleEffect(0.5)
+                        .frame(width: 12, height: 12)
+                    Text(fixStatus)
+                        .font(.system(size: 10))
+                        .foregroundColor(.secondary)
+                }
+            }
+            
+            Spacer()
+            
+            // 1. AI Agent Auto-Fix Button (Monochrome / Theme-matching)
+            Button {
+                triggerAgentAutoFix()
+            } label: {
+                HStack(spacing: 4) {
+                    Image(systemName: "bolt.badge.automatic.fill")
+                        .font(.system(size: 10))
+                    Text("Agent Auto-Fix")
+                }
+                .font(.system(size: 10, weight: .medium))
+            }
+            .buttonStyle(.bordered)
+            .disabled(isFixing)
+            .help("MicroCode AI Agent repairs and re-runs this cell automatically")
+            
+            // 2. Open in Full AI Agent Chat
+            Button {
+                openInAgentChat()
+            } label: {
+                HStack(spacing: 3) {
+                    Image(systemName: "bubble.left.and.bubble.right")
+                        .font(.system(size: 9))
+                    Text("Ask Agent")
+                }
+                .font(.system(size: 10))
+            }
+            .buttonStyle(.bordered)
+            .disabled(isFixing)
+            .help("Switch to MicroCode AI Agent to interactively debug and fix this error")
+            
+            // 3. Copy Traceback Button
+            Button {
+                NSPasteboard.general.clearContents()
+                NSPasteboard.general.setString(cell.output, forType: .string)
+                showCopied = true
+                DispatchQueue.main.asyncAfter(deadline: .now() + 2) { showCopied = false }
+            } label: {
+                HStack(spacing: 3) {
+                    Image(systemName: showCopied ? "checkmark" : "doc.on.doc")
+                        .font(.system(size: 9))
+                    Text(showCopied ? "Copied" : "Copy")
+                }
+                .font(.system(size: 10))
+            }
+            .buttonStyle(.bordered)
+            .disabled(isFixing)
+        }
+        .padding(.horizontal, 8)
+        .padding(.vertical, 4)
+        .background(Color.primary.opacity(0.04))
+        .cornerRadius(6)
+        .overlay(
+            RoundedRectangle(cornerRadius: 6)
+                .stroke(Color.primary.opacity(0.12), lineWidth: 1)
+        )
+    }
+    
+    private func triggerAgentAutoFix() {
+        isFixing = true
+        fixStatus = "Agent analyzing traceback..."
+        
+        let prompt = """
+        You are the MicroCode Autonomous AI Agent.
+        The following \(cell.language.rawValue) notebook cell failed with an execution error.
+        
+        LANGUAGE: \(cell.language.rawValue)
+        CODE:
+        ```\(cell.language.rawValue.lowercased())
+        \(cell.content)
+        ```
+        
+        TRACEBACK:
+        ```
+        \(cell.output)
+        ```
+        
+        Analyze the exact failure (syntax, missing import, compiler flags, or logic).
+        Repair the code completely.
+        Output ONLY the corrected runnable code inside a single ```\(cell.language.rawValue.lowercased()) ... ``` block.
+        Do NOT write explanations or conversation.
+        """
+        
+        let providerStr = UserDefaults.standard.string(forKey: "aiProvider") ?? "omni"
+        let provider = StreamableAIProvider(rawValue: providerStr) ?? .omni
+        let model = UserDefaults.standard.string(forKey: "aiModel") ?? provider.defaultModel
+        let key = UserDefaults.standard.string(forKey: "\(provider.rawValue)_api_key") ?? UserDefaults.standard.string(forKey: "apiKey") ?? ""
+        
+        AIClient.shared.sendMessage(
+            prompt: prompt,
+            systemPrompt: "You are the MicroCode AI Agent. Output ONLY the fixed code inside a single markdown code block.",
+            provider: provider,
+            model: model,
+            apiKey: key,
+            onToken: { _ in },
+            onComplete: { response in
+                DispatchQueue.main.async {
+                    self.isFixing = false
+                    
+                    var fixed = response.trimmingCharacters(in: .whitespacesAndNewlines)
+                    if fixed.contains("```") {
+                        let lines = fixed.components(separatedBy: .newlines)
+                        var codeLines: [String] = []
+                        var inside = false
+                        for l in lines {
+                            let trimmed = l.trimmingCharacters(in: .whitespaces)
+                            if trimmed.hasPrefix("```") {
+                                inside.toggle()
+                                continue
+                            }
+                            if inside {
+                                codeLines.append(l)
+                            }
+                        }
+                        if !codeLines.isEmpty {
+                            fixed = codeLines.joined(separator: "\n")
+                        }
+                    }
+                    
+                    if !fixed.isEmpty {
+                        self.cell.content = fixed
+                        self.cell.appendOutput("\n⚡ [Agent Self-Healing] Code patched. Re-executing now...\n")
+                        self.onRun()
+                    }
+                }
+            },
+            onError: { err in
+                DispatchQueue.main.async {
+                    self.isFixing = false
+                    self.cell.appendOutput("\n⚠️ [Agent Self-Healing] Repair error: \(err)\n")
+                }
+            }
+        )
+    }
+    
+    private func openInAgentChat() {
+        let inquiry = """
+        Please analyze and fix this \(cell.language.rawValue) notebook cell error:
+        
+        CODE:
+        ```\(cell.language.rawValue.lowercased())
+        \(cell.content)
+        ```
+        
+        ERROR TRACEBACK:
+        ```
+        \(cell.output)
+        ```
+        """
+        
+        // Copy error prompt to pasteboard so user can easily paste into chat
+        NSPasteboard.general.clearContents()
+        NSPasteboard.general.setString(inquiry, forType: .string)
+        
+        // Post notification to switch to Agent surface
+        NotificationCenter.default.post(name: NSNotification.Name("SwitchToAgentSurface"), object: inquiry)
+    }
+}
+
 
 // MARK: - HPC Settings View
 

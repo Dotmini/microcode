@@ -264,42 +264,26 @@ struct GitSettingsView: View {
     
     private var authSection: some View {
         VStack(alignment: .leading, spacing: 16) {
-            Text("Authentication Method")
+            Text("Connected Accounts")
                 .font(.headline)
-            
+
             Picker("Method", selection: $authMethod) {
                 ForEach(GitAuthMethod.allCases, id: \.self) { method in
                     Text(method.rawValue).tag(method)
                 }
             }
             .pickerStyle(.segmented)
-            
+
             GroupBox {
                 switch authMethod {
                 case .https:
                     VStack(alignment: .leading, spacing: 12) {
-                        Text("Personal Access Token")
+                        Text("Provider sign-in")
                             .font(.subheadline.bold())
-                        
-                        HStack {
-                            if showToken {
-                                TextField("ghp_xxxx...", text: $personalAccessToken)
-                                    .textFieldStyle(.roundedBorder)
-                            } else {
-                                SecureField("ghp_xxxx...", text: $personalAccessToken)
-                                    .textFieldStyle(.roundedBorder)
-                            }
-                            
-                            Button {
-                                showToken.toggle()
-                            } label: {
-                                Image(systemName: showToken ? "eye.slash" : "eye")
-                            }
-                            .buttonStyle(.borderless)
-                        }
-                        
-                        Link("Generate token on GitHub", destination: URL(string: "https://github.com/settings/tokens")!)
+                        Text("Use the provider's browser-based OAuth flow. Credentials are managed by GitHub CLI, GitLab CLI, SSH, or macOS Keychain — never saved in MicroCode preferences.")
                             .font(.caption)
+                            .foregroundColor(.secondary)
+                        GitHostingAccountsView()
                     }
                     
                 case .ssh:
@@ -344,10 +328,9 @@ struct GitSettingsView: View {
                 }
             }
             
-            Button("Save Authentication") {
-                saveAuth()
-            }
-            .buttonStyle(.borderedProminent)
+            Text("For a personal access token, use the provider CLI or macOS Git Credential Manager rather than pasting it into MicroCode.")
+                .font(.caption)
+                .foregroundColor(.secondary)
         }
     }
     
@@ -730,11 +713,9 @@ struct GitSettingsView: View {
     private func saveAuth() {
         switch authMethod {
         case .https:
-            // Store token in keychain
-            if !personalAccessToken.isEmpty {
-                UserDefaults.standard.set(personalAccessToken, forKey: "git.personalAccessToken")
-                successMessage = "Token saved"
-            }
+            // Tokens are deliberately not persisted by the app. GitHub/GitLab
+            // CLIs and Git Credential Manager own their secure storage.
+            successMessage = "Use Connect to sign in through your Git provider"
         case .ssh:
             UserDefaults.standard.set(sshKeyPath, forKey: "git.sshKeyPath")
             successMessage = "SSH key path saved"

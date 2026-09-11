@@ -40,7 +40,7 @@ from pathlib import Path
 # ============================================================
 
 SERVER_NAME = "microcode-mcp"
-SERVER_VERSION = "2.0.0"
+SERVER_VERSION = "2.0.1"
 PROTOCOL_VERSION = "2024-11-05"
 
 # Workspace root — set via env or auto-detect
@@ -738,6 +738,260 @@ def tool_ardium_diagnose(params: dict) -> str:
     return "🔍 Ardium Diagnostics Summary:\n" + "\n".join(issues)
 
 # ============================================================
+# Dotmini Computer Use Tools (MicroCode Native)
+# ============================================================
+
+def _get_computer_use_engine():
+    sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+    try:
+        from tools.computer_use_engine import MicroCodeComputerUse
+        return MicroCodeComputerUse()
+    except Exception as e:
+        raise RuntimeError(f"Failed to initialize MicroCode Computer Use engine: {e}")
+
+def tool_computer_use_inspect(args: dict) -> str:
+    engine = _get_computer_use_engine()
+    elements = engine.inspect_elements()
+    query = args.get("query")
+    role = args.get("role")
+    if query:
+        q = query.lower()
+        elements = [e for e in elements if q in e["label"].lower() or q in e["role"].lower()]
+    if role:
+        r = role.lower()
+        elements = [e for e in elements if r in e["role"].lower()]
+    return json.dumps(elements, indent=2)
+
+def tool_computer_use_click(args: dict) -> str:
+    engine = _get_computer_use_engine()
+    target = args.get("target")
+    x = args.get("x")
+    y = args.get("y")
+    click_count = args.get("click_count", 1)
+    if target:
+        res = engine.click_element(target, role=args.get("role"), click_count=click_count)
+        return json.dumps(res, indent=2)
+    elif x is not None and y is not None:
+        engine.mouse_click(float(x), float(y), click_count=click_count)
+        return json.dumps({"success": True, "clicked_at": {"x": float(x), "y": float(y)}}, indent=2)
+    else:
+        raise ValueError("Must provide either 'target' (label) or 'x' and 'y'")
+
+def tool_computer_use_type(args: dict) -> str:
+    engine = _get_computer_use_engine()
+    text = args.get("text", "")
+    press_enter = args.get("press_enter", False)
+    engine.type_text(text, press_enter=press_enter)
+    return json.dumps({"success": True, "typed_length": len(text)})
+
+def tool_computer_use_shortcut(args: dict) -> str:
+    engine = _get_computer_use_engine()
+    modifiers = args.get("modifiers", [])
+    key = args.get("key", "")
+    engine.send_shortcut(modifiers, key)
+    return json.dumps({"success": True, "shortcut": f"{'+'.join(modifiers)}+{key}"})
+
+def tool_computer_use_capture(args: dict) -> str:
+    engine = _get_computer_use_engine()
+    output_path = args.get("output_path", "/tmp/microcode_screenshot.png")
+    res = engine.capture_screenshot(output_path)
+    return json.dumps({"success": True, "path": res})
+
+def tool_computer_use_live_test(args: dict) -> str:
+    sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+    from tools.computer_use_engine import MicroCodeComputerUse
+    engine = MicroCodeComputerUse()
+    art_dir = "/Users/dotmini/.gemini/antigravity/brain/197fe973-60a3-4cf1-b2bf-10645e78f063"
+    s0 = engine.capture_screenshot(f"{art_dir}/live_step0_initial.png")
+    engine.click_element("Clear Outputs")
+    time.sleep(1.0)
+    s1 = engine.capture_screenshot(f"{art_dir}/live_step1_cleared.png")
+    try:
+        engine.click_element("Play")
+    except Exception:
+        engine.send_shortcut(["cmd"], "return")
+    time.sleep(3.5)
+    s2 = engine.capture_screenshot(f"{art_dir}/live_step2_executed.png")
+    return json.dumps({
+        "status": "success",
+        "initial": s0,
+        "cleared": s1,
+        "executed": s2
+    }, indent=2)
+def tool_device_list(args: dict) -> str:
+    """List connected Android devices (physical & emulator), AVDs, and iOS Simulators."""
+    devices = []
+    
+    # 1. Check Android devices via adb
+    adb_path = os.environ.get("ADB_PATH", "adb")
+    try:
+        res = subprocess.run([adb_path, "devices", "-l"], capture_output=True, text=True, timeout=5)
+        if res.returncode == 0:
+            lines = res.stdout.strip().split("\n")[1:]
+            for line in lines:
+                if not line.strip(): continue
+                parts = line.split()
+                if len(parts) >= 2 and parts[1] == "device":
+                    serial = parts[0]
+                    is_emu = serial.startswith("emulator-")
+                    model = "Unknown"
+                    for p in parts[2:]:
+                        if p.startswith("model:"): model = p.split(":")[1]
+                    devices.append({
+                        "id": serial,
+                        "platform": "Android",
+                        "type": "Emulator" if is_emu else "Physical",
+                        "name": f"{model} ({serial})",
+                        "state": "Connected"
+                    })
+    except Exception as e:
+        pass
+
+    # 2. Check Android AVDs
+    emulator_path = os.environ.get("EMULATOR_PATH", "emulator")
+    try:
+        res = subprocess.run([emulator_path, "-list-avds"], capture_output=True, text=True, timeout=5)
+        if res.returncode == 0:
+            for avd in res.stdout.strip().split("\n"):
+                avd = avd.strip()
+                if avd:
+                    # Check if already listed as running
+                    devices.append({
+                        "id": f"avd:{avd}",
+                        "platform": "Android",
+                        "type": "AVD (Configured)",
+                        "name": avd,
+                        "state": "Available"
+                    })
+    except Exception:
+        pass
+
+    # 3. Check iOS Simulators via xcrun simctl
+    try:
+        res = subprocess.run(["xcrun", "simctl", "list", "devices", "available", "-j"], capture_output=True, text=True, timeout=5)
+        if res.returncode == 0:
+            data = json.loads(res.stdout)
+            for runtime, dev_list in data.get("devices", {}).items():
+                for dev in dev_list:
+                    if dev.get("isAvailable", False):
+                        devices.append({
+                            "id": dev.get("udid"),
+                            "platform": "iOS",
+                            "type": "Simulator",
+                            "name": f"{dev.get('name')} ({runtime.split('.')[-1]})",
+                            "state": dev.get("state")
+                        })
+    except Exception:
+        pass
+
+    return json.dumps({"devices": devices, "count": len(devices)}, indent=2)
+
+def tool_device_interact(args: dict) -> str:
+    """Interact with a device: tap, swipe, text, key, screenshot."""
+    action = args.get("action", "").lower()
+    device_id = args.get("device_id")
+    
+    adb_path = os.environ.get("ADB_PATH", "adb")
+    
+    if action == "tap":
+        x = args.get("x")
+        y = args.get("y")
+        if x is None or y is None: raise ValueError("Tap requires 'x' and 'y'")
+        cmd = [adb_path] + (["-s", device_id] if device_id else []) + ["shell", "input", "tap", str(int(x)), str(int(y))]
+        res = subprocess.run(cmd, capture_output=True, text=True, timeout=10)
+        return json.dumps({"success": res.returncode == 0, "action": "tap", "coords": [x, y], "output": res.stdout})
+
+    elif action == "swipe":
+        x1, y1 = args.get("x"), args.get("y")
+        x2, y2 = args.get("x2"), args.get("y2")
+        dur = args.get("duration", 200)
+        if None in (x1, y1, x2, y2): raise ValueError("Swipe requires x, y, x2, y2")
+        cmd = [adb_path] + (["-s", device_id] if device_id else []) + ["shell", "input", "swipe", str(int(x1)), str(int(y1)), str(int(x2)), str(int(y2)), str(int(dur))]
+        res = subprocess.run(cmd, capture_output=True, text=True, timeout=10)
+        return json.dumps({"success": res.returncode == 0, "action": "swipe", "output": res.stdout})
+
+    elif action == "text":
+        text = args.get("text", "")
+        escaped = text.replace(" ", "%s").replace("\n", "%s")
+        cmd = [adb_path] + (["-s", device_id] if device_id else []) + ["shell", "input", "text", escaped]
+        res = subprocess.run(cmd, capture_output=True, text=True, timeout=10)
+        return json.dumps({"success": res.returncode == 0, "action": "text", "typed": text, "output": res.stdout})
+
+    elif action == "key":
+        key = str(args.get("key", "3"))
+        key_map = {"HOME": "3", "BACK": "4", "ENTER": "66", "POWER": "26", "RECENT": "187"}
+        code = key_map.get(key.upper(), key)
+        cmd = [adb_path] + (["-s", device_id] if device_id else []) + ["shell", "input", "keyevent", code]
+        res = subprocess.run(cmd, capture_output=True, text=True, timeout=10)
+        return json.dumps({"success": res.returncode == 0, "action": "key", "keycode": code, "output": res.stdout})
+
+    elif action == "screenshot":
+        out_path = args.get("output_path", f"/tmp/device_{int(time.time())}.png")
+        if device_id and len(device_id) == 36 and "-" in device_id: # likely iOS UDID
+            cmd = ["xcrun", "simctl", "io", device_id, "screenshot", out_path]
+            res = subprocess.run(cmd, capture_output=True, text=True, timeout=15)
+        else:
+            cmd = [adb_path] + (["-s", device_id] if device_id else []) + ["exec-out", "screencap", "-p"]
+            with open(out_path, "wb") as f:
+                res = subprocess.run(cmd, stdout=f, stderr=subprocess.PIPE, timeout=15)
+        return json.dumps({"success": res.returncode == 0, "action": "screenshot", "path": out_path})
+
+    else:
+        raise ValueError(f"Unknown action: {action}. Must be tap, swipe, text, key, or screenshot")
+
+def tool_device_app_manage(args: dict) -> str:
+    """Install, launch, or force-stop an application on device."""
+    op = args.get("operation", "").lower()
+    device_id = args.get("device_id")
+    identifier = args.get("identifier")
+    package_path = args.get("package_path")
+    adb_path = os.environ.get("ADB_PATH", "adb")
+
+    if op == "launch":
+        if not identifier: raise ValueError("launch requires 'identifier' (package or bundle ID)")
+        if device_id and len(device_id) == 36 and "-" in device_id:
+            cmd = ["xcrun", "simctl", "launch", device_id, identifier]
+        else:
+            cmd = [adb_path] + (["-s", device_id] if device_id else []) + ["shell", "monkey", "-p", identifier, "-c", "android.intent.category.LAUNCHER", "1"]
+        res = subprocess.run(cmd, capture_output=True, text=True, timeout=15)
+        return json.dumps({"success": res.returncode == 0, "operation": "launch", "output": res.stdout + res.stderr})
+
+    elif op == "stop":
+        if not identifier: raise ValueError("stop requires 'identifier'")
+        if device_id and len(device_id) == 36 and "-" in device_id:
+            cmd = ["xcrun", "simctl", "terminate", device_id, identifier]
+        else:
+            cmd = [adb_path] + (["-s", device_id] if device_id else []) + ["shell", "am", "force-stop", identifier]
+        res = subprocess.run(cmd, capture_output=True, text=True, timeout=10)
+        return json.dumps({"success": res.returncode == 0, "operation": "stop", "output": res.stdout + res.stderr})
+
+    elif op == "install":
+        if not package_path: raise ValueError("install requires 'package_path'")
+        if device_id and len(device_id) == 36 and "-" in device_id:
+            cmd = ["xcrun", "simctl", "install", device_id, package_path]
+        else:
+            cmd = [adb_path] + (["-s", device_id] if device_id else []) + ["install", "-r", "-t", package_path]
+        res = subprocess.run(cmd, capture_output=True, text=True, timeout=45)
+        return json.dumps({"success": res.returncode == 0, "operation": "install", "output": res.stdout + res.stderr})
+
+    else:
+        raise ValueError(f"Unknown operation: {op}. Must be launch, stop, or install")
+
+def tool_adb_execute(args: dict) -> str:
+    """Execute raw ADB shell command on connected device."""
+    command = args.get("command")
+    device_id = args.get("device_id")
+    if not command: raise ValueError("command is required")
+    adb_path = os.environ.get("ADB_PATH", "adb")
+    cmd = [adb_path] + (["-s", device_id] if device_id else []) + ["shell", command]
+    res = subprocess.run(cmd, capture_output=True, text=True, timeout=20)
+    return json.dumps({
+        "returncode": res.returncode,
+        "stdout": res.stdout,
+        "stderr": res.stderr
+    })
+
+# ============================================================
 # Tool Registry
 # ============================================================
 
@@ -1038,6 +1292,133 @@ TOOLS = {
             }
         },
         "handler": tool_ardium_diagnose
+    },
+    # --- Dotmini Computer Use Tools ---
+    "computer_use_inspect": {
+        "description": "Inspect all interactive UI elements in the MicroCode native macOS window (buttons, menus, cells, editors) with bounding boxes and coordinates.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "query": {"type": "string", "description": "Filter by element title or label substring"},
+                "role": {"type": "string", "description": "Filter by AX role (e.g. AXButton, AXMenuButton)"}
+            }
+        },
+        "handler": tool_computer_use_inspect
+    },
+    "computer_use_click": {
+        "description": "Simulate physical human mouse click on a MicroCode UI element by label/title (e.g. 'Clear Outputs', 'Play', 'Code') or explicit screen coordinates (x, y).",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "target": {"type": "string", "description": "Target UI element title or label"},
+                "role": {"type": "string", "description": "Optional AX role filter"},
+                "x": {"type": "number", "description": "Target screen X coordinate"},
+                "y": {"type": "number", "description": "Target screen Y coordinate"},
+                "click_count": {"type": "integer", "description": "1 for single click, 2 for double click"}
+            }
+        },
+        "handler": tool_computer_use_click
+    },
+    "computer_use_type": {
+        "description": "Type text directly into the focused editor or cell with natural human typing cadence.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "text": {"type": "string", "description": "Text or code to type"},
+                "press_enter": {"type": "boolean", "description": "Whether to hit Enter after typing"}
+            },
+            "required": ["text"]
+        },
+        "handler": tool_computer_use_type
+    },
+    "computer_use_shortcut": {
+        "description": "Send native macOS keyboard shortcuts to MicroCode (e.g. Cmd+Return to run cell, Cmd+K, Cmd+S).",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "modifiers": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": "Modifiers: cmd, shift, option, ctrl"
+                },
+                "key": {"type": "string", "description": "Key name: return, space, escape, k, s, etc."}
+            },
+            "required": ["modifiers", "key"]
+        },
+        "handler": tool_computer_use_shortcut
+    },
+    "computer_use_capture": {
+        "description": "Capture a crystal clear real-time screenshot of the MicroCode native window.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "output_path": {"type": "string", "description": "Destination file path for PNG screenshot"}
+            }
+        },
+        "handler": tool_computer_use_capture
+    },
+    "computer_use_live_test": {
+        "description": "Execute a full real-time human simulation test on the running MicroCode notebook (captures before, clicks Clear Outputs, executes Play, and captures rendered output).",
+        "inputSchema": {
+            "type": "object",
+            "properties": {}
+        },
+        "handler": tool_computer_use_live_test
+    },
+    # --- Device & Hardware Automation Tools ---
+    "device_list": {
+        "description": "List connected Android physical devices, running emulators, configured AVDs, and iOS Simulators.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {}
+        },
+        "handler": tool_device_list
+    },
+    "device_interact": {
+        "description": "Interact with an Android device/emulator or iOS simulator: tap, swipe, text, key, screenshot.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "action": {"type": "string", "description": "tap | swipe | text | key | screenshot"},
+                "device_id": {"type": "string", "description": "Target device serial or UDID"},
+                "x": {"type": "number", "description": "X coordinate for tap or swipe start"},
+                "y": {"type": "number", "description": "Y coordinate for tap or swipe start"},
+                "x2": {"type": "number", "description": "X coordinate for swipe end"},
+                "y2": {"type": "number", "description": "Y coordinate for swipe end"},
+                "duration": {"type": "integer", "description": "Swipe duration in ms (default 200)"},
+                "text": {"type": "string", "description": "Text to type"},
+                "key": {"type": "string", "description": "Key code or name (HOME, BACK, ENTER, POWER, RECENT)"},
+                "output_path": {"type": "string", "description": "Output path for screenshot"}
+            },
+            "required": ["action"]
+        },
+        "handler": tool_device_interact
+    },
+    "device_app_manage": {
+        "description": "Launch, stop, or install an application on target Android or iOS device.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "operation": {"type": "string", "description": "launch | stop | install"},
+                "device_id": {"type": "string", "description": "Target device serial or UDID"},
+                "identifier": {"type": "string", "description": "Package name (Android) or Bundle ID (iOS)"},
+                "package_path": {"type": "string", "description": "Path to .apk or .app bundle for installation"}
+            },
+            "required": ["operation"]
+        },
+        "handler": tool_device_app_manage
+    },
+    "adb_execute": {
+        "description": "Execute raw ADB shell command on connected Android device.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "command": {"type": "string", "description": "ADB shell command to run"},
+                "device_id": {"type": "string", "description": "Target Android device serial"}
+            },
+            "required": ["command"]
+        },
+        "handler": tool_adb_execute
     },
 }
 

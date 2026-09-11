@@ -1,25 +1,28 @@
 
-export const microcodeShim = {
+export type HostEvent = (method: string, params: Record<string, unknown>) => void;
+
+export function createMicroCodeShim(emit: HostEvent) {
+    const registeredCommands = new Map<string, (...args: any[]) => any>();
+    return {
     commands: {
         registerCommand: (command: string, callback: (...args: any[]) => any) => {
-            console.error(`[Shim] Registered command: ${command}`);
-            // In real impl: notify Core to register command ID
-            return { dispose: () => { } };
+            registeredCommands.set(command, callback);
+            emit('command/register', { command });
+            return { dispose: () => registeredCommands.delete(command) };
         },
         executeCommand: (command: string, ...rest: any[]) => {
-            console.error(`[Shim] Executing command: ${command}`);
-            return Promise.resolve();
+            const callback = registeredCommands.get(command);
+            return Promise.resolve(callback?.(...rest));
         }
     },
     window: {
         showInformationMessage: (message: string) => {
-            console.error(`[Shim] Info: ${message}`);
-            // Send RPC to Core
+            emit('window/info', { message });
             return Promise.resolve();
         },
         createOutputChannel: (name: string) => {
             return {
-                appendLine: (val: string) => console.error(`[${name}] ${val}`),
+                appendLine: (val: string) => emit('window/output', { name, value: val }),
                 show: () => { },
                 dispose: () => { }
             };
@@ -33,3 +36,4 @@ export const microcodeShim = {
         }
     }
 };
+}

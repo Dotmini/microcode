@@ -18,6 +18,7 @@ class KeychainManager: ObservableObject {
     static let shared = KeychainManager()
     
     private let service = "com.dotmini.microcode.api-keys"
+    private let integrationService = "com.dotmini.microcode.integrations"
     
     /// Known provider key identifiers
     enum ProviderKey: String, CaseIterable {
@@ -153,6 +154,48 @@ class KeychainManager: ObservableObject {
     /// Get all configured providers
     func configuredProviders() -> [ProviderKey] {
         return ProviderKey.allCases.filter { hasKey(for: $0) }
+    }
+
+    // MARK: - Integration Secrets
+
+    /// Webhook URLs are credentials. Keep them out of project files, chat
+    /// transcripts, and UserDefaults just like provider API keys.
+    func saveIntegrationSecret(_ value: String, account: String) -> Bool {
+        guard !value.isEmpty else { return false }
+        deleteIntegrationSecret(account: account)
+        let query: [String: Any] = [
+            kSecClass as String: kSecClassGenericPassword,
+            kSecAttrService as String: integrationService,
+            kSecAttrAccount as String: account,
+            kSecValueData as String: Data(value.utf8),
+            kSecAttrAccessible as String: kSecAttrAccessibleAfterFirstUnlock
+        ]
+        return SecItemAdd(query as CFDictionary, nil) == errSecSuccess
+    }
+
+    func readIntegrationSecret(account: String) -> String? {
+        let query: [String: Any] = [
+            kSecClass as String: kSecClassGenericPassword,
+            kSecAttrService as String: integrationService,
+            kSecAttrAccount as String: account,
+            kSecReturnData as String: true,
+            kSecMatchLimit as String: kSecMatchLimitOne
+        ]
+        var result: AnyObject?
+        guard SecItemCopyMatching(query as CFDictionary, &result) == errSecSuccess,
+              let data = result as? Data else { return nil }
+        return String(data: data, encoding: .utf8)
+    }
+
+    @discardableResult
+    func deleteIntegrationSecret(account: String) -> Bool {
+        let query: [String: Any] = [
+            kSecClass as String: kSecClassGenericPassword,
+            kSecAttrService as String: integrationService,
+            kSecAttrAccount as String: account
+        ]
+        let status = SecItemDelete(query as CFDictionary)
+        return status == errSecSuccess || status == errSecItemNotFound
     }
     
     // MARK: - Rust FFI Bridge

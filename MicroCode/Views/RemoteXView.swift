@@ -7,6 +7,8 @@
 //
 
 import SwiftUI
+import AppKit
+import class SwiftTerm.LocalProcessTerminalView
 
 // MARK: - Remote Connection Configuration
 
@@ -19,6 +21,7 @@ struct RemoteConnectionConfig: Identifiable, Hashable, Codable {
     var authType: AuthType = .password
     var password: String = ""
     var keyPath: String = ""
+    var otp: String = ""
     var connectionType: ConnectionType = .ssh
     var lastConnected: Date?
     
@@ -83,14 +86,18 @@ struct RemoteConnectionConfig: Identifiable, Hashable, Codable {
         case gcp = "gcp"
         case alibaba = "alibaba"
         case digitalocean = "digitalocean"
+        case runpod = "runpod"
+        case azure = "azure"
         
         var displayName: String {
             switch self {
-            case .none: return "Custom"
-            case .aws: return "AWS"
-            case .gcp: return "GCP"
-            case .alibaba: return "Alibaba"
+            case .none: return "Custom VPS"
+            case .aws: return "AWS EC2"
+            case .gcp: return "Google Cloud"
+            case .alibaba: return "Alibaba Cloud"
             case .digitalocean: return "DigitalOcean"
+            case .runpod: return "RunPod GPU"
+            case .azure: return "Azure VPS"
             }
         }
         
@@ -98,9 +105,11 @@ struct RemoteConnectionConfig: Identifiable, Hashable, Codable {
             switch self {
             case .none: return "server.rack"
             case .aws: return "cloud.fill"
-            case .gcp: return "cloud.rainbow.half"
-            case .alibaba: return "cart.fill"
-            case .digitalocean: return "drop.fill"
+            case .gcp: return "network"
+            case .alibaba: return "cpu.fill"
+            case .digitalocean: return "water.waves"
+            case .runpod: return "bolt.horizontal.fill"
+            case .azure: return "square.stack.3d.up.fill"
             }
         }
         
@@ -109,18 +118,22 @@ struct RemoteConnectionConfig: Identifiable, Hashable, Codable {
             case .none: return .secondary
             case .aws: return .orange
             case .gcp: return .blue
-            case .alibaba: return .orange
-            case .digitalocean: return .blue
+            case .alibaba: return .purple
+            case .digitalocean: return .cyan
+            case .runpod: return .indigo
+            case .azure: return .teal
             }
         }
         
         var defaultUser: String {
             switch self {
-            case .none: return ""
+            case .none: return "root"
             case .aws: return "ec2-user"
             case .gcp: return "google_compute_engine"
             case .alibaba: return "root"
             case .digitalocean: return "root"
+            case .runpod: return "root"
+            case .azure: return "azureuser"
             }
         }
     }
@@ -128,7 +141,7 @@ struct RemoteConnectionConfig: Identifiable, Hashable, Codable {
     var provider: CloudProvider = .none
     
     enum CodingKeys: String, CodingKey {
-        case id, name, host, port, username, authType, password, keyPath, connectionType, lastConnected, provider
+        case id, name, host, port, username, authType, password, keyPath, otp, connectionType, lastConnected, provider
     }
     
     init(from decoder: Decoder) throws {
@@ -141,13 +154,14 @@ struct RemoteConnectionConfig: Identifiable, Hashable, Codable {
         authType = try container.decodeIfPresent(AuthType.self, forKey: .authType) ?? .password
         password = try container.decodeIfPresent(String.self, forKey: .password) ?? ""
         keyPath = try container.decodeIfPresent(String.self, forKey: .keyPath) ?? ""
+        otp = try container.decodeIfPresent(String.self, forKey: .otp) ?? ""
         connectionType = try container.decodeIfPresent(ConnectionType.self, forKey: .connectionType) ?? .ssh
         lastConnected = try container.decodeIfPresent(Date.self, forKey: .lastConnected)
         provider = try container.decodeIfPresent(CloudProvider.self, forKey: .provider) ?? .none
     }
     
     // Memberwise init
-    init(id: UUID = UUID(), name: String, host: String, port: UInt16 = 22, username: String, authType: AuthType = .password, password: String = "", keyPath: String = "", connectionType: ConnectionType = .ssh, provider: CloudProvider = .none) {
+    init(id: UUID = UUID(), name: String, host: String, port: UInt16 = 22, username: String, authType: AuthType = .password, password: String = "", keyPath: String = "", otp: String = "", connectionType: ConnectionType = .ssh, provider: CloudProvider = .none) {
         self.id = id
         self.name = name
         self.host = host
@@ -156,6 +170,7 @@ struct RemoteConnectionConfig: Identifiable, Hashable, Codable {
         self.authType = authType
         self.password = password
         self.keyPath = keyPath
+        self.otp = otp
         self.connectionType = connectionType
         self.provider = provider
     }
@@ -165,6 +180,63 @@ struct RemoteConnectionConfig: Identifiable, Hashable, Codable {
 
 class RemoteConnectionManager: ObservableObject {
     static let shared = RemoteConnectionManager()
+    
+    // MARK: - Persistent SSH Terminal Session Pool
+    // Caches the underlying NSView and PTY process so that switching between
+    // Code Editor, Files, and Terminal NEVER kills the SSH session or clears terminal text.
+    private var terminalSessions: [UUID: LocalProcessTerminalView] = [:]
+    
+    func getOrCreateTerminalView(
+        for server: RemoteConnectionConfig,
+        args: [String],
+        fontName: String,
+        fontSize: CGFloat,
+        textColor: NSColor,
+        isTransparent: Bool,
+        onSessionTerminated: ((Int32) -> Void)? = nil
+    ) -> LocalProcessTerminalView {
+        if let existing = terminalSessions[server.id] {
+            return existing
+        }
+        
+        let terminalView = LocalProcessTerminalView(frame: .zero)
+        terminalView.configureNativeLook(
+            fontName: fontName,
+            fontSize: fontSize,
+            textColor: textColor,
+            backgroundColor: isTransparent ? .clear : .black
+        )
+        terminalView.startProcess(executable: "/usr/bin/ssh", args: args)
+        terminalSessions[server.id] = terminalView
+        return terminalView
+    }
+    
+    func terminateTerminalSession(for serverId: UUID) {
+        if let view = terminalSessions.removeValue(forKey: serverId) {
+            view.feed(text: "\nexit\n")
+        }
+    }
+    
+    func reconnectTerminalSession(
+        for server: RemoteConnectionConfig,
+        args: [String],
+        fontName: String,
+        fontSize: CGFloat,
+        textColor: NSColor,
+        isTransparent: Bool,
+        onSessionTerminated: ((Int32) -> Void)? = nil
+    ) -> LocalProcessTerminalView {
+        terminateTerminalSession(for: server.id)
+        return getOrCreateTerminalView(
+            for: server,
+            args: args,
+            fontName: fontName,
+            fontSize: fontSize,
+            textColor: textColor,
+            isTransparent: isTransparent,
+            onSessionTerminated: onSessionTerminated
+        )
+    }
     
     @Published var servers: [RemoteConnectionConfig] = []
     @Published var currentConnection: RemoteConnectionConfig?
@@ -367,6 +439,10 @@ class RemoteConnectionManager: ObservableObject {
         webSocketTask?.cancel(with: .normalClosure, reason: nil)
         webSocketTask = nil
         
+        if let server = currentConnection {
+            terminateTerminalSession(for: server.id)
+        }
+        
         isConnected = false
         currentConnection = nil
         connectionStatus = "Disconnected"
@@ -519,13 +595,24 @@ struct RemoteXView: View {
     @State private var connectionTask: Task<Void, Never>?
     @State private var selectedTab: Int = 0 // 0: Terminal, 1: Files, 2: Info
     @State private var sidebarVisible: Bool = true
+    @State private var serverFilter: String = ""
+    
+    private var filteredServers: [RemoteConnectionConfig] {
+        let query = serverFilter.trimmingCharacters(in: .whitespacesAndNewlines)
+        if query.isEmpty { return manager.servers }
+        return manager.servers.filter {
+            $0.name.localizedCaseInsensitiveContains(query) ||
+            $0.host.localizedCaseInsensitiveContains(query) ||
+            $0.username.localizedCaseInsensitiveContains(query)
+        }
+    }
     
     var body: some View {
         Group {
             if sidebarVisible {
-                DraggableSplitView(initialProportion: 0.3) {
+                DraggableSplitView(initialProportion: 0.28) {
                     serverListPanel
-                        .frame(minWidth: 250)
+                        .frame(minWidth: 240, maxWidth: 360)
                 } right: {
                     mainConnectionContent
                 }
@@ -541,6 +628,7 @@ struct RemoteXView: View {
                     manager.addServer(server)
                 }
             }
+            .environmentObject(appState)
         }
         .alert("Connection Error", isPresented: $manager.showError) {
             Button("OK", role: .cancel) { }
@@ -564,271 +652,474 @@ struct RemoteXView: View {
     
     private var serverListPanel: some View {
         VStack(spacing: 0) {
-            // Header
-            HStack {
-                Label("Remote Servers", systemImage: "server.rack")
-                    .font(.system(size: 13, weight: .semibold))
+            // Modern Header
+            HStack(spacing: 8) {
+                Image(systemName: "server.rack")
+                    .font(.system(size: 13, weight: .bold))
+                    .foregroundColor(.secondary)
+                
+                Text("REMOTE SERVERS")
+                    .font(.system(size: 11, weight: .bold, design: .rounded))
+                    .foregroundColor(Color(nsColor: appState.appTheme.editorText).opacity(0.85))
+                
+                Text("\(manager.servers.count)")
+                    .font(.system(size: 9, weight: .bold, design: .monospaced))
+                    .foregroundColor(.secondary)
+                    .padding(.horizontal, 5)
+                    .padding(.vertical, 1.5)
+                    .background(Color.primary.opacity(0.06))
+                    .cornerRadius(6)
                 
                 Spacer()
                 
+                // Import SSH Config
+                Button(action: { manager.importSSHConfig() }) {
+                    Image(systemName: "square.and.arrow.down")
+                        .font(.system(size: 11))
+                        .foregroundColor(.secondary)
+                        .padding(5)
+                        .background(Color.primary.opacity(0.04))
+                        .clipShape(Circle())
+                }
+                .buttonStyle(.plain)
+                .help("Import ~/.ssh/config")
+                
+                // Add Server
                 Button(action: {
                     currentConfigMode = .add
                     showingConfigSheet = true
                 }) {
-                    Image(systemName: "plus.circle.fill")
-                        .font(.system(size: 16))
-                        .foregroundColor(.accentColor)
+                    Image(systemName: "plus")
+                        .font(.system(size: 11, weight: .bold))
+                        .foregroundColor(.primary)
+                        .padding(5)
+                        .background(Color.primary.opacity(0.08))
+                        .clipShape(Circle())
                 }
                 .buttonStyle(.plain)
-                .help("Add Server")
+                .help("Add Remote Server")
             }
-            .padding(12)
-            .background(Color.compat(nsColor: .windowBackgroundColor))
+            .padding(.horizontal, 12)
+            .padding(.vertical, 10)
+            .background(appState.appTheme.isGlass ? Color.clear : Color(nsColor: appState.appTheme.panelBackground))
             
-            // Sub-header: Import
-            HStack {
-                Button(action: { manager.importSSHConfig() }) {
-                    Label("Import SSH Config", systemImage: "arrow.down.doc")
-                        .font(.system(size: 10))
+            // Search Filter
+            HStack(spacing: 6) {
+                Image(systemName: "magnifyingglass")
+                    .font(.system(size: 10))
+                    .foregroundColor(.secondary)
+                TextField("Search servers...", text: $serverFilter)
+                    .textFieldStyle(.plain)
+                    .font(.system(size: 11))
+                if !serverFilter.isEmpty {
+                    Button(action: { serverFilter = "" }) {
+                        Image(systemName: "xmark.circle.fill")
+                            .font(.system(size: 10))
+                            .foregroundColor(.secondary)
+                    }
+                    .buttonStyle(.plain)
                 }
-                .buttonStyle(.borderless)
-                .padding(.horizontal, 12)
-                .padding(.bottom, 8)
-                Spacer()
             }
+            .padding(.horizontal, 8)
+            .padding(.vertical, 5)
+            .background(Color.primary.opacity(0.04))
+            .cornerRadius(6)
+            .padding(.horizontal, 10)
+            .padding(.bottom, 8)
             
             Divider()
             
             if manager.servers.isEmpty {
-                VStack(spacing: 16) {
-                    Image(systemName: "externaldrive.badge.plus")
-                        .font(.system(size: 40))
+                VStack(spacing: 14) {
+                    Spacer()
+                    Image(systemName: "server.rack")
+                        .font(.system(size: 34))
                         .foregroundColor(.secondary.opacity(0.5))
                     
-                    Text("No Servers")
-                        .font(.headline)
-                        .foregroundColor(.secondary)
+                    Text("No Servers Added")
+                        .font(.system(size: 13, weight: .semibold))
+                        .foregroundColor(.primary)
                     
-                    Text("Add a remote server to get started")
+                    Text("Add your remote Linux servers, Cloud GPUs, or VPS instances to start developing.")
                         .font(.caption)
-                        .foregroundColor(.secondary.opacity(0.7))
+                        .foregroundColor(.secondary)
+                        .multilineTextAlignment(.center)
+                        .padding(.horizontal, 16)
                     
-                    Button("Add Server") {
+                    Button {
                         currentConfigMode = .add
                         showingConfigSheet = true
+                    } label: {
+                        HStack(spacing: 6) {
+                            Image(systemName: "plus")
+                            Text("Add Server")
+                        }
+                        .font(.system(size: 11, weight: .semibold))
                     }
                     .buttonStyle(.borderedProminent)
+                    .controlSize(.small)
+                    Spacer()
                 }
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
             } else {
-                List(selection: $selectedServer) {
-                    ForEach(manager.servers) { server in
-                        ServerRowView(server: server, isSelected: selectedServer?.id == server.id)
-                            .tag(server)
-                            .onTapGesture {
-                                selectedServer = server
-                            }
-                            .contextMenu {
-                                Button("Edit") {
-                                    currentConfigMode = .edit(server)
-                                    showingConfigSheet = true
+                ScrollView {
+                    LazyVStack(spacing: 4) {
+                        ForEach(filteredServers) { server in
+                            ServerRowView(server: server, isSelected: selectedServer?.id == server.id)
+                                .contentShape(Rectangle())
+                                .onTapGesture {
+                                    selectedServer = server
                                 }
-                                Button("Duplicate") {
-                                    var copy = server
-                                    copy.id = UUID()
-                                    copy.name = "\(server.name) Copy"
-                                    manager.addServer(copy)
-                                }
-                                Divider()
-                                Button("Delete", role: .destructive) {
-                                    manager.deleteServer(server)
-                                    if selectedServer?.id == server.id {
-                                        selectedServer = nil
+                                .contextMenu {
+                                    Button("Connect") {
+                                        selectedServer = server
+                                        Task { await manager.connect(to: server) }
+                                    }
+                                    Divider()
+                                    Button("Edit") {
+                                        currentConfigMode = .edit(server)
+                                        showingConfigSheet = true
+                                    }
+                                    Button("Duplicate") {
+                                        var copy = server
+                                        copy.id = UUID()
+                                        copy.name = "\(server.name) Copy"
+                                        manager.addServer(copy)
+                                    }
+                                    Divider()
+                                    Button("Delete", role: .destructive) {
+                                        manager.deleteServer(server)
+                                        if selectedServer?.id == server.id {
+                                            selectedServer = nil
+                                        }
                                     }
                                 }
-                            }
+                        }
                     }
+                    .padding(.horizontal, 8)
+                    .padding(.vertical, 6)
                 }
-                .listStyle(.sidebar)
                 .onAppear {
-                    // Auto-select first server if none selected
                     if selectedServer == nil, let first = manager.servers.first {
                         selectedServer = first
                     }
                 }
             }
         }
-        .background(Color.compat(nsColor: .controlBackgroundColor))
+        .background(appState.appTheme.isGlass ? Color.clear : Color(nsColor: appState.appTheme.panelBackground))
     }
     
     // MARK: - Connection Panel
     
     private func connectionPanel(server: RemoteConnectionConfig) -> some View {
         VStack(spacing: 0) {
-            // Connection Header
-            HStack(spacing: 12) {
-                // 1. Sidebar Toggle (Always Visible)
+            // Modern Inspector Header
+            HStack(spacing: 10) {
+                // Sidebar Toggle
                 Button(action: {
                     withAnimation { sidebarVisible.toggle() }
                 }) {
                     Image(systemName: "sidebar.left")
-                        .font(.system(size: 16))
+                        .font(.system(size: 13, weight: .medium))
                         .foregroundColor(.primary)
                 }
-                .buttonStyle(.borderless)
+                .buttonStyle(.plain)
                 .padding(6)
-                .background(Color.gray.opacity(0.1))
+                .background(Color.primary.opacity(0.05))
                 .cornerRadius(6)
                 .help(sidebarVisible ? "Hide Server List" : "Show Server List")
 
-                // 2. Server Info
-                VStack(alignment: .leading, spacing: 4) {
-                    HStack(spacing: 8) {
-                        Image(systemName: server.connectionType.icon)
-                            .foregroundColor(.accentColor)
-                        Text(server.name)
-                            .font(.headline)
-                    }
-                    
+                // Server Icon & Title
+                ZStack {
+                    RoundedRectangle(cornerRadius: 6, style: .continuous)
+                        .fill(Color.primary.opacity(0.06))
+                        .frame(width: 26, height: 26)
+                    Image(systemName: "terminal")
+                        .font(.system(size: 12, weight: .medium))
+                        .foregroundColor(.primary.opacity(0.85))
+                }
+
+                VStack(alignment: .leading, spacing: 2) {
                     HStack(spacing: 6) {
-                        Circle()
-                            .fill(manager.isConnected && manager.currentConnection?.id == server.id ? Color.green : Color.red)
-                            .frame(width: 8, height: 8)
+                        Text(server.name)
+                            .font(.system(size: 13, weight: .bold))
                         
-                        // Only show status from manager if ID matches
-                        if manager.currentConnection?.id == server.id {
-                             Text(manager.isConnected ? "Connected" : manager.connectionStatus)
-                                .font(.caption)
-                                .foregroundColor(.secondary)
-                        } else {
-                            Text("Disconnected")
-                                .font(.caption)
-                                .foregroundColor(.secondary)
-                        }
+                        Circle()
+                            .fill(manager.isConnected && manager.currentConnection?.id == server.id ? Color.green : Color.secondary.opacity(0.4))
+                            .frame(width: 7, height: 7)
+                        
+                        Text(manager.isConnected && manager.currentConnection?.id == server.id ? "Connected" : (manager.connectionStatus == "Connecting..." && manager.currentConnection?.id == server.id ? "Connecting..." : "Offline"))
+                            .font(.system(size: 10, weight: .medium))
+                            .foregroundColor(.secondary)
                     }
                 }
                 
                 Spacer()
                 
-                Text("\(server.username)@\(server.host):\(server.port)")
-                    .font(.system(size: 12, design: .monospaced))
-                    .foregroundColor(.secondary)
-                    .padding(.horizontal, 8)
-                    .padding(.vertical, 4)
-                    .background(Color.compat(nsColor: .controlBackgroundColor))
-                    .cornerRadius(4)
+                // Tab Switcher when connected
+                if manager.isConnected && manager.currentConnection?.id == server.id {
+                    Picker("", selection: $selectedTab) {
+                        if server.connectionType == .ssh {
+                            Label("Terminal", systemImage: "terminal.fill").tag(0)
+                        }
+                        Label("Files", systemImage: "folder.fill").tag(1)
+                        Label("Info", systemImage: "info.circle.fill").tag(2)
+                    }
+                    .pickerStyle(.segmented)
+                    .frame(maxWidth: 240)
+                    .controlSize(.small)
+                }
                 
+                // Address Pill with Copy
+                HStack(spacing: 5) {
+                    Text("\(server.username)@\(server.host):\(server.port)")
+                        .font(.system(size: 11, design: .monospaced))
+                        .foregroundColor(.secondary)
+                    
+                    Button {
+                        NSPasteboard.general.clearContents()
+                        NSPasteboard.general.setString("ssh \(server.username)@\(server.host) -p \(server.port)", forType: .string)
+                    } label: {
+                        Image(systemName: "doc.on.doc")
+                            .font(.system(size: 9))
+                            .foregroundColor(.secondary)
+                    }
+                    .buttonStyle(.plain)
+                    .help("Copy SSH Command")
+                }
+                .padding(.horizontal, 8)
+                .padding(.vertical, 4)
+                .background(Color.primary.opacity(0.04))
+                .cornerRadius(6)
+                
+                // Edit Server Button
                 Button(action: {
                     currentConfigMode = .edit(server)
                     showingConfigSheet = true
                 }) {
-                    Image(systemName: "pencil")
+                    Image(systemName: "slider.horizontal.3")
+                        .font(.system(size: 12))
                 }
                 .buttonStyle(.bordered)
-                .help("Edit Server")
+                .controlSize(.small)
+                .help("Edit Server Configuration")
                 
+                // Connect / Disconnect Action Button
                 if manager.isConnected && manager.currentConnection?.id == server.id {
-                    // Open in Main Editor (If Workspace Active)
-                    if appState.isRemoteProject {
-                        Button(action: {
-                            // Switch to Main Code View
-                            let state: AppState = appState
-                            state.editorMode = EditorMode.code
-                        }) {
-                            Label("Open in Editor", systemImage: "macwindow.on.rectangle")
-                        }
-                        .buttonStyle(.borderedProminent)
-                        .help("Switch to Main Editor View")
-                    }
-                    
                     Button("Disconnect") {
                         manager.disconnect()
                     }
                     .buttonStyle(.bordered)
+                    .controlSize(.small)
                 } else if manager.connectionStatus == "Connecting..." && manager.currentConnection?.id == server.id {
                     Button("Cancel") {
                         connectionTask?.cancel()
                         manager.disconnect()
                     }
                     .buttonStyle(.bordered)
+                    .controlSize(.small)
                 } else {
-                    Button("Connect") {
-                        // Set selected server before connecting
+                    Button {
                         selectedServer = server
+                        manager.currentConnection = server
+                        manager.isConnected = true
+                        selectedTab = (server.connectionType == .ftp || server.connectionType == .sftp || server.connectionType == .ftps) ? 1 : 0
                         connectionTask = Task {
                             let success = await manager.connect(to: server)
-                            if success {
-                                // If FTP/SFTP/FTPS, switch to Files tab automatically
-                                if server.connectionType == .ftp || server.connectionType == .sftp || server.connectionType == .ftps {
-                                    await MainActor.run {
-                                        selectedTab = 1 // Files
-                                    }
-                                    // Trigger file list
-                                    await manager.listFiles(at: manager.currentPath)
-                                } else {
-                                    await MainActor.run {
-                                        selectedTab = 0 // Terminal
-                                    }
-                                }
+                            if success && selectedTab == 1 {
+                                await manager.listFiles(at: manager.currentPath)
                             }
                         }
+                    } label: {
+                        HStack(spacing: 4) {
+                            Image(systemName: "bolt.fill")
+                                .font(.system(size: 10))
+                            Text("Connect")
+                        }
+                        .font(.system(size: 11, weight: .semibold))
+                        .foregroundColor(.primary)
+                        .padding(.horizontal, 10)
+                        .padding(.vertical, 4)
+                        .background(Color.primary.opacity(0.1))
+                        .cornerRadius(6)
+                        .overlay(
+                            RoundedRectangle(cornerRadius: 6)
+                                .stroke(Color.primary.opacity(0.15), lineWidth: 1)
+                        )
                     }
-                    .buttonStyle(.borderedProminent)
+                    .buttonStyle(.plain)
                 }
             }
-            .padding(16)
-            .background(Color.compat(nsColor: .windowBackgroundColor))
+            .padding(.horizontal, 12)
+            .padding(.vertical, 8)
+            .background(appState.appTheme.isGlass ? Color.clear : Color(nsColor: appState.appTheme.panelBackground))
             
             Divider()
             
-            // Content Area - Show when connected
+            // Content Area - ZStack keeps live SSH terminal session running when switching to Files or Info
             if manager.isConnected, let connectedServer = manager.currentConnection {
-                TabView(selection: $selectedTab) {
-                    // Only show terminal for SSH
+                ZStack {
                     if connectedServer.connectionType == .ssh {
                         RemoteTerminalTab(manager: manager)
-                            .tabItem {
-                                Label("Terminal", systemImage: "terminal.fill")
-                            }
-                            .tag(0)
+                            .opacity(selectedTab == 0 ? 1 : 0)
+                            .allowsHitTesting(selectedTab == 0)
                     }
-                    
                     RemoteFilesTab(manager: manager, appState: appState)
-                        .tabItem {
-                            Label("Files", systemImage: "folder.fill")
-                        }
-                        .tag(1)
-                    
+                        .opacity(selectedTab == 1 ? 1 : 0)
+                        .allowsHitTesting(selectedTab == 1)
                     ServerInfoTab(server: connectedServer)
-                        .tabItem {
-                            Label("Info", systemImage: "info.circle.fill")
-                        }
-                        .tag(2)
+                        .opacity(selectedTab == 2 ? 1 : 0)
+                        .allowsHitTesting(selectedTab == 2)
                 }
             } else {
-                VStack(spacing: 16) {
-                    Image(systemName: "network.slash")
-                        .font(.system(size: 48))
-                        .foregroundColor(.secondary.opacity(0.5))
+                // Modern Server Dashboard (instead of empty black void)
+                VStack(spacing: 24) {
+                    Spacer()
                     
-                    Text("Not Connected")
-                        .font(.title2)
-                        .foregroundColor(.secondary)
-                    
-                    Text("Click Connect to establish connection")
-                        .font(.caption)
-                        .foregroundColor(.secondary.opacity(0.7))
-                    
-                    Button("Connect Now") {
-                        Task {
-                            await manager.connect(to: server)
+                    // Server Avatar & Info Card
+                    VStack(spacing: 12) {
+                        ZStack {
+                            Circle()
+                                .fill(Color.primary.opacity(0.05))
+                                .frame(width: 76, height: 76)
+                            
+                            Circle()
+                                .stroke(Color.primary.opacity(0.12), lineWidth: 1)
+                                .frame(width: 76, height: 76)
+                            
+                            Image(systemName: "terminal")
+                                .font(.system(size: 32, weight: .regular))
+                                .foregroundColor(.primary.opacity(0.85))
+                        }
+                        
+                        VStack(spacing: 4) {
+                            Text(server.name)
+                                .font(.system(size: 20, weight: .bold))
+                            
+                            HStack(spacing: 6) {
+                                Text("ssh \(server.username)@\(server.host) -p \(server.port)")
+                                    .font(.system(size: 11, design: .monospaced))
+                                    .foregroundColor(.secondary)
+                                
+                                Button {
+                                    NSPasteboard.general.clearContents()
+                                    NSPasteboard.general.setString("ssh \(server.username)@\(server.host) -p \(server.port)", forType: .string)
+                                } label: {
+                                    Image(systemName: "doc.on.doc")
+                                        .font(.system(size: 10))
+                                }
+                                .buttonStyle(.plain)
+                                .help("Copy SSH Command")
+                            }
+                            .padding(.horizontal, 10)
+                            .padding(.vertical, 4)
+                            .background(Color.primary.opacity(0.04))
+                            .cornerRadius(6)
                         }
                     }
-                    .buttonStyle(.borderedProminent)
+                    
+                    // Server Specs Grid
+                    HStack(spacing: 14) {
+                        dashboardMetricTile(title: "PROTOCOL", value: server.connectionType.displayName, icon: "network")
+                        dashboardMetricTile(title: "HOST", value: server.host, icon: "server.rack")
+                        dashboardMetricTile(title: "PORT", value: "\(server.port)", icon: "number")
+                        dashboardMetricTile(title: "AUTH", value: server.authType == .key ? "SSH Key" : "Password", icon: server.authType == .key ? "key.fill" : "lock.fill")
+                    }
+                    .frame(maxWidth: 560)
+                    
+                    // Action Buttons
+                    HStack(spacing: 14) {
+                        Button {
+                            selectedServer = server
+                            manager.currentConnection = server
+                            manager.isConnected = true
+                            selectedTab = 0
+                            // Start terminal immediately; attempt SFTP sync silently without popping modal error
+                            connectionTask = Task {
+                                _ = try? await BackendService.shared.connectRemote(config: server)
+                            }
+                        } label: {
+                            HStack(spacing: 8) {
+                                Image(systemName: "terminal")
+                                    .font(.system(size: 12, weight: .medium))
+                                Text("Connect Terminal (SSH)")
+                                    .font(.system(size: 12.5, weight: .semibold))
+                            }
+                            .padding(.horizontal, 18)
+                            .padding(.vertical, 9)
+                            .foregroundColor(.primary)
+                            .background(Color.primary.opacity(0.1))
+                            .cornerRadius(7)
+                            .overlay(
+                                RoundedRectangle(cornerRadius: 7)
+                                    .stroke(Color.primary.opacity(0.15), lineWidth: 1)
+                            )
+                        }
+                        .buttonStyle(.plain)
+                        
+                        if server.connectionType == .ssh || server.connectionType == .sftp {
+                            Button {
+                                selectedServer = server
+                                manager.currentConnection = server
+                                manager.isConnected = true
+                                selectedTab = 1
+                                connectionTask = Task {
+                                    let success = await manager.connect(to: server)
+                                    if success {
+                                        await manager.listFiles(at: manager.currentPath)
+                                    }
+                                }
+                            } label: {
+                                HStack(spacing: 6) {
+                                    Image(systemName: "folder")
+                                        .font(.system(size: 11))
+                                    Text("Browse Files (SFTP)")
+                                        .font(.system(size: 12.5, weight: .medium))
+                                }
+                                .padding(.horizontal, 16)
+                                .padding(.vertical, 9)
+                                .foregroundColor(.secondary)
+                                .background(Color.primary.opacity(0.05))
+                                .cornerRadius(7)
+                                .overlay(
+                                    RoundedRectangle(cornerRadius: 7)
+                                        .stroke(Color.primary.opacity(0.08), lineWidth: 1)
+                                )
+                            }
+                            .buttonStyle(.plain)
+                        }
+                    }
+                    
+                    Spacer()
                 }
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
+                .background(
+                    appState.appTheme.isGlass ? Color.clear : Color(nsColor: appState.appTheme.workspaceBackground)
+                )
             }
         }
+    }
+    
+    private func dashboardMetricTile(title: String, value: String, icon: String) -> some View {
+        VStack(alignment: .leading, spacing: 6) {
+            HStack(spacing: 4) {
+                Image(systemName: icon)
+                    .font(.system(size: 10))
+                    .foregroundColor(.secondary)
+                Text(title)
+                    .font(.system(size: 9, weight: .bold, design: .rounded))
+                    .foregroundColor(.secondary)
+            }
+            Text(value)
+                .font(.system(size: 12, weight: .semibold, design: .monospaced))
+                .foregroundColor(.primary)
+                .lineLimit(1)
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .padding(12)
+        .background(Color.primary.opacity(0.03))
+        .cornerRadius(8)
+        .overlay(RoundedRectangle(cornerRadius: 8).stroke(Color.primary.opacity(0.06), lineWidth: 1))
     }
     
     // MARK: - Empty State
@@ -836,62 +1127,71 @@ struct RemoteXView: View {
     private var emptyStateView: some View {
         VStack(spacing: 20) {
             Image(systemName: "network")
-                .font(.system(size: 64))
-                .foregroundColor(.secondary.opacity(0.4))
-            
-            Text("Remote Explorer")
-                .font(.title)
-                .foregroundColor(.secondary)
-            
-            Text("Select a server or add a new one to get started")
-                .font(.body)
+                .font(.system(size: 54))
                 .foregroundColor(.secondary.opacity(0.7))
             
-            HStack(spacing: 16) {
+            VStack(spacing: 6) {
+                Text("Remote Explorer")
+                    .font(.system(size: 20, weight: .bold))
+                    .foregroundColor(Color(nsColor: appState.appTheme.editorText))
+                
+                Text("Select an existing server from the left sidebar or create a new remote session.")
+                    .font(.system(size: 12))
+                    .foregroundColor(.secondary)
+            }
+            
+            HStack(spacing: 12) {
                 Button {
                     currentConfigMode = .add
                     showingConfigSheet = true
                 } label: {
-                    Label("Add SSH Server", systemImage: "terminal.fill")
+                    HStack(spacing: 6) {
+                        Image(systemName: "plus")
+                        Text("Add Remote Server")
+                    }
+                    .font(.system(size: 12, weight: .semibold))
+                    .foregroundColor(.primary)
+                    .padding(.horizontal, 16)
+                    .padding(.vertical, 8)
+                    .background(Color.primary.opacity(0.1))
+                    .cornerRadius(6)
+                    .overlay(
+                        RoundedRectangle(cornerRadius: 6)
+                            .stroke(Color.primary.opacity(0.15), lineWidth: 1)
+                    )
                 }
-                .buttonStyle(.borderedProminent)
+                .buttonStyle(.plain)
                 
                 Button {
-                    var server = RemoteConnectionConfig(name: "New SFTP", host: "", username: "")
-                    server.connectionType = .sftp
-                    currentConfigMode = .edit(server) // Use edit mode to pass pre-filled object
-                    showingConfigSheet = true
+                    manager.importSSHConfig()
                 } label: {
-                    Label("Add SFTP Server", systemImage: "externaldrive.connected.to.line.below.fill")
+                    HStack(spacing: 6) {
+                        Image(systemName: "square.and.arrow.down")
+                        Text("Import ~/.ssh/config")
+                    }
+                    .font(.system(size: 12))
                 }
                 .buttonStyle(.bordered)
             }
             
             // Cloud Presets
-            VStack(spacing: 8) {
-                Text("Quick Add Cloud Server")
-                    .font(.caption)
+            VStack(spacing: 10) {
+                Text("Quick Cloud Presets")
+                    .font(.system(size: 11, weight: .medium))
                     .foregroundColor(.secondary)
                     
-                HStack(spacing: 12) {
-                    CloudPresetButton(provider: .aws) {
-                        configurePreset(.aws)
-                    }
-                    CloudPresetButton(provider: .gcp) {
-                        configurePreset(.gcp)
-                    }
-                    CloudPresetButton(provider: .alibaba) {
-                        configurePreset(.alibaba)
-                    }
-                     CloudPresetButton(provider: .digitalocean) {
-                        configurePreset(.digitalocean)
-                    }
+                HStack(spacing: 10) {
+                    CloudPresetButton(provider: .aws) { configurePreset(.aws) }
+                    CloudPresetButton(provider: .gcp) { configurePreset(.gcp) }
+                    CloudPresetButton(provider: .digitalocean) { configurePreset(.digitalocean) }
+                    CloudPresetButton(provider: .runpod) { configurePreset(.runpod) }
+                    CloudPresetButton(provider: .azure) { configurePreset(.azure) }
                 }
             }
-            .padding(.top, 20)
+            .padding(.top, 16)
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
-        .background(Color.compat(nsColor: .textBackgroundColor))
+        .background(appState.appTheme.isGlass ? Color.clear : Color(nsColor: appState.appTheme.workspaceBackground))
     }
     
     private func configurePreset(_ provider: RemoteConnectionConfig.CloudProvider) {
@@ -904,8 +1204,10 @@ struct RemoteXView: View {
             server.authType = .key
             server.keyPath = "~/.ssh/google_compute_engine"
         } else if provider == .aws {
-             server.authType = .key
-             // AWS often requires user to pick key, but we can hint
+            server.authType = .key
+        } else if provider == .runpod {
+            server.authType = .key
+            server.keyPath = "~/.ssh/id_ed25519"
         }
         
         currentConfigMode = .edit(server) // Use edit mode to pre-fill
@@ -916,22 +1218,28 @@ struct RemoteXView: View {
 struct CloudPresetButton: View {
     let provider: RemoteConnectionConfig.CloudProvider
     let action: () -> Void
+    @State private var isHovered = false
     
     var body: some View {
         Button(action: action) {
-            VStack(spacing: 4) {
+            VStack(spacing: 6) {
                 Image(systemName: provider.icon)
-                    .font(.system(size: 20))
+                    .font(.system(size: 18))
                     .foregroundColor(provider.color)
                 Text(provider.displayName)
-                    .font(.system(size: 10))
+                    .font(.system(size: 10, weight: .medium))
+                    .foregroundColor(.primary)
             }
-            .frame(width: 60, height: 50)
-            .background(Color.compat(nsColor: .controlBackgroundColor))
+            .frame(width: 85, height: 60)
+            .background(isHovered ? provider.color.opacity(0.12) : Color.primary.opacity(0.03))
             .cornerRadius(8)
-            .overlay(RoundedRectangle(cornerRadius: 8).stroke(Color.secondary.opacity(0.1), lineWidth: 1))
+            .overlay(
+                RoundedRectangle(cornerRadius: 8)
+                    .stroke(isHovered ? provider.color.opacity(0.4) : Color.primary.opacity(0.06), lineWidth: 1)
+            )
         }
         .buttonStyle(.plain)
+        .onHover { isHovered = $0 }
     }
 }
 
@@ -941,65 +1249,94 @@ struct ServerRowView: View {
     let server: RemoteConnectionConfig
     let isSelected: Bool
     @ObservedObject var manager = RemoteConnectionManager.shared
+    @EnvironmentObject var appState: AppState
+    @State private var isHovered = false
     
-    @State private var pulseScale: CGFloat = 1.0
+    var isConnected: Bool {
+        manager.isConnected && manager.currentConnection?.id == server.id
+    }
     
     var isConnecting: Bool {
         manager.connectionStatus == "Connecting..." && manager.currentConnection?.id == server.id
     }
     
     var body: some View {
-        HStack(spacing: 12) {
-            // Icon
+        HStack(spacing: 10) {
+            // Active selection vertical indicator
+            RoundedRectangle(cornerRadius: 1.5)
+                .fill(isSelected ? Color.primary : Color.clear)
+                .frame(width: 3, height: 28)
+            
+            // Server Icon Tile
             ZStack {
-                RoundedRectangle(cornerRadius: 8)
-                    .fill(server.connectionType == .ssh ? Color.green.opacity(0.1) :
-                          server.connectionType == .sftp ? Color.blue.opacity(0.1) :
-                          Color.orange.opacity(0.1))
-                    .frame(width: 36, height: 36)
+                RoundedRectangle(cornerRadius: 6, style: .continuous)
+                    .fill(Color.primary.opacity(0.06))
+                    .frame(width: 30, height: 30)
                 
-                if isConnecting {
-                    Circle()
-                        .stroke(Color.green, lineWidth: 2)
-                        .frame(width: 44, height: 44)
-                        .scaleEffect(pulseScale)
-                        .opacity(2.0 - Double(pulseScale))
-                        .onAppear {
-                            withAnimation(.easeInOut(duration: 1.2).repeatForever(autoreverses: false)) {
-                                pulseScale = 2.0
-                            }
-                        }
-                }
-                
-                Image(systemName: server.provider != .none ? server.provider.icon : server.connectionType.icon)
-                    .font(.system(size: 16))
-                    .foregroundColor(server.provider != .none ? server.provider.color :
-                                    (server.connectionType == .ssh ? .green :
-                                    server.connectionType == .sftp ? .blue : .orange))
+                Image(systemName: "terminal")
+                    .font(.system(size: 12, weight: .medium))
+                    .foregroundColor(isSelected ? .primary : .secondary)
             }
             
+            // Title & Host
             VStack(alignment: .leading, spacing: 2) {
-                Text(server.name)
-                    .font(.system(size: 13, weight: .medium))
+                HStack(spacing: 6) {
+                    Text(server.name)
+                        .font(.system(size: 12, weight: isSelected ? .semibold : .medium))
+                        .foregroundColor(isSelected ? Color(nsColor: appState.appTheme.editorText) : .primary)
+                        .lineLimit(1)
+                    
+                    if isConnected {
+                        Circle()
+                            .fill(Color.green)
+                            .frame(width: 6, height: 6)
+                    }
+                }
                 
                 Text("\(server.username)@\(server.host)")
-                    .font(.system(size: 11))
+                    .font(.system(size: 10, design: .monospaced))
                     .foregroundColor(.secondary)
+                    .lineLimit(1)
             }
             
             Spacer()
             
-            Text(server.connectionType.displayName)
-                .font(.system(size: 10, weight: .medium))
-                .foregroundColor(.secondary)
-                .padding(.horizontal, 6)
-                .padding(.vertical, 2)
-                .background(Color.secondary.opacity(0.1))
-                .cornerRadius(4)
+            // Tag / Status Badge
+            if isConnecting {
+                ProgressView().scaleEffect(0.6).frame(width: 14, height: 14)
+            } else if isConnected {
+                Text("ONLINE")
+                    .font(.system(size: 8, weight: .bold, design: .monospaced))
+                    .foregroundColor(.green)
+                    .padding(.horizontal, 5)
+                    .padding(.vertical, 2)
+                    .background(Color.green.opacity(0.12))
+                    .cornerRadius(4)
+            } else {
+                Text(server.connectionType.displayName)
+                    .font(.system(size: 9, weight: .medium, design: .monospaced))
+                    .foregroundColor(.secondary.opacity(0.8))
+                    .padding(.horizontal, 5)
+                    .padding(.vertical, 2)
+                    .background(Color.primary.opacity(0.04))
+                    .cornerRadius(4)
+            }
         }
         .padding(.vertical, 6)
+        .padding(.horizontal, 8)
+        .background(
+            RoundedRectangle(cornerRadius: 7, style: .continuous)
+                .fill(isSelected ? Color.primary.opacity(0.08) :
+                      (isHovered ? Color.primary.opacity(0.04) : Color.clear))
+        )
+        .overlay(
+            RoundedRectangle(cornerRadius: 7, style: .continuous)
+                .stroke(isSelected ? Color.primary.opacity(0.18) : Color.clear, lineWidth: 1)
+        )
+        .onHover { isHovered = $0 }
     }
 }
+
 
 // MARK: - Server Configuration Sheet
 
@@ -1013,6 +1350,7 @@ struct ServerConfigSheet: View {
     let onSave: (RemoteConnectionConfig) -> Void
     
     @Environment(\.dismiss) var dismiss
+    @EnvironmentObject var appState: AppState
     
     @State private var name: String = ""
     @State private var host: String = ""
@@ -1020,14 +1358,18 @@ struct ServerConfigSheet: View {
     @State private var username: String = ""
     @State private var password: String = ""
     @State private var keyPath: String = ""
+    @State private var otp: String = ""
     @State private var connectionType: RemoteConnectionConfig.ConnectionType = .ssh
     @State private var provider: RemoteConnectionConfig.CloudProvider = .none
     @State private var authType: RemoteConnectionConfig.AuthType = .password
     @State private var showingKeyPicker = false
     @State private var magicPaste: String = "" // Magic SSH Parser input
     @State private var lastPastedValue: String = ""
-    
     @State private var reachabilityStatus: ReachabilityStatus = .unknown
+    @State private var testingConnection = false
+    @State private var testResult: String?
+    @State private var testSuccess = false
+    
     enum ReachabilityStatus {
         case unknown, checking, reachable, unreachable
     }
@@ -1040,69 +1382,90 @@ struct ServerConfigSheet: View {
         VStack(spacing: 0) {
             // Header
             HStack {
-                Text(mode.isAdd ? "Add Server" : "Edit Server")
-                    .font(.headline)
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(mode.isAdd ? "Add Remote Server" : "Edit Remote Server")
+                        .font(.system(size: 15, weight: .bold))
+                        .foregroundColor(Color(nsColor: appState.appTheme.editorText))
+                    Text("Configure SSH, SFTP, or Cloud VPS connection")
+                        .font(.system(size: 11))
+                        .foregroundColor(.secondary)
+                }
                 
                 Spacer()
                 
                 Button(action: { dismiss() }) {
                     Image(systemName: "xmark.circle.fill")
-                        .font(.title2)
-                        .foregroundColor(.secondary)
+                        .font(.system(size: 18))
+                        .foregroundColor(.secondary.opacity(0.8))
                 }
                 .buttonStyle(.plain)
             }
-            .padding(16)
-            .background(Color.compat(nsColor: .windowBackgroundColor))
+            .padding(.horizontal, 18)
+            .padding(.vertical, 14)
+            .background(appState.appTheme.isGlass ? Color.clear : Color(nsColor: appState.appTheme.panelBackground))
             
             Divider()
             
-            // Form
+            // Form Content
             ScrollView {
-                VStack(alignment: .leading, spacing: 20) {
-                    // Magic Paste Section
+                VStack(alignment: .leading, spacing: 18) {
+                    // Smart SSH Import
                     VStack(alignment: .leading, spacing: 8) {
                         HStack {
-                            Image(systemName: "wand.and.stars")
-                                .foregroundColor(.purple)
-                            Text("Magic SSH Import")
-                                .font(.system(size: 13, weight: .bold))
+                            Image(systemName: "sparkles")
+                                .font(.system(size: 12))
+                                .foregroundColor(.secondary)
+                            Text("Smart SSH Import")
+                                .font(.system(size: 12, weight: .bold))
+                                .foregroundColor(Color(nsColor: appState.appTheme.editorText))
                             Spacer()
                         }
                         
-                        TextField("Paste SSH command here (e.g. ssh -i key.pem user@host)", text: $magicPaste)
-                            .textFieldStyle(.roundedBorder)
+                        TextField("Paste SSH command here (e.g. ssh -i key.pem user@host -p 22)", text: $magicPaste)
+                            .textFieldStyle(.plain)
+                            .font(.system(size: 11, design: .monospaced))
+                            .padding(.horizontal, 10)
+                            .padding(.vertical, 7)
+                            .background(Color.primary.opacity(0.04))
+                            .cornerRadius(6)
+                            .overlay(RoundedRectangle(cornerRadius: 6).stroke(Color.primary.opacity(0.12), lineWidth: 1))
                             .onChange(of: magicPaste) { newValue in
                                 parseMagicSSH(newValue)
                             }
                         
-                        Text("Supports: ssh command, or user@host format")
+                        Text("Auto-detects username, host, port, and key path from ssh command or user@host")
                             .font(.system(size: 10))
                             .foregroundColor(.secondary)
                     }
                     .padding(12)
-                    .background(Color.purple.opacity(0.05))
+                    .background(Color.primary.opacity(0.03))
                     .cornerRadius(8)
-                    .overlay(RoundedRectangle(cornerRadius: 8).stroke(Color.purple.opacity(0.1), lineWidth: 1))
+                    .overlay(RoundedRectangle(cornerRadius: 8).stroke(Color.primary.opacity(0.08), lineWidth: 1))
                     
                     // Cloud Provider Wizard
-                    VStack(alignment: .leading, spacing: 10) {
-                        Text("Cloud Provider Wizard")
-                            .font(.system(size: 12, weight: .semibold))
+                    VStack(alignment: .leading, spacing: 8) {
+                        Text("Cloud Provider / Preset")
+                            .font(.system(size: 11, weight: .semibold))
                             .foregroundColor(.secondary)
                         
-                        HStack(spacing: 12) {
-                            ProviderTile(provider: .aws, current: $provider, action: selectProvider)
-                            ProviderTile(provider: .gcp, current: $provider, action: selectProvider)
-                            ProviderTile(provider: .alibaba, current: $provider, action: selectProvider)
-                            ProviderTile(provider: .digitalocean, current: $provider, action: selectProvider)
-                            ProviderTile(provider: .none, current: $provider, action: selectProvider)
+                        ScrollView(.horizontal, showsIndicators: false) {
+                            HStack(spacing: 8) {
+                                ProviderTile(provider: .none, current: $provider, action: selectProvider)
+                                ProviderTile(provider: .aws, current: $provider, action: selectProvider)
+                                ProviderTile(provider: .gcp, current: $provider, action: selectProvider)
+                                ProviderTile(provider: .digitalocean, current: $provider, action: selectProvider)
+                                ProviderTile(provider: .runpod, current: $provider, action: selectProvider)
+                                ProviderTile(provider: .azure, current: $provider, action: selectProvider)
+                                ProviderTile(provider: .alibaba, current: $provider, action: selectProvider)
+                            }
+                            .padding(.horizontal, 1)
                         }
                     }
+                    
                     // Connection Type
-                    VStack(alignment: .leading, spacing: 8) {
+                    VStack(alignment: .leading, spacing: 6) {
                         Text("Connection Type")
-                            .font(.system(size: 12, weight: .medium))
+                            .font(.system(size: 11, weight: .semibold))
                             .foregroundColor(.secondary)
                         
                         Picker("", selection: $connectionType) {
@@ -1119,23 +1482,39 @@ struct ServerConfigSheet: View {
                     Divider()
                     
                     // Server Details
-                    VStack(alignment: .leading, spacing: 12) {
+                    VStack(alignment: .leading, spacing: 10) {
                         Text("Server Details")
-                            .font(.system(size: 12, weight: .medium))
+                            .font(.system(size: 11, weight: .semibold))
                             .foregroundColor(.secondary)
                         
                         HStack {
                             Text("Name")
+                                .font(.system(size: 11, weight: .medium))
+                                .foregroundColor(.secondary)
                                 .frame(width: 80, alignment: .trailing)
                             TextField("My Server", text: $name)
-                                .textFieldStyle(.roundedBorder)
+                                .textFieldStyle(.plain)
+                                .font(.system(size: 11))
+                                .padding(.horizontal, 8)
+                                .padding(.vertical, 5)
+                                .background(Color.primary.opacity(0.04))
+                                .cornerRadius(6)
+                                .overlay(RoundedRectangle(cornerRadius: 6).stroke(Color.primary.opacity(0.1), lineWidth: 1))
                         }
                         
                         HStack {
                             Text("Host")
+                                .font(.system(size: 11, weight: .medium))
+                                .foregroundColor(.secondary)
                                 .frame(width: 80, alignment: .trailing)
                             TextField("example.com or IP", text: $host)
-                                .textFieldStyle(.roundedBorder)
+                                .textFieldStyle(.plain)
+                                .font(.system(size: 11, design: .monospaced))
+                                .padding(.horizontal, 8)
+                                .padding(.vertical, 5)
+                                .background(Color.primary.opacity(0.04))
+                                .cornerRadius(6)
+                                .overlay(RoundedRectangle(cornerRadius: 6).stroke(Color.primary.opacity(0.1), lineWidth: 1))
                                 .onChange(of: host) { _ in debouncePing() }
                             
                             // Reachability Indicator
@@ -1163,30 +1542,49 @@ struct ServerConfigSheet: View {
                         
                         HStack {
                             Text("Port")
+                                .font(.system(size: 11, weight: .medium))
+                                .foregroundColor(.secondary)
                                 .frame(width: 80, alignment: .trailing)
                             TextField("22", text: $port)
-                                .textFieldStyle(.roundedBorder)
+                                .textFieldStyle(.plain)
+                                .font(.system(size: 11, design: .monospaced))
+                                .padding(.horizontal, 8)
+                                .padding(.vertical, 5)
+                                .background(Color.primary.opacity(0.04))
+                                .cornerRadius(6)
+                                .overlay(RoundedRectangle(cornerRadius: 6).stroke(Color.primary.opacity(0.1), lineWidth: 1))
                                 .frame(width: 80)
+                            Spacer()
                         }
                     }
                     
                     Divider()
                     
                     // Authentication
-                    VStack(alignment: .leading, spacing: 12) {
+                    VStack(alignment: .leading, spacing: 10) {
                         Text("Authentication")
-                            .font(.system(size: 12, weight: .medium))
+                            .font(.system(size: 11, weight: .semibold))
                             .foregroundColor(.secondary)
                         
                         HStack {
                             Text("Username")
+                                .font(.system(size: 11, weight: .medium))
+                                .foregroundColor(.secondary)
                                 .frame(width: 80, alignment: .trailing)
                             TextField("root", text: $username)
-                                .textFieldStyle(.roundedBorder)
+                                .textFieldStyle(.plain)
+                                .font(.system(size: 11, design: .monospaced))
+                                .padding(.horizontal, 8)
+                                .padding(.vertical, 5)
+                                .background(Color.primary.opacity(0.04))
+                                .cornerRadius(6)
+                                .overlay(RoundedRectangle(cornerRadius: 6).stroke(Color.primary.opacity(0.1), lineWidth: 1))
                         }
                         
                         HStack {
                             Text("Auth Type")
+                                .font(.system(size: 11, weight: .medium))
+                                .foregroundColor(.secondary)
                                 .frame(width: 80, alignment: .trailing)
                             Picker("", selection: $authType) {
                                 ForEach(RemoteConnectionConfig.AuthType.allCases, id: \.self) { type in
@@ -1199,16 +1597,55 @@ struct ServerConfigSheet: View {
                         if authType == .password {
                             HStack {
                                 Text("Password")
+                                    .font(.system(size: 11, weight: .medium))
+                                    .foregroundColor(.secondary)
                                     .frame(width: 80, alignment: .trailing)
                                 SecureField("Password", text: $password)
-                                    .textFieldStyle(.roundedBorder)
+                                    .textFieldStyle(.plain)
+                                    .font(.system(size: 11))
+                                    .padding(.horizontal, 8)
+                                    .padding(.vertical, 5)
+                                    .background(Color.primary.opacity(0.04))
+                                    .cornerRadius(6)
+                                    .overlay(RoundedRectangle(cornerRadius: 6).stroke(Color.primary.opacity(0.1), lineWidth: 1))
+                            }
+                            
+                            HStack {
+                                Text("2FA / OTP")
+                                    .font(.system(size: 11, weight: .medium))
+                                    .foregroundColor(.secondary)
+                                    .frame(width: 80, alignment: .trailing)
+                                TextField("6-digit verification code (e.g. LANTA OTP)", text: $otp)
+                                    .textFieldStyle(.plain)
+                                    .font(.system(size: 11, design: .monospaced))
+                                    .padding(.horizontal, 8)
+                                    .padding(.vertical, 5)
+                                    .background(Color.primary.opacity(0.04))
+                                    .cornerRadius(6)
+                                    .overlay(RoundedRectangle(cornerRadius: 6).stroke(Color.primary.opacity(0.1), lineWidth: 1))
+                            }
+                            
+                            HStack {
+                                Spacer().frame(width: 80)
+                                Text("Optional: 6-digit OTP for 2FA / Supercomputers like LANTA, or leave blank to enter interactively in the Terminal.")
+                                    .font(.system(size: 9.5))
+                                    .foregroundColor(.secondary)
+                                    .fixedSize(horizontal: false, vertical: true)
                             }
                         } else {
                             HStack {
                                 Text("Key Path")
+                                    .font(.system(size: 11, weight: .medium))
+                                    .foregroundColor(.secondary)
                                     .frame(width: 80, alignment: .trailing)
                                 TextField("~/.ssh/id_rsa", text: $keyPath)
-                                    .textFieldStyle(.roundedBorder)
+                                    .textFieldStyle(.plain)
+                                    .font(.system(size: 11, design: .monospaced))
+                                    .padding(.horizontal, 8)
+                                    .padding(.vertical, 5)
+                                    .background(Color.primary.opacity(0.04))
+                                    .cornerRadius(6)
+                                    .overlay(RoundedRectangle(cornerRadius: 6).stroke(Color.primary.opacity(0.1), lineWidth: 1))
                                     .onDrop(of: [.fileURL], isTargeted: nil) { providers in
                                         if let provider = providers.first {
                                             _ = provider.loadObject(ofClass: URL.self) { url, _ in
@@ -1233,23 +1670,50 @@ struct ServerConfigSheet: View {
                                     
                                     if panel.runModal() == .OK, let url = panel.url {
                                         keyPath = url.path
-                                        // Save to recent
                                         RemoteConnectionManager.shared.addRecentKey(keyPath)
                                     }
                                 }
+                                .buttonStyle(.bordered)
+                                .controlSize(.small)
                             }
                             
                             // Recent Keys Menu
                             if !RemoteConnectionManager.shared.recentKeys.isEmpty {
-                                Menu("Recent Keys") {
-                                    ForEach(RemoteConnectionManager.shared.recentKeys, id: \.self) { key in
-                                        Button(key) {
-                                            keyPath = key
+                                HStack {
+                                    Spacer().frame(width: 80)
+                                    Menu("Recent Keys") {
+                                        ForEach(RemoteConnectionManager.shared.recentKeys, id: \.self) { key in
+                                            Button(key) {
+                                                keyPath = key
+                                            }
                                         }
                                     }
+                                    .font(.system(size: 10))
+                                    Spacer()
                                 }
-                                .font(.caption)
-                                .padding(.leading, 80) // Align to text field start roughly
+                            }
+                            
+                            HStack {
+                                Text("Passphrase")
+                                    .font(.system(size: 11, weight: .medium))
+                                    .foregroundColor(.secondary)
+                                    .frame(width: 80, alignment: .trailing)
+                                SecureField("Key Passphrase (if encrypted)", text: $password)
+                                    .textFieldStyle(.plain)
+                                    .font(.system(size: 11))
+                                    .padding(.horizontal, 8)
+                                    .padding(.vertical, 5)
+                                    .background(Color.primary.opacity(0.04))
+                                    .cornerRadius(6)
+                                    .overlay(RoundedRectangle(cornerRadius: 6).stroke(Color.primary.opacity(0.1), lineWidth: 1))
+                            }
+                            
+                            HStack {
+                                Spacer().frame(width: 80)
+                                Text("Optional: Enter passphrase if ~/.ssh key is encrypted, or leave blank to enter interactively in the Terminal.")
+                                    .font(.system(size: 9.5))
+                                    .foregroundColor(.secondary)
+                                    .fixedSize(horizontal: false, vertical: true)
                             }
                         }
                     }
@@ -1260,14 +1724,17 @@ struct ServerConfigSheet: View {
             Divider()
             
             // Footer
-            VStack {
-                 if let result = testResult {
-                     Text(result)
-                         .foregroundColor(testSuccess ? .green : .red)
-                         .font(.caption)
-                 }
-                 
-                 HStack {
+            VStack(spacing: 8) {
+                if let result = testResult {
+                    HStack(spacing: 6) {
+                        Image(systemName: testSuccess ? "checkmark.circle.fill" : "exclamationmark.triangle.fill")
+                        Text(result)
+                    }
+                    .foregroundColor(testSuccess ? .green : .red)
+                    .font(.system(size: 11, weight: .medium))
+                }
+                
+                HStack {
                     Button("Cancel") {
                         dismiss()
                     }
@@ -1276,26 +1743,44 @@ struct ServerConfigSheet: View {
                     Spacer()
                     
                     if testingConnection {
-                        ProgressView().scaleEffect(0.5)
+                        ProgressView().scaleEffect(0.6)
                     }
                     
                     Button("Test Connection") {
                         testConnection()
                     }
+                    .buttonStyle(.bordered)
+                    .controlSize(.regular)
                     .disabled(!isValid || testingConnection)
                     
-                    Button(mode.isAdd ? "Add" : "Save") {
+                    Button {
                         saveServer()
+                    } label: {
+                        HStack(spacing: 4) {
+                            Image(systemName: "checkmark")
+                            Text(mode.isAdd ? "Add Server" : "Save Changes")
+                        }
+                        .font(.system(size: 12, weight: .semibold))
+                        .foregroundColor(.white)
+                        .padding(.horizontal, 14)
+                        .padding(.vertical, 6)
+                        .background(isValid ? Color.primary.opacity(0.12) : Color.primary.opacity(0.04))
+                        .cornerRadius(6)
+                        .overlay(
+                            RoundedRectangle(cornerRadius: 6)
+                                .stroke(isValid ? Color.primary.opacity(0.18) : Color.clear, lineWidth: 1)
+                        )
                     }
-                    .buttonStyle(.borderedProminent)
-                    .keyboardShortcut(.defaultAction)
+                    .buttonStyle(.plain)
                     .disabled(!isValid)
+                    .keyboardShortcut(.defaultAction)
                 }
             }
             .padding(16)
-            .background(Color.compat(nsColor: .windowBackgroundColor))
+            .background(appState.appTheme.isGlass ? Color.clear : Color(nsColor: appState.appTheme.panelBackground))
         }
-        .frame(width: 520, height: 600)
+        .frame(width: 540, height: 620)
+        .background(appState.appTheme.isGlass ? Color.clear : Color(nsColor: appState.appTheme.panelBackground))
         .onAppear {
             if case .edit(let server) = mode {
                 name = server.name
@@ -1304,20 +1789,20 @@ struct ServerConfigSheet: View {
                 username = server.username
                 password = server.password
                 keyPath = server.keyPath
+                otp = server.otp
                 connectionType = server.connectionType
                 provider = server.provider
                 authType = server.authType
-                
-                // Trigger reachability check
+                if password.isEmpty {
+                    if let saved = (UserDefaults.standard.dictionary(forKey: "ssh_saved_passwords") as? [String: String])?[host] {
+                        password = saved
+                    }
+                }
                 debouncePing()
             }
         }
     }
-    
-    @State private var testingConnection = false
-    @State private var testResult: String?
-    @State private var testSuccess = false
-    
+
     private func selectProvider(_ provider: RemoteConnectionConfig.CloudProvider) {
         self.provider = provider
         if username.isEmpty || username == RemoteConnectionConfig.CloudProvider.none.defaultUser || username == "root" {
@@ -1430,6 +1915,7 @@ struct ServerConfigSheet: View {
             authType: authType,
             password: password,
             keyPath: keyPath,
+            otp: otp,
             connectionType: connectionType,
             provider: provider
         )
@@ -1466,7 +1952,13 @@ struct ServerConfigSheet: View {
         server.port = UInt16(port) ?? 22
         server.username = username
         server.password = password
+        if !password.isEmpty {
+            var saved = UserDefaults.standard.dictionary(forKey: "ssh_saved_passwords") as? [String: String] ?? [:]
+            saved[host] = password
+            UserDefaults.standard.set(saved, forKey: "ssh_saved_passwords")
+        }
         server.keyPath = keyPath
+        server.otp = otp
         server.connectionType = connectionType
         server.provider = provider
         server.authType = authType
@@ -1483,44 +1975,196 @@ extension ServerConfigSheet.Mode {
     }
 }
 
+
+
+// MARK: - Persistent Remote Terminal View
+struct PersistentRemoteTerminal: NSViewRepresentable {
+    let server: RemoteConnectionConfig
+    let args: [String]
+    let fontName: String
+    let fontSize: CGFloat
+    let textColor: NSColor
+    let isTransparent: Bool
+    let onSessionTerminated: ((Int32) -> Void)?
+    
+    func makeNSView(context: Context) -> LocalProcessTerminalView {
+        return RemoteConnectionManager.shared.getOrCreateTerminalView(
+            for: server,
+            args: args,
+            fontName: fontName,
+            fontSize: fontSize,
+            textColor: textColor,
+            isTransparent: isTransparent,
+            onSessionTerminated: onSessionTerminated
+        )
+    }
+    
+    func updateNSView(_ nsView: LocalProcessTerminalView, context: Context) {
+        nsView.nativeBackgroundColor = isTransparent ? .clear : .black
+        nsView.nativeForegroundColor = textColor
+        nsView.font = NSFont(name: fontName, size: fontSize) ?? NSFont.monospacedSystemFont(ofSize: fontSize, weight: .regular)
+    }
+}
+
 // MARK: - Remote Terminal Tab
 
 struct RemoteTerminalTab: View {
     @ObservedObject var manager: RemoteConnectionManager
     @EnvironmentObject var appState: AppState
+    @State private var sessionID = UUID()
+    @State private var sessionTerminated = false
+    @State private var terminationCode: Int32 = 0
+    @State private var useWebSocketFallback: Bool = false
     @State private var externalCommand: String?
     
+    private var sshArgs: [String] {
+        guard let server = manager.currentConnection else { return [] }
+        var args = [
+            "-o", "ServerAliveInterval=15",
+            "-o", "ServerAliveCountMax=6",
+            "-o", "TCPKeepAlive=yes",
+            "-o", "StrictHostKeyChecking=accept-new",
+            "-o", "ConnectTimeout=15",
+            "-o", "ExitOnForwardFailure=no",
+            "-o", "PreferredAuthentications=publickey,keyboard-interactive,password",
+            "-o", "KbdInteractiveAuthentication=yes",
+            "-o", "PubkeyAuthentication=yes",
+            "-t",
+            "-p", "\(server.port)"
+        ]
+        if !server.keyPath.isEmpty {
+            let expanded = (server.keyPath as NSString).expandingTildeInPath
+            if FileManager.default.fileExists(atPath: expanded) {
+                args.append(contentsOf: ["-i", expanded, "-o", "IdentitiesOnly=yes"])
+            }
+        }
+        args.append("\(server.username)@\(server.host)")
+        return args
+    }
+
     var body: some View {
-        ZStack {
-            // Background Blur Effect
-            VisualEffectView(material: NSVisualEffectView.Material.underWindowBackground, blendingMode: NSVisualEffectView.BlendingMode.behindWindow)
-                .ignoresSafeArea()
-            
-            // Tint Overlay for "Semi-Transparent" feel
-            Color.black.opacity(0.3)
-                .ignoresSafeArea()
-            
-            if let serverId = manager.currentConnection?.id.uuidString,
-               let url = BackendService.shared.remoteShellWebSocketURL(id: serverId) {
+        VStack(spacing: 0) {
+            // SSH Terminal Status & Quick Action Bar
+            if let server = manager.currentConnection {
+                HStack(spacing: 8) {
+                    HStack(spacing: 5) {
+                        Circle()
+                            .fill(sessionTerminated ? Color.red : Color.green)
+                            .frame(width: 7, height: 7)
+                        Text(sessionTerminated ? "Session Ended (\(terminationCode))" : "\(server.name) · ssh \(server.username)@\(server.host):\(server.port)")
+                            .font(.system(size: 11, weight: .semibold, design: .monospaced))
+                            .foregroundColor(.primary)
+                    }
+
+                    Spacer()
+
+                    // Quick Command Buttons
+                    Group {
+                        quickCommandButton("htop", cmd: "htop\n")
+                        quickCommandButton("df -h", cmd: "df -h\n")
+                        quickCommandButton("tmux", cmd: "tmux attach || tmux new\n")
+                        quickCommandButton("git status", cmd: "git status\n")
+                        quickCommandButton("docker ps", cmd: "docker ps\n")
+                    }
+
+                    Divider().frame(height: 14)
+
+                    // Reconnect Button
+                    Button {
+                        sessionTerminated = false
+                        if let server = manager.currentConnection {
+                            _ = manager.reconnectTerminalSession(
+                                for: server,
+                                args: sshArgs,
+                                fontName: appState.playgroundFontName,
+                                fontSize: appState.fontSize,
+                                textColor: appState.appTheme.editorText,
+                                isTransparent: true,
+                                onSessionTerminated: { code in
+                                    sessionTerminated = true
+                                    terminationCode = code
+                                }
+                            )
+                        }
+                        sessionID = UUID()
+                    } label: {
+                        HStack(spacing: 4) {
+                            Image(systemName: "arrow.clockwise")
+                            Text("Reconnect")
+                        }
+                        .font(.system(size: 10, weight: .medium))
+                    }
+                    .buttonStyle(.bordered)
+                    .controlSize(.small)
+                    .help("Reconnect SSH session (keepalive active)")
+                }
+                .padding(.horizontal, 12)
+                .padding(.vertical, 6)
+                .background(Color.primary.opacity(0.04))
+                Divider()
+            }
+
+            // Terminal Area
+            ZStack {
+                VisualEffectView(material: NSVisualEffectView.Material.underWindowBackground, blendingMode: NSVisualEffectView.BlendingMode.behindWindow)
+                    .ignoresSafeArea()
                 
-                TransparentTerminalView(
-                    url: url,
-                    theme: appState.appTheme,
-                    fontSize: Int(appState.fontSize),
-                    fontFamily: appState.fontFamily,
-                    externalCommand: $externalCommand
-                )
-                .frame(maxWidth: CGFloat.infinity, maxHeight: CGFloat.infinity)
-                .padding(4) // Small padding from edges
-            } else {
-                VStack {
-                    ProgressView()
-                    Text("Initializing Terminal Session...")
-                        .font(.caption)
-                        .foregroundColor(.secondary)
+                Color.black.opacity(0.3)
+                    .ignoresSafeArea()
+
+                if let server = manager.currentConnection, server.connectionType == .ssh, !useWebSocketFallback {
+                    // Persistent Native OpenSSH session via SwiftTerm (Never loses session or terminal text on tab switch)
+                    PersistentRemoteTerminal(
+                        server: server,
+                        args: sshArgs,
+                        fontName: appState.playgroundFontName,
+                        fontSize: appState.fontSize,
+                        textColor: appState.appTheme.editorText,
+                        isTransparent: true,
+                        onSessionTerminated: { code in
+                            sessionTerminated = true
+                            terminationCode = code
+                        }
+                    )
+                    .id("\(server.id)-\(sessionID)")
+                    .padding(4)
+                } else if let serverId = manager.currentConnection?.id.uuidString,
+                          let url = BackendService.shared.remoteShellWebSocketURL(id: serverId) {
+                    // Fallback Web PTY
+                    TransparentTerminalView(
+                        url: url,
+                        theme: appState.appTheme,
+                        fontSize: Int(appState.fontSize),
+                        fontFamily: appState.fontFamily,
+                        externalCommand: $externalCommand
+                    )
+                    .padding(4)
+                } else {
+                    VStack(spacing: 8) {
+                        ProgressView().scaleEffect(0.8)
+                        Text("Ready to connect...")
+                            .font(.caption)
+                            .foregroundColor(.secondary)
+                    }
                 }
             }
         }
+    }
+
+    private func quickCommandButton(_ title: String, cmd: String) -> some View {
+        Button(title) {
+            NotificationCenter.default.post(
+                name: Notification.Name("MicroCodeAgentTerminalCommand"),
+                object: nil,
+                userInfo: ["command": cmd.trimmingCharacters(in: .newlines), "phase": "started"]
+            )
+        }
+        .buttonStyle(.plain)
+        .font(.system(size: 10, weight: .medium, design: .monospaced))
+        .padding(.horizontal, 6)
+        .padding(.vertical, 2)
+        .background(Color.primary.opacity(0.05))
+        .cornerRadius(4)
     }
 }
 
@@ -2056,38 +2700,44 @@ struct ProviderTile: View {
     let provider: RemoteConnectionConfig.CloudProvider
     @Binding var current: RemoteConnectionConfig.CloudProvider
     let action: (RemoteConnectionConfig.CloudProvider) -> Void
+    @EnvironmentObject var appState: AppState
+    @State private var isHovered = false
     
     var isSelected: Bool { current == provider }
     
     var body: some View {
         Button(action: { action(provider) }) {
-            VStack(spacing: 8) {
+            VStack(spacing: 6) {
                 Image(systemName: provider.icon)
-                    .font(.system(size: 20))
+                    .font(.system(size: 18, weight: .medium))
+                    .foregroundColor(isSelected ? .primary : .secondary)
                 Text(provider.displayName)
-                    .font(.system(size: 10, weight: .medium))
+                    .font(.system(size: 9.5, weight: isSelected ? .semibold : .medium))
+                    .foregroundColor(isSelected ? .primary : .secondary)
+                    .lineLimit(1)
             }
-            .frame(width: 85, height: 70)
-            .background(isSelected ? provider.brandColor.opacity(0.15) : Color.secondary.opacity(0.05))
+            .frame(width: 84, height: 62)
+            .background(
+                isSelected ? Color.primary.opacity(0.1) :
+                (isHovered ? Color.primary.opacity(0.04) : Color.primary.opacity(0.02))
+            )
             .cornerRadius(8)
             .overlay(
-                RoundedRectangle(cornerRadius: 8)
-                    .stroke(isSelected ? provider.brandColor : Color.clear, lineWidth: 2)
+                RoundedRectangle(cornerRadius: 8, style: .continuous)
+                    .stroke(
+                        isSelected ? Color.primary.opacity(0.2) :
+                        (isHovered ? Color.primary.opacity(0.1) : Color.primary.opacity(0.05)),
+                        lineWidth: 1
+                    )
             )
-            .foregroundColor(isSelected ? provider.brandColor : .primary)
         }
         .buttonStyle(.plain)
+        .onHover { isHovered = $0 }
     }
 }
 
 extension RemoteConnectionConfig.CloudProvider {
     var brandColor: Color {
-        switch self {
-        case .aws: return .orange
-        case .gcp: return .blue
-        case .alibaba: return .orange
-        case .digitalocean: return .cyan
-        case .none: return .gray
-        }
+        self.color
     }
 }

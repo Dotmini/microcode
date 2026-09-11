@@ -51,6 +51,26 @@ class PythonEnvManager: ObservableObject {
     
     private let envsDirectory: URL
     private let systemPython: String
+    public var systemPythonExecutable: String { systemPython }
+
+    public func resolveExecutablePath(_ path: String) -> String {
+        if path.hasPrefix("/") && FileManager.default.isExecutableFile(atPath: path) {
+            return path
+        }
+        if DeveloperToolsGuard.isSafeToExecute(self.systemPython) {
+            return self.systemPython
+        }
+        let candidates = [
+            "/opt/homebrew/bin/python3",
+            "/usr/local/bin/python3",
+            "\(NSHomeDirectory())/.pyenv/shims/python3",
+            "/usr/bin/python3"
+        ]
+        if let found = candidates.first(where: { DeveloperToolsGuard.isSafeToExecute($0) }) {
+            return found
+        }
+        return DeveloperToolsGuard.hasCommandLineTools ? "/usr/bin/python3" : "python3"
+    }
     
     private init() {
         // Store environments in ~/Library/Application Support/MicroCode/envs
@@ -75,7 +95,7 @@ class PythonEnvManager: ObservableObject {
                 "/usr/bin/python3",
                 "\(NSHomeDirectory())/.pyenv/shims/python3"
             ]
-            resolved = candidates.first { fm.isExecutableFile(atPath: $0) }
+            resolved = candidates.first { DeveloperToolsGuard.isSafeToExecute($0) }
         }
         if resolved == nil {
             let shell = ProcessInfo.processInfo.environment["SHELL"] ?? "/bin/zsh"
@@ -91,7 +111,7 @@ class PythonEnvManager: ObservableObject {
                     let out = String(data: pipe.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8)?
                         .split(separator: "\n").first.map(String.init)?
                         .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
-                    if !out.isEmpty, fm.isExecutableFile(atPath: out) { resolved = out }
+                    if !out.isEmpty, DeveloperToolsGuard.isSafeToExecute(out) { resolved = out }
                 }
             }
         }
@@ -462,8 +482,16 @@ class PythonEnvManager: ObservableObject {
             guard let self = self else { return }
             
             let process = Process()
-            process.executableURL = URL(fileURLWithPath: pythonPath)
+            let resolvedPath = self.resolveExecutablePath(pythonPath)
+            process.executableURL = URL(fileURLWithPath: resolvedPath)
             process.arguments = ["-c", sanitizedCode]
+            
+            var env = ProcessInfo.processInfo.environment
+            let standardPath = "/opt/homebrew/bin:/opt/homebrew/sbin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"
+            let existingPath = env["PATH"] ?? ""
+            env["PATH"] = existingPath.isEmpty ? standardPath : "\(standardPath):\(existingPath)"
+            env["PYTORCH_ENABLE_MPS_FALLBACK"] = "1"
+            process.environment = env
             
             let outputPipe = Pipe()
             let errorPipe = Pipe()

@@ -10,6 +10,23 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use tokenizers::Tokenizer;
 
+// A desktop RAG cache must stay resident and predictable.  Full-repository
+// discovery belongs on disk/lazy retrieval, not in a Vec of every embedding.
+const MAX_RESIDENT_CHUNKS: usize = 4_096;
+const MAX_CHUNK_CONTENT_BYTES: usize = 8 * 1024;
+
+fn compact_chunk_content(content: &str) -> String {
+    if content.len() <= MAX_CHUNK_CONTENT_BYTES {
+        return content.to_string();
+    }
+
+    let mut end = MAX_CHUNK_CONTENT_BYTES;
+    while end > 0 && !content.is_char_boundary(end) {
+        end -= 1;
+    }
+    format!("{}\n…[chunk truncated]…", &content[..end])
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct VectorIndex {
     pub chunks: Vec<CodeChunk>,
@@ -106,8 +123,11 @@ impl RagEngine {
     }
 
     pub fn build_index(&mut self, chunks: Vec<CodeChunk>) -> Result<()> {
-        let mut embeddings = Vec::new();
-        for chunk in &chunks {
+        let mut resident_chunks = Vec::with_capacity(chunks.len().min(MAX_RESIDENT_CHUNKS));
+        let mut embeddings = Vec::with_capacity(chunks.len().min(MAX_RESIDENT_CHUNKS));
+
+        for mut chunk in chunks.into_iter().take(MAX_RESIDENT_CHUNKS) {
+            chunk.content = compact_chunk_content(&chunk.content);
             // Include symbol name/kind in the text for better search
             let text = format!(
                 "File: {}\nSymbol: {} ({})\nContent: {}",
@@ -117,10 +137,18 @@ impl RagEngine {
                 chunk.content
             );
             embeddings.push(self.get_embeddings(&text)?);
+            resident_chunks.push(chunk);
         }
 
-        self.index = Some(VectorIndex { chunks, embeddings });
+        self.index = Some(VectorIndex {
+            chunks: resident_chunks,
+            embeddings,
+        });
         Ok(())
+    }
+
+    pub const fn max_resident_chunks() -> usize {
+        MAX_RESIDENT_CHUNKS
     }
 
     pub fn search(&self, query: &str, limit: usize) -> Result<Vec<(CodeChunk, f32)>> {

@@ -1,6 +1,7 @@
 import SwiftUI
 
 struct EditorView: View {
+    @EnvironmentObject var appState: AppState
     @State private var text: String = """
     fn main() {
         print("Hello from Ardium!");
@@ -81,8 +82,11 @@ struct EditorView: View {
                         .frame(maxWidth: .infinity, maxHeight: .infinity)
                 } else {
                     // Authentic Native Terminal
-                    AuthenticTerminal()
-                        .frame(maxWidth: .infinity, maxHeight: .infinity)
+                    AuthenticTerminal(
+                        workingDirectory: appState.activeTerminalDirectory
+                    )
+                    .id("editor-terminal-\(appState.activeTerminalDirectory)")
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
                 }
             }
             .frame(minWidth: 200)

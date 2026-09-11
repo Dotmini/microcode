@@ -1,7 +1,13 @@
+pub mod agent_kernel;
+pub mod arrow_cdata;
+pub mod arrow_flight;
 pub mod crash_decoder;
 pub mod device_manager;
+pub mod error;
 pub mod llm;
 pub mod mcp;
 pub mod microcode_core;
+pub mod polyglot;
+pub mod shm_broker;
 pub mod vm;
 uniffi::setup_scaffolding!("microcode_core");

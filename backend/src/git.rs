@@ -11,9 +11,13 @@ use std::path::Path;
 pub async fn status(repo_path: &str) -> Result<GitStatus> {
     let repo = open_repository(repo_path)?;
 
-    // Get current branch
-    let head = repo.head().map_err(|e| AppError::GitError(e.to_string()))?;
-    let branch = head.shorthand().unwrap_or("HEAD").to_string();
+    // A newly initialized repository has an unborn HEAD. It is still a valid
+    // repository and Source Control must be usable before the first commit.
+    let branch = repo
+        .head()
+        .ok()
+        .and_then(|head| head.shorthand().map(str::to_owned))
+        .unwrap_or_else(|| default_initial_branch(&repo));
 
     // Get file statuses
     let mut opts = StatusOptions::new();
@@ -188,9 +192,11 @@ pub async fn log(repo_path: &str, limit: usize) -> Result<Vec<GitCommit>> {
     let mut revwalk = repo
         .revwalk()
         .map_err(|e| AppError::GitError(e.to_string()))?;
-    revwalk
-        .push_head()
-        .map_err(|e| AppError::GitError(e.to_string()))?;
+    // `push_head` returns an unborn-branch error before the first commit. An
+    // empty history is the correct result in that case, not a failed repo.
+    if revwalk.push_head().is_err() {
+        return Ok(Vec::new());
+    }
 
     let mut commits = Vec::new();
     for (i, oid) in revwalk.enumerate() {
@@ -280,6 +286,14 @@ fn calculate_ahead_behind(repo: &Repository) -> Result<(usize, usize)> {
         Ok((ahead, behind)) => Ok((ahead, behind)),
         Err(_) => Ok((0, 0)),
     }
+}
+
+fn default_initial_branch(repo: &Repository) -> String {
+    repo.config()
+        .ok()
+        .and_then(|config| config.get_string("init.defaultBranch").ok())
+        .filter(|branch| !branch.is_empty())
+        .unwrap_or_else(|| "main".to_string())
 }
 
 #[cfg(test)]

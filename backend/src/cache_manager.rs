@@ -1,7 +1,7 @@
-use std::path::{PathBuf};
-use walkdir::WalkDir;
+use serde::{Deserialize, Serialize};
 use std::fs;
-use serde::{Serialize, Deserialize};
+use std::path::PathBuf;
+use walkdir::WalkDir;
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct DerivedDataInfo {
@@ -18,7 +18,12 @@ pub fn get_derived_data_path() -> Option<PathBuf> {
 pub fn get_derived_data_info() -> Result<DerivedDataInfo, std::io::Error> {
     let path = match get_derived_data_path() {
         Some(p) => p,
-        None => return Err(std::io::Error::new(std::io::ErrorKind::NotFound, "Home directory not found")),
+        None => {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::NotFound,
+                "Home directory not found",
+            ))
+        }
     };
 
     if !path.exists() {
@@ -51,10 +56,17 @@ pub fn get_derived_data_info() -> Result<DerivedDataInfo, std::io::Error> {
     })
 }
 
-pub fn clear_derived_data(project_pattern: Option<String>) -> Result<DerivedDataInfo, std::io::Error> {
+pub fn clear_derived_data(
+    project_pattern: Option<String>,
+) -> Result<DerivedDataInfo, std::io::Error> {
     let path = match get_derived_data_path() {
         Some(p) => p,
-        None => return Err(std::io::Error::new(std::io::ErrorKind::NotFound, "Home directory not found")),
+        None => {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::NotFound,
+                "Home directory not found",
+            ))
+        }
     };
 
     if !path.exists() {

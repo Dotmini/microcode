@@ -127,13 +127,13 @@ enum AppTheme: String, CaseIterable {
     /// allowed to expose the desktop through the app window.
     var workspaceBackground: NSColor {
         if isGlass { return editorBackground }
-        if self == .dark { return NSColor(red: 0.035, green: 0.039, blue: 0.047, alpha: 1.0) }
+        if self == .dark || self == .xcodeDark { return NSColor.black }
         return editorBackground.withAlphaComponent(1.0)
     }
 
     var panelBackground: NSColor {
         if isGlass { return editorBackground }
-        if self == .dark { return NSColor(red: 0.055, green: 0.059, blue: 0.067, alpha: 1.0) }
+        if self == .dark || self == .xcodeDark { return NSColor(white: 0.06, alpha: 1.0) }
         let target: NSColor = isDark ? .white : .black
         return (editorBackground.blended(withFraction: isDark ? 0.035 : 0.025, of: target) ?? editorBackground)
             .withAlphaComponent(1.0)
@@ -141,7 +141,7 @@ enum AppTheme: String, CaseIterable {
 
     var elevatedBackground: NSColor {
         if isGlass { return editorBackground }
-        if self == .dark { return NSColor(red: 0.075, green: 0.078, blue: 0.086, alpha: 1.0) }
+        if self == .dark || self == .xcodeDark { return NSColor(white: 0.10, alpha: 1.0) }
         let target: NSColor = isDark ? .white : .black
         return (editorBackground.blended(withFraction: isDark ? 0.07 : 0.045, of: target) ?? editorBackground)
             .withAlphaComponent(1.0)
@@ -219,10 +219,9 @@ enum AppTheme: String, CaseIterable {
         case .system: 
             return NSApp?.effectiveAppearance.name == .darkAqua ? NSColor(red: 0.118, green: 0.118, blue: 0.118, alpha: 1.0) : NSColor(white: 1.0, alpha: 1.0)
         case .light, .xcodeLight: return NSColor(red: 1.0, green: 1.0, blue: 1.0, alpha: 1.0)
-        case .dark: return NSColor(red: 0.035, green: 0.039, blue: 0.047, alpha: 1.0) // Near-black #090A0C
         case .navy: return NSColor(red: 0.051, green: 0.106, blue: 0.165, alpha: 1.0) // #0D1B2A
         case .lightBlue: return NSColor(red: 0.890, green: 0.949, blue: 0.992, alpha: 1.0) // #E3F2FD
-        case .xcodeDark: return NSColor(red: 0.118, green: 0.125, blue: 0.157, alpha: 1.0) // #1F2028
+        case .dark, .xcodeDark: return NSColor.black // Pure Pitch Black #000000 (Xcode Pro Dark)
         case .vscodeDefault: return NSColor(red: 0.118, green: 0.118, blue: 0.118, alpha: 1.0) // #1E1E1E
         case .visualStudio: return NSColor(red: 0.118, green: 0.118, blue: 0.118, alpha: 1.0) // #1E1E1E
         case .wwdc: return NSColor(red: 0.08, green: 0.08, blue: 0.12, alpha: 1.0) // Deep Midnight Blue
@@ -263,10 +262,9 @@ enum AppTheme: String, CaseIterable {
         case .system: 
             return NSApp?.effectiveAppearance.name == .darkAqua ? NSColor(red: 0.831, green: 0.831, blue: 0.831, alpha: 1.0) : NSColor(red: 0.0, green: 0.0, blue: 0.0, alpha: 1.0)
         case .light, .xcodeLight: return NSColor(red: 0.0, green: 0.0, blue: 0.0, alpha: 1.0)
-        case .dark: return NSColor(red: 0.831, green: 0.831, blue: 0.831, alpha: 1.0) // #D4D4D4
+        case .dark, .xcodeDark: return NSColor.white // Pure Crisp White #FFFFFF (Xcode Pro Dark)
         case .navy: return NSColor(red: 0.878, green: 0.882, blue: 0.867, alpha: 1.0) // #E0E1DD
         case .lightBlue: return NSColor(red: 0.102, green: 0.137, blue: 0.494, alpha: 1.0) // #1A237E
-        case .xcodeDark: return NSColor(red: 1.0, green: 1.0, blue: 1.0, alpha: 1.0)
         case .vscodeDefault: return NSColor(red: 0.831, green: 0.831, blue: 0.831, alpha: 1.0) // #D4D4D4
         case .visualStudio: return NSColor(red: 0.863, green: 0.863, blue: 0.863, alpha: 1.0) // #DCDCDC
         case .wwdc: return NSColor(white: 1.0, alpha: 1.0) // Pure White for Presentation
@@ -306,12 +304,11 @@ enum AppTheme: String, CaseIterable {
     var keywordColor: NSColor {
         switch self {
         case .system: return NSApp?.effectiveAppearance.name == .darkAqua ? AppTheme.dark.keywordColor : AppTheme.light.keywordColor
-        case .dark: return NSColor(red: 0.78, green: 0.37, blue: 0.83, alpha: 1.0)
+        case .dark, .xcodeDark: return NSColor(red: 0.988, green: 0.373, blue: 0.639, alpha: 1.0) // Xcode Pink #FC5FA3
         case .light: return NSColor(red: 0.608, green: 0.165, blue: 0.639, alpha: 1.0) // Purple
         case .navy: return NSColor(red: 0.0, green: 0.851, blue: 1.0, alpha: 1.0) // #00D9FF
         case .lightBlue: return NSColor(red: 0.486, green: 0.302, blue: 1.0, alpha: 1.0) // #7C4DFF
         case .xcodeLight: return NSColor(red: 0.608, green: 0.165, blue: 0.639, alpha: 1.0) // Purple (Classic Xcode)
-        case .xcodeDark: return NSColor(red: 0.988, green: 0.376, blue: 0.639, alpha: 1.0) // Pink
         case .vscodeDefault: return NSColor(red: 0.337, green: 0.612, blue: 0.839, alpha: 1.0) // #569CD6
         case .visualStudio: return NSColor(red: 0.337, green: 0.612, blue: 0.839, alpha: 1.0) // #569CD6
         case .wwdc: return NSColor(red: 1.0, green: 0.176, blue: 0.333, alpha: 1.0) // Neon Pink/Red (#FF2D55)
@@ -348,12 +345,11 @@ enum AppTheme: String, CaseIterable {
     var stringColor: NSColor {
         switch self {
         case .system: return NSApp?.effectiveAppearance.name == .darkAqua ? AppTheme.dark.stringColor : AppTheme.light.stringColor
-        case .dark: return NSColor(red: 0.84, green: 0.45, blue: 0.35, alpha: 1.0)
+        case .dark, .xcodeDark: return NSColor(red: 0.988, green: 0.416, blue: 0.365, alpha: 1.0) // Xcode Coral #FC6A5D
         case .light: return NSColor(red: 0.761, green: 0.196, blue: 0.169, alpha: 1.0) // Red
         case .navy: return NSColor(red: 1.0, green: 0.718, blue: 0.012, alpha: 1.0) // #FFB703
         case .lightBlue: return NSColor(red: 0.827, green: 0.184, blue: 0.184, alpha: 1.0) // #D32F2F
         case .xcodeLight: return NSColor(red: 0.761, green: 0.196, blue: 0.169, alpha: 1.0) // Red
-        case .xcodeDark: return NSColor(red: 0.988, green: 0.416, blue: 0.365, alpha: 1.0) // Orange-red
         case .vscodeDefault: return NSColor(red: 0.808, green: 0.569, blue: 0.471, alpha: 1.0) // #CE9178
         case .visualStudio: return NSColor(red: 0.839, green: 0.616, blue: 0.522, alpha: 1.0) // #D69D85
         case .wwdc: return NSColor(red: 1.0, green: 0.839, blue: 0.04, alpha: 1.0) // Gold/Yellow
@@ -390,12 +386,10 @@ enum AppTheme: String, CaseIterable {
     var commentColor: NSColor {
         switch self {
         case .system: return NSApp?.effectiveAppearance.name == .darkAqua ? AppTheme.dark.commentColor : AppTheme.light.commentColor
-        case .dark: return NSColor(red: 0.45, green: 0.55, blue: 0.45, alpha: 1.0)
-        case .light: return NSColor(red: 0.373, green: 0.514, blue: 0.349, alpha: 1.0) // Green-gray
+        case .dark, .xcodeDark: return NSColor(red: 0.424, green: 0.475, blue: 0.525, alpha: 1.0) // Xcode Slate Gray #6C7986
+        case .light, .xcodeLight: return NSColor(red: 0.373, green: 0.514, blue: 0.349, alpha: 1.0) // Green-gray
         case .navy: return NSColor(red: 0.424, green: 0.459, blue: 0.490, alpha: 1.0) // #6C757D
         case .lightBlue: return NSColor(red: 0.333, green: 0.545, blue: 0.184, alpha: 1.0) // #558B2F
-        case .xcodeLight: return NSColor(red: 0.373, green: 0.514, blue: 0.349, alpha: 1.0) // Green
-        case .xcodeDark: return NSColor(red: 0.424, green: 0.647, blue: 0.424, alpha: 1.0) // Green
         case .vscodeDefault: return NSColor(red: 0.416, green: 0.600, blue: 0.333, alpha: 1.0) // #6A9955
         case .visualStudio: return NSColor(red: 0.341, green: 0.651, blue: 0.290, alpha: 1.0) // #57A64A
         case .wwdc: return NSColor(white: 0.5, alpha: 1.0) // Grey
@@ -433,12 +427,10 @@ enum AppTheme: String, CaseIterable {
     var numberColor: NSColor {
         switch self {
         case .system: return NSApp?.effectiveAppearance.name == .darkAqua ? AppTheme.dark.numberColor : AppTheme.light.numberColor
-        case .dark: return NSColor(red: 0.82, green: 0.68, blue: 0.36, alpha: 1.0)
-        case .light: return NSColor(red: 0.071, green: 0.408, blue: 0.616, alpha: 1.0) // Blue
+        case .dark, .xcodeDark: return NSColor(red: 0.816, green: 0.749, blue: 0.412, alpha: 1.0) // Xcode Gold #D0BF69
+        case .light, .xcodeLight: return NSColor(red: 0.071, green: 0.408, blue: 0.616, alpha: 1.0) // Blue
         case .navy: return NSColor(red: 0.549, green: 0.906, blue: 0.992, alpha: 1.0) // Light cyan
         case .lightBlue: return NSColor(red: 0.071, green: 0.408, blue: 0.616, alpha: 1.0)
-        case .xcodeLight: return NSColor(red: 0.071, green: 0.408, blue: 0.616, alpha: 1.0) // Blue
-        case .xcodeDark: return NSColor(red: 0.816, green: 0.749, blue: 0.412, alpha: 1.0) // Yellow
         case .vscodeDefault: return NSColor(red: 0.710, green: 0.808, blue: 0.659, alpha: 1.0) // #B5CEA8
         case .visualStudio: return NSColor(red: 0.710, green: 0.808, blue: 0.659, alpha: 1.0)
         case .wwdc: return NSColor(red: 0.686, green: 0.321, blue: 0.87, alpha: 1.0) // Purple
@@ -475,12 +467,10 @@ enum AppTheme: String, CaseIterable {
     var typeColor: NSColor {
         switch self {
         case .system: return NSApp?.effectiveAppearance.name == .darkAqua ? AppTheme.dark.typeColor : AppTheme.light.typeColor
-        case .dark: return NSColor(red: 0.35, green: 0.68, blue: 0.85, alpha: 1.0)
-        case .light: return NSColor(red: 0.110, green: 0.404, blue: 0.576, alpha: 1.0) // Teal
+        case .dark, .xcodeDark: return NSColor(red: 0.365, green: 0.847, blue: 0.808, alpha: 1.0) // Xcode Teal #5DD8CE
+        case .light, .xcodeLight: return NSColor(red: 0.110, green: 0.404, blue: 0.576, alpha: 1.0) // Teal
         case .navy: return NSColor(red: 0.498, green: 0.859, blue: 0.702, alpha: 1.0) // Mint
         case .lightBlue: return NSColor(red: 0.082, green: 0.396, blue: 0.753, alpha: 1.0) // #1565C0 (Darker Blue for better contrast)
-        case .xcodeLight: return NSColor(red: 0.110, green: 0.404, blue: 0.576, alpha: 1.0) // Teal
-        case .xcodeDark: return NSColor(red: 0.353, green: 0.812, blue: 0.945, alpha: 1.0) // Cyan
         case .vscodeDefault: return NSColor(red: 0.306, green: 0.788, blue: 0.690, alpha: 1.0) // #4EC9B0
         case .visualStudio: return NSColor(red: 0.306, green: 0.788, blue: 0.690, alpha: 1.0)
         case .wwdc: return NSColor(red: 0.353, green: 0.784, blue: 0.98, alpha: 1.0) // Cyan
@@ -518,12 +508,11 @@ enum AppTheme: String, CaseIterable {
     var functionColor: NSColor {
         switch self {
         case .system: return NSApp?.effectiveAppearance.name == .darkAqua ? AppTheme.dark.functionColor : AppTheme.light.functionColor
-        case .dark: return NSColor(red: 0.40, green: 0.72, blue: 0.65, alpha: 1.0)
+        case .dark, .xcodeDark: return NSColor(red: 0.255, green: 0.655, blue: 0.988, alpha: 1.0) // Xcode Vibrant Blue #41A7FC
         case .light: return NSColor(red: 0.067, green: 0.376, blue: 0.537, alpha: 1.0)
         case .navy: return NSColor(red: 0.984, green: 0.769, blue: 0.353, alpha: 1.0) // Gold
         case .lightBlue: return NSColor(red: 0.506, green: 0.298, blue: 0.757, alpha: 1.0) // Purple
         case .xcodeLight: return NSColor(red: 0.067, green: 0.376, blue: 0.537, alpha: 1.0) // Navy
-        case .xcodeDark: return NSColor(red: 0.251, green: 0.655, blue: 0.710, alpha: 1.0) // Teal
         case .vscodeDefault: return NSColor(red: 0.863, green: 0.863, blue: 0.667, alpha: 1.0) // #DCDCAA
         case .visualStudio: return NSColor(red: 0.863, green: 0.863, blue: 0.667, alpha: 1.0)
         case .wwdc: return NSColor(red: 0.0, green: 0.98, blue: 0.6, alpha: 1.0) // Mint Green
@@ -648,12 +637,17 @@ enum AppTheme: String, CaseIterable {
     
     /// Convert AppTheme to Theme for the syntax engine
     func toTheme() -> Theme {
+        // Dark & Xcode Dark map directly to MicroCode Pro Dark (Xcode Dark Aesthetic)
+        if self == .dark || self == .xcodeDark {
+            return ThemeManager.createDefaultDarkTheme()
+        }
+
         // Fallback colors for properties not explicitly in AppTheme
         let selectionHex = selectionColor.hexString
         let lineHighlightHex = lineHighlightColor.hexString
-        let cursorHex = isDark ? "#FFD700" : "#D63031"
+        let cursorHex = isDark ? "#FFFFFF" : "#000000"
         let gutterHex = editorBackground.hexString
-        let gutterTextHex = isDark ? "#4B5563" : "#B2BEC3"
+        let gutterTextHex = isDark ? "#4A4A50" : "#B2BEC3"
 
         return Theme(
             name: self.rawValue,
@@ -668,19 +662,28 @@ enum AppTheme: String, CaseIterable {
             editorGutterText: gutterTextHex,
             tokenColors: [
                 "keyword": TokenStyleConfig(foreground: keywordColor.hexString),
+                "keywordControl": TokenStyleConfig(foreground: keywordColor.hexString),
+                "keywordDeclaration": TokenStyleConfig(foreground: keywordColor.hexString),
+                "keywordModifier": TokenStyleConfig(foreground: keywordColor.hexString),
+                "keywordOperator": TokenStyleConfig(foreground: keywordColor.hexString),
                 "string": TokenStyleConfig(foreground: stringColor.hexString),
-                "comment": TokenStyleConfig(foreground: commentColor.hexString), // FIXED: Removed italic to prevent shake
+                "comment": TokenStyleConfig(foreground: commentColor.hexString),
+                "commentDoc": TokenStyleConfig(foreground: commentColor.hexString),
+                "commentBlock": TokenStyleConfig(foreground: commentColor.hexString),
                 "number": TokenStyleConfig(foreground: numberColor.hexString),
                 "type": TokenStyleConfig(foreground: typeColor.hexString),
                 "function": TokenStyleConfig(foreground: functionColor.hexString),
                 "identifier": TokenStyleConfig(foreground: editorText.hexString),
-                "variable": TokenStyleConfig(foreground: typeColor.hexString), // Better than plain text
+                "variable": TokenStyleConfig(foreground: editorText.hexString),
                 "property": TokenStyleConfig(foreground: typeColor.hexString),
-                "parameter": TokenStyleConfig(foreground: typeColor.hexString),
+                "parameter": TokenStyleConfig(foreground: editorText.hexString),
                 "boolean": TokenStyleConfig(foreground: keywordColor.hexString),
                 "null": TokenStyleConfig(foreground: keywordColor.hexString),
                 "operator": TokenStyleConfig(foreground: editorText.hexString),
                 "punctuation": TokenStyleConfig(foreground: editorText.hexString),
+                "delimiter": TokenStyleConfig(foreground: editorText.hexString),
+                "annotation": TokenStyleConfig(foreground: "#FD8F3F"),
+                "preprocessor": TokenStyleConfig(foreground: "#FD8F3F"),
                 "escape": TokenStyleConfig(foreground: numberColor.hexString)
             ]
         )
@@ -700,6 +703,7 @@ enum EditorMode: String, CaseIterable, Identifiable {
     case embedded = "Embedded Studio"
     case aiAgent = "AI Agent"
     case browser = "Browser"
+    case apiClient = "apiClient"
     
     var id: String { rawValue }
     
@@ -712,9 +716,10 @@ enum EditorMode: String, CaseIterable, Identifiable {
         case .notebook: return "Notebook"
         case .scenario: return "Scenario"
         case .design: return "Design"
-        case .embedded: return "Embedded Studio"
+        case .embedded: return "Embed & IoT Studio"
         case .aiAgent: return "AI Agent"
         case .browser: return "Browser"
+        case .apiClient: return "API Studio"
         }
     }
     
@@ -730,6 +735,7 @@ enum EditorMode: String, CaseIterable, Identifiable {
         case .embedded: return "cpu.fill" // Chip icon
         case .aiAgent: return "brain.head.profile" // AI brain icon
         case .browser: return "globe" // Browser icon
+        case .apiClient: return "network" // API Studio icon
         }
     }
 }
@@ -751,6 +757,8 @@ struct PythonVersionInfo: Identifiable, Hashable {
 
 @MainActor
 class AppState: ObservableObject {
+    static weak var shared: AppState? = nil
+
     // MARK: - Published Properties
 
     @Published var openFiles: [CodeFile] = []
@@ -767,9 +775,42 @@ class AppState: ObservableObject {
     @Published var isExecuting: Bool = false
 
     @Published var workspaceFolder: URL?
+    @Published var showingFirstLaunchWelcome: Bool = true
+    @Published var showingWelcomeHome: Bool = false
+
+    func closeWorkspace() {
+        workspaceFolder = nil
+        openFiles.removeAll()
+        currentFile = nil
+        editorMode = .code
+        UserDefaults.standard.removeObject(forKey: "lastWorkspacePath")
+    }
+
+    func showWelcomeScreen() {
+        closeWorkspace()
+        showingWelcomeHome = true
+    }
+
+    func showFirstLaunchOnboarding() {
+        showingFirstLaunchWelcome = true
+    }
     @Published var fileTree: [FileNode] = []
     @Published private(set) var fileTreeRevision: UInt64 = 0
     @Published var fileTreeLimitWarning: String?
+    
+    /// Always returns the active project directory for Terminal and tools, following the currently opened workspace.
+    var activeTerminalDirectory: String {
+        if let folder = workspaceFolder?.path, !folder.isEmpty, FileManager.default.fileExists(atPath: folder) {
+            return folder
+        }
+        if let last = UserDefaults.standard.string(forKey: "lastWorkspacePath"), !last.isEmpty, FileManager.default.fileExists(atPath: last) {
+            return last
+        }
+        if FileManager.default.fileExists(atPath: "/Volumes/MAC/microcode_lib_kernel") {
+            return "/Volumes/MAC/microcode_lib_kernel"
+        }
+        return FileManager.default.homeDirectoryForCurrentUser.path
+    }
 
     @Published var gitStatus: GitStatus?
     @Published var gitCommits: [GitCommit] = []
@@ -778,6 +819,12 @@ class AppState: ObservableObject {
     @Published var gitRemoteURL: String = ""
     @Published var gitDiff: String = ""
     @Published var gitDiffFile: String = ""
+    @Published var gitOperationMessage: String = ""
+    @Published var gitIsWorking: Bool = false
+    @Published var gitIsGeneratingCommitMessage: Bool = false
+    /// Kept separate from `gitStatus`: a repository can be valid even before
+    /// it has its first commit or any tracked files.
+    @Published private(set) var gitRepositoryAvailable: Bool = false
     @Published var cicdRuns: [WorkflowRun] = []
     @Published var cicdLoading: Bool = false
     
@@ -798,6 +845,7 @@ class AppState: ObservableObject {
     @Published var currentComputeTarget: ComputeTarget = .localCPU
     @Published var userTokenBalance: Int = 0
     @Published var isPremiumSubscriber: Bool = false
+    @Published var selectedSSHComputeServer: RemoteConnectionConfig?
     
     // Custom HPC Configuration
     @AppStorage("hpcEndpoint") var hpcEndpoint: String = "ws://127.0.0.1:8080/v1/agent"
@@ -836,12 +884,20 @@ class AppState: ObservableObject {
     // Removed showingExportWindow
     @Published var showingCommitDialog: Bool = false
     @Published var showingSettingsDialog: Bool = false
+    @Published var settingsSelectedTab: Int = 2
     @Published var showingSimulatorDialog: Bool = false
     @Published var showingNewFileDialog: Bool = false
     @Published var showingNewConversationDialog: Bool = false
     @Published var showingNodeManager: Bool = false
     @Published var showingDatabaseStudio: Bool = false
-    @Published var showingAPIClient: Bool = false
+    @Published var showingAPIClient: Bool = false {
+        didSet {
+            if showingAPIClient {
+                openAPIStudio()
+                showingAPIClient = false
+            }
+        }
+    }
     @Published var showingCICDView: Bool = false
     @Published var showingProjectRuntime: Bool = false
     @Published var showingSubAgentMonitor: Bool = false
@@ -894,7 +950,7 @@ class AppState: ObservableObject {
 
     // AI Settings
     @Published var aiProvider: String = "gemini"
-    @Published var aiModel: String = "gemini-3.6-flash"
+    @Published var aiModel: String = "gemini-2.5-flash"
     @Published var mixMode: Bool = false  // Use multiple AI providers
     @Published var autoFormatOnSave: Bool = false
     @Published var apiKeys: [String: String] = [:]
@@ -985,8 +1041,14 @@ class AppState: ObservableObject {
     // MARK: - Initialization
 
     init() {
-        setupSubscriptions()
-        loadSettings()
+        AppState.shared = self
+        // Let SwiftUI commit the first window before restoring settings and a
+        // previous workspace. This keeps cold-launch first paint responsive.
+        DispatchQueue.main.async { [weak self] in
+            guard let self else { return }
+            self.setupSubscriptions()
+            self.loadSettings()
+        }
     }
 
     private func setupSubscriptions() {
@@ -1080,7 +1142,12 @@ class AppState: ObservableObject {
                 let output = (info["output"] as? String) ?? ""
                 let cwd = (info["cwd"] as? String) ?? ""
                 let cwdName = URL(fileURLWithPath: cwd).lastPathComponent
-                self.consoleOutput += "\n🤖 [Agent Terminal: \(cwdName.isEmpty ? cwd : cwdName)]\n$ \(cmd)\n\(output)\n"
+                let phase = (info["phase"] as? String) ?? "completed"
+                if phase == "started" {
+                    self.consoleOutput += "\n🤖 [Agent Terminal: \(cwdName.isEmpty ? cwd : cwdName)]\n$ \(cmd)\n"
+                } else {
+                    self.consoleOutput += "\(output)\n[Agent command finished]\n"
+                }
             }
             .store(in: &cancellables)
     }
@@ -1123,12 +1190,76 @@ class AppState: ObservableObject {
             appTheme = savedTheme ?? .dark
             defaults.set(true, forKey: opaqueDefaultMigrationKey)
         }
-        aiProvider = defaults.string(forKey: "aiProvider") ?? "gemini"
-        aiModel = defaults.string(forKey: "aiModel") ?? "gemini-3.6-flash"
+        
+        // Auto-detect and migrate credentials from existing local developer setups across macOS
+        autoDetectAndMigrateCredentials(defaults: defaults)
+
+        // Load API Keys
+        let providers = ["gemini", "openai", "anthropic", "glm", "deepseek", "qwen", "grok"]
+        for provider in providers {
+            if let key = defaults.string(forKey: "\(provider)_api_key"), !key.isEmpty {
+                apiKeys[provider] = key
+            }
+        }
+        if let legacyKey = defaults.string(forKey: "apiKey"), !legacyKey.isEmpty {
+            if apiKeys["openai"] == nil || apiKeys["openai"]?.isEmpty == true {
+                apiKeys["openai"] = legacyKey
+            }
+        }
+
+        // Intelligently select active provider and model based on working credentials
+        let hasGemini = !(apiKeys["gemini"]?.isEmpty ?? true)
+        let hasDeepSeek = !(apiKeys["deepseek"]?.isEmpty ?? true)
+        let hasOpenAI = !(apiKeys["openai"]?.isEmpty ?? true)
+        let hasAnthropic = !(apiKeys["anthropic"]?.isEmpty ?? true)
+
+        let savedProvider = defaults.string(forKey: "aiProvider") ?? defaults.string(forKey: "provider")?.lowercased()
+        let savedModel = defaults.string(forKey: "aiModel") ?? defaults.string(forKey: "model")
+
+        if let savedProvider = savedProvider, !(apiKeys[savedProvider]?.isEmpty ?? true) {
+            aiProvider = savedProvider
+            aiModel = savedModel ?? "gemini-2.5-flash"
+        } else if hasGemini {
+            aiProvider = "gemini"
+            aiModel = (savedModel?.contains("gemini") == true) ? savedModel! : "gemini-2.5-flash"
+            defaults.set("gemini", forKey: "aiProvider")
+            defaults.set(aiModel, forKey: "aiModel")
+        } else if hasDeepSeek {
+            aiProvider = "deepseek"
+            aiModel = (savedModel?.contains("deepseek") == true) ? savedModel! : "deepseek-chat"
+            defaults.set("deepseek", forKey: "aiProvider")
+            defaults.set(aiModel, forKey: "aiModel")
+        } else if hasOpenAI {
+            aiProvider = "openai"
+            aiModel = (savedModel?.contains("gpt") == true || savedModel?.contains("o1") == true || savedModel?.contains("o3") == true) ? savedModel! : "gpt-4o"
+            defaults.set("openai", forKey: "aiProvider")
+            defaults.set(aiModel, forKey: "aiModel")
+        } else if hasAnthropic {
+            aiProvider = "anthropic"
+            aiModel = "claude-3-7-sonnet"
+            defaults.set("anthropic", forKey: "aiProvider")
+            defaults.set(aiModel, forKey: "aiModel")
+        } else {
+            aiProvider = savedProvider ?? "gemini"
+            aiModel = savedModel ?? "gemini-2.5-flash"
+        }
+
         let normalizedAI = AIModelCatalog.shared.normalizedSelection(provider: aiProvider, model: aiModel)
         aiProvider = normalizedAI.provider
         aiModel = normalizedAI.model
-        
+
+        // Set default aiKeyMode only when not previously configured
+        let savedKeyMode = defaults.string(forKey: "aiKeyMode")
+        if savedKeyMode == nil {
+            if SubscriptionAuthManager.shared.hasAnyConnected {
+                defaults.set("subscription", forKey: "aiKeyMode")
+            } else if hasGemini || hasDeepSeek || hasOpenAI || hasAnthropic {
+                defaults.set("direct", forKey: "aiKeyMode")
+            } else {
+                defaults.set("cloud", forKey: "aiKeyMode")
+            }
+        }
+
         // MicroRent AI Proxy setup
         let microToken = defaults.string(forKey: "microRentToken") ?? ""
         if !microToken.isEmpty {
@@ -1138,15 +1269,7 @@ class AppState: ObservableObject {
             unsetenv("MICRORENT_TOKEN")
             setenv("USE_MICRORENT_PROXY", "0", 1)
         }
-        
-        // Load API Keys
-        let providers = ["gemini", "openai", "anthropic", "glm", "deepseek", "qwen", "grok"]
-        for provider in providers {
-            if let key = defaults.string(forKey: "\(provider)_api_key") {
-                apiKeys[provider] = key
-            }
-        }
-        
+
         // Load GitHub Settings
         githubOwner = defaults.string(forKey: "githubOwner") ?? ""
         githubRepo = defaults.string(forKey: "githubRepo") ?? ""
@@ -1165,21 +1288,33 @@ class AppState: ObservableObject {
         agentMode = defaults.object(forKey: "agentMode") == nil ? true : defaults.bool(forKey: "agentMode")
         agentAutoApproveTools = defaults.bool(forKey: "agentAutoApproveTools")
         agentCustomInstructions = defaults.string(forKey: "agentCustomInstructions") ?? ""
-        agentMaxIterations = defaults.object(forKey: "agentMaxIterations") == nil ? 0 : defaults.integer(forKey: "agentMaxIterations")
+        let savedAgentMaxIterations = defaults.object(forKey: "agentMaxIterations") == nil
+            ? 0
+            : defaults.integer(forKey: "agentMaxIterations")
+        // Versions before 2.0.1 persisted `3` as a hidden default despite
+        // presenting Unlimited as the default in Settings. Migrate that legacy
+        // value so existing users are not silently cut off mid-task.
+        agentMaxIterations = (1...4).contains(savedAgentMaxIterations) ? 0 : savedAgentMaxIterations
+        if agentMaxIterations != savedAgentMaxIterations {
+            defaults.set(agentMaxIterations, forKey: "agentMaxIterations")
+        }
         
         // Restore last opened workspace folder
         if let lastPath = defaults.string(forKey: "lastWorkspacePath"),
            !lastPath.isEmpty,
            FileManager.default.fileExists(atPath: lastPath) {
             let url = URL(fileURLWithPath: lastPath)
-            Task { @MainActor in
-                await self.openWorkspace(url: url)
+            // External workspaces can be expensive to enumerate. Restore only
+            // after the editor shell has become interactive.
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.35) { [weak self] in
+                guard let self else { return }
+                Task { @MainActor in await self.openWorkspace(url: url) }
             }
         }
         
         // Start the backend server automatically
         Task {
-            await AIModelCatalog.shared.refreshIfNeeded()
+            await AIModelCatalog.shared.refreshLiveProviderModels()
             let refreshedAI = AIModelCatalog.shared.normalizedSelection(provider: aiProvider, model: aiModel)
             if refreshedAI.provider != aiProvider || refreshedAI.model != aiModel {
                 aiProvider = refreshedAI.provider
@@ -1196,6 +1331,86 @@ class AppState: ObservableObject {
                 print("⚠️ Failed to start backend server: \(error.localizedDescription)")
                 print("   Some features (.NET, ML Training) will not be available.")
                 // Continue even if backend fails - some features will work without it
+            }
+        }
+    }
+
+    private func autoDetectAndMigrateCredentials(defaults: UserDefaults) {
+        let providers = ["gemini", "openai", "anthropic", "glm", "deepseek", "qwen", "grok"]
+        
+        // 1. Scan candidate preference suites and plists for existing developer credentials
+        let candidateSuites = [
+            "com.dotmini.codetunner",
+            "com.dotmini.microcode",
+            "com.arsenal.codetunner",
+            "com.spuaiclub.microcode-oss",
+            "com.spuaiclub.codetunner"
+        ]
+        var discoveredKeys: [String: String] = [:]
+        
+        for suite in candidateSuites {
+            if let suiteDefaults = UserDefaults(suiteName: suite) {
+                for p in providers {
+                    if let k = suiteDefaults.string(forKey: "\(p)_api_key"), !k.isEmpty, discoveredKeys[p] == nil {
+                        discoveredKeys[p] = k
+                    }
+                    if let k = suiteDefaults.string(forKey: "api_key_\(p)"), !k.isEmpty, discoveredKeys[p] == nil {
+                        discoveredKeys[p] = k
+                    }
+                }
+                if let lic = suiteDefaults.string(forKey: "dotminiLicenseKey"), !lic.isEmpty, defaults.string(forKey: "dotminiLicenseKey")?.isEmpty ?? true {
+                    defaults.set(lic, forKey: "dotminiLicenseKey")
+                }
+                if let mail = suiteDefaults.string(forKey: "dotminiUserEmail"), !mail.isEmpty, defaults.string(forKey: "dotminiUserEmail")?.isEmpty ?? true {
+                    defaults.set(mail, forKey: "dotminiUserEmail")
+                }
+                if let rent = suiteDefaults.string(forKey: "microRentToken"), !rent.isEmpty, defaults.string(forKey: "microRentToken")?.isEmpty ?? true {
+                    defaults.set(rent, forKey: "microRentToken")
+                }
+            }
+            
+            // Directly read plist file on disk in case suite wasn't registered in sandbox
+            let plistPath = ("~/Library/Preferences/\(suite).plist" as NSString).expandingTildeInPath
+            if FileManager.default.fileExists(atPath: plistPath),
+               let data = try? Data(contentsOf: URL(fileURLWithPath: plistPath)),
+               let plist = (try? PropertyListSerialization.propertyList(from: data, options: [], format: nil)) as? [String: Any] {
+                for p in providers {
+                    if let k = (plist["\(p)_api_key"] ?? plist["api_key_\(p)"]) as? String, !k.isEmpty, discoveredKeys[p] == nil {
+                        discoveredKeys[p] = k
+                    }
+                    if p == "gemini", let k = (plist["api_key_Gemini"] ?? plist["gemini_api_key"]) as? String, !k.isEmpty, discoveredKeys[p] == nil {
+                        discoveredKeys[p] = k
+                    }
+                    if p == "openai", let k = (plist["api_key_ChatGPT"] ?? plist["openai_api_key"]) as? String, !k.isEmpty, discoveredKeys[p] == nil {
+                        discoveredKeys[p] = k
+                    }
+                }
+                if let lic = plist["dotminiLicenseKey"] as? String, !lic.isEmpty, defaults.string(forKey: "dotminiLicenseKey")?.isEmpty ?? true {
+                    defaults.set(lic, forKey: "dotminiLicenseKey")
+                }
+                if let mail = plist["dotminiUserEmail"] as? String, !mail.isEmpty, defaults.string(forKey: "dotminiUserEmail")?.isEmpty ?? true {
+                    defaults.set(mail, forKey: "dotminiUserEmail")
+                }
+                if let rent = plist["microRentToken"] as? String, !rent.isEmpty, defaults.string(forKey: "microRentToken")?.isEmpty ?? true {
+                    defaults.set(rent, forKey: "microRentToken")
+                }
+            }
+        }
+        
+        // 2. Check process environment variables
+        let env = ProcessInfo.processInfo.environment
+        for p in providers {
+            let envKey = "\(p.uppercased())_API_KEY"
+            if let val = env[envKey], !val.isEmpty, discoveredKeys[p] == nil {
+                discoveredKeys[p] = val
+            }
+        }
+        
+        // 3. Populate defaults with discovered keys if current defaults lacks them
+        for (prov, key) in discoveredKeys {
+            let current = defaults.string(forKey: "\(prov)_api_key")
+            if current == nil || current?.isEmpty == true {
+                defaults.set(key, forKey: "\(prov)_api_key")
             }
         }
     }
@@ -1389,6 +1604,95 @@ class AppState: ObservableObject {
         }
     }
 
+    func newFile() {
+        let untitledFile = CodeFile(
+            id: UUID(),
+            name: "Untitled.swift",
+            path: "",
+            content: "//\n//  Untitled.swift\n//\n\nimport SwiftUI\n\nstruct UntitledView: View {\n    var body: some View {\n        Text(\"Hello from MicroCode!\")\n            .padding()\n    }\n}\n",
+            language: "swift",
+            isUnsaved: true
+        )
+        openFiles.append(untitledFile)
+        currentFileIndex = openFiles.count - 1
+        editorMode = .code
+    }
+
+    static func recordRecentWorkspace(url: URL) {
+        NSDocumentController.shared.noteNewRecentDocumentURL(url)
+        var paths = UserDefaults.standard.stringArray(forKey: "microcode_recent_workspaces") ?? []
+        paths.removeAll { $0 == url.path }
+        paths.insert(url.path, at: 0)
+        if paths.count > 20 { paths = Array(paths.prefix(20)) }
+        UserDefaults.standard.set(paths, forKey: "microcode_recent_workspaces")
+    }
+
+    static func recordRecentFile(url: URL) {
+        NSDocumentController.shared.noteNewRecentDocumentURL(url)
+        var paths = UserDefaults.standard.stringArray(forKey: "microcode_recent_files") ?? []
+        paths.removeAll { $0 == url.path }
+        paths.insert(url.path, at: 0)
+        if paths.count > 25 { paths = Array(paths.prefix(25)) }
+        UserDefaults.standard.set(paths, forKey: "microcode_recent_files")
+    }
+
+    static func getRecentWorkspaces() -> [URL] {
+        var paths = UserDefaults.standard.stringArray(forKey: "microcode_recent_workspaces") ?? []
+        if let last = UserDefaults.standard.string(forKey: "lastWorkspacePath"), !last.isEmpty, !paths.contains(last) {
+            paths.insert(last, at: 0)
+        }
+        
+        // Also merge any directory URLs from system recent documents
+        for docURL in NSDocumentController.shared.recentDocumentURLs {
+            var isDir: ObjCBool = false
+            if FileManager.default.fileExists(atPath: docURL.path, isDirectory: &isDir), isDir.boolValue {
+                if !paths.contains(docURL.path) {
+                    paths.append(docURL.path)
+                }
+            }
+        }
+        
+        // Discover current active/development project if list is small or empty
+        let discoveryCandidates = [
+            "/Users/dotmini/Documents/SX/codetunner-native",
+            "/Volumes/MAC/3DAR",
+            "/Volumes/MAC/microcode_lib_kernel",
+            FileManager.default.currentDirectoryPath
+        ]
+        for candidate in discoveryCandidates {
+            var isDir: ObjCBool = false
+            if FileManager.default.fileExists(atPath: candidate, isDirectory: &isDir), isDir.boolValue {
+                if !paths.contains(candidate) && !candidate.contains("/.build") && candidate != "/" {
+                    paths.append(candidate)
+                }
+            }
+        }
+        
+        let validURLs = paths.compactMap { path -> URL? in
+            var isDir: ObjCBool = false
+            if FileManager.default.fileExists(atPath: path, isDirectory: &isDir), isDir.boolValue {
+                return URL(fileURLWithPath: path)
+            }
+            return nil
+        }
+        
+        // Update back to UserDefaults
+        let validPaths = validURLs.map { $0.path }
+        UserDefaults.standard.set(validPaths, forKey: "microcode_recent_workspaces")
+        return validURLs
+    }
+
+    static func getRecentFiles() -> [URL] {
+        let paths = UserDefaults.standard.stringArray(forKey: "microcode_recent_files") ?? []
+        return paths.compactMap { path in
+            var isDir: ObjCBool = false
+            if FileManager.default.fileExists(atPath: path, isDirectory: &isDir), !isDir.boolValue {
+                return URL(fileURLWithPath: path)
+            }
+            return nil
+        }
+    }
+
     func openFile() {
         let panel = NSOpenPanel()
         panel.allowsMultipleSelection = false
@@ -1400,17 +1704,25 @@ class AppState: ObservableObject {
         if let window = NSApp.keyWindow {
             panel.beginSheetModal(for: window) { [weak self] response in
                 guard let self = self, response == .OK, let url = panel.url else { return }
+                Self.recordRecentFile(url: url)
                 Task { @MainActor in
                     await self.loadFile(url: url)
                 }
             }
         } else {
             if panel.runModal() == .OK, let url = panel.url {
+                Self.recordRecentFile(url: url)
                 Task { @MainActor in
                     await self.loadFile(url: url)
                 }
             }
         }
+    }
+
+    @MainActor
+    func openInPreviewDock(url: URL) {
+        PreviewDockService.shared.openFile(url: url, makeActive: true)
+        DeviceRuntimeService.shared.showingEmbeddedDeviceDock = true
     }
 
     @MainActor
@@ -1464,6 +1776,7 @@ class AppState: ObservableObject {
         // Step 1: Immediate UI update (no CPU cost)
         self.workspaceFolder = url
         UserDefaults.standard.set(url.path, forKey: "lastWorkspacePath")
+        Self.recordRecentWorkspace(url: url)
         AgentService.shared.setWorkspace(url.path)
         
         // Initialize MicroCode AI Core
@@ -2250,8 +2563,16 @@ class AppState: ObservableObject {
         let hash = SHA256.hash(data: data)
         let codeHash = hash.compactMap { String(format: "%02x", $0) }.joined().prefix(16)
         
-        let filename = "script_\(codeHash).\(ext)"
-        let sourceFile = tempDir.appendingPathComponent(filename)
+        let sourceFile: URL
+        if language.lowercased() == "java" {
+            // Java requires public class name to match file name (conventionally Main.java)
+            let javaDir = tempDir.appendingPathComponent("java_\(codeHash)", isDirectory: true)
+            try? FileManager.default.createDirectory(at: javaDir, withIntermediateDirectories: true, attributes: nil)
+            sourceFile = javaDir.appendingPathComponent("Main.java")
+        } else {
+            let filename = "script_\(codeHash).\(ext)"
+            sourceFile = tempDir.appendingPathComponent(filename)
+        }
         
         do {
             if !FileManager.default.fileExists(atPath: sourceFile.path) {
@@ -2265,7 +2586,7 @@ class AppState: ObservableObject {
         }
     }
 
-    private func fileExtension(for language: String) -> String {
+    func fileExtension(for language: String) -> String {
         switch language.lowercased() {
         case "python": return "py"
         case "javascript": return "js"
@@ -2300,8 +2621,8 @@ class AppState: ObservableObject {
         case "solidity": return "sol"
         case "powershell": return "ps1"
         case "csharp": return "cs"
-        case "objective-c": return "m"
-        case "objective-cpp": return "mm"
+        case "objective-c", "objc": return "m"
+        case "objective-c++", "objective-cpp", "objcpp", "objc++": return "mm"
         case "ocaml": return "ml"
         case "haskell": return "hs"
         case "ardium", "ar": return "ar"
@@ -2356,7 +2677,12 @@ class AppState: ObservableObject {
             let jarPath = tempDir.appendingPathComponent("output_\(hashSuffix).jar").path
             if !FileManager.default.fileExists(atPath: jarPath) {
                 let compileResult = await runProcess(executable: "/usr/bin/env", arguments: ["kotlinc", sourcePath, "-include-runtime", "-d", jarPath])
-                if compileResult.exitCode != 0 { return compileResult }
+                if compileResult.exitCode != 0 {
+                    if compileResult.stderr.contains("not found") || compileResult.stderr.contains("No such file") {
+                        return ("", "❌ Error: Kotlin compiler (kotlinc) not found in PATH.\nPlease install Kotlin via: brew install kotlin", 1)
+                    }
+                    return compileResult
+                }
             }
             return await runProcess(executable: "/usr/bin/env", arguments: ["java", "-jar", jarPath])
             
@@ -2370,9 +2696,11 @@ class AppState: ObservableObject {
             
         // Systems
         case "rust", "rs":
-            let outputPath = tempDir.appendingPathComponent("output_rs").path
-            let compileResult = await runProcess(executable: "/usr/bin/env", arguments: ["rustc", "-o", outputPath, sourcePath])
-            if compileResult.exitCode != 0 { return compileResult }
+            let outputPath = tempDir.appendingPathComponent("output_rs_\(hashSuffix)").path
+            if !FileManager.default.fileExists(atPath: outputPath) {
+                let compileResult = await runProcess(executable: "/usr/bin/env", arguments: ["rustc", "-o", outputPath, sourcePath])
+                if compileResult.exitCode != 0 { return compileResult }
+            }
             return await runProcess(executable: outputPath, arguments: [])
             
         case "c":
@@ -2395,17 +2723,23 @@ class AppState: ObservableObject {
             let outputPath = tempDir.appendingPathComponent("output_objc_\(hashSuffix)").path
             if !FileManager.default.fileExists(atPath: outputPath) {
                 let compileResult = await runProcess(executable: "/usr/bin/env", arguments: ["clang", "-framework", "Foundation", "-o", outputPath, sourcePath])
-                if compileResult.exitCode != 0 { return compileResult }
+                if compileResult.exitCode != 0 {
+                    return (compileResult.stdout, cleanObjcOutput(compileResult.stderr), compileResult.exitCode)
+                }
             }
-            return await runProcess(executable: outputPath, arguments: [])
+            let runResult = await runProcess(executable: outputPath, arguments: [])
+            return (cleanObjcOutput(runResult.stdout), cleanObjcOutput(runResult.stderr), runResult.exitCode)
             
-        case "objective-c++", "objective-cpp", "objcpp", "mm":
+        case "objective-c++", "objective-cpp", "objcpp", "objc++", "mm":
             let outputPath = tempDir.appendingPathComponent("output_objcpp_\(hashSuffix)").path
             if !FileManager.default.fileExists(atPath: outputPath) {
                 let compileResult = await runProcess(executable: "/usr/bin/env", arguments: ["clang++", "-framework", "Foundation", "-o", outputPath, sourcePath])
-                if compileResult.exitCode != 0 { return compileResult }
+                if compileResult.exitCode != 0 {
+                    return (compileResult.stdout, cleanObjcOutput(compileResult.stderr), compileResult.exitCode)
+                }
             }
-            return await runProcess(executable: outputPath, arguments: [])
+            let runResult = await runProcess(executable: outputPath, arguments: [])
+            return (cleanObjcOutput(runResult.stdout), cleanObjcOutput(runResult.stderr), runResult.exitCode)
             
         // .NET / C#
         case "csharp", "cs":
@@ -2426,15 +2760,34 @@ class AppState: ObservableObject {
         case "powershell", "ps1": args = ["pwsh", sourcePath]
         
         // Data Science
-        case "r": args = ["Rscript", sourcePath]
-        case "julia", "jl": args = ["julia", sourcePath]
+        case "r":
+            if let rPath = RuntimeManager.shared.selectedExecutable(for: .r) {
+                // R itself and Rscript accept different argument forms. The
+                // runtime manager tracks `R`, while a user may explicitly
+                // select `Rscript` in Manage Environments.
+                if URL(fileURLWithPath: rPath).lastPathComponent.lowercased().contains("rscript") {
+                    return await runProcess(executable: rPath, arguments: [sourcePath])
+                }
+                return await runProcess(executable: rPath, arguments: ["--vanilla", "--slave", "-f", sourcePath])
+            }
+            args = ["Rscript", sourcePath]
+        case "julia", "jl":
+            if let juliaPath = RuntimeManager.shared.selectedExecutable(for: .julia) {
+                return await runProcess(executable: juliaPath, arguments: [sourcePath])
+            }
+            args = ["julia", sourcePath]
         case "matlab": args = ["matlab", "-batch", "run('" + sourcePath + "')"]
             
         // Functional / Others
         case "ocaml", "ml": args = ["ocaml", sourcePath]
         case "haskell", "hs": args = ["runghc", sourcePath]
         case "dart": args = ["dart", "run", sourcePath]
-        case "scala": args = ["scala", sourcePath]
+        case "scala":
+            let scalaResult = await runProcess(executable: "/usr/bin/env", arguments: ["scala", sourcePath])
+            if scalaResult.exitCode != 0 && (scalaResult.stderr.contains("not found") || scalaResult.stderr.contains("No such file")) {
+                return ("", "❌ Error: Scala runner not found in PATH.\nPlease install Scala via: brew install scala", 1)
+            }
+            return scalaResult
         case "groovy": args = ["groovy", sourcePath]
         case "elixir", "ex", "exs": args = ["elixir", sourcePath]
         case "clojure", "clj": args = ["clojure", "-M", sourcePath]
@@ -2507,8 +2860,34 @@ class AppState: ObservableObject {
         
         return await runProcess(executable: executable, arguments: args)
     }
+
+    /// Clean Objective-C NSLog headers and temp paths from process output
+    public func cleanObjcOutput(_ raw: String) -> String {
+        guard !raw.isEmpty else { return raw }
+        // Filter NSLog timestamp and process name prefix:
+        // "2026-09-06 06:02:12.285 output_objc_1234567890[19949:1470682] Hello from Objective-C!" -> "Hello from Objective-C!"
+        let nslogPattern = #"^\d{4}-\d{2}-\d{2}\s+\d{2}:\d{2}:\d{2}\.\d{3}\s+[^\s\[]+\[\d+:\d+\]\s+"#
+        var cleanedLines: [String] = []
+        for line in raw.components(separatedBy: "\n") {
+            if let regex = try? NSRegularExpression(pattern: nslogPattern, options: []) {
+                let range = NSRange(location: 0, length: (line as NSString).length)
+                let cleaned = regex.stringByReplacingMatches(in: line, options: [], range: range, withTemplate: "")
+                cleanedLines.append(cleaned)
+            } else {
+                cleanedLines.append(line)
+            }
+        }
+        var result = cleanedLines.joined(separator: "\n")
+        // Strip long temp directory references like /var/folders/.../T/MicroCode_.../
+        let tempDirPattern = #"/var/folders/[^\s:]+/([A-Za-z0-9_\-\.]+)"#
+        if let regex = try? NSRegularExpression(pattern: tempDirPattern, options: []) {
+            let range = NSRange(location: 0, length: (result as NSString).length)
+            result = regex.stringByReplacingMatches(in: result, options: [], range: range, withTemplate: "$1")
+        }
+        return result
+    }
     
-    /// Run a process and capture output
+    /// Run a process and capture output with comprehensive PATH injection
     private func runProcess(executable: String, arguments: [String]) async -> (stdout: String, stderr: String, exitCode: Int32) {
         return await withCheckedContinuation { continuation in
             let process = Process()
@@ -2520,6 +2899,37 @@ class AppState: ObservableObject {
                 process.executableURL = URL(fileURLWithPath: executable)
                 process.arguments = arguments
             }
+            
+            // Build rich PATH environment covering cargo, swiftly, homebrew, openjdk, dotnet, etc.
+            var env = ProcessInfo.processInfo.environment
+            let home = NSHomeDirectory()
+            let additionalPaths = [
+                "/opt/homebrew/bin",
+                "/opt/homebrew/sbin",
+                "/usr/local/bin",
+                "\(home)/.cargo/bin",
+                "\(home)/.swiftly/bin",
+                "/opt/homebrew/opt/openjdk@21/bin",
+                "/opt/homebrew/opt/openjdk@17/bin",
+                "/opt/homebrew/opt/openjdk/bin",
+                "/Library/Frameworks/Python.framework/Versions/3.11/bin",
+                "/Library/Frameworks/Python.framework/Versions/Current/bin",
+                "\(home)/Library/Android/sdk/cmdline-tools/latest/bin",
+                "\(home)/Library/Android/sdk/platform-tools",
+                "/Library/TeX/texbin",
+                "\(home)/Library/TinyTeX/bin/universal-darwin"
+            ]
+            let existingPath = env["PATH"] ?? "/usr/bin:/bin:/usr/sbin:/sbin"
+            let completePath = (additionalPaths + [existingPath]).joined(separator: ":")
+            env["PATH"] = completePath
+            if env["JAVA_HOME"] == nil {
+                if FileManager.default.fileExists(atPath: "/opt/homebrew/opt/openjdk@21/libexec/openjdk.jdk/Contents/Home") {
+                    env["JAVA_HOME"] = "/opt/homebrew/opt/openjdk@21/libexec/openjdk.jdk/Contents/Home"
+                } else if FileManager.default.fileExists(atPath: "/opt/homebrew/opt/openjdk/libexec/openjdk.jdk/Contents/Home") {
+                    env["JAVA_HOME"] = "/opt/homebrew/opt/openjdk/libexec/openjdk.jdk/Contents/Home"
+                }
+            }
+            process.environment = env
             
             let stdoutPipe = Pipe()
             let stderrPipe = Pipe()
@@ -3019,9 +3429,16 @@ class AppState: ObservableObject {
         Task {
             print("📂 [FreezeDebug] gitRefresh started for \(folder.path)")
             let start = Date()
+
+            guard await checkGitRepository() else {
+                clearGitRepositoryState()
+                print("📂 [FreezeDebug] gitRefresh skipped non-repository in \(Date().timeIntervalSince(start))s")
+                return
+            }
             
             do {
                 let status = try await backend.getGitStatus(repoPath: folder.path)
+                self.gitRepositoryAvailable = true
                 self.gitStatus = status
 
                 let commits = try await backend.getGitLog(repoPath: folder.path, limit: 50)
@@ -3035,81 +3452,194 @@ class AppState: ObservableObject {
                 print("📂 [FreezeDebug] gitRefresh finished in \(Date().timeIntervalSince(start))s")
             } catch {
                 // Repository might not be a git repo
-                self.gitStatus = nil
-                self.gitCommits = []
-                self.gitBranches = []
-                self.gitStashList = []
+                clearGitRepositoryState()
                 print("📂 [FreezeDebug] gitRefresh failed/skipped in \(Date().timeIntervalSince(start))s")
             }
         }
+    }
+
+    /// Initializes only the currently opened workspace. This is an explicit
+    /// user action; MicroCode never creates a repository implicitly.
+    @discardableResult
+    func gitInitializeRepository() async -> Bool {
+        guard workspaceFolder != nil else {
+            gitOperationMessage = "Open a folder before initializing Git."
+            return false
+        }
+        if await checkGitRepository() {
+            gitRepositoryAvailable = true
+            gitOperationMessage = "This workspace is already a Git repository."
+            return true
+        }
+
+        gitIsWorking = true
+        defer { gitIsWorking = false }
+        let result = await runGitExec(["init"])
+        guard result.exitCode == 0 else {
+            gitOperationMessage = "Could not initialize this repository."
+            alertMessage = "Git initialization failed:\n\(result.output)"
+            return false
+        }
+        gitRepositoryAvailable = true
+        gitOperationMessage = "Git repository initialized. Review files, then make the first commit."
+        gitRefresh()
+        return true
     }
 
     func showCommitDialog() {
         showingCommitDialog = true
     }
 
-    func commitChanges(message: String) async {
-        guard let folder = workspaceFolder else { return }
-
-        isLoading = true
-        defer { isLoading = false }
-
-        do {
-            try await backend.gitCommit(repoPath: folder.path, message: message)
-            await gitRefresh()
-        } catch {
-            alertMessage = "Failed to commit: \(error.localizedDescription)"
+    @discardableResult
+    func commitChanges(message: String) async -> Bool {
+        guard workspaceFolder != nil else { return false }
+        let trimmed = message.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return false }
+        guard await requireGitRepository(for: "commit") else { return false }
+        gitIsWorking = true
+        defer { gitIsWorking = false }
+        let result = await runGitExec(["commit", "-m", trimmed])
+        guard result.exitCode == 0 else {
+            alertMessage = "Commit failed:\n\(result.output)"
+            return false
         }
+        gitOperationMessage = "Committed changes."
+        gitRefresh()
+        return true
+    }
+
+    /// Single-click workflow for users who explicitly choose "Stage all" in
+    /// the commit sheet. `git add -A` includes deletions and nested files, but
+    /// respects .gitignore and never force-adds ignored content.
+    @discardableResult
+    func gitCommitAllChanges(message: String, pushAfterCommit: Bool) async -> Bool {
+        guard workspaceFolder != nil else { return false }
+        guard await requireGitRepository(for: "stage and commit") else { return false }
+        let stage = await runGitExec(["add", "-A"])
+        guard stage.exitCode == 0 else {
+            alertMessage = "Could not stage changes:\n\(stage.output)"
+            return false
+        }
+        guard await commitChanges(message: message) else { return false }
+        if pushAfterCommit {
+            return await gitPushAndWait()
+        }
+        return true
     }
 
     func gitPush() {
-        guard let folder = workspaceFolder else { return }
+        guard workspaceFolder != nil else { return }
 
         Task {
-            isLoading = true
-            defer { isLoading = false }
-
-            do {
-                try await backend.gitPush(repoPath: folder.path)
-                await gitRefresh()
-            } catch {
-                alertMessage = "Failed to push: \(error.localizedDescription)"
+            guard await requireGitRepository(for: "push") else { return }
+            gitIsWorking = true
+            defer { gitIsWorking = false }
+            var result = await runGitExec(["push"])
+            // A new local branch often has no upstream. Make the first push a
+            // one-click publish while still requiring an existing origin remote.
+            if result.exitCode != 0,
+               let branch = gitStatus?.branch,
+               !branch.isEmpty,
+               !(await runGit(["remote", "get-url", "origin"])).isEmpty {
+                result = await runGitExec(["push", "--set-upstream", "origin", branch])
             }
+            guard result.exitCode == 0 else {
+                alertMessage = "Push failed:\n\(result.output)"
+                return
+            }
+            gitOperationMessage = "Pushed to remote."
+            gitRefresh()
         }
     }
 
+    private func gitPushAndWait() async -> Bool {
+        guard await requireGitRepository(for: "push") else { return false }
+        gitIsWorking = true
+        defer { gitIsWorking = false }
+        var result = await runGitExec(["push"])
+        if result.exitCode != 0,
+           let branch = gitStatus?.branch,
+           !branch.isEmpty,
+           !(await runGit(["remote", "get-url", "origin"])).isEmpty {
+            result = await runGitExec(["push", "--set-upstream", "origin", branch])
+        }
+        guard result.exitCode == 0 else {
+            alertMessage = "Push failed:\n\(result.output)"
+            return false
+        }
+        gitOperationMessage = "Committed and pushed changes."
+        gitRefresh()
+        return true
+    }
+
     func gitPull() {
-        guard let folder = workspaceFolder else { return }
+        guard workspaceFolder != nil else { return }
 
         Task {
-            isLoading = true
-            defer { isLoading = false }
-
-            do {
-                try await backend.gitPull(repoPath: folder.path)
-                await gitRefresh()
-                // Reload all open files
-                for file in openFiles {
-                    if !file.path.isEmpty, FileManager.default.fileExists(atPath: file.path) {
-                        let url = URL(fileURLWithPath: file.path)
-                        let content = try String(contentsOf: url)
-                        if let index = openFiles.firstIndex(where: { $0.id == file.id }) {
-                            openFiles[index].content = content
-                        }
+            guard await requireGitRepository(for: "pull") else { return }
+            gitIsWorking = true
+            defer { gitIsWorking = false }
+            // Fast-forward only keeps a one-click pull predictable: no implicit
+            // merge commit and no overwrite if branches have diverged.
+            let result = await runGitExec(["pull", "--ff-only"])
+            guard result.exitCode == 0 else {
+                alertMessage = "Pull needs review:\n\(result.output)"
+                return
+            }
+            gitOperationMessage = "Pulled latest changes."
+            gitRefresh()
+            // Reload all open files after a successful fast-forward.
+            for file in openFiles {
+                if !file.path.isEmpty, FileManager.default.fileExists(atPath: file.path) {
+                    let url = URL(fileURLWithPath: file.path)
+                    if let content = try? String(contentsOf: url),
+                       let index = openFiles.firstIndex(where: { $0.id == file.id }) {
+                        openFiles[index].content = content
                     }
                 }
-            } catch {
-                alertMessage = "Failed to pull: \(error.localizedDescription)"
             }
         }
     }
 
     // MARK: - Git Extended Operations
+
+    /// Prevent Git's low-level "not a repository" error from reaching users.
+    /// The Source Control panel will immediately render its Initialize action.
+    private func requireGitRepository(for operation: String) async -> Bool {
+        guard workspaceFolder != nil else {
+            gitOperationMessage = "Open a folder before trying to \(operation)."
+            return false
+        }
+        guard await checkGitRepository() else {
+            clearGitRepositoryState()
+            gitPanelVisible = true
+            gitOperationMessage = "This folder is not a Git repository. Open Source Control and choose Initialize Repository."
+            return false
+        }
+        gitRepositoryAvailable = true
+        return true
+    }
+
+    private func checkGitRepository() async -> Bool {
+        let result = await runGitExec(["rev-parse", "--is-inside-work-tree"])
+        return result.exitCode == 0 && result.output.trimmingCharacters(in: .whitespacesAndNewlines) == "true"
+    }
+
+    private func clearGitRepositoryState() {
+        gitRepositoryAvailable = false
+        gitStatus = nil
+        gitCommits = []
+        gitBranches = []
+        gitStashList = []
+        gitRemoteURL = ""
+        gitDiff = ""
+        gitDiffFile = ""
+    }
     
     /// Run a git command and return stdout
     private func runGit(_ args: [String]) async -> String {
         guard let folder = workspaceFolder else { return "" }
-        return await withCheckedContinuation { continuation in
+        return await Task.detached(priority: .userInitiated) {
             let process = Process()
             let pipe = Pipe()
             process.executableURL = URL(fileURLWithPath: "/usr/bin/git")
@@ -3121,17 +3651,17 @@ class AppState: ObservableObject {
                 try process.run()
                 process.waitUntilExit()
                 let data = pipe.fileHandleForReading.readDataToEndOfFile()
-                continuation.resume(returning: String(data: data, encoding: .utf8)?.trimmingCharacters(in: .whitespacesAndNewlines) ?? "")
+                return String(data: data, encoding: .utf8)?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
             } catch {
-                continuation.resume(returning: "")
+                return ""
             }
-        }
+        }.value
     }
     
     /// Run git command, return exit code
     private func runGitExec(_ args: [String]) async -> (output: String, exitCode: Int32) {
         guard let folder = workspaceFolder else { return ("", -1) }
-        return await withCheckedContinuation { continuation in
+        return await Task.detached(priority: .userInitiated) {
             let process = Process()
             let outPipe = Pipe()
             let errPipe = Pipe()
@@ -3145,10 +3675,80 @@ class AppState: ObservableObject {
                 process.waitUntilExit()
                 let out = String(data: outPipe.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? ""
                 let err = String(data: errPipe.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? ""
-                continuation.resume(returning: (out + err, process.terminationStatus))
+                return (out + err, process.terminationStatus)
             } catch {
-                continuation.resume(returning: (error.localizedDescription, -1))
+                return (error.localizedDescription, -1)
             }
+        }.value
+    }
+
+    /// Ask the configured AI to describe the selected changes. This runs only
+    /// after the user presses the button; no diff is sent automatically.
+    func gitGenerateCommitMessage() async -> String? {
+        guard workspaceFolder != nil else { return nil }
+        gitIsGeneratingCommitMessage = true
+        defer { gitIsGeneratingCommitMessage = false }
+        let staged = await runGit(["diff", "--cached", "--no-ext-diff"])
+        let working = staged.isEmpty ? await runGit(["diff", "--no-ext-diff"]) : staged
+        let untracked = await runGit(["ls-files", "--others", "--exclude-standard"])
+        let context = String((working + "\nUntracked files:\n" + untracked).prefix(48_000))
+        guard !context.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+            alertMessage = "There are no changes to describe."
+            return nil
+        }
+        do {
+            let reply = try await backend.completeCode(
+                code: context,
+                context: "You generate one precise Conventional Commit message. Return exactly one line, using a type such as feat:, fix:, refactor:, docs:, test:, or chore:. Do not include markdown, quotes, explanation, credentials, or source code.",
+                provider: aiProvider,
+                model: aiModel,
+                apiKey: apiKeys[aiProvider] ?? ""
+            )
+            let message = reply
+                .split(separator: "\n")
+                .map(String.init)
+                .first(where: { !$0.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty })?
+                .replacingOccurrences(of: "`", with: "")
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+            guard let message, !message.isEmpty else {
+                alertMessage = "AI did not return a commit message."
+                return nil
+            }
+            gitOperationMessage = "AI commit message generated. Review it before committing."
+            return String(message.prefix(160))
+        } catch {
+            alertMessage = "Could not generate a commit message: \(error.localizedDescription)"
+            return nil
+        }
+    }
+
+    /// Safe rollback: creates a new inverse commit and preserves shared history.
+    func gitRevertCommit(_ hash: String) {
+        Task {
+            gitIsWorking = true
+            defer { gitIsWorking = false }
+            let result = await runGitExec(["revert", "--no-edit", hash])
+            guard result.exitCode == 0 else {
+                alertMessage = "Revert failed:\n\(result.output)"
+                return
+            }
+            gitOperationMessage = "Created a revert commit for \(hash.prefix(7))."
+            gitRefresh()
+        }
+    }
+
+    /// Undo an unpushed commit while keeping all edits staged for correction.
+    func gitUndoLastCommit() {
+        Task {
+            gitIsWorking = true
+            defer { gitIsWorking = false }
+            let result = await runGitExec(["reset", "--soft", "HEAD~1"])
+            guard result.exitCode == 0 else {
+                alertMessage = "Undo commit failed:\n\(result.output)"
+                return
+            }
+            gitOperationMessage = "Last commit undone; changes remain staged."
+            gitRefresh()
         }
     }
     
@@ -3621,8 +4221,8 @@ class AppState: ObservableObject {
             aiChatVisible = false
         }
         
-        // Force publish the change
-        objectWillChange.send()
+        // `editorMode` is @Published; manually publishing here caused two
+        // complete SwiftUI invalidations for one click.
         editorMode = mode
     }
     
@@ -3632,6 +4232,12 @@ class AppState: ObservableObject {
         } else {
             setEditorMode(mode)
         }
+    }
+    
+    func openAPIStudio() {
+        showingWelcomeHome = false
+        showingAPIClient = false
+        setEditorMode(.apiClient)
     }
     
     // MARK: - File Watcher
@@ -3714,6 +4320,7 @@ class AppState: ObservableObject {
             let fileManager = FileManager.default
             
             for path in pythonPaths {
+                guard DeveloperToolsGuard.isSafeToExecute(path) else { continue }
                 if fileManager.fileExists(atPath: path) {
                     // Get version
                     let process = Process()

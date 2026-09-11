@@ -23,12 +23,13 @@ use tracing::{info, Level};
 use tracing_subscriber;
 
 mod agent;
+mod agent_kernel;
 mod ai;
 pub mod ai_engine;
 mod ai_report;
 mod ai_ultra;
-mod cicd;
 mod cache_manager;
+mod cicd;
 mod code;
 pub mod crash_decoder;
 mod data;
@@ -57,9 +58,15 @@ mod rag;
 mod remote;
 mod rosetta;
 mod runner;
+pub mod arrow_cdata;
+pub mod arrow_flight;
+pub mod polyglot;
+pub mod shm_broker;
 mod scenario;
+mod simulator;
 mod state;
 mod tasks;
+mod telemetry;
 mod terminal;
 /// MCP Host (Model Context Protocol)
 use crate::error::Result;
@@ -73,7 +80,7 @@ async fn main() -> Result<()> {
     // Load environment variables
     dotenv::dotenv().ok();
 
-    info!("Starting MicroCode Backend v2.0.0");
+    info!("Starting MicroCode Backend v2.0.1");
 
     // If the MicroCode app that spawned us dies (crash / force-quit / SIGKILL),
     // macOS re-parents us to launchd (PID 1) and we'd keep running, spinning a
@@ -95,6 +102,14 @@ async fn main() -> Result<()> {
         .route("/ws/terminal", get(handlers::terminal_ws))
         // Health check
         .route("/health", get(health_check))
+        // Opt-in, aggregate-only product telemetry. Deploy this route behind
+        // api.dotmini.net and set TELEMETRY_ADMIN_TOKEN for the admin summary.
+        .route("/v1/telemetry/events", post(crate::telemetry::ingest))
+        .route(
+            "/api/admin/telemetry/summary",
+            get(crate::telemetry::admin_summary),
+        )
+        .route("/admin/telemetry", get(crate::telemetry::admin_dashboard))
         // File operations
         .route("/api/files/list", post(handlers::list_files))
         .route("/api/files/read", post(handlers::read_file))
@@ -108,6 +123,15 @@ async fn main() -> Result<()> {
         // IPC / Shared Memory Optimized Routes
         .route("/api/data/shm/get/:name", get(handlers::data_get_shm))
         .route("/api/data/shm/store/:name", post(handlers::data_store_shm))
+        // Rosetta Hybrid: POSIX Shared Memory & Arrow C Data Registry
+        .route("/api/shm/:session_id", get(handlers::shm_list_variables))
+        .route("/api/shm/:session_id/:name", get(handlers::shm_get_variable))
+        .route("/api/shm/allocate", post(handlers::shm_allocate_variable))
+        // Rosetta Hybrid: Arrow Flight P2P Local <-> Cloud Streaming
+        .route("/api/flight/export", post(handlers::flight_export))
+        .route("/api/flight/import", post(handlers::flight_import))
+        // Rosetta Hybrid: In-Memory SQL over Arrow SHM
+        .route("/api/sql/execute", post(handlers::sql_execute_in_memory))
         // Code operations
         .route("/api/code/analyze", post(handlers::analyze_code))
         .route("/api/code/format", post(handlers::format_code))
@@ -260,6 +284,28 @@ async fn main() -> Result<()> {
             post(handlers::agent_execute_tool),
         )
         .route("/api/agent/tools", get(handlers::agent_list_tools))
+        // Durable model-agnostic Agent Kernel. Every provider, Skill, MCP
+        // server and subagent shares this lifecycle and recovery protocol.
+        .route(
+            "/api/agent-kernel/runs",
+            post(crate::agent_kernel::create_run),
+        )
+        .route(
+            "/api/agent-kernel/runs/:id",
+            get(crate::agent_kernel::get_run),
+        )
+        .route(
+            "/api/agent-kernel/runs/:id/plan",
+            post(crate::agent_kernel::set_plan),
+        )
+        .route(
+            "/api/agent-kernel/runs/:id/observe",
+            post(crate::agent_kernel::observe),
+        )
+        .route(
+            "/api/agent-kernel/runs/:id/cancel",
+            post(crate::agent_kernel::cancel),
+        )
         // Production AI Agent - Like Cursor/Windsurf
         .route(
             "/api/agent/enhanced-chat",
@@ -299,6 +345,13 @@ async fn main() -> Result<()> {
             "/api/preview/agent/stop",
             post(handlers::preview_stop_agent),
         )
+        // Native Simulator control plane. Swift owns the zero-copy video path;
+        // Rust exposes only bounded simctl lifecycle commands.
+        .route(
+            "/api/simulator/devices",
+            get(crate::simulator::list_devices),
+        )
+        .route("/api/simulator/control", post(crate::simulator::control))
         // Hot Reload Engine routes (Thunk Table + State)
         .route(
             "/api/hotreload/thunk/list",
@@ -323,7 +376,10 @@ async fn main() -> Result<()> {
         .route("/api/hotreload/version", get(handlers::hotreload_version))
         // Cache Management
         .route("/api/cache/derived_data", get(handlers::get_derived_data))
-        .route("/api/cache/derived_data/clear", post(handlers::clear_derived_data))
+        .route(
+            "/api/cache/derived_data/clear",
+            post(handlers::clear_derived_data),
+        )
         // Remote X Support
         .route("/api/remote/connect", post(remote::remote_connect))
         .route("/api/remote/ping", post(remote::remote_ping))
@@ -396,6 +452,17 @@ async fn main() -> Result<()> {
         )
         .with_state(state);
 
+    // Dotmini Cloud MCP Gateway Router (Gemini Spark, Claude Web, Desktop Tunnel)
+    let mcp_gateway = Arc::new(crate::mcp::gateway::McpGatewayState::new());
+    let mcp_router = Router::new()
+        .route("/sse", get(crate::mcp::gateway::mcp_sse_handler))
+        .route("/", get(crate::mcp::gateway::mcp_sse_handler).post(crate::mcp::gateway::mcp_direct_post_handler))
+        .route("/message", post(crate::mcp::gateway::mcp_message_handler))
+        .route("/tunnel", get(crate::mcp::gateway::mcp_tunnel_ws_handler))
+        .with_state(mcp_gateway);
+
+    let app = app.nest("/v1/mcp", mcp_router);
+
     // Start server on port 3000 (matches Swift services)
     let addr = SocketAddr::from(([127, 0, 0, 1], 3000));
     info!("Backend listening on {}", addr);
@@ -442,7 +509,7 @@ fn spawn_parent_watchdog() {
 async fn health_check() -> impl IntoResponse {
     Json(serde_json::json!({
         "status": "ok",
-        "version": "2.0.0",
+        "version": "2.0.1",
         "timestamp": chrono::Utc::now().to_rfc3339()
     }))
 }
@@ -1012,23 +1079,29 @@ mod handlers {
                 }
 
                 if let Some(engine) = guard.as_mut() {
-                    // 3. Convert symbols to chunks for RAG
+                    // 3. Re-chunk each source file only once.  The previous
+                    // implementation re-read the same file once per symbol,
+                    // multiplying both I/O and resident RAG memory.
                     let mut chunks = Vec::new();
+                    let mut seen_files = std::collections::HashSet::new();
+                    let chunk_limit = crate::rag::RagEngine::max_resident_chunks();
                     for sym in symbols {
+                        if chunks.len() >= chunk_limit || !seen_files.insert(sym.file_path.clone())
+                        {
+                            continue;
+                        }
                         if let Ok(content) = tokio::fs::read_to_string(&sym.file_path).await {
-                            // Only chunk a reasonable window around the symbol if needed,
-                            // but for now the symbol extractor already gives us chunks.
-                            // Actually crate::agent::index_files already used indexer.chunk_file.
-                            // Let's just re-chunk specifically for RAG to be sure.
                             if let Ok(file_chunks) = indexer.chunk_file(&sym.file_path, &content) {
-                                chunks.extend(file_chunks);
+                                chunks.extend(
+                                    file_chunks.into_iter().take(chunk_limit - chunks.len()),
+                                );
                             }
                         }
                     }
 
-                    let engine_ref: &mut crate::rag::RagEngine = guard.as_mut().unwrap();
-                    let _ = engine_ref.build_index(chunks);
-                    info!("Indexing complete. RAG engine READY.");
+                    if engine.build_index(chunks).is_ok() {
+                        info!("Indexing complete. RAG engine READY.");
+                    }
                 }
             }
         });
@@ -1489,7 +1562,28 @@ mod handlers {
             None
         };
 
-        let output = crate::runner::execute(&req.code, &req.language, node_path).await?;
+        let mut final_code = req.code.clone();
+
+        if let Some(ref session_id) = req.session_id {
+            let broker = &*crate::shm_broker::GLOBAL_SHM_BROKER;
+            let active_vars = broker.list_session_variables(session_id);
+            if !active_vars.is_empty() {
+                let bindings: Vec<crate::polyglot::PolyglotVariableBinding> = active_vars
+                    .into_iter()
+                    .map(|v| crate::polyglot::PolyglotVariableBinding {
+                        name: v.name,
+                        shm_name: v.shm_name,
+                        data_type: v.data_type,
+                        num_rows: None,
+                        num_cols: None,
+                    })
+                    .collect();
+
+                final_code = crate::polyglot::PolyglotBridge::inject_prelude(&req.language, &final_code, &bindings);
+            }
+        }
+
+        let output = crate::runner::execute(&final_code, &req.language, node_path).await?;
         Ok(Json(ExecuteCodeResponse { output }))
     }
 
@@ -1516,7 +1610,29 @@ mod handlers {
             None
         };
 
-        match crate::runner::execute_stream(&req.code, &req.language, node_path).await {
+        let mut final_code = req.code.clone();
+
+        // If session_id is provided, inject polyglot bridge preambles for active variables
+        if let Some(ref session_id) = req.session_id {
+            let broker = &*crate::shm_broker::GLOBAL_SHM_BROKER;
+            let active_vars = broker.list_session_variables(session_id);
+            if !active_vars.is_empty() {
+                let bindings: Vec<crate::polyglot::PolyglotVariableBinding> = active_vars
+                    .into_iter()
+                    .map(|v| crate::polyglot::PolyglotVariableBinding {
+                        name: v.name,
+                        shm_name: v.shm_name,
+                        data_type: v.data_type,
+                        num_rows: None,
+                        num_cols: None,
+                    })
+                    .collect();
+
+                final_code = crate::polyglot::PolyglotBridge::inject_prelude(&req.language, &final_code, &bindings);
+            }
+        }
+
+        match crate::runner::execute_stream(&final_code, &req.language, node_path).await {
             Ok(stream) => {
                 let stream = stream.map(
                     |result: std::result::Result<
@@ -1835,39 +1951,41 @@ mod handlers {
             "architecture": std::env::consts::ARCH
         }))
     }
-    
+
     // Cache Management Handlers
-    
+
     pub async fn get_derived_data() -> impl IntoResponse {
         match crate::cache_manager::get_derived_data_info() {
             Ok(info) => Json(serde_json::json!({
                 "success": true,
                 "info": info
-            })).into_response(),
+            }))
+            .into_response(),
             Err(e) => (
                 axum::http::StatusCode::INTERNAL_SERVER_ERROR,
-                Json(serde_json::json!({ "success": false, "error": e.to_string() }))
-            ).into_response(),
+                Json(serde_json::json!({ "success": false, "error": e.to_string() })),
+            )
+                .into_response(),
         }
     }
-    
+
     #[derive(Debug, Deserialize)]
     pub struct ClearDerivedDataRequest {
         pub project_pattern: Option<String>,
     }
-    
-    pub async fn clear_derived_data(
-        Json(req): Json<ClearDerivedDataRequest>,
-    ) -> impl IntoResponse {
+
+    pub async fn clear_derived_data(Json(req): Json<ClearDerivedDataRequest>) -> impl IntoResponse {
         match crate::cache_manager::clear_derived_data(req.project_pattern) {
             Ok(info) => Json(serde_json::json!({
                 "success": true,
                 "info": info
-            })).into_response(),
+            }))
+            .into_response(),
             Err(e) => (
                 axum::http::StatusCode::INTERNAL_SERVER_ERROR,
-                Json(serde_json::json!({ "success": false, "error": e.to_string() }))
-            ).into_response(),
+                Json(serde_json::json!({ "success": false, "error": e.to_string() })),
+            )
+                .into_response(),
         }
     }
 
@@ -2253,6 +2371,117 @@ mod handlers {
             Err(e) => {
                 (axum::http::StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response()
             }
+        }
+    }
+
+    // MARK: - Rosetta Hybrid In-Memory Fabric Handlers (SHM, Arrow C Data, Flight)
+
+    pub async fn shm_list_variables(
+        Path(session_id): Path<String>,
+    ) -> impl IntoResponse {
+        let vars = crate::shm_broker::GLOBAL_SHM_BROKER.list_session_variables(&session_id);
+        Json(json!({ "success": true, "session_id": session_id, "variables": vars })).into_response()
+    }
+
+    pub async fn shm_get_variable(
+        Path((session_id, name)): Path<(String, String)>,
+    ) -> impl IntoResponse {
+        if let Some(seg_arc) = crate::shm_broker::GLOBAL_SHM_BROKER.get(&session_id, &name) {
+            if let Ok(seg) = seg_arc.read() {
+                return Json(json!({ "success": true, "metadata": seg.metadata })).into_response();
+            }
+        }
+        (StatusCode::NOT_FOUND, Json(json!({ "success": false, "error": "Variable not found in SHM" }))).into_response()
+    }
+
+    #[derive(Deserialize)]
+    pub struct ShmAllocateRequest {
+        pub session_id: String,
+        pub variable_name: String,
+        pub size_bytes: usize,
+        pub data_type: Option<String>,
+    }
+
+    pub async fn shm_allocate_variable(
+        Json(req): Json<ShmAllocateRequest>,
+    ) -> impl IntoResponse {
+        let dtype = req.data_type.unwrap_or_else(|| "arrow_record_batch".to_string());
+        match crate::shm_broker::GLOBAL_SHM_BROKER.allocate(&req.session_id, &req.variable_name, req.size_bytes, &dtype) {
+            Ok(seg_arc) => {
+                if let Ok(seg) = seg_arc.read() {
+                    Json(json!({ "success": true, "metadata": seg.metadata })).into_response()
+                } else {
+                    (StatusCode::INTERNAL_SERVER_ERROR, "Lock error").into_response()
+                }
+            }
+            Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
+        }
+    }
+
+    #[derive(Deserialize)]
+    pub struct FlightExportRequest {
+        pub session_id: String,
+        pub variable_name: String,
+        pub compression: Option<String>,
+    }
+
+    pub async fn flight_export(
+        Json(req): Json<FlightExportRequest>,
+    ) -> impl IntoResponse {
+        let service = crate::arrow_flight::ArrowFlightService::new();
+        match service.prepare_export(&req.session_id, &req.variable_name, req.compression.as_deref()) {
+            Ok((header, payload)) => {
+                let b64 = base64::Engine::encode(&base64::engine::general_purpose::STANDARD, &payload);
+                Json(json!({ "success": true, "header": header, "payload_base64": b64 })).into_response()
+            }
+            Err(e) => (StatusCode::BAD_REQUEST, e.to_string()).into_response(),
+        }
+    }
+
+    #[derive(Deserialize)]
+    pub struct FlightImportRequest {
+        pub header: crate::arrow_flight::FlightTransferHeader,
+        pub payload_base64: String,
+    }
+
+    pub async fn flight_import(
+        Json(req): Json<FlightImportRequest>,
+    ) -> impl IntoResponse {
+        let service = crate::arrow_flight::ArrowFlightService::new();
+        let payload = match base64::Engine::decode(&base64::engine::general_purpose::STANDARD, &req.payload_base64) {
+            Ok(bytes) => bytes,
+            Err(e) => return (StatusCode::BAD_REQUEST, format!("Invalid base64: {}", e)).into_response(),
+        };
+
+        match service.ingest_import(&req.header, &payload) {
+            Ok(_) => Json(json!({ "success": true, "variable_name": req.header.variable_name })).into_response(),
+            Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
+        }
+    }
+
+    #[derive(Deserialize)]
+    pub struct SqlExecuteRequest {
+        pub session_id: String,
+        pub query: String,
+    }
+
+    pub async fn sql_execute_in_memory(
+        Json(req): Json<SqlExecuteRequest>,
+    ) -> impl IntoResponse {
+        match crate::polyglot::sql_bridge::SqlBridge::execute_sql(&req.session_id, &req.query) {
+            Ok(df) => {
+                let shape = (df.height(), df.width());
+                let cols = df.get_column_names();
+                let output_str = format!("{}", df);
+                Json(json!({
+                    "success": true,
+                    "rows": shape.0,
+                    "columns": shape.1,
+                    "column_names": cols,
+                    "result": output_str,
+                })).into_response()
+            }
+            Err(e) => (StatusCode::BAD_REQUEST, e.to_string()).into_response(),
         }
     }
 

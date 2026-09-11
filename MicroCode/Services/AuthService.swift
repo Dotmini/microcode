@@ -2,18 +2,11 @@
 //  AuthService.swift
 //  MicroCode
 //
-//  Production Authentication Service
-//  Google Sign-In + Email/Password + Token Management
-//
-//  SPU AI CLUB - Dotmini Software
+//  Presentation-facing account state. SupabaseAuthService owns every actual
+//  credential, refresh, OAuth, and signup request.
 //
 
 import Foundation
-import AuthenticationServices
-import CryptoKit
-import SwiftUI
-
-// MARK: - User Model
 
 struct IDXUser: Codable, Identifiable {
     let id: String
@@ -25,15 +18,9 @@ struct IDXUser: Codable, Identifiable {
     var lastLoginAt: Date
     var isPremium: Bool
     var isEarlyAccess: Bool
-    
-    enum AuthProvider: String, Codable {
-        case google
-        case email
-        case apple
-    }
-}
 
-// MARK: - Auth State
+    enum AuthProvider: String, Codable { case google, email, apple }
+}
 
 enum AuthState {
     case signedOut
@@ -42,337 +29,123 @@ enum AuthState {
     case error(String)
 }
 
-// MARK: - Auth Service
-
 @MainActor
-class AuthService: NSObject, ObservableObject {
+final class AuthService: ObservableObject {
     static let shared = AuthService()
-    
+
     @Published var currentUser: IDXUser?
     @Published var authState: AuthState = .signedOut
     @Published var isLoading = false
     @Published var errorMessage: String?
-    
-    private let keychainService = "com.dotmini.microcode.auth"
-    private var currentNonce: String?
-    
-    // IDX Cloud API
-    private let baseURL = "https://idx-cloud.dotmini.dev/api/v1"
-    
-    override init() {
-        super.init()
-        loadSavedSession()
-    }
-    
-    // MARK: - Google Sign-In (via ASWebAuthenticationSession)
-    
+
+    private let userDefaultsKey = "com.dotmini.microcode.auth.session"
+
+    private init() { loadSavedSession() }
+
     func signInWithGoogle() async throws {
         isLoading = true
         errorMessage = nil
         authState = .loading
-        
         defer { isLoading = false }
-        
-        // For macOS, use ASWebAuthenticationSession
-        let clientID = "YOUR_GOOGLE_CLIENT_ID" // Replace with actual
-        let redirectURI = "com.dotmini.microcode:/oauth2redirect"
-        let scope = "email profile"
-        
-        let authURL = URL(string: "https://accounts.google.com/o/oauth2/v2/auth?client_id=\(clientID)&redirect_uri=\(redirectURI)&response_type=code&scope=\(scope.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) ?? scope)")!
-        
-        // In production, use ASWebAuthenticationSession
-        // For now, create a simulated user for development
-        #if DEBUG
-        // Development mode - simulate Google sign-in
-        let user = IDXUser(
-            id: UUID().uuidString,
-            email: "dev@example.com",
-            displayName: "Developer",
-            photoURL: nil,
-            provider: .google,
-            createdAt: Date(),
-            lastLoginAt: Date(),
-            isPremium: false,
-            isEarlyAccess: true
-        )
-        
-        self.currentUser = user
-        self.authState = .signedIn(user)
-        try saveSession(user)
-        #else
-        // Production - use real OAuth
-        throw AuthError.notImplemented("Google Sign-In requires OAuth configuration")
-        #endif
+        do {
+            try await SupabaseAuthService.shared.startOAuth(provider: "google")
+            // Completion arrives through MicroCodeApp's custom URL callback.
+        } catch {
+            authState = .error(error.localizedDescription)
+            errorMessage = error.localizedDescription
+            throw error
+        }
     }
-    
-    // MARK: - Email/Password Authentication
-    
+
     func signUpWithEmail(email: String, password: String, displayName: String) async throws {
-        isLoading = true
-        errorMessage = nil
-        authState = .loading
-        
+        guard isValidEmail(email) else { throw AuthError.invalidEmail }
+        guard password.count >= 8 else { throw AuthError.weakPassword }
+        isLoading = true; errorMessage = nil; authState = .loading
         defer { isLoading = false }
-        
-        // Validate input
-        guard isValidEmail(email) else {
-            throw AuthError.invalidEmail
-        }
-        
-        guard password.count >= 8 else {
-            throw AuthError.weakPassword
-        }
-        
-        // Hash password
-        let passwordHash = hashPassword(password)
-        
-        // Create account via API
-        let url = URL(string: "\(baseURL)/auth/register")!
-        var request = URLRequest(url: url)
-        request.httpMethod = "POST"
-        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
-        
-        let body: [String: Any] = [
-            "email": email,
-            "password_hash": passwordHash,
-            "display_name": displayName
-        ]
-        request.httpBody = try? JSONSerialization.data(withJSONObject: body)
-        
         do {
-            let (data, response) = try await URLSession.shared.data(for: request)
-            
-            guard let httpResponse = response as? HTTPURLResponse,
-                  httpResponse.statusCode == 200 || httpResponse.statusCode == 201 else {
-                // If server not available, create local user for development
-                let user = createLocalUser(email: email, displayName: displayName, provider: .email)
-                self.currentUser = user
-                self.authState = .signedIn(user)
-                try saveSession(user)
-                return
-            }
-            
-            // Parse response
-            if let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-               let userId = json["user_id"] as? String {
-                let user = IDXUser(
-                    id: userId,
-                    email: email,
-                    displayName: displayName,
-                    photoURL: nil,
-                    provider: .email,
-                    createdAt: Date(),
-                    lastLoginAt: Date(),
-                    isPremium: false,
-                    isEarlyAccess: false
-                )
-                
-                self.currentUser = user
-                self.authState = .signedIn(user)
-                try saveSession(user)
+            if let session = try await SupabaseAuthService.shared.signUp(email: email, password: password, displayName: displayName) {
+                syncWithWebSession(email: session.email, token: session.accessToken, displayName: displayName)
+            } else {
+                let message = "Account created. Confirm your email, then sign in."
+                authState = .signedOut
+                errorMessage = message
             }
         } catch {
-            // Fallback to local user for development
-            let user = createLocalUser(email: email, displayName: displayName, provider: .email)
-            self.currentUser = user
-            self.authState = .signedIn(user)
-            try saveSession(user)
+            authState = .error(error.localizedDescription)
+            errorMessage = error.localizedDescription
+            throw error
         }
     }
-    
+
     func signInWithEmail(email: String, password: String) async throws {
-        isLoading = true
-        errorMessage = nil
-        authState = .loading
-        
+        guard isValidEmail(email) else { throw AuthError.invalidEmail }
+        isLoading = true; errorMessage = nil; authState = .loading
         defer { isLoading = false }
-        
-        guard isValidEmail(email) else {
-            throw AuthError.invalidEmail
-        }
-        
-        let passwordHash = hashPassword(password)
-        
-        // Authenticate via API
-        let url = URL(string: "\(baseURL)/auth/login")!
-        var request = URLRequest(url: url)
-        request.httpMethod = "POST"
-        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
-        
-        let body: [String: Any] = [
-            "email": email,
-            "password_hash": passwordHash
-        ]
-        request.httpBody = try? JSONSerialization.data(withJSONObject: body)
-        
         do {
-            let (data, response) = try await URLSession.shared.data(for: request)
-            
-            guard let httpResponse = response as? HTTPURLResponse,
-                  httpResponse.statusCode == 200 else {
-                // Fallback for development
-                let user = createLocalUser(email: email, displayName: email.components(separatedBy: "@").first ?? "User", provider: .email)
-                self.currentUser = user
-                self.authState = .signedIn(user)
-                try saveSession(user)
-                return
-            }
-            
-            // Parse response
-            if let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-               let userData = json["user"] as? [String: Any] {
-                let user = IDXUser(
-                    id: userData["id"] as? String ?? UUID().uuidString,
-                    email: email,
-                    displayName: userData["display_name"] as? String ?? email,
-                    photoURL: userData["photo_url"] as? String,
-                    provider: .email,
-                    createdAt: Date(),
-                    lastLoginAt: Date(),
-                    isPremium: userData["is_premium"] as? Bool ?? false,
-                    isEarlyAccess: userData["is_early_access"] as? Bool ?? false
-                )
-                
-                self.currentUser = user
-                self.authState = .signedIn(user)
-                try saveSession(user)
-            }
+            let session = try await SupabaseAuthService.shared.signIn(email: email, password: password)
+            syncWithWebSession(email: session.email, token: session.accessToken)
         } catch {
-            // Fallback for development
-            let user = createLocalUser(email: email, displayName: email.components(separatedBy: "@").first ?? "User", provider: .email)
-            self.currentUser = user
-            self.authState = .signedIn(user)
-            try saveSession(user)
+            authState = .error(error.localizedDescription)
+            errorMessage = error.localizedDescription
+            throw error
         }
     }
-    
-    // MARK: - Sign Out
-    
+
     func signOut() {
+        SupabaseAuthService.shared.signOut()
         currentUser = nil
         authState = .signedOut
-        deleteSession()
+        errorMessage = nil
+        UserDefaults.standard.removeObject(forKey: userDefaultsKey)
     }
-    
-    // MARK: - Omni AI & Dotmini Account Web Sync
-    
+
+    /// Called after either a Supabase password sign-in or the app URL OAuth
+    /// callback. The JWT is never stored in this UI cache.
     func syncWithWebSession(email: String, token: String = "", displayName: String = "") {
         let cleanEmail = email.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !cleanEmail.isEmpty else { return }
-        
-        let name = displayName.isEmpty ? (cleanEmail.components(separatedBy: "@").first ?? "User") : displayName
+        let session = SupabaseAuthService.shared.session
+        let name = displayName.isEmpty ? cleanEmail.components(separatedBy: "@").first ?? "User" : displayName
+        let userID = session?.userID ?? ""
         let user = IDXUser(
-            id: token.isEmpty ? UUID().uuidString : token,
+            id: userID.isEmpty ? cleanEmail : userID,
             email: cleanEmail,
             displayName: name,
             photoURL: nil,
-            provider: .google,
+            provider: .email,
             createdAt: Date(),
             lastLoginAt: Date(),
-            isPremium: true,
-            isEarlyAccess: true
+            isPremium: ["pro", "enterprise", "admin"].contains(SupabaseAuthService.shared.entitlement.plan),
+            isEarlyAccess: false
         )
-        
-        self.currentUser = user
-        self.authState = .signedIn(user)
+        currentUser = user
+        authState = .signedIn(user)
         try? saveSession(user)
+        _ = token // Credentials remain owned by SupabaseAuthService/Keychain.
     }
 
-    // MARK: - Session Management
-    
-    private let userDefaultsKey = "com.dotmini.microcode.auth.session"
-    
     func saveSession(_ user: IDXUser) throws {
-        let encoder = JSONEncoder()
-        let data = try encoder.encode(user)
-        UserDefaults.standard.set(data, forKey: userDefaultsKey)
+        UserDefaults.standard.set(try JSONEncoder().encode(user), forKey: userDefaultsKey)
     }
-    
+
     private func loadSavedSession() {
-        // Clean up legacy keychain item to eliminate OS password prompts
-        let legacyQuery: [String: Any] = [
-            kSecClass as String: kSecClassGenericPassword,
-            kSecAttrService as String: keychainService,
-            kSecAttrAccount as String: "currentUser"
-        ]
-        SecItemDelete(legacyQuery as CFDictionary)
-        
-        if let data = UserDefaults.standard.data(forKey: userDefaultsKey) {
-            let decoder = JSONDecoder()
-            if let user = try? decoder.decode(IDXUser.self, from: data) {
-                self.currentUser = user
-                self.authState = .signedIn(user)
-            }
+        if let session = SupabaseAuthService.shared.session, !session.email.isEmpty {
+            syncWithWebSession(email: session.email, token: session.accessToken)
+            return
         }
+        // This is UI metadata only; it grants neither an authenticated session
+        // nor cloud access after the Keychain session has been removed.
+        guard let data = UserDefaults.standard.data(forKey: userDefaultsKey),
+              let user = try? JSONDecoder().decode(IDXUser.self, from: data) else { return }
+        currentUser = user
+        authState = .signedOut
     }
-    
-    private func deleteSession() {
-        UserDefaults.standard.removeObject(forKey: userDefaultsKey)
-        let legacyQuery: [String: Any] = [
-            kSecClass as String: kSecClassGenericPassword,
-            kSecAttrService as String: keychainService,
-            kSecAttrAccount as String: "currentUser"
-        ]
-        SecItemDelete(legacyQuery as CFDictionary)
-    }
-    
-    // MARK: - Helpers
-    
+
     private func isValidEmail(_ email: String) -> Bool {
-        let emailRegex = "[A-Z0-9a-z._%+-]+@[A-Za-z0-9.-]+\\.[A-Za-z]{2,64}"
-        return NSPredicate(format: "SELF MATCHES %@", emailRegex).evaluate(with: email)
-    }
-    
-    private func hashPassword(_ password: String) -> String {
-        let data = Data(password.utf8)
-        let hash = SHA256.hash(data: data)
-        return hash.compactMap { String(format: "%02x", $0) }.joined()
-    }
-    
-    private func createLocalUser(email: String, displayName: String, provider: IDXUser.AuthProvider) -> IDXUser {
-        return IDXUser(
-            id: UUID().uuidString,
-            email: email,
-            displayName: displayName,
-            photoURL: nil,
-            provider: provider,
-            createdAt: Date(),
-            lastLoginAt: Date(),
-            isPremium: false,
-            isEarlyAccess: true
-        )
-    }
-    
-    private func randomNonceString(length: Int = 32) -> String {
-        precondition(length > 0)
-        let charset: [Character] = Array("0123456789ABCDEFGHIJKLMNOPQRSTUVXYZabcdefghijklmnopqrstuvwxyz-._")
-        var result = ""
-        var remainingLength = length
-        
-        while remainingLength > 0 {
-            let randoms: [UInt8] = (0..<16).map { _ in
-                var random: UInt8 = 0
-                let errorCode = SecRandomCopyBytes(kSecRandomDefault, 1, &random)
-                if errorCode != errSecSuccess {
-                    fatalError("Unable to generate nonce")
-                }
-                return random
-            }
-            
-            randoms.forEach { random in
-                if remainingLength == 0 { return }
-                if random < charset.count {
-                    result.append(charset[Int(random)])
-                    remainingLength -= 1
-                }
-            }
-        }
-        
-        return result
+        let expression = "[A-Z0-9a-z._%+-]+@[A-Za-z0-9.-]+\\.[A-Za-z]{2,64}"
+        return NSPredicate(format: "SELF MATCHES %@", expression).evaluate(with: email)
     }
 }
-
-// MARK: - Auth Errors
 
 enum AuthError: LocalizedError {
     case invalidEmail
@@ -381,7 +154,7 @@ enum AuthError: LocalizedError {
     case wrongPassword
     case networkError
     case notImplemented(String)
-    
+
     var errorDescription: String? {
         switch self {
         case .invalidEmail: return "Invalid email address"
@@ -389,7 +162,7 @@ enum AuthError: LocalizedError {
         case .userNotFound: return "User not found"
         case .wrongPassword: return "Incorrect password"
         case .networkError: return "Network error"
-        case .notImplemented(let msg): return msg
+        case .notImplemented(let message): return message
         }
     }
 }

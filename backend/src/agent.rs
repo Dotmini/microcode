@@ -47,6 +47,82 @@ static AGENT_SESSIONS: Lazy<Arc<StdRwLock<HashMap<String, AgentSession>>>> =
 static FILE_OPERATION_LOG: Lazy<Arc<StdRwLock<Vec<FileOperation>>>> =
     Lazy::new(|| Arc::new(StdRwLock::new(Vec::new())));
 
+// Keep agent state bounded while allowing deep, long-running autonomous tasks (24/7).
+// Large repositories are discovered and queried incrementally.
+const MAX_AGENT_TURNS: usize = 1000;
+const MAX_AGENT_MESSAGE_CHARS: usize = 8_000_000;
+const MAX_AGENT_TOOL_OUTPUT_CHARS: usize = 4_000_000;
+const MAX_AGENT_LOOPS: usize = 1000;
+const MAX_PROJECT_ENTRIES: usize = 100_000;
+const MAX_PROJECT_SYMBOLS: usize = 200_000;
+const MAX_INDEXABLE_FILE_BYTES: u64 = 2 * 1024 * 1024;
+
+fn compact_prompt_text(text: &str, limit: usize) -> String {
+    if text.len() <= limit {
+        return text.to_string();
+    }
+
+    let mut split = (limit * 2) / 3;
+    while split > 0 && !text.is_char_boundary(split) {
+        split -= 1;
+    }
+    let mut tail_start = text.len().saturating_sub(limit / 3);
+    while tail_start < text.len() && !text.is_char_boundary(tail_start) {
+        tail_start += 1;
+    }
+    format!(
+        "{}\n…[truncated by MicroCode harness]…\n{}",
+        &text[..split],
+        &text[tail_start..]
+    )
+}
+
+fn trim_session_messages(messages: &mut Vec<AgentMessage>) {
+    if messages.len() > MAX_AGENT_TURNS {
+        let remove_count = messages.len() - MAX_AGENT_TURNS;
+        messages.drain(..remove_count);
+    }
+
+    for message in messages.iter_mut() {
+        message.content = compact_prompt_text(&message.content, MAX_AGENT_MESSAGE_CHARS);
+        for result in message.tool_results.iter_mut() {
+            result.output = compact_prompt_text(&result.output, MAX_AGENT_TOOL_OUTPUT_CHARS);
+            if let Some(error) = result.error.as_mut() {
+                *error = compact_prompt_text(error, MAX_AGENT_TOOL_OUTPUT_CHARS);
+            }
+        }
+    }
+}
+
+fn next_agent_turn_prompt(
+    base_prompt: &str,
+    assistant_text: &str,
+    results: &[ToolResult],
+) -> String {
+    let mut prompt = String::with_capacity(base_prompt.len().min(96_000) + 48_000);
+    prompt.push_str(&compact_prompt_text(base_prompt, 96_000));
+    prompt.push_str("\n\nPrevious assistant response:\n");
+    prompt.push_str(&compact_prompt_text(assistant_text, 24_000));
+    prompt.push_str("\n\nTool results:\n");
+
+    for result in results.iter().take(16) {
+        let output = if result.success {
+            &result.output
+        } else {
+            result.error.as_deref().unwrap_or("tool failed")
+        };
+        prompt.push_str(&format!(
+            "- {}: {}\n",
+            result.tool_call_id,
+            compact_prompt_text(output, MAX_AGENT_TOOL_OUTPUT_CHARS)
+        ));
+    }
+    prompt.push_str(
+        "Use a new tool call only if another action is necessary; otherwise give the final answer.",
+    );
+    prompt
+}
+
 // ==========================================
 // Core Data Structures
 // ==========================================
@@ -651,6 +727,41 @@ pub async fn index_files(
     Ok((files, symbols))
 }
 
+fn is_indexable_source(path: &Path) -> bool {
+    matches!(
+        path.extension().and_then(|extension| extension.to_str()),
+        Some(
+            "rs" | "swift"
+                | "m"
+                | "mm"
+                | "c"
+                | "cc"
+                | "cpp"
+                | "h"
+                | "hpp"
+                | "py"
+                | "js"
+                | "jsx"
+                | "ts"
+                | "tsx"
+                | "java"
+                | "kt"
+                | "kts"
+                | "go"
+                | "rb"
+                | "php"
+                | "cs"
+                | "scala"
+                | "sql"
+                | "sh"
+                | "zsh"
+                | "fish"
+                | "r"
+                | "jl"
+        )
+    )
+}
+
 #[async_recursion::async_recursion]
 async fn index_files_recursive(
     root: &Path,
@@ -661,7 +772,7 @@ async fn index_files_recursive(
     max_depth: usize,
     indexer: &mut crate::indexer::Indexer,
 ) -> Result<()> {
-    if depth > max_depth {
+    if depth > max_depth || files.len() >= MAX_PROJECT_ENTRIES {
         return Ok(());
     }
 
@@ -674,6 +785,9 @@ async fn index_files_recursive(
         .await
         .map_err(|e| AppError::IOError(e.to_string()))?
     {
+        if files.len() >= MAX_PROJECT_ENTRIES {
+            break;
+        }
         let path = entry.path();
         let name = path
             .file_name()
@@ -726,14 +840,20 @@ async fn index_files_recursive(
         if metadata.is_dir() {
             index_files_recursive(root, &path, files, symbols, depth + 1, max_depth, indexer)
                 .await?;
-        } else {
+        } else if metadata.len() <= MAX_INDEXABLE_FILE_BYTES
+            && symbols.len() < MAX_PROJECT_SYMBOLS
+            && is_indexable_source(&path)
+        {
             // Extract symbols from code files
-            // THROTTLING: Give some breathing room to the OS and other tasks
+            // Yield before parsing so indexing cannot monopolize the runtime.
             tokio::task::yield_now().await;
 
             if let Ok(content) = fs::read_to_string(&path).await {
                 if let Ok(chunks) = indexer.chunk_file(&path, &content) {
                     for chunk in chunks {
+                        if symbols.len() >= MAX_PROJECT_SYMBOLS {
+                            break;
+                        }
                         if let Some(name) = chunk.symbol_name {
                             symbols.push(Symbol {
                                 name,
@@ -1859,12 +1979,13 @@ REMEMBER: You are building the future of coding. Make it look magic."#,
 
     // AI Loop for Autonomy & Self-Correction
     let mut current_prompt = full_prompt.clone();
+    let base_prompt = full_prompt;
     let mut total_tool_calls = Vec::new();
     let mut total_tool_results = Vec::new();
     let mut pending_changes = Vec::new();
     let mut final_assistant_content = String::new();
     let mut loop_count = 0;
-    let max_loops = 5;
+    let max_loops = MAX_AGENT_LOOPS;
 
     // Merge request overrides with base config
     let mut actual_config = ai_config.clone();
@@ -1962,23 +2083,7 @@ REMEMBER: You are building the future of coding. Make it look magic."#,
             break;
         }
 
-        // Prepare next turn prompt with tool results
-        current_prompt.push_str(&format!(
-            "\n\nAssistant: {}\n\nTool Results:\n",
-            ai_response
-        ));
-        for result in &turn_tool_results {
-            current_prompt.push_str(&format!(
-                "Tool Call {}: {}\n",
-                result.tool_call_id,
-                if result.success {
-                    result.output.clone()
-                } else {
-                    result.error.clone().unwrap_or_default()
-                }
-            ));
-        }
-        current_prompt.push_str("\nBased on these results, what is your next step?");
+        current_prompt = next_agent_turn_prompt(&base_prompt, &ai_response, &turn_tool_results);
     }
 
     // Update session with final results
@@ -2000,6 +2105,7 @@ REMEMBER: You are building the future of coding. Make it look magic."#,
         timestamp: Utc::now(),
     });
     updated_session.updated_at = Utc::now();
+    trim_session_messages(&mut updated_session.messages);
     update_session(updated_session);
 
     let final_session = get_session(&request.session_id).unwrap_or(session);
@@ -2094,7 +2200,8 @@ INSTRUCTIONS:
             tools_json
         );
 
-        let mut current_prompt = format!("System: {}\n\nUser: {}", system_prompt, request.message);
+        let base_prompt = format!("System: {}\n\nUser: {}", system_prompt, request.message);
+        let mut current_prompt = base_prompt.clone();
 
         let mut actual_config = ai_config.clone();
         if let Some(p) = &request.provider {
@@ -2121,7 +2228,7 @@ INSTRUCTIONS:
         };
 
         let mut loop_count = 0;
-        let max_loops = 5;
+        let max_loops = MAX_AGENT_LOOPS;
         let mut total_tool_calls = Vec::new();
         let mut total_tool_results = Vec::new();
         let mut final_content = String::new();
@@ -2250,23 +2357,8 @@ INSTRUCTIONS:
                 break;
             }
 
-            // Prepare next turn prompt
-            current_prompt.push_str(&format!(
-                "\n\nAssistant: {}\n\nTool Results:\n",
-                turn_full_content
-            ));
-            for result in &turn_tool_results {
-                current_prompt.push_str(&format!(
-                    "Tool Call {}: {}\n",
-                    result.tool_call_id,
-                    if result.success {
-                        result.output.clone()
-                    } else {
-                        result.error.clone().unwrap_or_default()
-                    }
-                ));
-            }
-            current_prompt.push_str("\nBased on these results, what is your next step?");
+            current_prompt =
+                next_agent_turn_prompt(&base_prompt, &turn_full_content, &turn_tool_results);
         }
 
         // Final session update
@@ -2287,6 +2379,7 @@ INSTRUCTIONS:
             tool_results: total_tool_results,
             timestamp: Utc::now(),
         });
+        trim_session_messages(&mut updated_session.messages);
         update_session(updated_session);
 
         let _ = tx.send(Ok(AgentStreamEvent::Done)).await;
@@ -2338,6 +2431,7 @@ pub fn run_agent_loop_stream(
                     tool_results: vec![],
                     timestamp: Utc::now(),
                 });
+                trim_session_messages(&mut session.messages);
             }
         }
 
@@ -2380,8 +2474,9 @@ pub fn run_agent_loop_stream(
 
         // 4. Agent Loop
         let mut loop_count = 0;
-        let max_loops = 5;
+        let max_loops = MAX_AGENT_LOOPS;
         let mut current_turn_prompt = full_prompt.clone();
+        let base_prompt = full_prompt;
 
         // Setup AI Config
         let mut config = crate::models::AIConfig::default();
@@ -2500,14 +2595,7 @@ pub fn run_agent_loop_stream(
                 }
             }
 
-            // Update Prompt for next turn
-            current_turn_prompt.push_str("\n\nAssistant: ");
-            current_turn_prompt.push_str(&turn_content);
-            current_turn_prompt.push_str("\n\nTool Results:\n");
-            for res in &turn_tool_results {
-                current_turn_prompt.push_str(&format!("Tool Call {}: {}\n", res.tool_call_id, res.output));
-            }
-            current_turn_prompt.push_str("\nBased on these results, what is your next step?");
+            current_turn_prompt = next_agent_turn_prompt(&base_prompt, &turn_content, &turn_tool_results);
 
             // If we executed tools, we loop again.
             // Save this turn to session
@@ -2520,8 +2608,9 @@ pub fn run_agent_loop_stream(
                          content: turn_content.clone(),
                          tool_calls: turn_tool_calls,
                          tool_results: turn_tool_results,
-                         timestamp: Utc::now(),
+                        timestamp: Utc::now(),
                     });
+                    trim_session_messages(&mut session.messages);
                 }
             }
         }

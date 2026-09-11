@@ -13,6 +13,7 @@ import UniformTypeIdentifiers
 
 struct ExtensionSettingsView: View {
     @StateObject private var extensionManager = ExtensionManager.shared
+    @StateObject private var extensionHost = ExtensionHostService.shared
     @State private var selectedType: ExtensionType? = nil
     @State private var searchText: String = ""
     @State private var showInstallSheet: Bool = false
@@ -22,10 +23,15 @@ struct ExtensionSettingsView: View {
         VStack(spacing: 0) {
             // Header
             HStack {
-                Image(systemName: "puzzlepiece.extension")
+                Image(systemName: "puzzlepiece")
                     .foregroundColor(.secondary)
-                Text("Extensions")
+                Text("Extension Hub")
                     .font(.headline)
+
+                Text(extensionHost.statusMessage)
+                    .font(.caption)
+                    .foregroundColor(.secondary)
+                    .lineLimit(1)
                 
                 Spacer()
                 
@@ -49,8 +55,11 @@ struct ExtensionSettingsView: View {
                         .textFieldStyle(.plain)
                 }
                 .padding(8)
-                .background(Color.compat(nsColor: .controlBackgroundColor))
-                .cornerRadius(8)
+                .background(
+                    RoundedRectangle(cornerRadius: 7, style: .continuous)
+                        .fill(Color.compat(nsColor: .controlBackgroundColor))
+                        .overlay(RoundedRectangle(cornerRadius: 7, style: .continuous).stroke(Color.primary.opacity(0.08), lineWidth: 1))
+                )
                 
                 // Type Filter
                 Picker("Type", selection: $selectedType) {
@@ -87,6 +96,23 @@ struct ExtensionSettingsView: View {
                     Text("Install extensions to add new features")
                         .font(.subheadline)
                         .foregroundColor(.secondary)
+                    HStack {
+                        Button("Install extension") { showInstallSheet = true }
+                        Button("Create starter") {
+                            Task {
+                                do {
+                                    let folder = try await extensionManager.createJavaScriptStarterExtension()
+                                    NSWorkspace.shared.open(folder)
+                                } catch {
+                                    errorMessage = "Could not create starter extension: \(error.localizedDescription)"
+                                }
+                            }
+                        }
+                        Button("Open Extensions Folder") {
+                            NSWorkspace.shared.open(extensionManager.userExtensionsDirectory)
+                        }
+                    }
+                    .buttonStyle(.bordered)
                 }
                 .frame(maxHeight: .infinity)
             } else {
@@ -118,7 +144,7 @@ struct ExtensionSettingsView: View {
             if !errorMessage.isEmpty {
                 HStack {
                     Image(systemName: "exclamationmark.triangle.fill")
-                        .foregroundColor(.orange)
+                        .foregroundColor(.secondary)
                     Text(errorMessage)
                         .font(.caption)
                     Spacer()
@@ -126,7 +152,8 @@ struct ExtensionSettingsView: View {
                         .buttonStyle(.borderless)
                 }
                 .padding()
-                .background(Color.orange.opacity(0.1))
+                .background(Color.primary.opacity(0.035))
+                .overlay(alignment: .top) { Divider().opacity(0.5) }
             }
         }
         .frame(minWidth: 500, minHeight: 400)
@@ -168,7 +195,7 @@ struct ExtensionRow: View {
             // Icon
             ZStack {
                 RoundedRectangle(cornerRadius: 8)
-                    .fill(Color.primary.opacity(0.06))
+                    .fill(Color.primary.opacity(0.045))
                     .frame(width: 38, height: 38)
                 Image(systemName: `extension`.displayIcon)
                     .font(.system(size: 16))

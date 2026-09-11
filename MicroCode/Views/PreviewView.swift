@@ -534,17 +534,17 @@ struct GridBackground: View {
                 var path = Path()
                 path.move(to: CGPoint(x: x, y: 0))
                 path.addLine(to: CGPoint(x: x, y: size.height))
-                context.stroke(path, with: .color(.white.opacity(0.05)), lineWidth: 0.5)
+                context.stroke(path, with: .color(.white.opacity(0.025)), lineWidth: 0.5)
             }
             
             for y in stride(from: 0, to: size.height, by: gridSize) {
                 var path = Path()
                 path.move(to: CGPoint(x: 0, y: y))
                 path.addLine(to: CGPoint(x: size.width, y: y))
-                context.stroke(path, with: .color(.white.opacity(0.05)), lineWidth: 0.5)
+                context.stroke(path, with: .color(.white.opacity(0.025)), lineWidth: 0.5)
             }
         }
-        .background(Color(white: 0.1))
+        .background(Color(white: 0.05))
     }
 }
 

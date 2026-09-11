@@ -6,6 +6,7 @@ struct ScienceModeView: View {
     @EnvironmentObject private var appState: AppState
     @StateObject private var agent = AgentService.shared
     @StateObject private var modelCatalog = AIModelCatalog.shared
+    @StateObject private var scienceWorkspace = ScienceWorkspaceStore.shared
     @State private var structure: ProteinStructureDocument?
     @State private var scene = SCNScene()
     @State private var isLoadingStructure = false
@@ -13,10 +14,9 @@ struct ScienceModeView: View {
     @State private var showBackbone = true
     @State private var selectedPanel: SciencePanel = .project
 
-    private var activeURL: URL? {
-        guard let file = appState.currentFile else { return nil }
-        return URL(fileURLWithPath: file.path)
-    }
+    @State private var selectedArtifactText = ""
+
+    private var activeURL: URL? { scienceWorkspace.selectedArtifact }
 
     private var isStructureFile: Bool {
         guard let ext = activeURL?.pathExtension.lowercased() else { return false }
@@ -24,7 +24,7 @@ struct ScienceModeView: View {
     }
 
     private var activeExtension: String { activeURL?.pathExtension.lowercased() ?? "" }
-    private var currentText: String { appState.currentFile?.content ?? "" }
+    private var currentText: String { selectedArtifactText }
 
     private var scienceModels: [AIModelDefinition] {
         modelCatalog.providers.flatMap(\.models).filter {
@@ -38,7 +38,12 @@ struct ScienceModeView: View {
             scienceToolbar
             Divider()
             HSplitView {
-                AIAgentView(allowsChatSidebar: false)
+                AIAgentView(
+                    allowsChatSidebar: false,
+                    sessionScope: .science,
+                    scopedWorkspacePath: scienceWorkspace.root?.path,
+                    restoresPersistedScopeWorkspace: false
+                )
                     .environmentObject(appState)
                     .frame(minWidth: 420, idealWidth: 620)
 
@@ -48,18 +53,30 @@ struct ScienceModeView: View {
         }
         .background(Color(nsColor: appState.appTheme.workspaceBackground))
         .onAppear {
-            agent.domain = .science
-            if let workspace = appState.workspaceFolder {
-                agent.setWorkspace(workspace.path)
-                agent.refreshScienceProjectContext()
-            }
+            // Science is an independent session: its chat list, project root,
+            // memory recall and prompt context never inherit Editor/Agent data.
+            agent.activateScope(
+                .science,
+                preferredWorkspace: scienceWorkspace.root?.path,
+                restorePersistedWorkspace: false
+            )
             routeActiveArtifact()
             loadActiveArtifact()
         }
         .onDisappear {
-            if agent.domain == .science { agent.domain = .software }
+            // SceneKit can retain substantial GPU/CPU-side state. Release it
+            // when the user leaves Science Mode instead of keeping it idle.
+            structure = nil
+            scene = SCNScene()
+            agent.suspendScienceWork()
         }
-        .onChange(of: appState.currentFile?.path) { _ in
+        .onChange(of: scienceWorkspace.root?.path) { path in
+            agent.activateScope(.science, preferredWorkspace: path, restorePersistedWorkspace: false)
+            selectedArtifactText = ""
+            structure = nil
+            scene = SCNScene()
+        }
+        .onChange(of: scienceWorkspace.selectedArtifact?.path) { _ in
             routeActiveArtifact()
             loadActiveArtifact()
         }
@@ -75,6 +92,16 @@ struct ScienceModeView: View {
                 .foregroundColor(.secondary)
 
             Divider().frame(height: 16)
+
+            Button {
+                chooseScienceWorkspace()
+            } label: {
+                Label(scienceWorkspace.root?.lastPathComponent ?? "Choose research workspace", systemImage: "folder")
+                    .font(.system(size: 10, weight: .medium))
+                    .lineLimit(1)
+            }
+            .buttonStyle(.bordered)
+            .help("Select the independent Science workspace")
 
             Picker("Workspace", selection: $selectedPanel) {
                 ForEach(SciencePanel.allCases) { panel in Text(panel.rawValue).tag(panel) }
@@ -213,14 +240,14 @@ struct ScienceModeView: View {
             VStack(alignment: .leading, spacing: 18) {
                 HStack {
                     VStack(alignment: .leading, spacing: 4) {
-                        Text(agent.scienceProjectContext?.workspaceName ?? appState.workspaceFolder?.lastPathComponent ?? "Scientific Project")
+                        Text(agent.scienceProjectContext?.workspaceName ?? scienceWorkspace.root?.lastPathComponent ?? "Choose a research workspace")
                             .font(.system(size: 17, weight: .semibold))
                         Text(agent.isIndexingScienceProject ? "Indexing scientific artifacts…" : "Project-aware scientific context is ready")
                             .font(.system(size: 11)).foregroundColor(.secondary)
                     }
                     Spacer()
                     if agent.isIndexingScienceProject { ProgressView().controlSize(.small) }
-                    Button("Refresh Context") { agent.refreshScienceProjectContext() }
+                    Button("Refresh Context") { agent.refreshScienceProjectContext(force: true) }
                         .buttonStyle(.bordered).controlSize(.small)
                 }
 
@@ -323,7 +350,23 @@ struct ScienceModeView: View {
     }
 
     private func loadActiveArtifact() {
-        guard isStructureFile, let url = activeURL else {
+        guard let url = activeURL else {
+            selectedArtifactText = ""
+            structure = nil
+            scene = SCNScene()
+            loadError = nil
+            return
+        }
+        let expectedPath = url.path
+        Task {
+            let preview = await Task.detached(priority: .utility) {
+                Self.readArtifactPreviewText(at: url)
+            }.value
+            guard activeURL?.path == expectedPath else { return }
+            selectedArtifactText = preview
+        }
+
+        guard isStructureFile else {
             structure = nil
             scene = SCNScene()
             loadError = nil
@@ -331,7 +374,6 @@ struct ScienceModeView: View {
         }
         isLoadingStructure = true
         loadError = nil
-        let expectedPath = url.path
         Task {
             do {
                 let document = try await Task.detached(priority: .userInitiated) { try ScienceService.loadStructure(at: url) }.value
@@ -347,25 +389,57 @@ struct ScienceModeView: View {
         }
     }
 
+    /// Results and LaTeX previews belong to the Science artifact selection,
+    /// never to AppState.currentFile (which remains owned by Editor Mode).
+    private nonisolated static func readArtifactPreviewText(at url: URL) -> String {
+        let textExtensions: Set<String> = ["tex", "bib", "md", "txt", "csv", "tsv", "json", "fasta", "fa", "faa", "fna", "a3m", "py", "r", "jl", "html", "htm", "svg"]
+        guard textExtensions.contains(url.pathExtension.lowercased()),
+              let size = try? url.resourceValues(forKeys: [.fileSizeKey]).fileSize,
+              size <= 2 * 1_024 * 1_024,
+              let data = try? Data(contentsOf: url, options: [.mappedIfSafe]) else {
+            return ""
+        }
+        return String(data: data, encoding: .utf8) ?? ""
+    }
+
     private func rebuildScene() {
         guard let structure else { return }
         scene = ScienceService.makeScene(for: structure, showBackbone: showBackbone)
     }
 
     private func openArtifact() {
+        guard let root = scienceWorkspace.root else {
+            loadError = "Choose a Science workspace first. Scientific artifacts are kept separate from the Editor workspace."
+            selectedPanel = .project
+            return
+        }
         let panel = NSOpenPanel()
         panel.title = "Open Scientific Artifact"
         panel.allowedContentTypes = []
         panel.allowsMultipleSelection = false
         panel.canChooseDirectories = false
+        panel.directoryURL = root
         if panel.runModal() == .OK, let url = panel.url {
-            Task {
-                await appState.loadFile(url: url)
-                appState.setEditorMode(.science)
-                routeActiveArtifact()
-                loadActiveArtifact()
+            guard scienceWorkspace.selectArtifact(url) else {
+                loadError = "Select an artifact inside the current Science workspace."
+                return
             }
+            routeActiveArtifact()
+            loadActiveArtifact()
         }
+    }
+
+    private func chooseScienceWorkspace() {
+        let panel = NSOpenPanel()
+        panel.title = "Choose Science Workspace"
+        panel.message = "This research workspace is independent from the Editor workspace and its Agent chats."
+        panel.canChooseFiles = false
+        panel.canChooseDirectories = true
+        panel.canCreateDirectories = true
+        panel.allowsMultipleSelection = false
+        panel.directoryURL = scienceWorkspace.root
+        guard panel.runModal() == .OK, let url = panel.url else { return }
+        scienceWorkspace.selectWorkspace(url)
     }
 
     private func routeActiveArtifact() {
@@ -391,7 +465,7 @@ struct ScienceModeView: View {
     }
 
     private func openInCells() {
-        let path = activeURL?.path ?? appState.workspaceFolder?.path ?? ""
+        let path = activeURL?.path ?? scienceWorkspace.root?.path ?? ""
         appState.aiExportedCode = """
         # Science Mode → local Cell analysis
         from pathlib import Path

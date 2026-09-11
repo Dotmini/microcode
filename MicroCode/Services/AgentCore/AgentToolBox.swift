@@ -27,6 +27,23 @@ struct ToolParameter {
     let required: Bool
 }
 
+// MARK: - Agent Execution Target
+
+enum AgentExecutionTarget: Equatable {
+    case local
+    case remote(RemoteConnectionConfig)
+    
+    var isLocal: Bool {
+        if case .local = self { return true }
+        return false
+    }
+    
+    var remoteServer: RemoteConnectionConfig? {
+        if case .remote(let config) = self { return config }
+        return nil
+    }
+}
+
 // MARK: - Agent ToolBox
 
 @MainActor
@@ -35,15 +52,25 @@ class AgentToolBox: ObservableObject {
     
     @Published var tools: [String: any AgentTool] = [:]
     @Published var executionHistory: [ToolExecution] = []
+    @Published var executionTarget: AgentExecutionTarget = .local
     private var readCache: [String: (value: String, date: Date)] = [:]
     private let readCacheTTL: TimeInterval = 3
-    private let defaultToolTimeout: UInt64 = 45_000_000_000
+    // A compile, dependency install, or first Android build legitimately
+    // outlives the old 45 second limit.  The runner reports its state instead
+    // of silently cancelling it mid-build; individual shell calls still have
+    // a bounded 10 minute ceiling to avoid an abandoned process lasting
+    // forever.
+    private let defaultToolTimeout: UInt64 = 600_000_000_000
     
     /// Workspace root — all file operations are sandboxed to this path
     var workspaceRoot: String? = nil
     
     init() {
         registerBuiltinTools()
+        Task { @MainActor in
+            let initialWs = self.workspaceRoot ?? UserDefaults.standard.string(forKey: "MicroCode.WorkspacePath") ?? FileManager.default.currentDirectoryPath
+            MCPClient.shared.start(workspacePath: initialWs)
+        }
     }
     
     private func registerBuiltinTools() {
@@ -69,10 +96,13 @@ class AgentToolBox: ObservableObject {
         register(CellRunTool())
         register(InspectImageTool())
         register(ExtractPDFTool())
+        register(AgentPlanTool())
         register(DefineSubagentTool())
         register(InvokeSubagentTool())
         register(ManageSubagentsTool())
         register(SendMessageTool())
+        register(DeviceRuntimeTool())
+        register(PreviewControlTool())
     }
     
     func register(_ tool: any AgentTool) {
@@ -80,7 +110,17 @@ class AgentToolBox: ObservableObject {
     }
     
     func execute(_ toolName: String, params: [String: Any]) async throws -> String {
-        guard let tool = tools[toolName] else {
+        var targetTool = tools[toolName]
+        if targetTool == nil {
+            if toolName.hasPrefix("mcp__") {
+                let candidate = toolName.replacingOccurrences(of: "mcp__", with: "mcp__local__")
+                targetTool = tools[candidate]
+            }
+            if targetTool == nil {
+                targetTool = tools["mcp__local__\(toolName)"]
+            }
+        }
+        guard let tool = targetTool else {
             throw ToolBoxError.toolNotFound(toolName)
         }
         
@@ -149,7 +189,7 @@ class AgentToolBox: ObservableObject {
             group.addTask { try await tool.execute(params: params) }
             group.addTask {
                 try await Task.sleep(nanoseconds: self.defaultToolTimeout)
-                throw ToolBoxError.executionFailed("Tool timed out after 45 seconds")
+                throw ToolBoxError.executionFailed("Tool timed out after 10 minutes")
             }
             guard let first = try await group.next() else {
                 throw ToolBoxError.executionFailed("Tool returned no result")
@@ -212,6 +252,284 @@ class AgentToolBox: ObservableObject {
     }
     
     var toolList: [any AgentTool] { Array(tools.values) }
+}
+
+// MARK: - Durable Agent Plan
+
+struct AgentPlanTool: AgentTool {
+    let name = "agent_plan"
+    let description = "Creates or advances the durable Rust-kernel plan and mirrors it to .microcode/task.md. Use set before complex work and complete only after deterministic verification."
+    let parameters = [
+        ToolParameter(name: "action", type: "string", description: "set or complete", required: true),
+        ToolParameter(name: "plan_json", type: "string", description: "For set: JSON array of {id,title,description,dependencies,verification,required_tools,owner}", required: false),
+        ToolParameter(name: "node_id", type: "string", description: "For complete: exact node ID", required: false),
+        ToolParameter(name: "evidence", type: "string", description: "For complete: concise deterministic verification evidence", required: false),
+        ToolParameter(name: "success", type: "boolean", description: "Whether the node verification passed", required: false)
+    ]
+
+    private struct InputNode: Codable {
+        let id: String
+        let title: String
+        let description: String?
+        let dependencies: [String]?
+        let verification: String?
+        let required_tools: [String]?
+        let owner: String?
+    }
+
+    func execute(params: [String: Any]) async throws -> String {
+        guard let runID = await MainActor.run(body: { AgentService.shared.currentKernelRunID }) else {
+            throw ToolBoxError.executionFailed("No durable agent run is active")
+        }
+        let action = (params["action"] as? String ?? "").lowercased()
+        switch action {
+        case "set":
+            guard let json = params["plan_json"] as? String,
+                  let data = json.data(using: .utf8),
+                  let input = try? JSONDecoder().decode([InputNode].self, from: data),
+                  !input.isEmpty else {
+                throw ToolBoxError.invalidParams("plan_json must be a non-empty JSON array")
+            }
+            let nodes = input.map { node in
+                AgentKernelPlanNode(
+                    id: node.id,
+                    title: node.title,
+                    description: node.description ?? "",
+                    dependencies: node.dependencies ?? [],
+                    verification: node.verification ?? "",
+                    requiredTools: node.required_tools ?? [],
+                    owner: node.owner
+                )
+            }
+            guard let response = await AgentKernelClient.shared.setPlan(runID: runID, nodes: nodes) else {
+                throw ToolBoxError.executionFailed("Rust agent kernel did not accept the plan")
+            }
+            try await mirrorTaskMarkdown(response.run.plan)
+            let assignments = response.run.plan.compactMap { node -> String? in
+                guard response.directive.readyNodes.contains(node.id),
+                      let owner = node.owner,
+                      owner != "main" else { return nil }
+                return "\(node.id)→\(owner)"
+            }
+            let delegation = assignments.isEmpty
+                ? ""
+                : ". Delegate independent ready work with invoke_subagent: \(assignments.joined(separator: ", "))"
+            return "Durable plan accepted. Ready nodes: \(response.directive.readyNodes.joined(separator: ", "))\(delegation)"
+
+        case "complete":
+            guard let nodeID = params["node_id"] as? String, !nodeID.isEmpty else {
+                throw ToolBoxError.invalidParams("node_id is required")
+            }
+            let success = params["success"] as? Bool ?? false
+            let evidence = params["evidence"] as? String ?? ""
+            guard !success || !evidence.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+                throw ToolBoxError.invalidParams("verification evidence is required before completion")
+            }
+            guard let response = await AgentKernelClient.shared.observe(
+                runID: runID,
+                kind: success ? "plan_node_completed" : "verification",
+                nodeID: nodeID,
+                success: success,
+                output: evidence,
+                error: success ? "" : evidence,
+                madeProgress: success
+            ) else {
+                throw ToolBoxError.executionFailed("Rust agent kernel did not update the plan node")
+            }
+            if success { try await markTaskNodeComplete(nodeID) }
+            return success
+                ? "Plan node \(nodeID) verified. Ready nodes: \(response.directive.readyNodes.joined(separator: ", "))"
+                : "Plan node \(nodeID) failed verification; kernel directive: \(response.directive.reason)"
+
+        default:
+            throw ToolBoxError.invalidParams("action must be set or complete")
+        }
+    }
+
+    @MainActor
+    private func mirrorTaskMarkdown(_ nodes: [AgentKernelPlanNode]) throws {
+        guard let workspace = AgentToolBox.shared.workspaceRoot else { return }
+        let directory = URL(fileURLWithPath: workspace, isDirectory: true).appendingPathComponent(".microcode", isDirectory: true)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        let lines = nodes.map { node -> String in
+            let dependencies = node.dependencies.isEmpty ? "" : " — after: \(node.dependencies.joined(separator: ", "))"
+            let verification = node.verification.isEmpty ? "" : "\n  - Verify: \(node.verification)"
+            let owner = node.owner.map { "\n  - Owner: \($0)" } ?? ""
+            return "- [ ] **\(node.id)** \(node.title)\(dependencies)\(verification)\(owner)"
+        }
+        let markdown = "# Agent Task\n\n" + lines.joined(separator: "\n") + "\n"
+        let target = directory.appendingPathComponent("task.md")
+        let temporary = directory.appendingPathComponent(".task.md.tmp")
+        try markdown.write(to: temporary, atomically: true, encoding: .utf8)
+        if FileManager.default.fileExists(atPath: target.path) {
+            _ = try FileManager.default.replaceItemAt(target, withItemAt: temporary)
+        } else {
+            try FileManager.default.moveItem(at: temporary, to: target)
+        }
+    }
+
+    @MainActor
+    private func markTaskNodeComplete(_ nodeID: String) throws {
+        guard let workspace = AgentToolBox.shared.workspaceRoot else { return }
+        let target = URL(fileURLWithPath: workspace, isDirectory: true)
+            .appendingPathComponent(".microcode/task.md")
+        guard var markdown = try? String(contentsOf: target, encoding: .utf8) else { return }
+        markdown = markdown.replacingOccurrences(of: "- [ ] **\(nodeID)**", with: "- [x] **\(nodeID)**")
+        try markdown.write(to: target, atomically: true, encoding: .utf8)
+        NotificationCenter.default.post(name: NSNotification.Name("MicroCodeAgentWorkspaceFilesChanged"), object: nil)
+    }
+}
+
+struct DeviceRuntimeTool: AgentTool {
+    let name = "device_runtime"
+    let description = "Full control and inspection for Android Emulators, iOS Simulators, and Physical Devices (via ADB/simctl). Supports: status, list_devices, start, run, stop, tap (x, y), swipe (x, y, x2, y2, duration), type_text (text), key_event (key), screenshot (file_path), launch_app (package_name), install_app (file_path), adb_shell (command)."
+    let parameters = [
+        ToolParameter(name: "operation", type: "string", description: "One of: status, list_devices, start, run, stop, tap, swipe, type_text, key_event, screenshot, launch_app, install_app, adb_shell", required: true),
+        ToolParameter(name: "device_id", type: "string", description: "Optional device ID/serial (e.g. emulator-5554, avd:Pixel_9, iOS UDID, or physical device serial). Defaults to selected/first device.", required: false),
+        ToolParameter(name: "x", type: "integer", description: "X pixel coordinate for tap or swipe start", required: false),
+        ToolParameter(name: "y", type: "integer", description: "Y pixel coordinate for tap or swipe start", required: false),
+        ToolParameter(name: "x2", type: "integer", description: "X2 pixel coordinate for swipe end", required: false),
+        ToolParameter(name: "y2", type: "integer", description: "Y2 pixel coordinate for swipe end", required: false),
+        ToolParameter(name: "duration", type: "integer", description: "Swipe duration in milliseconds (default: 200ms)", required: false),
+        ToolParameter(name: "text", type: "string", description: "Text to type into focused input or fallback command", required: false),
+        ToolParameter(name: "key", type: "string", description: "Key event code or name (e.g. KEYCODE_HOME, BACK, ENTER, POWER, 3, 4)", required: false),
+        ToolParameter(name: "package_name", type: "string", description: "Android package name (e.g. com.example.app) or iOS bundle identifier", required: false),
+        ToolParameter(name: "file_path", type: "string", description: "Path for screenshot output or app package to install (.apk / .app)", required: false),
+        ToolParameter(name: "command", type: "string", description: "ADB shell command string to execute on target device", required: false),
+        ToolParameter(name: "workspace", type: "string", description: "Optional workspace path; defaults to the current workspace", required: false)
+    ]
+
+    func execute(params: [String: Any]) async throws -> String {
+        guard let operation = params["operation"] as? String else {
+            throw ToolBoxError.invalidParams("operation is required")
+        }
+        let defaultWorkspace = await MainActor.run { AgentToolBox.shared.workspaceRoot }
+        let workspace = params["workspace"] as? String ?? defaultWorkspace
+        
+        let x = params["x"] as? Int ?? (params["x"] as? Double).map { Int($0) }
+        let y = params["y"] as? Int ?? (params["y"] as? Double).map { Int($0) }
+        let x2 = params["x2"] as? Int ?? (params["x2"] as? Double).map { Int($0) }
+        let y2 = params["y2"] as? Int ?? (params["y2"] as? Double).map { Int($0) }
+        let duration = params["duration"] as? Int ?? (params["duration"] as? Double).map { Int($0) }
+        let text = params["text"] as? String
+        let key = params["key"] as? String
+        let packageName = params["package_name"] as? String
+        let filePath = params["file_path"] as? String
+        let command = params["command"] as? String
+        
+        return try await DeviceRuntimeService.shared.executeForAgent(
+            operation: operation,
+            workspacePath: workspace,
+            deviceID: params["device_id"] as? String,
+            x: x,
+            y: y,
+            x2: x2,
+            y2: y2,
+            duration: duration,
+            text: text,
+            key: key,
+            packageName: packageName,
+            filePath: filePath,
+            command: command
+        )
+    }
+}
+
+// MARK: - Native Preview Control Tool
+
+struct PreviewControlTool: AgentTool {
+    let name = "preview_control"
+    let description = "Directly control and inspect the IDE's live Embedded Preview Dock (WebApp, Apple Simulator, Android Device). Supports opening URLs (e.g. http://localhost:3000, Vite, Next.js), reloading pages, changing viewports (Desktop, Tablet, Mobile, Responsive), and toggling between Web, iOS, and Android modes."
+    let parameters = [
+        ToolParameter(name: "action", type: "string", description: "Action to perform: 'open', 'close', 'reload', 'set_url', 'switch_mode', 'set_viewport', 'status'", required: true),
+        ToolParameter(name: "url", type: "string", description: "Target URL for WebApp preview (e.g. http://localhost:3000, http://127.0.0.1:5173)", required: false),
+        ToolParameter(name: "mode", type: "string", description: "Dock mode: 'web', 'ios', or 'android'", required: false),
+        ToolParameter(name: "viewport", type: "string", description: "Viewport size: 'responsive', 'desktop', 'tablet', or 'mobile'", required: false)
+    ]
+
+    func execute(params: [String: Any]) async throws -> String {
+        guard let action = (params["action"] as? String)?.lowercased() else {
+            throw ToolBoxError.invalidParams("action is required")
+        }
+        let url = params["url"] as? String
+        let mode = (params["mode"] as? String)?.lowercased()
+        let viewport = (params["viewport"] as? String)?.lowercased()
+
+        return try await MainActor.run {
+            let runtime = DeviceRuntimeService.shared
+
+            switch action {
+            case "open":
+                runtime.showingEmbeddedDeviceDock = true
+                if let mode = mode {
+                    if mode == "web" { runtime.embeddedDockMode = .web }
+                    else if mode == "ios" { runtime.embeddedDockMode = .ios }
+                    else if mode == "android" { runtime.embeddedDockMode = .android }
+                } else if runtime.embeddedDockMode != .web && url != nil {
+                    runtime.embeddedDockMode = .web
+                }
+                if let urlString = url, let parsedURL = URL(string: urlString.hasPrefix("http") ? urlString : "http://\(urlString)") {
+                    runtime.targetWebURL = parsedURL
+                }
+                if let viewport = viewport {
+                    runtime.targetViewport = viewport
+                }
+                return "✅ Live Preview Dock opened in \(runtime.embeddedDockMode.rawValue) mode\(url != nil ? " with URL: \(url!)" : "")."
+
+            case "close":
+                runtime.showingEmbeddedDeviceDock = false
+                return "✅ Live Preview Dock closed."
+
+            case "reload", "refresh":
+                runtime.showingEmbeddedDeviceDock = true
+                runtime.webRefreshTrigger.toggle()
+                return "✅ Live Preview reload triggered."
+
+            case "set_url":
+                runtime.showingEmbeddedDeviceDock = true
+                runtime.embeddedDockMode = .web
+                guard let urlString = url, !urlString.isEmpty else {
+                    throw ToolBoxError.invalidParams("url is required for set_url action")
+                }
+                let full = urlString.hasPrefix("http") ? urlString : "http://\(urlString)"
+                guard let target = URL(string: full) else {
+                    throw ToolBoxError.invalidParams("Invalid URL format: \(urlString)")
+                }
+                runtime.targetWebURL = target
+                return "✅ WebApp Preview URL navigated to: \(target.absoluteString)"
+
+            case "switch_mode":
+                runtime.showingEmbeddedDeviceDock = true
+                guard let mode = mode else {
+                    throw ToolBoxError.invalidParams("mode is required ('web', 'ios', or 'android')")
+                }
+                switch mode {
+                case "web": runtime.embeddedDockMode = .web
+                case "ios": runtime.embeddedDockMode = .ios
+                case "android": runtime.embeddedDockMode = .android
+                default:
+                    throw ToolBoxError.invalidParams("Unknown mode '\(mode)'. Use 'web', 'ios', or 'android'.")
+                }
+                return "✅ Switched Live Preview Dock to \(runtime.embeddedDockMode.rawValue) mode."
+
+            case "set_viewport":
+                guard let vp = viewport else {
+                    throw ToolBoxError.invalidParams("viewport is required ('responsive', 'desktop', 'tablet', 'mobile')")
+                }
+                runtime.targetViewport = vp
+                return "✅ WebApp Preview viewport set to: \(vp)"
+
+            case "status":
+                let visible = runtime.showingEmbeddedDeviceDock ? "Visible" : "Hidden"
+                let currentMode = runtime.embeddedDockMode.rawValue
+                let currentURL = runtime.targetWebURL?.absoluteString ?? "http://localhost:3000"
+                return "Live Preview Dock: \(visible) | Mode: \(currentMode) | URL: \(currentURL) | Viewport: \(runtime.targetViewport)"
+
+            default:
+                throw ToolBoxError.invalidParams("Unknown action '\(action)'. Supported: open, close, reload, set_url, switch_mode, set_viewport, status")
+            }
+        }
+    }
 }
 
 struct ToolExecution: Identifiable {
@@ -478,6 +796,7 @@ struct GrepSearchTool: AgentTool {
         process.standardError = Pipe() // discard stderr
         
         try process.run()
+
         process.waitUntilExit()
         
         let data = pipe.fileHandleForReading.readDataToEndOfFile()
@@ -658,6 +977,13 @@ struct ShellCommandTool: AgentTool {
         // Enforce safety validation
         try Self.validateSafety(command)
         
+        let target = await MainActor.run { AgentToolBox.shared.executionTarget }
+        
+        // If a remote SSH server is selected, route execution to the cloud/SSH server
+        if case .remote(let server) = target {
+            return try await executeRemote(command: command, server: server, params: params)
+        }
+        
         let process = Process()
         process.executableURL = URL(fileURLWithPath: "/bin/zsh")
         process.arguments = ["-c", command]
@@ -693,9 +1019,24 @@ struct ShellCommandTool: AgentTool {
         process.standardError = stderrPipe
         
         try process.run()
+
+        // Mirror the native macOS command to both the IDE Console and its
+        // interactive Terminal immediately. The command is still executed
+        // by this Process, not simulated in the UI.
+        NotificationCenter.default.post(
+            name: NSNotification.Name("MicroCodeAgentTerminalCommand"),
+            object: nil,
+            userInfo: [
+                "phase": "started",
+                "command": command,
+                "cwd": targetCwd
+            ]
+        )
         
-        // Timeout: 45 seconds
-        let deadline = DispatchTime.now() + .seconds(45)
+        // Builds and first dependency installs may take several minutes.
+        // Match AgentToolBox's bounded timeout rather than killing a healthy
+        // native process after 45 seconds.
+        let deadline = DispatchTime.now() + .seconds(600)
         DispatchQueue.global().asyncAfter(deadline: deadline) {
             if process.isRunning { process.terminate() }
         }
@@ -707,7 +1048,8 @@ struct ShellCommandTool: AgentTool {
         
         var output = stdout
         if !stderr.isEmpty { output += "\n[stderr]\n\(stderr)" }
-        if process.terminationStatus != 0 { output = "[exit code: \(process.terminationStatus)]\n\(output)" }
+        let didSucceed = process.terminationStatus == 0
+        if !didSucceed { output = "[exit code: \(process.terminationStatus)]\n\(output)" }
         
         // Broadcast to IDE Terminal & Console
         NotificationCenter.default.post(
@@ -717,13 +1059,173 @@ struct ShellCommandTool: AgentTool {
                 "command": command,
                 "output": output,
                 "cwd": targetCwd,
-                "exitCode": Int(process.terminationStatus)
+                "exitCode": Int(process.terminationStatus),
+                "phase": "completed"
             ]
         )
         
-        // Truncate
-        if output.count > 15000 { return String(output.prefix(15000)) + "\n... (truncated)" }
-        return output
+        // A non-zero command must be a failed tool result.  Previously this
+        // returned ordinary text, so the agent recorded a failed xcodebuild
+        // as success and later tried to complete from prose alone.
+        let boundedOutput = output.count > 15000
+            ? String(output.suffix(15000)).trimmingCharacters(in: .whitespacesAndNewlines) + "\n... (leading output truncated)"
+            : output
+        guard didSucceed else {
+            throw ToolBoxError.executionFailed(boundedOutput.isEmpty
+                ? "Command exited with status \(process.terminationStatus)."
+                : boundedOutput)
+        }
+        return boundedOutput
+    }
+    
+    /// Remote execution over OpenSSH when a remote server / VPS / RunPod target is active
+    private func executeRemote(command: String, server: RemoteConnectionConfig, params: [String: Any]) async throws -> String {
+        let targetCwd = (params["cwd"] as? String) ?? ""
+        let remoteCommand = targetCwd.isEmpty ? command : "cd \(targetCwd) && \(command)"
+        
+        // Notify start
+        NotificationCenter.default.post(
+            name: NSNotification.Name("MicroCodeAgentTerminalCommand"),
+            object: nil,
+            userInfo: [
+                "phase": "started",
+                "command": "[SSH: \(server.name)] \(remoteCommand)",
+                "cwd": targetCwd
+            ]
+        )
+        
+        // Unlock SSH key in macOS Keychain if present
+        let keychainTask = Process()
+        keychainTask.executableURL = URL(fileURLWithPath: "/usr/bin/ssh-add")
+        keychainTask.arguments = ["--apple-load-keychain"]
+        try? keychainTask.run()
+        keychainTask.waitUntilExit()
+        
+        var effectivePassword = server.password
+        if effectivePassword.isEmpty {
+            if let saved = UserDefaults.standard.dictionary(forKey: "ssh_saved_passwords")?[server.host] as? String {
+                effectivePassword = saved
+            }
+        }
+        
+        let scriptFeed = """
+        \(remoteCommand)
+        exit $?
+        """
+        
+        let rawOutput: String
+        let exitCode: Int32
+        
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: "/usr/bin/ssh")
+        
+        var args = [
+            "-tt",
+            "-o", "ServerAliveInterval=15",
+            "-o", "TCPKeepAlive=yes",
+            "-o", "StrictHostKeyChecking=accept-new",
+            "-o", "ConnectTimeout=15",
+            "-p", "\(server.port)"
+        ]
+        if !server.keyPath.isEmpty {
+            let expanded = (server.keyPath as NSString).expandingTildeInPath
+            if FileManager.default.fileExists(atPath: expanded) {
+                args.append(contentsOf: ["-i", expanded])
+            }
+        }
+        args.append("\(server.username)@\(server.host)")
+        process.arguments = args
+        
+        var env = ProcessInfo.processInfo.environment
+        var tempAskPass: String? = nil
+        var tempPassFile: String? = nil
+        
+        if !effectivePassword.isEmpty {
+            let unique = ProcessInfo.processInfo.globallyUniqueString
+            let passPath = "/tmp/mc_pass_\(unique).txt"
+            let askPath = "/tmp/mc_ask_\(unique).sh"
+            
+            try? (effectivePassword + "\n").write(toFile: passPath, atomically: true, encoding: .utf8)
+            let chmodP = Process()
+            chmodP.executableURL = URL(fileURLWithPath: "/bin/chmod")
+            chmodP.arguments = ["600", passPath]
+            try? chmodP.run()
+            chmodP.waitUntilExit()
+            
+            let askScript = "#!/bin/sh\ncat \"\(passPath)\"\n"
+            try? askScript.write(toFile: askPath, atomically: true, encoding: .utf8)
+            let chmodA = Process()
+            chmodA.executableURL = URL(fileURLWithPath: "/bin/chmod")
+            chmodA.arguments = ["700", askPath]
+            try? chmodA.run()
+            chmodA.waitUntilExit()
+            
+            env["SSH_ASKPASS"] = askPath
+            env["SSH_ASKPASS_REQUIRE"] = "force"
+            env["DISPLAY"] = ":0"
+            tempAskPass = askPath
+            tempPassFile = passPath
+        }
+        process.environment = env
+        
+        let stdinPipe = Pipe()
+        let stdoutPipe = Pipe()
+        let stderrPipe = Pipe()
+        process.standardInput = stdinPipe
+        process.standardOutput = stdoutPipe
+        process.standardError = stderrPipe
+        
+        do {
+            try process.run()
+            
+            if let data = scriptFeed.data(using: .utf8) {
+                stdinPipe.fileHandleForWriting.write(data)
+                try? stdinPipe.fileHandleForWriting.close()
+            }
+            
+            let outData = stdoutPipe.fileHandleForReading.readDataToEndOfFile()
+            let errData = stderrPipe.fileHandleForReading.readDataToEndOfFile()
+            process.waitUntilExit()
+            
+            if let tempAskPass = tempAskPass { try? FileManager.default.removeItem(atPath: tempAskPass) }
+            if let tempPassFile = tempPassFile { try? FileManager.default.removeItem(atPath: tempPassFile) }
+            
+            var combined = String(data: outData, encoding: .utf8) ?? ""
+            if let errStr = String(data: errData, encoding: .utf8), !errStr.isEmpty {
+                combined += "\n" + errStr
+            }
+            rawOutput = combined
+            exitCode = process.terminationStatus
+        } catch {
+            if let tempAskPass = tempAskPass { try? FileManager.default.removeItem(atPath: tempAskPass) }
+            if let tempPassFile = tempPassFile { try? FileManager.default.removeItem(atPath: tempPassFile) }
+            throw ToolBoxError.executionFailed("Failed to launch SSH remote process: \(error.localizedDescription)")
+        }
+        
+        let didSucceed = (exitCode == 0)
+        let output = didSucceed ? rawOutput : "[exit code: \(exitCode)]\n\(rawOutput)"
+        
+        NotificationCenter.default.post(
+            name: NSNotification.Name("MicroCodeAgentTerminalCommand"),
+            object: nil,
+            userInfo: [
+                "command": "[SSH: \(server.name)] \(remoteCommand)",
+                "output": output,
+                "cwd": targetCwd,
+                "exitCode": Int(exitCode),
+                "phase": "completed"
+            ]
+        )
+        
+        let boundedOutput = output.count > 15000
+            ? String(output.suffix(15000)).trimmingCharacters(in: .whitespacesAndNewlines) + "\n... (leading output truncated)"
+            : output
+        guard didSucceed else {
+            throw ToolBoxError.executionFailed(boundedOutput.isEmpty
+                ? "Remote SSH command exited with status \(exitCode)."
+                : boundedOutput)
+        }
+        return boundedOutput
     }
 }
 
@@ -1003,18 +1505,51 @@ class MCPClient: ObservableObject {
         
         let process = Process()
         
-        var scriptPath = Bundle.main.path(forResource: "mcp-server", ofType: "py")
-        if scriptPath == nil {
-            scriptPath = FileManager.default.currentDirectoryPath + "/mcp-server.py"
+        var scriptPath: String? = Bundle.main.path(forResource: "mcp-server", ofType: "py")
+        if scriptPath == nil || !FileManager.default.fileExists(atPath: scriptPath!) {
+            let bundleRes = Bundle.main.bundleURL.appendingPathComponent("Contents/Resources/mcp-server.py").path
+            if FileManager.default.fileExists(atPath: bundleRes) {
+                scriptPath = bundleRes
+            }
+        }
+        if scriptPath == nil || !FileManager.default.fileExists(atPath: scriptPath!) {
+            let wsCandidate = (workspacePath as NSString).appendingPathComponent("mcp-server.py")
+            if FileManager.default.fileExists(atPath: wsCandidate) {
+                scriptPath = wsCandidate
+            }
+        }
+        if scriptPath == nil || !FileManager.default.fileExists(atPath: scriptPath!) {
+            let cwdCandidate = FileManager.default.currentDirectoryPath + "/mcp-server.py"
+            if FileManager.default.fileExists(atPath: cwdCandidate) {
+                scriptPath = cwdCandidate
+            }
+        }
+        if scriptPath == nil || !FileManager.default.fileExists(atPath: scriptPath!) {
+            let devCandidate = "/Users/dotmini/Documents/SX/codetunner-native/mcp-server.py"
+            if FileManager.default.fileExists(atPath: devCandidate) {
+                scriptPath = devCandidate
+            }
         }
         
         guard let path = scriptPath, FileManager.default.fileExists(atPath: path) else {
-            print("[MCPClient] Error: mcp-server.py not found")
+            print("[MCPClient] Error: mcp-server.py not found across bundle, workspace, CWD, or repo root")
             return
         }
         
-        process.executableURL = URL(fileURLWithPath: "/usr/bin/env")
-        process.arguments = ["python3", "-u", path]
+        // Safely check for a real Python binary before attempting to spawn
+        let safePython = [
+            "/opt/homebrew/bin/python3",
+            "/usr/local/bin/python3",
+            "\(FileManager.default.homeDirectoryForCurrentUser.path)/.pyenv/shims/python3"
+        ].first(where: { DeveloperToolsGuard.isSafeToExecute($0) }) ?? (DeveloperToolsGuard.hasCommandLineTools && FileManager.default.isExecutableFile(atPath: "/usr/bin/python3") ? "/usr/bin/python3" : nil)
+        
+        guard let pythonExe = safePython else {
+            print("[MCPClient] Safe Python binary not found. Skipping external Python MCP server.")
+            return
+        }
+        
+        process.executableURL = URL(fileURLWithPath: pythonExe)
+        process.arguments = ["-u", path]
         
         var env = ProcessInfo.processInfo.environment
         env["MICROCODE_WORKSPACE"] = workspacePath
@@ -1074,6 +1609,21 @@ class MCPClient: ObservableObject {
         availableTools = []
         activeWorkspacePath = nil
         stdoutBuffer = ""
+    }
+    
+    /// Ensures MCP Server process is booted and its tools are populated and registered
+    /// before an Agent or SubAgent executes its tool schema extraction.
+    func ensureConnected(workspacePath: String? = nil, timeoutSeconds: TimeInterval = 2.0) async {
+        let ws = workspacePath ?? activeWorkspacePath ?? AgentToolBox.shared.workspaceRoot ?? FileManager.default.currentDirectoryPath
+        if !isConnected || activeWorkspacePath != ws {
+            start(workspacePath: ws)
+        }
+        
+        let start = Date()
+        while Date().timeIntervalSince(start) < timeoutSeconds {
+            if !availableTools.isEmpty { break }
+            try? await Task.sleep(nanoseconds: 60_000_000) // 60ms
+        }
     }
     
     private func handleOutput(_ data: Data) {
@@ -1154,12 +1704,13 @@ class MCPClient: ObservableObject {
                     
                     var parsedTools: [MCPToolSchema] = []
                     for t in toolsList {
-                        if let name = t["name"] as? String,
-                           let desc = t["description"] as? String,
-                           let schema = t["inputSchema"] as? [String: Any],
-                           let schemaData = try? JSONSerialization.data(withJSONObject: schema),
-                           let parsedSchema = try? JSONDecoder().decode([String: AnyCodable].self, from: schemaData) {
-                            parsedTools.append(MCPToolSchema(name: name, description: desc, inputSchema: parsedSchema))
+                        if let name = t["name"] as? String {
+                            let desc = t["description"] as? String ?? t["desc"] as? String ?? ""
+                            let schema = t["inputSchema"] as? [String: Any] ?? ["type": "object", "properties": [:]]
+                            if let schemaData = try? JSONSerialization.data(withJSONObject: schema),
+                               let parsedSchema = try? JSONDecoder().decode([String: AnyCodable].self, from: schemaData) {
+                                parsedTools.append(MCPToolSchema(name: name, description: desc, inputSchema: parsedSchema))
+                            }
                         }
                     }
                     
@@ -1176,10 +1727,11 @@ class MCPClient: ObservableObject {
     
     private func registerToolsWithAgent() {
         for schema in availableTools {
-            if AgentToolBox.shared.tools[schema.name] == nil {
+            let namespacedName = "mcp__local__\(schema.name)"
+            if AgentToolBox.shared.tools[namespacedName] == nil {
                 let proxyTool = DynamicMCPTool(mcpClient: self, schema: schema)
                 AgentToolBox.shared.register(proxyTool)
-                print("[MCPClient] Registered external MCP Tool: \(schema.name)")
+                print("[MCPClient] Registered external MCP Tool: \(namespacedName)")
             }
         }
     }
@@ -1199,9 +1751,13 @@ class MCPClient: ObservableObject {
                         let content = (dict["content"] as? [[String: Any]])?.first?["text"] as? String ?? "Unknown error"
                         continuation.resume(throwing: NSError(domain: "MCP", code: -1, userInfo: [NSLocalizedDescriptionKey: content]))
                     } else if let dict = res as? [String: Any],
-                              let contentArray = dict["content"] as? [[String: Any]],
-                              let text = contentArray.first?["text"] as? String {
-                        continuation.resume(returning: text)
+                              let contentArray = dict["content"] as? [[String: Any]] {
+                        let texts = contentArray.compactMap { $0["text"] as? String }
+                        if !texts.isEmpty {
+                            continuation.resume(returning: texts.joined(separator: "\n"))
+                        } else {
+                            continuation.resume(returning: "Success")
+                        }
                     } else {
                         continuation.resume(returning: "Success")
                     }
@@ -1217,17 +1773,20 @@ struct DynamicMCPTool: AgentTool {
     let mcpClient: MCPClient
     let schema: MCPClient.MCPToolSchema
     
-    var name: String { schema.name }
+    /// MCP tools are namespaced at registration time so two servers cannot
+    /// silently replace one another. The original server name is retained for
+    /// the JSON-RPC tools/call request below.
+    var name: String { "mcp__local__\(schema.name)" }
     var description: String { schema.description }
     
     var parameters: [ToolParameter] {
         var params: [ToolParameter] = []
         if let properties = schema.inputSchema["properties"]?.value as? [String: Any] {
             let required = schema.inputSchema["required"]?.value as? [String] ?? []
-            for (key, val) in properties {
-                if let propDict = val as? [String: Any],
-                   let type = propDict["type"] as? String,
-                   let desc = propDict["description"] as? String {
+            for (key, val) in properties.sorted(by: { $0.key < $1.key }) {
+                if let propDict = val as? [String: Any] {
+                    let type = propDict["type"] as? String ?? "string"
+                    let desc = propDict["description"] as? String ?? ""
                     params.append(ToolParameter(name: key, type: type, description: desc, required: required.contains(key)))
                 }
             }
@@ -1236,7 +1795,7 @@ struct DynamicMCPTool: AgentTool {
     }
     
     func execute(params: [String: Any]) async throws -> String {
-        return try await mcpClient.callTool(name: name, arguments: params)
+        return try await mcpClient.callTool(name: schema.name, arguments: params)
     }
 }
 

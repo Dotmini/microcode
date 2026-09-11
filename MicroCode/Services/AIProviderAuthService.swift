@@ -110,14 +110,14 @@ enum AIProviderMeta: String, CaseIterable, Identifiable {
     
     var defaultModels: [String] {
         switch self {
-        case .openai: return ["gpt-5", "gpt-4.5-preview", "gpt-4o", "gpt-4o-mini", "o3-mini", "o4-mini"]
-        case .anthropic: return ["claude-4.7-opus-20260501", "claude-3-7-sonnet-20250219", "claude-3-5-sonnet-20241022", "claude-3-5-haiku-20241022"]
-        case .deepseek: return ["deepseek-chat-v4", "deepseek-chat", "deepseek-coder", "deepseek-reasoner"]
-        case .gemini: return ["gemini-3.1-pro", "gemini-2.5-pro-preview-05-06", "gemini-2.5-flash", "gemini-2.5-flash-lite", "gemma-3n-e4"]
-        case .grok: return ["grok-3", "grok-3-mini"]
-        case .qwen: return ["qwen3-235b-a22b", "qwen-max", "qwen-plus"]
-        case .glm: return ["glm-4.6", "glm-4-plus", "glm-4-flash"]
-        case .codex: return ["codex-mini-latest", "o4-mini"]
+        case .openai: return ["o3-mini", "o1", "gpt-4o", "gpt-4o-mini", "gpt-4.5-preview", "chatgpt-4o-latest"]
+        case .anthropic: return ["claude-3-7-sonnet", "claude-3-5-sonnet", "claude-3-5-haiku", "claude-3-opus"]
+        case .deepseek: return ["deepseek-chat", "deepseek-reasoner"]
+        case .gemini: return ["gemini-2.5-flash", "gemini-2.5-pro", "gemini-2.0-flash", "gemini-1.5-pro"]
+        case .grok: return ["grok-3", "grok-3-mini", "grok-2"]
+        case .qwen: return ["qwen/qwen-2.5-coder-32b-instruct", "qwen/qwen-2.5-72b-instruct"]
+        case .glm: return ["glm-4-plus", "glm-4-flash"]
+        case .codex: return ["o3-mini", "gpt-4o", "gpt-4o-mini"]
         }
     }
     

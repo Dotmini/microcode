@@ -449,6 +449,28 @@ class MCPServer: ObservableObject {
                     ],
                     "required": ["email"]
                 ]
+            ],
+            [
+                "name": "device_runtime",
+                "description": "Inspect, control, and automate Android devices (physical & emulator via ADB) and iOS Simulators (via simctl). Operations: status, list_devices, start, run, stop, tap, swipe, type_text, key_event, screenshot, launch_app, install_app, adb_shell.",
+                "inputSchema": [
+                    "type": "object",
+                    "properties": [
+                        "operation": ["type": "string", "description": "Operation: status, list_devices, start, run, stop, tap, swipe, type_text, key_event, screenshot, launch_app, install_app, adb_shell"],
+                        "device_id": ["type": "string", "description": "Target device serial or UDID"],
+                        "x": ["type": "integer", "description": "X coordinate for tap or swipe start"],
+                        "y": ["type": "integer", "description": "Y coordinate for tap or swipe start"],
+                        "x2": ["type": "integer", "description": "X2 coordinate for swipe end"],
+                        "y2": ["type": "integer", "description": "Y2 coordinate for swipe end"],
+                        "duration": ["type": "integer", "description": "Swipe duration in ms"],
+                        "text": ["type": "string", "description": "Text to type or fallback payload"],
+                        "key": ["type": "string", "description": "Key code or name (HOME, BACK, ENTER, POWER, RECENT)"],
+                        "package_name": ["type": "string", "description": "App package name or bundle ID"],
+                        "file_path": ["type": "string", "description": "Screenshot destination path or APK/app path to install"],
+                        "command": ["type": "string", "description": "ADB shell command to execute"]
+                    ],
+                    "required": ["operation"]
+                ]
             ]
         ]
         
@@ -506,6 +528,26 @@ class MCPServer: ObservableObject {
                 result = try await executeGetDiagnostics(args)
             case "microcode_run_cell":
                 result = try await executeRunCell(args, sandbox: sandbox)
+            case "device_runtime":
+                let op = args["operation"] as? String ?? "status"
+                let devId = args["device_id"] as? String
+                let x = (args["x"] as? NSNumber)?.intValue
+                let y = (args["y"] as? NSNumber)?.intValue
+                let x2 = (args["x2"] as? NSNumber)?.intValue
+                let y2 = (args["y2"] as? NSNumber)?.intValue
+                let dur = (args["duration"] as? NSNumber)?.intValue
+                let txt = args["text"] as? String
+                let key = args["key"] as? String
+                let pkg = args["package_name"] as? String
+                let path = args["file_path"] as? String
+                let cmd = args["command"] as? String
+                result = try await DeviceRuntimeService.shared.executeForAgent(
+                    operation: op,
+                    workspacePath: workspacePath,
+                    deviceID: devId,
+                    x: x, y: y, x2: x2, y2: y2, duration: dur,
+                    text: txt, key: key, packageName: pkg, filePath: path, command: cmd
+                )
             default:
                 return MCPResponse(id: request.id, error: .custom("Unknown tool: \(name)"))
             }
@@ -1113,6 +1155,22 @@ class MCPServer: ObservableObject {
             return data
         }
         
+        // Handle MCP SSE Handshake for Google Gemini Spark & Claude Web
+        if (path.hasPrefix("/v1/mcp/sse") || path == "/v1/mcp" || path.hasPrefix("/v1/mcp?")) && method == "GET" {
+            let sessionId = UUID().uuidString
+            let endpointPayload = "event: endpoint\r\ndata: /v1/mcp/message?sessionId=\(sessionId)\r\n\r\n"
+            let httpResp = "HTTP/1.1 200 OK\r\nAccess-Control-Allow-Origin: *\r\nContent-Type: text/event-stream\r\nCache-Control: no-cache\r\nConnection: close\r\nContent-Length: \(endpointPayload.utf8.count)\r\n\r\n\(endpointPayload)"
+            return httpResp.data(using: .utf8) ?? Data()
+        }
+        
+        // Handle MCP SSE Message Dispatch
+        if path.hasPrefix("/v1/mcp/message") && method == "POST" {
+            let mcpRespString = await self.handleRequest(bodyString)
+            let ssePayload = "event: message\r\ndata: \(mcpRespString)\r\n\r\n"
+            let httpResp = "HTTP/1.1 200 OK\r\nAccess-Control-Allow-Origin: *\r\nContent-Type: text/event-stream\r\nCache-Control: no-cache\r\nConnection: close\r\nContent-Length: \(ssePayload.utf8.count)\r\n\r\n\(ssePayload)"
+            return httpResp.data(using: .utf8) ?? Data()
+        }
+
         if path.hasPrefix("/v1/mcp") && method == "POST" {
             let mcpRespString = await self.handleRequest(bodyString)
             let respBody = mcpRespString.data(using: .utf8) ?? Data()
@@ -1132,6 +1190,15 @@ class MCPServer: ObservableObject {
         if logs.count > 200 { logs.removeFirst(logs.count - 200) }
     }
     
+
+    // MARK: - Gemini Spark & Dotmini Cloud MCP Helpers
+
+    func getGeminiSparkURL() -> String {
+        let token = UserDefaults.standard.string(forKey: "dotmini_cloud_token") ?? "mc_live_\(String(UUID().uuidString.prefix(8).lowercased()))"
+        UserDefaults.standard.set(token, forKey: "dotmini_cloud_token")
+        return "https://api.dotmini.net/v1/mcp?token=\(token)"
+    }
+
     // MARK: - Encode Response
     
     private func encodeResponse(_ response: MCPResponse) -> String {
