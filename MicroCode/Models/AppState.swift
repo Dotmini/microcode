@@ -1247,6 +1247,8 @@ class AppState: ObservableObject {
         let normalizedAI = AIModelCatalog.shared.normalizedSelection(provider: aiProvider, model: aiModel)
         aiProvider = normalizedAI.provider
         aiModel = normalizedAI.model
+        defaults.set(aiProvider, forKey: "aiProvider")
+        defaults.set(aiModel, forKey: "aiModel")
 
         // Set default aiKeyMode only when not previously configured
         let savedKeyMode = defaults.string(forKey: "aiKeyMode")

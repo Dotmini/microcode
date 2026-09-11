@@ -73,12 +73,14 @@ final class AIModelCatalog: ObservableObject {
     func normalizedSelection(provider: String, model: String) -> (provider: String, model: String) {
         var targetModel = model
         let lower = model.lowercased()
-        if lower == "deepseek-v4" || lower == "deepseek-chat-v4" || lower == "deepseek" || lower == "deepseek-v4-flash" {
+        if lower == "deepseek-v4" || lower == "deepseek-chat-v4" || lower == "deepseek" || lower == "deepseek-v4-flash" || lower == "deepseek-flash" || lower == "deepseek flash" {
             targetModel = "deepseek-chat"
-        } else if lower == "deepseek-v4-pro" || lower == "deepseek-r1" {
+        } else if lower == "deepseek-v4-pro" || lower == "deepseek-r1" || lower == "deepseek reasoner" {
             targetModel = "deepseek-reasoner"
-        } else if lower == "gemini-flash" || lower == "gemini" {
+        } else if lower == "gemini-flash" || lower == "gemini" || lower == "gemini-3.7-flash" || lower == "gemini-3.6-flash" {
             targetModel = "gemini-2.5-flash"
+        } else if lower == "gemini-pro" || lower == "gemini-3.7-pro" {
+            targetModel = "gemini-2.5-pro"
         }
         
         if self.provider(provider)?.models.contains(where: { $0.id == targetModel }) == true {
@@ -235,14 +237,13 @@ final class AIModelCatalog: ObservableObject {
         
         liveModels.sort { a, b in
             let rank: (String) -> Int = { id in
-                if id == "gemini-3.7-flash" { return 100 }
-                if id == "gemini-3.6-flash" { return 95 }
-                if id == "gemini-2.5-pro" { return 90 }
-                if id == "gemini-2.5-flash" { return 85 }
-                if id == "gemini-2.0-flash" { return 80 }
-                if id == "gemini-1.5-pro" { return 70 }
-                if id.contains("3.") { return 65 }
-                if id.contains("2.5") { return 60 }
+                if id == "gemini-2.5-pro" { return 100 }
+                if id == "gemini-2.5-flash" { return 95 }
+                if id == "gemini-2.0-flash" { return 90 }
+                if id == "gemini-1.5-pro" { return 80 }
+                if id == "gemini-1.5-flash" { return 75 }
+                if id.contains("2.5") { return 70 }
+                if id.contains("2.0") { return 65 }
                 return 10
             }
             return rank(a.id) > rank(b.id)
@@ -298,7 +299,7 @@ final class AIModelCatalog: ObservableObject {
         var liveModels: [AIModelDefinition] = []
         for item in list {
             guard let mid = item["id"] as? String else { continue }
-            let badge = mid.contains("reasoner") ? "REASONING" : (mid.contains("flash") ? "FAST" : "CHAT")
+            let badge = mid.contains("reasoner") ? "REASONING" : "CHAT"
             let name = mid == "deepseek-reasoner" ? "DeepSeek R1 Reasoner" : (mid == "deepseek-chat" ? "DeepSeek V3 Chat" : Self.formatModelName(mid))
             liveModels.append(AIModelDefinition(id: mid, name: name, provider: "deepseek", badge: badge))
         }
@@ -307,7 +308,6 @@ final class AIModelCatalog: ObservableObject {
             let rank: (String) -> Int = { id in
                 if id == "deepseek-chat" { return 100 }
                 if id == "deepseek-reasoner" { return 95 }
-                if id == "deepseek-flash" { return 90 }
                 return 10
             }
             return rank(a.id) > rank(b.id)
@@ -379,14 +379,12 @@ final class AIModelCatalog: ObservableObject {
     public static func formatModelName(_ id: String) -> String {
         let clean = id.replacingOccurrences(of: "models/", with: "")
         if clean == "gemini-2.5-pro" { return "Gemini 2.5 Pro" }
-        if clean == "gemini-2.5-flash" { return "Gemini 2.5 Flash" }
-        if clean == "gemini-3.7-flash" { return "Gemini 3.7 Flash" }
+        if clean == "gemini-2.5-flash" || clean == "gemini-3.7-flash" || clean == "gemini-3.6-flash" { return "Gemini 2.5 Flash" }
         if clean == "gemini-2.0-flash" { return "Gemini 2.0 Flash" }
         if clean == "gemini-1.5-pro" { return "Gemini 1.5 Pro" }
         if clean == "gemini-1.5-flash" { return "Gemini 1.5 Flash" }
         if clean == "deepseek-reasoner" { return "DeepSeek R1 Reasoner" }
-        if clean == "deepseek-chat" { return "DeepSeek V3 Chat" }
-        if clean == "deepseek-flash" { return "DeepSeek Flash" }
+        if clean == "deepseek-chat" || clean == "deepseek-flash" { return "DeepSeek V3 Chat" }
         if clean == "claude-3-7-sonnet" { return "Claude 3.7 Sonnet" }
         if clean == "claude-3-5-sonnet" { return "Claude 3.5 Sonnet" }
         if clean == "claude-3-5-haiku" { return "Claude 3.5 Haiku" }

@@ -845,9 +845,12 @@ class AgentService: ObservableObject {
             )
         }
         
-        let detectedProvider = StreamableAIProvider(rawValue: provider) ?? StreamableAIProvider.detect(from: model)
+        let normalizedAI = AIModelCatalog.shared.normalizedSelection(provider: provider, model: model)
+        let resolvedProvider = normalizedAI.provider
+        let resolvedModel = normalizedAI.model
+        let detectedProvider = StreamableAIProvider(rawValue: resolvedProvider) ?? StreamableAIProvider.detect(from: resolvedModel)
         lastProvider = detectedProvider.rawValue
-        lastModel = model
+        lastModel = resolvedModel
         
         if !isChatMode {
             await MCPClient.shared.ensureConnected(workspacePath: toolBox.workspaceRoot)
@@ -868,7 +871,7 @@ class AgentService: ObservableObject {
                 objective: content,
                 workspace: toolBox.workspaceRoot ?? "",
                 provider: detectedProvider.rawValue,
-                model: model,
+                model: resolvedModel,
                 tools: toolNames,
                 skills: AgentSkillsStore.shared.enabledSkillIds(),
                 mcpServers: MCPClient.shared.isConnected ? ["local"] : []
@@ -886,7 +889,7 @@ class AgentService: ObservableObject {
         let optimizedSystemPrompt = buildSystemPrompt(
             for: content,
             provider: detectedProvider,
-            model: model,
+            model: resolvedModel,
             queryEmbedding: queryEmbedding
         )
         
@@ -944,7 +947,7 @@ class AgentService: ObservableObject {
                         systemPrompt: optimizedSystemPrompt,
                         conversationHistory: history,
                         provider: detectedProvider,
-                        model: model,
+                        model: resolvedModel,
                         apiKey: apiKey,
                         tools: toolSchemas,
                         onToken: { token in
@@ -981,7 +984,7 @@ class AgentService: ObservableObject {
                         messages: syncMessages,
                         systemPrompt: optimizedSystemPrompt,
                         provider: detectedProvider,
-                        model: model,
+                        model: resolvedModel,
                         apiKey: apiKey,
                         tools: toolSchemas
                     )
@@ -1502,7 +1505,7 @@ class AgentService: ObservableObject {
         // Update token stats
         let inputTokens = tokenOptimizer.estimateTokens(optimizedSystemPrompt) + history.reduce(0) { $0 + tokenOptimizer.estimateTokens($1.content) }
         let outputTokens = tokenOptimizer.estimateTokens(finalText)
-        tokenOptimizer.recordUsage(provider: detectedProvider.rawValue, model: model, inputTokens: inputTokens, outputTokens: outputTokens)
+        tokenOptimizer.recordUsage(provider: detectedProvider.rawValue, model: resolvedModel, inputTokens: inputTokens, outputTokens: outputTokens)
         
         if terminationNotice == nil {
             logActivity(.done, "Completed (\(iteration) iterations, \(allToolResults.count) tools, ~\(inputTokens + outputTokens) tokens)")
