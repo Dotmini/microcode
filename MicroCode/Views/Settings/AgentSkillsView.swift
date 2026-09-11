@@ -68,7 +68,7 @@ final class AgentSkillsStore: ObservableObject {
         let fm = FileManager.default
         let home = NSHomeDirectory()
         
-        let searchRoots = [
+        var searchRoots = [
             "\(home)/.agents/skills",
             "\(home)/.codex/skills",
             "\(home)/.codex/plugins/cache",
@@ -76,6 +76,26 @@ final class AgentSkillsStore: ObservableObject {
             "\(home)/.gemini/config/plugins",
             "\(home)/.gemini/antigravity/builtin/skills"
         ]
+        
+        // Scan active workspace and external volumes for project-specific skills
+        if let ws = AgentToolBox.shared.workspaceRoot, !ws.isEmpty {
+            searchRoots.append("\(ws)/.skills")
+            searchRoots.append("\(ws)/.agents/skills")
+            searchRoots.append("\(ws)/skills")
+        }
+        
+        // Scan mounted External SSD volumes (e.g. /Volumes/MAC, /Volumes/MicroCodeBuild)
+        if let volContents = try? fm.contentsOfDirectory(atPath: "/Volumes") {
+            for vol in volContents where !vol.starts(with: ".") {
+                let volPath = "/Volumes/\(vol)"
+                if fm.fileExists(atPath: "\(volPath)/.agents/skills") {
+                    searchRoots.append("\(volPath)/.agents/skills")
+                }
+                if fm.fileExists(atPath: "\(volPath)/skills") {
+                    searchRoots.append("\(volPath)/skills")
+                }
+            }
+        }
         
         var foundPaths: [String] = []
         let ignoredDirectoryNames: Set<String> = [

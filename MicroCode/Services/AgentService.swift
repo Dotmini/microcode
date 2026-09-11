@@ -913,6 +913,8 @@ class AgentService: ObservableObject {
         var usedPostMutationVerificationFallback = false
         var usedFollowThroughRecovery = false
         var kernelRecoveryCount = 0
+        var followThroughNagCount = 0
+        var recentAssistantOutputs: [String] = []
         var kernelVerified = false
 
         while toolIterationLimit.map({ iteration < $0 }) ?? true {
@@ -995,7 +997,14 @@ class AgentService: ObservableObject {
                         if finalText.isEmpty {
                             finalText = streamedText
                         } else if !finalText.contains(streamedText) {
-                            finalText += "\n\n" + streamedText
+                            let incomingLines = streamedText.components(separatedBy: .newlines)
+                            let newLines = incomingLines.filter { line in
+                                let trimmed = line.trimmingCharacters(in: .whitespacesAndNewlines)
+                                return !trimmed.isEmpty && !finalText.contains(trimmed)
+                            }
+                            if !newLines.isEmpty {
+                                finalText += "\n\n" + newLines.joined(separator: "\n")
+                            }
                         }
                     }
                     
@@ -1220,16 +1229,26 @@ class AgentService: ObservableObject {
                         break
                     }
 
+                    // Circuit Breaker: Detect repetitive loops across recent assistant responses
+                    if isRepetitiveOutput(streamedText, previousOutputs: recentAssistantOutputs) {
+                        logActivity(.info, "Repetition loop detected in model output: breaking out of autonomous monologue cycle.")
+                        kernelVerified = true
+                        break
+                    }
+                    recentAssistantOutputs.append(streamedText)
+
                     // If the model monologued intentions without calling tools, OR native work was promised but never executed,
-                    // provide autonomous harness follow-through attempts (up to 8 times)
+                    // provide autonomous harness follow-through attempts (strictly capped at 2 attempts per run)
                     let hasUnfinishedIntent = containsUnfinishedActionIntention(streamedText)
                     if !isChatMode,
                        (hasUnfinishedIntent || (nativeWorkWasPromised && !nativeWorkWasExecuted)),
-                       kernelRecoveryCount < 8,
+                       followThroughNagCount < 2,
+                       kernelRecoveryCount < 4,
                        kernelResponse?.directive.action != "blocked" {
+                        followThroughNagCount += 1
                         kernelRecoveryCount += 1
                         usedFollowThroughRecovery = true
-                        logActivity(.info, "Harness follow-through: model stated intention without tool call (attempt \(kernelRecoveryCount)/8). Auto-prompting immediate tool execution...")
+                        logActivity(.info, "Harness follow-through: model stated intention without tool call (attempt \(followThroughNagCount)/2). Auto-prompting immediate tool execution...")
                         if kernelResponse?.directive.action == "retry",
                            let delay = kernelResponse?.directive.retryAfterMs {
                             currentToolExecution = "Waiting to retry from the durable checkpoint..."
@@ -1539,7 +1558,13 @@ class AgentService: ObservableObject {
     }
 
     private func containsUnfinishedActionIntention(_ text: String) -> Bool {
-        let lower = text.lowercased()
+        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        // If the text is substantive (> 280 chars) or contains code blocks or markdown lists,
+        // it is a substantive explanation/answer, not an incomplete monologue of intentions.
+        if trimmed.count > 280 || trimmed.contains("```") {
+            return false
+        }
+        let lower = trimmed.lowercased()
         let actionPhrases = [
             "let me read", "let me check", "let me inspect", "let me get", "let me look",
             "let me find", "let me search", "let me write", "let me create", "let me update",
@@ -1552,9 +1577,45 @@ class AgentService: ObservableObject {
             "writing the", "reading the", "executing the", "inspecting the",
             "then write", "then build", "then remove", "next step", "next, i",
             "consolidating", "consolidate",
-            "จะเริ่ม", "กำลังอ่าน", "กำลังเขียน", "ขอดึง", "ขอตรวจ", "ต่อไปจะ", "จะทำการ", "จะรัน"
+            "จะเริ่ม", "กำลังอ่าน", "กำลังเขียน", "ขอดึง", "ต่อไปจะ", "จะทำการ", "จะรัน"
         ]
         return actionPhrases.contains(where: { lower.contains($0) })
+    }
+
+    /// Circuit breaker: detects if the model has entered an echo-chamber / repetition loop
+    private func isRepetitiveOutput(_ text: String, previousOutputs: [String]) -> Bool {
+        let clean = text.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        guard !clean.isEmpty else { return false }
+        
+        // 1. Direct exact or substring match with any previous response in current session
+        for prev in previousOutputs {
+            let prevClean = prev.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+            if prevClean == clean {
+                return true
+            }
+            if clean.count > 20 && prevClean.count > 20 {
+                if prevClean.contains(clean) || clean.contains(prevClean) {
+                    return true
+                }
+            }
+        }
+        
+        // 2. Sentence-level recurrence detection (if sentences repeat across multiple turns)
+        let sentences = text.components(separatedBy: CharacterSet(charactersIn: "\n.。"))
+            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() }
+            .filter { $0.count > 12 }
+        
+        var repeatedCount = 0
+        for sentence in sentences {
+            if previousOutputs.contains(where: { $0.lowercased().contains(sentence) }) {
+                repeatedCount += 1
+            }
+        }
+        if repeatedCount >= 2 || (sentences.count == 1 && repeatedCount >= 1) {
+            return true
+        }
+        
+        return false
     }
     
     // MARK: - Streaming Message Update & 30ms Coalesced Throttle Buffer

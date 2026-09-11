@@ -208,11 +208,36 @@ class AgentToolBox: ObservableObject {
     
     private func validateSandbox(_ path: String) throws {
         guard let root = workspaceRoot else { return } // No workspace = no restriction
-        let resolved = (path as NSString).standardizingPath
-        let rootResolved = (root as NSString).standardizingPath
-        guard resolved.hasPrefix(rootResolved) || resolved.hasPrefix("/tmp") else {
-            throw ToolBoxError.executionFailed("Path '\(path)' is outside the workspace. Access denied.")
+        let resolved = URL(fileURLWithPath: (path as NSString).standardizingPath).resolvingSymlinksInPath().path
+        let rootResolved = URL(fileURLWithPath: (root as NSString).standardizingPath).resolvingSymlinksInPath().path
+        
+        // 1. Within workspace root
+        if resolved.hasPrefix(rootResolved) { return }
+        
+        // 2. Temp and cache directories
+        if resolved.hasPrefix("/tmp") || resolved.hasPrefix("/private/tmp") || resolved.hasPrefix("/var/folders") || resolved.hasPrefix(NSTemporaryDirectory()) {
+            return
         }
+        
+        // 3. External SSD / mounted volumes (e.g. /Volumes/MAC, /Volumes/MicroCodeBuild, /Volumes/MicroCodeScratch)
+        if resolved.hasPrefix("/Volumes/") {
+            return
+        }
+        
+        // 4. Global agent skills, Antigravity configs, and toolchain caches
+        let home = NSHomeDirectory()
+        let allowedAgentPaths = [
+            "\(home)/.gemini",
+            "\(home)/.agents",
+            "\(home)/.codex",
+            "\(home)/.cargo",
+            "\(home)/.gradle"
+        ]
+        for allowed in allowedAgentPaths {
+            if resolved.hasPrefix(allowed) { return }
+        }
+        
+        throw ToolBoxError.executionFailed("Path '\(path)' is outside the authorized workspace and volumes. Access denied.")
     }
     
     // MARK: - Tool Descriptions (for prompt injection)
@@ -267,7 +292,7 @@ struct AgentPlanTool: AgentTool {
         ToolParameter(name: "success", type: "boolean", description: "Whether the node verification passed", required: false)
     ]
 
-    private struct InputNode: Codable {
+    private struct InputNode: Decodable {
         let id: String
         let title: String
         let description: String?
@@ -275,6 +300,48 @@ struct AgentPlanTool: AgentTool {
         let verification: String?
         let required_tools: [String]?
         let owner: String?
+
+        enum CodingKeys: String, CodingKey {
+            case id, title, name, task, step, description, desc, dependencies, deps, depends_on, after, verification, required_tools, owner
+        }
+
+        init(from decoder: Decoder) throws {
+            let container = try decoder.container(keyedBy: CodingKeys.self)
+            if let stringID = try? container.decode(String.self, forKey: .id) {
+                self.id = stringID
+            } else if let intID = try? container.decode(Int.self, forKey: .id) {
+                self.id = String(intID)
+            } else {
+                self.id = UUID().uuidString
+            }
+
+            self.title = (try? container.decode(String.self, forKey: .title))
+                ?? (try? container.decode(String.self, forKey: .name))
+                ?? (try? container.decode(String.self, forKey: .task))
+                ?? (try? container.decode(String.self, forKey: .step))
+                ?? "Task"
+
+            self.description = (try? container.decode(String.self, forKey: .description))
+                ?? (try? container.decode(String.self, forKey: .desc))
+
+            if let deps = try? container.decode([String].self, forKey: .dependencies) {
+                self.dependencies = deps
+            } else if let intDeps = try? container.decode([Int].self, forKey: .dependencies) {
+                self.dependencies = intDeps.map { String($0) }
+            } else if let deps = try? container.decode([String].self, forKey: .deps) {
+                self.dependencies = deps
+            } else if let intDeps = try? container.decode([Int].self, forKey: .deps) {
+                self.dependencies = intDeps.map { String($0) }
+            } else if let deps = try? container.decode([String].self, forKey: .depends_on) {
+                self.dependencies = deps
+            } else {
+                self.dependencies = []
+            }
+
+            self.verification = try? container.decode(String.self, forKey: .verification)
+            self.required_tools = try? container.decode([String].self, forKey: .required_tools)
+            self.owner = try? container.decode(String.self, forKey: .owner)
+        }
     }
 
     func execute(params: [String: Any]) async throws -> String {
@@ -284,40 +351,57 @@ struct AgentPlanTool: AgentTool {
         let action = (params["action"] as? String ?? "").lowercased()
         switch action {
         case "set":
-            guard let json = params["plan_json"] as? String,
-                  let data = json.data(using: .utf8),
-                  let input = try? JSONDecoder().decode([InputNode].self, from: data),
-                  !input.isEmpty else {
-                throw ToolBoxError.invalidParams("plan_json must be a non-empty JSON array")
+            let rawInput = params["plan_json"] ?? params["plan"] ?? params["nodes"]
+            let data: Data?
+            if let str = rawInput as? String {
+                data = str.data(using: .utf8)
+            } else if let obj = rawInput {
+                data = try? JSONSerialization.data(withJSONObject: obj)
+            } else {
+                data = nil
             }
+            guard let validData = data,
+                  let input = try? JSONDecoder().decode([InputNode].self, from: validData),
+                  !input.isEmpty else {
+                throw ToolBoxError.invalidParams("plan_json must be a non-empty array of plan nodes")
+            }
+
+            let allIDs = Set(input.map { $0.id })
             let nodes = input.map { node in
-                AgentKernelPlanNode(
+                let validDeps = (node.dependencies ?? []).filter { dep in
+                    allIDs.contains(dep) && dep != node.id
+                }
+                return AgentKernelPlanNode(
                     id: node.id,
                     title: node.title,
                     description: node.description ?? "",
-                    dependencies: node.dependencies ?? [],
-                    verification: node.verification ?? "",
+                    dependencies: validDeps,
+                    verification: (node.verification?.isEmpty == false) ? node.verification! : "Deterministic verification",
                     requiredTools: node.required_tools ?? [],
                     owner: node.owner
                 )
             }
-            guard let response = await AgentKernelClient.shared.setPlan(runID: runID, nodes: nodes) else {
-                throw ToolBoxError.executionFailed("Rust agent kernel did not accept the plan")
+            if let response = await AgentKernelClient.shared.setPlan(runID: runID, nodes: nodes) {
+                try await mirrorTaskMarkdown(response.run.plan)
+                let assignments = response.run.plan.compactMap { node -> String? in
+                    guard response.directive.readyNodes.contains(node.id),
+                          let owner = node.owner,
+                          owner != "main" else { return nil }
+                    return "\(node.id)→\(owner)"
+                }
+                let delegation = assignments.isEmpty
+                    ? ""
+                    : ". Delegate independent ready work with invoke_subagent: \(assignments.joined(separator: ", "))"
+                return "Durable plan accepted. Ready nodes: \(response.directive.readyNodes.joined(separator: ", "))\(delegation)"
+            } else {
+                try await mirrorTaskMarkdown(nodes)
+                return "Plan accepted and mirrored to .microcode/task.md"
             }
-            try await mirrorTaskMarkdown(response.run.plan)
-            let assignments = response.run.plan.compactMap { node -> String? in
-                guard response.directive.readyNodes.contains(node.id),
-                      let owner = node.owner,
-                      owner != "main" else { return nil }
-                return "\(node.id)→\(owner)"
-            }
-            let delegation = assignments.isEmpty
-                ? ""
-                : ". Delegate independent ready work with invoke_subagent: \(assignments.joined(separator: ", "))"
-            return "Durable plan accepted. Ready nodes: \(response.directive.readyNodes.joined(separator: ", "))\(delegation)"
 
         case "complete":
-            guard let nodeID = params["node_id"] as? String, !nodeID.isEmpty else {
+            let rawNodeID = params["node_id"] ?? params["id"]
+            let nodeID = (rawNodeID as? String) ?? (rawNodeID != nil ? String(describing: rawNodeID!) : "")
+            guard !nodeID.isEmpty else {
                 throw ToolBoxError.invalidParams("node_id is required")
             }
             let success = params["success"] as? Bool ?? false
@@ -1008,10 +1092,48 @@ struct ShellCommandTool: AgentTool {
         env["PATH"] = "\(extraPaths):\(currentPath)"
         env["TERM"] = "xterm-256color"
         env["LANG"] = "en_US.UTF-8"
-        process.environment = env
-        
-        let targetCwd = (params["cwd"] as? String) ?? FileManager.default.currentDirectoryPath
+        // Auto-resolve working directory (cwd)
+        let currentWorkspace = await MainActor.run { AgentToolBox.shared.workspaceRoot }
+        let rawCwd = params["cwd"] as? String
+        let resolvedCwd: String
+        if let rawCwd = rawCwd, !rawCwd.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            if rawCwd.hasPrefix("/") {
+                resolvedCwd = rawCwd
+            } else if rawCwd.hasPrefix("~") {
+                resolvedCwd = (rawCwd as NSString).expandingTildeInPath
+            } else if let root = currentWorkspace {
+                resolvedCwd = (root as NSString).appendingPathComponent(rawCwd)
+            } else {
+                resolvedCwd = rawCwd
+            }
+        } else {
+            resolvedCwd = currentWorkspace ?? FileManager.default.currentDirectoryPath
+        }
+        let standardizedCwd = URL(fileURLWithPath: (resolvedCwd as NSString).standardizingPath).resolvingSymlinksInPath().path
+        let targetCwd = standardizedCwd
         process.currentDirectoryURL = URL(fileURLWithPath: targetCwd)
+        
+        // External SSD & Volume Scratch Acceleration:
+        // When working on an external SSD volume (/Volumes/*), redirect Gradle/Cargo/TMPDIR
+        // caches to the external drive so the internal SSD is never exhausted (0 bytes free).
+        if standardizedCwd.hasPrefix("/Volumes/") {
+            let comps = (standardizedCwd as NSString).pathComponents
+            if comps.count >= 3 {
+                let volumeMount = "/" + comps[1] + "/" + comps[2]
+                let extCacheDir = "\(volumeMount)/.microcode_cache"
+                try? FileManager.default.createDirectory(atPath: "\(extCacheDir)/tmp", withIntermediateDirectories: true)
+                try? FileManager.default.createDirectory(atPath: "\(extCacheDir)/gradle", withIntermediateDirectories: true)
+                
+                if env["GRADLE_USER_HOME"] == nil {
+                    env["GRADLE_USER_HOME"] = "\(extCacheDir)/gradle"
+                }
+                if env["TMPDIR"] == nil || env["TMPDIR"]?.hasPrefix("/var") == true || env["TMPDIR"]?.hasPrefix("/tmp") == true {
+                    env["TMPDIR"] = "\(extCacheDir)/tmp"
+                }
+            }
+        }
+        
+        process.environment = env
         
         let stdoutPipe = Pipe()
         let stderrPipe = Pipe()
