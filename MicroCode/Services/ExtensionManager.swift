@@ -59,6 +59,8 @@ struct ExtensionManifest: Codable, Identifiable {
         case rust = "rust"
         case swift = "swift"
         case javascript = "javascript"
+        case wasm = "wasm"
+        case process = "process"
     }
 }
 
@@ -86,10 +88,12 @@ class ExtensionManager: ObservableObject {
     
     private let extensionsDirectory: URL
     private let officialExtensionsDirectory: URL
+
+    var userExtensionsDirectory: URL { extensionsDirectory }
     
     init() {
         let appSupport = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first!
-        extensionsDirectory = appSupport.appendingPathComponent("Project IDX/Extensions", isDirectory: true)
+        extensionsDirectory = appSupport.appendingPathComponent("MicroCode/Extensions", isDirectory: true)
         officialExtensionsDirectory = Bundle.main.bundleURL.appendingPathComponent("Contents/Resources/Extensions", isDirectory: true)
         
         // Create extensions directory if needed
@@ -286,23 +290,9 @@ class ExtensionManager: ObservableObject {
         let dirOfficial = await loadExtensionsFromDirectory(officialExtensionsDirectory, isOfficial: true)
         extensions.append(contentsOf: dirOfficial)
         
-        // 2. Add built-in defaults if not already present
-        let existingIDs = Set(extensions.map(\.id))
-        for def in Self.defaultOfficialExtensions {
-            if !existingIDs.contains(def.id) {
-                extensions.append(
-                    InstalledExtension(
-                        id: def.id,
-                        manifest: def,
-                        path: URL(fileURLWithPath: "/builtin/\(def.id)"),
-                        isEnabled: enabledExtensions.contains(def.id) || true, // default enabled
-                        isOfficial: true
-                    )
-                )
-            }
-        }
-        
-        // 3. Load user extensions
+        // 2. Load user extensions. Do not populate the page with a fake
+        // catalog: only extensions that exist on disk are shown as installed.
+        // A marketplace/catalog is a separate network-backed product surface.
         extensions.append(contentsOf: await loadExtensionsFromDirectory(extensionsDirectory, isOfficial: false))
         
         await MainActor.run {
@@ -345,28 +335,15 @@ class ExtensionManager: ObservableObject {
     // MARK: - Enable/Disable
     func toggleExtension(_ id: String) {
         if enabledExtensions.contains(id) {
-            enabledExtensions.remove(id)
+            setEnabled(id, enabled: false)
         } else {
             // Check permissions before enabling
             if checkPermissions(for: id) {
-                enabledExtensions.insert(id)
+                setEnabled(id, enabled: true)
             } else {
                 requestPermissions(for: id)
             }
         }
-        
-        // Update installed extensions
-        for i in installedExtensions.indices {
-            if installedExtensions[i].id == id {
-                installedExtensions[i].isEnabled = enabledExtensions.contains(id)
-            }
-        }
-        
-        // Save to UserDefaults
-        UserDefaults.standard.set(Array(enabledExtensions), forKey: "enabledExtensions")
-        
-        // Apply changes
-        applyExtensionChanges()
     }
     
     func setEnabled(_ id: String, enabled: Bool) {
@@ -384,6 +361,15 @@ class ExtensionManager: ObservableObject {
         
         UserDefaults.standard.set(Array(enabledExtensions), forKey: "enabledExtensions")
         applyExtensionChanges()
+        if enabled, let installedExtension = installedExtensions.first(where: { $0.id == id }) {
+            Task {
+                do {
+                    try await ExtensionHostService.shared.activate(installedExtension)
+                } catch {
+                    ExtensionHostService.shared.reportFailure(error.localizedDescription)
+                }
+            }
+        }
     }
     
     // MARK: - Install Extension (Universal)
@@ -393,6 +379,48 @@ class ExtensionManager: ObservableObject {
         } else {
             try await installStandardExtension(from: url)
         }
+    }
+
+    /// Creates a minimal, runnable Node extension outside the application
+    /// bundle. Community authors own this folder and can open it in any editor.
+    func createJavaScriptStarterExtension() async throws -> URL {
+        let slug = "community-extension-\(UUID().uuidString.prefix(8).lowercased())"
+        let destination = extensionsDirectory.appendingPathComponent(slug, isDirectory: true)
+        try FileManager.default.createDirectory(at: destination, withIntermediateDirectories: false)
+
+        let manifest = ExtensionManifest(
+            id: "community.\(slug)",
+            name: "My MicroCode Extension",
+            version: "0.1.0",
+            author: NSFullUserName(),
+            description: "A community extension for MicroCode.",
+            type: .command,
+            runtime: .javascript,
+            main: "extension.js",
+            icon: "puzzlepiece.extension",
+            repository: nil,
+            license: "MIT",
+            keywords: ["community"]
+        )
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
+        try encoder.encode(manifest).write(to: destination.appendingPathComponent("manifest.json"))
+        let source = """
+        // MicroCode extension host exposes a scoped VS Code-compatible API.
+        const vscode = require('vscode');
+
+        function activate(context) {
+          const command = vscode.commands.registerCommand('community.hello', () => {
+            vscode.window.showInformationMessage('Hello from your MicroCode extension.');
+          });
+          context.subscriptions.push(command);
+        }
+
+        module.exports = { activate };
+        """
+        try source.data(using: .utf8)?.write(to: destination.appendingPathComponent("extension.js"))
+        await loadExtensions()
+        return destination
     }
 
     // MARK: - Standard Install
@@ -531,14 +559,7 @@ class ExtensionManager: ObservableObject {
         
         // Auto-grant for demo purposes
         UserDefaults.standard.set(true, forKey: "ext_perm_\(id)")
-        enabledExtensions.insert(id)
-        
-        // Update UI
-        for i in installedExtensions.indices {
-            if installedExtensions[i].id == id {
-                installedExtensions[i].isEnabled = true
-            }
-        }
+        setEnabled(id, enabled: true)
     }
     
     // MARK: - Get Extensions by Type
@@ -582,4 +603,3 @@ struct VSCodeLanguage: Codable {
     let id: String
     let extensions: [String]?
 }
-

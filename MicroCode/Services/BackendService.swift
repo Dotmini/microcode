@@ -70,8 +70,9 @@ class BackendService {
         // OpenAI-compatible Dotmini proxy as the native AI client.
         let defaults = UserDefaults.standard
         let proxyBaseURL = defaults.string(forKey: "dotminiProxyURL") ?? "https://api.dotmini.net/v1"
-        let proxyToken = defaults.string(forKey: "dotminiLicenseKey")
+        let proxyToken = defaults.string(forKey: "cloudGPUAuthToken")
             ?? defaults.string(forKey: "microRentToken")
+            ?? defaults.string(forKey: "dotminiLicenseKey")
             ?? ""
         let keyMode = defaults.string(forKey: "aiKeyMode") ?? "cloud"
         if keyMode == "cloud" {
@@ -429,14 +430,14 @@ class BackendService {
 
     // MARK: - Code Execution
 
-    func executeCode(code: String, language: String) async throws -> ExecutionOutput {
+    func executeCode(code: String, language: String, sessionId: String? = nil) async throws -> ExecutionOutput {
         let url = URL(string: "\(baseURL)/api/run/execute")!
-        let request = ExecuteCodeRequest(code: code, language: language, args: [], env: [:])
+        let request = ExecuteCodeRequest(code: code, language: language, args: [], env: [:], sessionId: sessionId)
         let response: ExecuteCodeResponse = try await post(url: url, body: request)
         return response.output
     }
     
-    func streamExecuteCode(code: String, language: String) -> AsyncThrowingStream<StreamEvent, Error> {
+    func streamExecuteCode(code: String, language: String, sessionId: String? = nil) -> AsyncThrowingStream<StreamEvent, Error> {
         return AsyncThrowingStream { continuation in
             let task = Task {
                 do {
@@ -447,7 +448,7 @@ class BackendService {
                     request.setValue("text/event-stream", forHTTPHeaderField: "Accept")
                     request.timeoutInterval = 300
                     
-                    let payload = ExecuteCodeRequest(code: code, language: language, args: [], env: [:])
+                    let payload = ExecuteCodeRequest(code: code, language: language, args: [], env: [:], sessionId: sessionId)
                     request.httpBody = try JSONEncoder().encode(payload)
                     
                     let (bytes, response) = try await session.bytes(for: request)
@@ -520,6 +521,32 @@ class BackendService {
         let request = StopExecutionRequest(executionId: executionId)
         let _: StatusResponse = try await post(url: url, body: request)
     }
+
+    // MARK: - Rosetta Hybrid Shared Memory
+
+    func getShmVariables(sessionId: String) async throws -> [ShmVariable] {
+        let url = URL(string: "\(baseURL)/api/shm/variables?session_id=\(sessionId)")!
+        let (data, _) = try await session.data(from: url)
+        let response = try JSONDecoder().decode(ShmVariablesResponse.self, from: data)
+        return response.variables
+    }
+
+    func sealShmVariable(sessionId: String, variableName: String) async throws -> Bool {
+        let url = URL(string: "\(baseURL)/api/shm/seal")!
+        let payload: [String: String] = ["session_id": sessionId, "variable_name": variableName]
+        let response: ShmSealResponse = try await post(url: url, body: payload)
+        return response.success
+    }
+
+    func executeInMemorySQL(sessionId: String, query: String) async throws -> String {
+        let url = URL(string: "\(baseURL)/api/sql/execute")!
+        let payload: [String: String] = ["session_id": sessionId, "query": query]
+        struct SqlResponse: Codable {
+            let result: String
+        }
+        let response: SqlResponse = try await post(url: url, body: payload)
+        return response.result
+    }
     // MARK: - Remote X Operations
 
     func connectRemote(config: RemoteConnectionConfig) async throws -> StatusResponse {
@@ -532,7 +559,8 @@ class BackendService {
             auth_type: config.authType.rawValue,
             password: config.password,
             key_path: config.keyPath,
-            connection_type: config.connectionType.rawValue
+            connection_type: config.connectionType.rawValue,
+            otp: config.otp.isEmpty ? nil : config.otp
         )
         return try await post(url: url, body: request)
     }
@@ -734,6 +762,7 @@ struct RemoteConnectRequest: Codable {
     let password: String
     let key_path: String
     let connection_type: String
+    let otp: String?
 }
 
 struct RemoteExecRequest: Codable {
@@ -1069,6 +1098,40 @@ struct ExecuteCodeRequest: Codable {
     let language: String
     let args: [String]
     let env: [String: String]
+    var sessionId: String? = nil
+
+    enum CodingKeys: String, CodingKey {
+        case code, language, args, env
+        case sessionId = "session_id"
+    }
+}
+
+struct ShmVariable: Codable, Identifiable {
+    var id: String { name }
+    let name: String
+    let shmName: String
+    let sizeBytes: Int
+    let dataType: String
+    let isReadOnly: Bool
+    let epoch: UInt64
+
+    enum CodingKeys: String, CodingKey {
+        case name
+        case shmName = "shm_name"
+        case sizeBytes = "size_bytes"
+        case dataType = "data_type"
+        case isReadOnly = "is_read_only"
+        case epoch
+    }
+}
+
+struct ShmVariablesResponse: Codable {
+    let variables: [ShmVariable]
+}
+
+struct ShmSealResponse: Codable {
+    let success: Bool
+    let message: String
 }
 
 struct ExecuteCodeResponse: Codable {

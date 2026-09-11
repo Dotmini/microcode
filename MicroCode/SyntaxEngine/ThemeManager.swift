@@ -112,11 +112,13 @@ public final class ThemeManager: @unchecked Sendable {
     /// Style cache for current theme
     private var styleCache: [SyntaxTokenType: TokenStyle] = [:]
     
-    /// Public initializer — creates an independent instance with all themes pre-registered.
-    /// Use this when you need isolated theme state (e.g., per-editor instances).
     public init() {
-        // Initialize with default dark theme
-        self.activeTheme = ThemeManager.createDefaultDarkTheme()
+        // Initialize with default dark theme (MicroCode Pro Dark)
+        let defaultDark = ThemeManager.createDefaultDarkTheme()
+        self.activeTheme = defaultDark
+        self.themeCache["default-dark"] = defaultDark
+        self.themeCache["dark"] = defaultDark
+        self.themeCache["xcodeDark"] = defaultDark
         
         // Register all AppThemes (Single Source of Truth)
         for themeCase in AppTheme.allCases {
@@ -126,7 +128,11 @@ public final class ThemeManager: @unchecked Sendable {
                 self.themeCache[theme.name] = theme
                 
                 // Keep default aliases for compatibility
-                if themeCase == .dark { self.themeCache["default-dark"] = theme }
+                if themeCase == .dark || themeCase == .xcodeDark {
+                    self.themeCache["default-dark"] = defaultDark
+                    self.themeCache["dark"] = defaultDark
+                    self.themeCache["xcodeDark"] = defaultDark
+                }
                 if themeCase == .light { self.themeCache["default-light"] = theme }
             }
         }
@@ -285,6 +291,9 @@ public final class ThemeManager: @unchecked Sendable {
             .parameter: ["identifier"],
             .constant: ["identifier"],
             .enumMember: ["type"],
+            .preprocessor: ["annotation", "keyword"],
+            .punctuation: ["delimiter"],
+            .delimiter: ["punctuation"],
         ]
         
         // Try fallback keys
@@ -302,43 +311,43 @@ public final class ThemeManager: @unchecked Sendable {
     
     // MARK: - Built-in Themes
     
-    /// Creates the default dark theme (similar to VS Code Dark+)
+    /// Creates the default dark theme (MicroCode Apple Pro / Xcode Dark Aesthetic)
     public static func createDefaultDarkTheme() -> Theme {
         Theme(
             name: "default-dark",
-            displayName: "Dark+ (Default)",
+            displayName: "MicroCode Pro Dark",
             isDark: true,
-            editorBackground: "#1E1E1E",
-            editorForeground: "#D4D4D4",
-            editorSelection: "#264F78",
-            editorLineHighlight: "#2D2D2D",
-            editorCursor: "#AEAFAD",
-            editorGutter: "#1E1E1E",
-            editorGutterText: "#858585",
+            editorBackground: "#000000",
+            editorForeground: "#FFFFFF",
+            editorSelection: "#263342",
+            editorLineHighlight: "#111114",
+            editorCursor: "#FFFFFF",
+            editorGutter: "#000000",
+            editorGutterText: "#4A4A50",
             tokenColors: [
-                "keyword": TokenStyleConfig(foreground: "#569CD6"),
-                "keywordControl": TokenStyleConfig(foreground: "#C586C0"),
-                "keywordDeclaration": TokenStyleConfig(foreground: "#569CD6"),
-                "keywordModifier": TokenStyleConfig(foreground: "#569CD6"),
-                "keywordOperator": TokenStyleConfig(foreground: "#569CD6"),
-                "string": TokenStyleConfig(foreground: "#CE9178"),
-                "number": TokenStyleConfig(foreground: "#B5CEA8"),
-                "boolean": TokenStyleConfig(foreground: "#569CD6"),
-                "null": TokenStyleConfig(foreground: "#569CD6"),
-                "comment": TokenStyleConfig(foreground: "#6A9955", fontStyle: "italic"),
-                "commentDoc": TokenStyleConfig(foreground: "#6A9955", fontStyle: "italic"),
-                "commentBlock": TokenStyleConfig(foreground: "#6A9955", fontStyle: "italic"),
-                "type": TokenStyleConfig(foreground: "#4EC9B0"),
-                "function": TokenStyleConfig(foreground: "#DCDCAA"),
-                "identifier": TokenStyleConfig(foreground: "#9CDCFE"),
-                "variable": TokenStyleConfig(foreground: "#9CDCFE"),
-                "property": TokenStyleConfig(foreground: "#9CDCFE"),
-                "parameter": TokenStyleConfig(foreground: "#9CDCFE"),
-                "operator": TokenStyleConfig(foreground: "#D4D4D4"),
-                "punctuation": TokenStyleConfig(foreground: "#D4D4D4"),
-                "delimiter": TokenStyleConfig(foreground: "#D4D4D4"),
-                "annotation": TokenStyleConfig(foreground: "#DCDCAA"),
-                "preprocessor": TokenStyleConfig(foreground: "#C586C0"),
+                "keyword": TokenStyleConfig(foreground: "#FC5FA3"),
+                "keywordControl": TokenStyleConfig(foreground: "#FC5FA3"),
+                "keywordDeclaration": TokenStyleConfig(foreground: "#FC5FA3"),
+                "keywordModifier": TokenStyleConfig(foreground: "#FC5FA3"),
+                "keywordOperator": TokenStyleConfig(foreground: "#FC5FA3"),
+                "string": TokenStyleConfig(foreground: "#FC6A5D"),
+                "number": TokenStyleConfig(foreground: "#D0BF69"),
+                "boolean": TokenStyleConfig(foreground: "#FC5FA3"),
+                "null": TokenStyleConfig(foreground: "#FC5FA3"),
+                "comment": TokenStyleConfig(foreground: "#6C7986", fontStyle: "italic"),
+                "commentDoc": TokenStyleConfig(foreground: "#6C7986", fontStyle: "italic"),
+                "commentBlock": TokenStyleConfig(foreground: "#6C7986", fontStyle: "italic"),
+                "type": TokenStyleConfig(foreground: "#5DD8CE"),
+                "function": TokenStyleConfig(foreground: "#41A7FC"),
+                "identifier": TokenStyleConfig(foreground: "#FFFFFF"),
+                "variable": TokenStyleConfig(foreground: "#FFFFFF"),
+                "property": TokenStyleConfig(foreground: "#5DD8CE"),
+                "parameter": TokenStyleConfig(foreground: "#FFFFFF"),
+                "operator": TokenStyleConfig(foreground: "#FFFFFF"),
+                "punctuation": TokenStyleConfig(foreground: "#D1D1D6"),
+                "delimiter": TokenStyleConfig(foreground: "#E5E5EA"),
+                "annotation": TokenStyleConfig(foreground: "#FD8F3F"),
+                "preprocessor": TokenStyleConfig(foreground: "#FD8F3F"),
                 "escape": TokenStyleConfig(foreground: "#D7BA7D"),
             ]
         )

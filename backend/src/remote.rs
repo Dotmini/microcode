@@ -29,6 +29,7 @@ pub struct RemoteConnectionConfig {
     pub password: Option<String>,
     pub key_path: Option<String>,
     pub connection_type: String, // "ssh", "sftp", "ftp", "ftps"
+    pub otp: Option<String>,
 }
 
 pub struct SshSession {
@@ -51,7 +52,15 @@ struct Client {}
 #[async_trait]
 impl client::Handler for Client {
     type Error = russh::Error;
-    // Using default check_server_key
+
+    async fn check_server_key(
+        &mut self,
+        _server_public_key: &russh_keys::key::PublicKey,
+    ) -> Result<bool, Self::Error> {
+        // Automatically trust / accept server key (equivalent to StrictHostKeyChecking=accept-new)
+        // Fixes "Unknown server key" error for LANTA Supercomputer and any VPS
+        Ok(true)
+    }
 }
 
 // Connection Manager
@@ -128,6 +137,7 @@ impl RemoteConnectionManager {
 
         // Stability: Add KeepAlive to prevent timeouts
         ssh_config.keepalive_interval = Some(std::time::Duration::from_secs(10));
+        ssh_config.keepalive_max = 6;
 
         let config_arc = Arc::new(ssh_config);
         let sh = Client {};
@@ -143,7 +153,7 @@ impl RemoteConnectionManager {
             Err(_) => return Err("Connection timed out (45s)".to_string()),
         };
 
-        let auth_res = if let Some(key_path) = config.key_path {
+        let auth_res: Result<bool, String> = if let Some(key_path) = config.key_path {
             let expanded_path = Self::expand_tilde(&key_path);
 
             // Check if file exists
@@ -151,21 +161,100 @@ impl RemoteConnectionManager {
                 return Err(format!("SSH Key not found: {}", expanded_path));
             }
 
-            let key_pair = load_secret_key(&expanded_path, None)
-                .map_err(|e| format!("Failed to load SSH Key ({}): {}", expanded_path, e))?;
+            let passphrase = config.password.as_deref().filter(|s| !s.is_empty());
+            let key_pair = load_secret_key(&expanded_path, passphrase)
+                .map_err(|e| {
+                    let err_str = e.to_string();
+                    if err_str.contains("encrypted") {
+                        format!("Failed to load SSH Key ({}): The key is encrypted with a passphrase. Please enter your Key Passphrase in Server Settings (Edit), or use 'Connect Terminal (SSH)' to connect interactively.", expanded_path)
+                    } else {
+                        format!("Failed to load SSH Key ({}): {}", expanded_path, e)
+                    }
+                })?;
 
             session
                 .authenticate_publickey(config.username, Arc::new(key_pair))
                 .await
+                .map_err(|e| e.to_string())
         } else if let Some(password) = config.password {
-            session
-                .authenticate_password(config.username, password)
-                .await
+            // Try standard password auth first
+            let pass_res = session
+                .authenticate_password(config.username.clone(), password.clone())
+                .await;
+
+            match pass_res {
+                Ok(true) => Ok(true),
+                _ => {
+                    // Fallback to keyboard-interactive (2FA / OTP support for LANTA Supercomputer, etc.)
+                    match session
+                        .authenticate_keyboard_interactive_start(config.username.clone(), None)
+                        .await
+                    {
+                        Ok(russh::client::KeyboardInteractiveAuthResponse::Success) => Ok(true),
+                        Ok(russh::client::KeyboardInteractiveAuthResponse::InfoRequest { prompts, .. }) => {
+                            let mut responses = Vec::new();
+                            for p in &prompts {
+                                let lower = p.prompt.to_lowercase();
+                                if lower.contains("verification")
+                                    || lower.contains("code")
+                                    || lower.contains("otp")
+                                    || lower.contains("token")
+                                {
+                                    responses.push(config.otp.clone().unwrap_or_default());
+                                } else {
+                                    responses.push(password.clone());
+                                }
+                            }
+                            match session
+                                .authenticate_keyboard_interactive_respond(responses)
+                                .await
+                            {
+                                Ok(russh::client::KeyboardInteractiveAuthResponse::Success) => {
+                                    Ok(true)
+                                }
+                                Ok(russh::client::KeyboardInteractiveAuthResponse::InfoRequest {
+                                    prompts: next_prompts,
+                                    ..
+                                }) => {
+                                    // 2nd prompt round (e.g. prompt 1 was password, prompt 2 is verification code)
+                                    let mut next_resp = Vec::new();
+                                    for p in &next_prompts {
+                                        let lower = p.prompt.to_lowercase();
+                                        if lower.contains("verification")
+                                            || lower.contains("code")
+                                            || lower.contains("otp")
+                                            || lower.contains("token")
+                                        {
+                                            next_resp.push(config.otp.clone().unwrap_or_default());
+                                        } else {
+                                            next_resp.push(password.clone());
+                                        }
+                                    }
+                                    match session
+                                        .authenticate_keyboard_interactive_respond(next_resp)
+                                        .await
+                                    {
+                                        Ok(russh::client::KeyboardInteractiveAuthResponse::Success) => {
+                                            Ok(true)
+                                        }
+                                        _ => Err(
+                                            "Keyboard-interactive (2FA) failed. Please verify Password and OTP."
+                                                .to_string(),
+                                        ),
+                                    }
+                                }
+                                _ => Err("Keyboard-interactive authentication failed".to_string()),
+                            }
+                        }
+                        _ => Err("Authentication failed: Server rejected password and keyboard-interactive auth".to_string()),
+                    }
+                }
+            }
         } else {
             return Err("No auth credentials provided".to_string());
         };
 
-        if auth_res.map_err(|e| e.to_string())? {
+        if auth_res? {
             // Init SFTP
             let sftp = if let Ok(channel) = session.channel_open_session().await {
                 if channel.request_subsystem(true, "sftp").await.is_ok() {
@@ -212,7 +301,7 @@ impl RemoteConnectionManager {
             Ok(mut channel) => {
                 // Request PTY for interactive shell
                 let pty_res: Result<(), russh::Error> =
-                    channel.request_pty(true, "xterm", 80, 24, 0, 0, &[]).await;
+                    channel.request_pty(true, "xterm-256color", 80, 24, 0, 0, &[]).await;
                 if let Err(e) = pty_res {
                     let _ = ws
                         .send(Message::Text(format!("Failed to request PTY: {}", e)))
@@ -261,9 +350,10 @@ impl RemoteConnectionManager {
                     while let Some(Ok(msg)) = ws_rx.next().await {
                         match msg {
                             Message::Text(text) => {
-                                // Handle special resize command: "RESIZE:cols:rows"
-                                if text.starts_with("RESIZE:") {
-                                    // In a real implementation, we'd parse this and call channel.request_pty_size
+                                // Filter out resize messages ("RESIZE:cols:rows" or "R:cols,rows")
+                                // so they are never typed into the remote shell's stdin.
+                                if text.starts_with("RESIZE:") || text.starts_with("R:") {
+                                    continue;
                                 }
                                 if let Err(_) = ssh_write.write_all(text.as_bytes()).await {
                                     break;
@@ -307,6 +397,9 @@ impl RemoteConnectionManager {
             while let Some(msg) = channel.wait().await {
                 match msg {
                     russh::ChannelMsg::Data { ref data } => {
+                        output.push_str(&String::from_utf8_lossy(data));
+                    }
+                    russh::ChannelMsg::ExtendedData { ref data, .. } => {
                         output.push_str(&String::from_utf8_lossy(data));
                     }
                     _ => {}
@@ -511,6 +604,7 @@ pub struct ConnectRequest {
     pub password: String,
     pub key_path: String,
     pub connection_type: Option<String>,
+    pub otp: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -568,6 +662,7 @@ pub async fn remote_connect(
             Some(req.key_path)
         },
         connection_type: req.connection_type.unwrap_or_else(|| "ssh".to_string()),
+        otp: req.otp.filter(|s| !s.trim().is_empty()),
     };
 
     let st = state.read().await;

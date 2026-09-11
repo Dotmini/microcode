@@ -21,30 +21,42 @@ done
 # We assume Rust lib is at backend/target/debug/libmicrocode_embedded.a
 echo "🏗️ Building Swift frontend..."
 swift build -c debug \
-    -Xlinker -Lbackend/target/debug -Xlinker -lmicrocode_embedded \
+    -Xlinker -Lbackend/target/debug -Xlinker -L/Volumes/MicroCodeBuild/cargo-target/release -Xlinker -L/Volumes/MicroCodeBuild/cargo-target/debug -Xlinker -lmicrocode_embedded \
     -Xlinker -Lmicrocode_core/target/release \
-    -Xlinker -Lmicrocode_core/target/aarch64-apple-darwin/release -Xlinker -lmicrocode_core
+    -Xlinker -Lmicrocode_core/target/aarch64-apple-darwin/release -Xlinker -lmicrocode_core \
+    -Xlinker -framework -Xlinker SystemConfiguration \
+    -Xlinker -framework -Xlinker Security \
+    -Xlinker -framework -Xlinker CoreFoundation \
+    -Xlinker -headerpad_max_install_names
 
 # 2. Create Bundle
-BUNDLE_NAME="MicroCode_Dev.app"
+BUNDLE_NAME="MicroCode.app"
 echo "📦 Creating Bundle: $BUNDLE_NAME"
 rm -rf "$BUNDLE_NAME"
 mkdir -p "$BUNDLE_NAME/Contents/MacOS"
 mkdir -p "$BUNDLE_NAME/Contents/Resources"
 
 # 3. Copy Binary
-# Note: Path might vary depending on swift version/platform, usually arm64-apple-macosx
-BINARY_PATH=".build/arm64-apple-macosx/debug/MicroCode"
+BINARY_PATH="$(swift build --show-bin-path)/MicroCode"
+if [ ! -f "$BINARY_PATH" ]; then
+    BINARY_PATH=".build/out/Products/Debug/MicroCode"
+fi
+if [ ! -f "$BINARY_PATH" ]; then
+    BINARY_PATH=".build/arm64-apple-macosx/debug/MicroCode"
+fi
 if [ ! -f "$BINARY_PATH" ]; then
     echo "Error: Binary not found at $BINARY_PATH"
     # Try finding it
-    BINARY_PATH=$(find .build -name MicroCode -type f | grep debug | head -n 1)
+    BINARY_PATH=$(find .build -name MicroCode -type f | grep -i Products | head -n 1)
     if [ -z "$BINARY_PATH" ]; then
-        echo "Critial Error: Could not locate compiled binary."
+        BINARY_PATH=$(find .build -name MicroCode -type f | head -n 1)
+    fi
+    if [ -z "$BINARY_PATH" ]; then
+        echo "Critical Error: Could not locate compiled binary."
         exit 1
     fi
-    echo "Found binary at: $BINARY_PATH"
 fi
+echo "Using binary at: $BINARY_PATH"
 
 cp "$BINARY_PATH" "$BUNDLE_NAME/Contents/MacOS/"
 
@@ -63,23 +75,47 @@ cat > "$BUNDLE_NAME/Contents/Info.plist" <<EOF
     <key>CFBundleDisplayName</key>
     <string>MicroCode</string>
     <key>CFBundleShortVersionString</key>
-    <string>1.0</string>
+    <string>2.3.0</string>
     <key>CFBundleVersion</key>
-    <string>1</string>
+    <string>2</string>
     <key>CFBundlePackageType</key>
     <string>APPL</string>
+    <key>CFBundleIconFile</key>
+    <string>AppIcon</string>
     <key>LSMinimumSystemVersion</key>
     <string>13.0</string>
     <key>NSHighResolutionCapable</key>
     <true/>
+    <key>NSScreenCaptureUsageDescription</key>
+    <string>MicroCode captures only the Apple Device Hub window you select to display an interactive iOS Simulator beside your chat.</string>
 </dict>
 </plist>
 EOF
 
 # 5. Resources (Logo, etc)
+if [ -f "AppIcon.icns" ]; then
+    echo "   Copying AppIcon.icns..."
+    cp "AppIcon.icns" "$BUNDLE_NAME/Contents/Resources/AppIcon.icns"
+elif [ -f "microcodexround.icns" ]; then
+    echo "   Copying microcodexround.icns as AppIcon.icns..."
+    cp "microcodexround.icns" "$BUNDLE_NAME/Contents/Resources/AppIcon.icns"
+fi
 if [ -f "MicroCOdeDoogleIcon.png" ]; then
     echo "   Copying logo..."
     cp "MicroCOdeDoogleIcon.png" "$BUNDLE_NAME/Contents/Resources/"
+fi
+if [ -f "Secrets.plist" ]; then
+    echo "   Copying Secrets.plist..."
+    cp "Secrets.plist" "$BUNDLE_NAME/Contents/Resources/"
+fi
+if [ -f "mcp-server.py" ]; then
+    echo "   Copying mcp-server.py into Bundle Resources..."
+    cp "mcp-server.py" "$BUNDLE_NAME/Contents/Resources/"
+    chmod +x "$BUNDLE_NAME/Contents/Resources/mcp-server.py"
+fi
+if [ -d "MicroCode/Resources" ]; then
+    echo "   Copying MicroCode/Resources into Bundle Resources..."
+    cp -R MicroCode/Resources/* "$BUNDLE_NAME/Contents/Resources/"
 fi
 
 # 6. Bundle Runtimes (only if --with-runtimes flag is passed)

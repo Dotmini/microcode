@@ -49,6 +49,7 @@ struct ProteinStructureDocument: Sendable {
 }
 
 struct ScienceProjectContext: Sendable {
+    let rootPath: String
     let workspaceName: String
     let fileCount: Int
     let structures: [String]
@@ -90,6 +91,11 @@ enum ScienceServiceError: LocalizedError {
 enum ScienceService {
     static let maximumFileBytes = 64 * 1024 * 1024
     static let maximumRenderedAtoms = 100_000
+    /// This is an inventory for the UI/prompt, never a full repository scan.
+    /// Exact files are inspected lazily when the research agent needs them.
+    static let maximumIndexEntries = 1_000
+    static let maximumVisitedEntries = 20_000
+    static let maximumIndexDuration: TimeInterval = 0.35
 
     @inline(never)
     static func indexWorkspace(at root: URL) -> ScienceProjectContext {
@@ -99,12 +105,16 @@ enum ScienceService {
         var structures: [String] = [], sequences: [String] = [], results: [String] = []
         var papers: [String] = [], datasets: [String] = [], workflows: [String] = []
         var count = 0
+        var visited = 0
+        let deadline = Date().addingTimeInterval(maximumIndexDuration)
         guard let iterator = manager.enumerator(at: root, includingPropertiesForKeys: Array(keys), options: [.skipsHiddenFiles, .skipsPackageDescendants], errorHandler: { _, _ in true }) else {
-            return ScienceProjectContext(workspaceName: root.lastPathComponent, fileCount: 0, structures: [], sequences: [], results: [], papers: [], datasets: [], workflows: [])
+            return ScienceProjectContext(rootPath: root.path, workspaceName: root.lastPathComponent, fileCount: 0, structures: [], sequences: [], results: [], papers: [], datasets: [], workflows: [])
         }
         for case let url as URL in iterator {
+            visited += 1
+            if visited >= maximumVisitedEntries || (visited.isMultiple(of: 64) && Date() >= deadline) { break }
             if skipped.contains(url.lastPathComponent) { iterator.skipDescendants(); continue }
-            guard count < 4_000 else { break }
+            guard count < maximumIndexEntries else { break }
             let values = try? url.resourceValues(forKeys: keys)
             guard values?.isRegularFile == true else { continue }
             count += 1
@@ -117,7 +127,7 @@ enum ScienceService {
             else if ["csv", "tsv", "parquet", "h5", "h5ad", "json", "npy", "npz"].contains(ext) { datasets.append(relative) }
             else if ["py", "r", "jl", "ipynb", "sh"].contains(ext) { workflows.append(relative) }
         }
-        return ScienceProjectContext(workspaceName: root.lastPathComponent, fileCount: count, structures: structures.sorted(), sequences: sequences.sorted(), results: results.sorted(), papers: papers.sorted(), datasets: datasets.sorted(), workflows: workflows.sorted())
+        return ScienceProjectContext(rootPath: root.path, workspaceName: root.lastPathComponent, fileCount: count, structures: structures.sorted(), sequences: sequences.sorted(), results: results.sorted(), papers: papers.sorted(), datasets: datasets.sorted(), workflows: workflows.sorted())
     }
 
     @inline(never)

@@ -50,7 +50,7 @@ class BillingService: ObservableObject {
     /// Returns the cost per minute of execution for a specific compute target
     func getCostPerMinute(for target: ComputeTarget) -> Int {
         switch target {
-        case .localCPU, .localMLX, .localNvidia, .customHPC:
+        case .localCPU, .localMLX, .localNvidia, .customHPC, .yourCloud:
             return 0 // Free / Bring your own compute
         case .cloudPremium:
             // Real Cloud GPU billing runs in CloudGPUService / gpu_wallets

@@ -19,7 +19,7 @@ echo "🦀 Using: $(cargo --version 2>/dev/null || echo 'cargo not available')"
 
 APP_NAME="MicroCode"
 BUNDLE_ID="com.dotmini.microcode"
-VERSION="2.0.0 Developer"
+VERSION="2.3.0"
 
 # Directories
 BUILD_ROOT=".build_dist"
@@ -247,13 +247,15 @@ package_variant() {
     <key>CFBundleShortVersionString</key>
     <string>${VERSION}</string>
     <key>CFBundleVersion</key>
-    <string>1</string>
+    <string>2</string>
     <key>CFBundlePackageType</key>
     <string>APPL</string>
     <key>LSMinimumSystemVersion</key>
     <string>13.0</string>
     <key>NSHighResolutionCapable</key>
     <true/>
+    <key>NSScreenCaptureUsageDescription</key>
+    <string>MicroCode captures only the Apple Device Hub window you select to display an interactive iOS Simulator beside your chat.</string>
     <key>NSAppTransportSecurity</key>
     <dict>
         <key>NSAllowsArbitraryLoads</key>
@@ -625,4 +627,3 @@ if [ "$SIGN_AFTER" = "true" ]; then
         echo "   Run manually: ./sign_and_notarize.sh all"
     fi
 fi
-

@@ -97,8 +97,14 @@ struct AuthenticFileTree: NSViewRepresentable {
              
              outlineView.reloadData()
              
-             // Restore expansion state
-             context.coordinator.restoreExpansion(outlineView, ids: expandedIds)
+             // Restore expansion state or auto-expand on initial load
+             if expandedIds.isEmpty {
+                 for item in newItems where item.node.isDirectory {
+                     outlineView.expandItem(item)
+                 }
+             } else {
+                 context.coordinator.restoreExpansion(outlineView, ids: expandedIds)
+             }
         }
     }
     

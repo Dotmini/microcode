@@ -6,6 +6,7 @@
 //! Copyright © 2025 SPU AI CLUB — Dotmini Software
 
 pub mod mcp_client;
+pub mod gateway;
 
 use serde::{Deserialize, Serialize};
 

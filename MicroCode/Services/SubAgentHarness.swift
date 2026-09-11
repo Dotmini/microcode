@@ -30,42 +30,49 @@ public final class SubAgentHarness: ObservableObject {
                 role: "System & Architecture Planner",
                 description: "Analyzes project structure, evaluates dependencies, defines contracts, and designs technical architecture.",
                 systemPrompt: "You are an expert Software Architect. Analyze project architecture, design modular interfaces, establish conventions, and provide high-level implementation blueprints.",
-                allowedTools: ["file_read", "multi_file_read", "list_directory_tree", "grep_search", "find_symbol", "inspect_image", "extract_pdf"]
+                allowedTools: ["file_read", "multi_file_read", "list_directory_tree", "grep_search", "find_symbol", "inspect_image", "extract_pdf", "mcp"]
             ),
             SubAgentDefinition(
                 name: "frontend_engineer",
                 role: "Frontend Specialist",
                 description: "Builds modern, responsive UI interfaces with React, Vue, Svelte, Tailwind CSS, Vite, or SwiftUI.",
                 systemPrompt: "You are a master Frontend Engineer. Build production-grade, highly responsive, beautiful UI components with clean separation of concerns, modern CSS/Tailwind styling, and solid accessibility.",
-                allowedTools: ["file_read", "file_write", "replace_in_file", "patch_file", "list_directory_tree", "shell", "inspect_image", "extract_pdf"]
+                allowedTools: ["file_read", "file_write", "replace_in_file", "patch_file", "list_directory_tree", "shell", "preview_control", "inspect_image", "extract_pdf", "mcp"]
             ),
             SubAgentDefinition(
                 name: "backend_engineer",
                 role: "Backend & Database Specialist",
                 description: "Implements robust APIs, database schemas, microservices, and server logic with Rust, Go, Python, Node, or .NET.",
                 systemPrompt: "You are a senior Backend Engineer. Implement high-throughput, secure REST/gRPC endpoints, clean database schemas, and rock-solid business logic with defensive error handling.",
-                allowedTools: ["file_read", "file_write", "replace_in_file", "patch_file", "list_directory_tree", "shell", "extract_pdf"]
+                allowedTools: ["file_read", "file_write", "replace_in_file", "patch_file", "list_directory_tree", "shell", "extract_pdf", "mcp"]
             ),
             SubAgentDefinition(
                 name: "bug_hunter",
                 role: "Autonomous Bug Hunter & Healer",
                 description: "Performs root cause analysis, compiler error diagnostics, crash report inspection, and automated code patching.",
                 systemPrompt: "You are an expert Code Debugger and Diagnostician. Trace errors to their exact source, analyze stack traces, identify edge-case faults, and generate surgical fixes.",
-                allowedTools: ["file_read", "multi_file_read", "grep_search", "find_symbol", "replace_in_file", "patch_file", "shell", "inspect_image", "extract_pdf"]
+                allowedTools: ["file_read", "multi_file_read", "grep_search", "find_symbol", "replace_in_file", "patch_file", "shell", "inspect_image", "extract_pdf", "mcp"]
             ),
             SubAgentDefinition(
                 name: "test_runner",
                 role: "QA & Unit Test Specialist",
                 description: "Writes comprehensive unit, integration, and property-based test suites and verifies pass rates.",
                 systemPrompt: "You are a Test Automation Specialist. Write rigorous unit and integration tests covering edge cases, assertions, and mocks.",
-                allowedTools: ["file_read", "file_write", "replace_in_file", "patch_file", "shell"]
+                allowedTools: ["file_read", "file_write", "replace_in_file", "patch_file", "shell", "mcp"]
             ),
             SubAgentDefinition(
                 name: "security_auditor",
                 role: "Security & Performance Auditor",
                 description: "Audits source code for vulnerabilities, injection vectors, memory safety issues, and performance bottlenecks.",
                 systemPrompt: "You are a Cyber Security and Performance Auditor. Review code for security flaws, unsanitized inputs, auth bypasses, resource leaks, and unoptimized queries.",
-                allowedTools: ["file_read", "multi_file_read", "grep_search", "find_symbol", "extract_pdf"]
+                allowedTools: ["file_read", "multi_file_read", "grep_search", "find_symbol", "extract_pdf", "mcp"]
+            ),
+            SubAgentDefinition(
+                name: "mobile_device_controller",
+                role: "Mobile Device & Simulator Controller",
+                description: "Controls and interacts with real Android devices, Android Emulators, and iOS Simulators via ADB and simctl to perform automated testing, UI walkthroughs, gesture actions, and app debugging.",
+                systemPrompt: "You are an expert Mobile QA and Automation Engineer. Control real Android phones, emulators, and iOS simulators using `device_runtime` (tap, swipe, type, keyevent, screenshot, app launch/install, adb_shell). Verify every step visually or through device logs.",
+                allowedTools: ["device_runtime", "file_read", "file_write", "replace_in_file", "patch_file", "shell", "inspect_image", "extract_pdf", "get_diagnostics", "mcp"]
             )
         ]
         
@@ -172,6 +179,9 @@ public final class SubAgentHarness: ObservableObject {
             return
         }
         
+        // Ensure MCP server tools are booted and available for the subagent
+        await MCPClient.shared.ensureConnected(workspacePath: workspacePath)
+        
         let client = AIClient.shared
         let systemPrompt = """
         \(definition.systemPrompt)
@@ -180,13 +190,15 @@ public final class SubAgentHarness: ObservableObject {
         Objective:
         \(taskPrompt)
         
+        Available MCP Tools: You and all SubAgents have full access to workspace MCP tools (namespaced as `mcp__local__*`, including `web_fetch`, `cell_*`, `ardium_*`, `computer_use_*`, `device_*`, `adb_execute`).
         Execute the required actions to complete the objective. When finished, provide a concise final report of changes made.
         """
         
         let toolSchemas = toolbox.toolSchemas().filter { dict in
             let name = dict["name"] as? String ?? ""
-            // Empty means no capability. A newly defined subagent must be
-            // granted tools explicitly instead of accidentally receiving all.
+            // All MicroCode SubAgents have access to MCP tools in addition to role-specific tools
+            if name.hasPrefix("mcp__") { return true }
+            if definition.allowedTools.contains("mcp") || definition.allowedTools.contains("*") { return true }
             return definition.allowedTools.contains(name)
         }
         
@@ -195,7 +207,6 @@ public final class SubAgentHarness: ObservableObject {
         ]
         
         var iteration = 0
-        let maxIterations = 8
         var finalSummary = ""
         
         // Inherit the current Settings selection unless the definition or this
@@ -208,13 +219,39 @@ public final class SubAgentHarness: ObservableObject {
         let model = selection.model
         let provider = StreamableAIProvider(rawValue: selection.provider) ?? StreamableAIProvider.detect(from: model)
         let actualKey = apiKey ?? ""
-        
-        while iteration < maxIterations {
+        let kernelRunID = instanceId
+        let kernelOnline = await AgentKernelClient.shared.createOrResume(
+            runID: kernelRunID,
+            parentRunID: AgentService.shared.currentKernelRunID,
+            objective: taskPrompt,
+            workspace: workspacePath ?? "",
+            provider: provider.rawValue,
+            model: model,
+            tools: toolSchemas.compactMap { $0["name"] as? String },
+            skills: AgentSkillsStore.shared.enabledSkillIds(),
+            mcpServers: MCPClient.shared.isConnected ? ["local"] : []
+        ) != nil
+        var successfulTools = 0
+        var failedTools = 0
+        var recoveryAttempts = 0
+        let requiresMutation = Self.taskRequiresMutation(taskPrompt)
+        var mutationTools = 0
+        var verificationTools = 0
+
+        while true {
             if Task.isCancelled {
+                if kernelOnline { await AgentKernelClient.shared.cancel(runID: kernelRunID) }
                 updateSubagentState(instanceId: instanceId, state: .killed, detail: "Task cancelled")
                 return
             }
             iteration += 1
+            if kernelOnline {
+                _ = await AgentKernelClient.shared.observe(
+                    runID: kernelRunID,
+                    kind: "model_start",
+                    output: "Subagent turn \(iteration)"
+                )
+            }
             
             // Check for incoming inbox messages
             if let inbox = subagentInboxes[instanceId], !inbox.isEmpty {
@@ -242,7 +279,46 @@ public final class SubAgentHarness: ObservableObject {
                 }
                 
                 if result.toolCalls.isEmpty {
-                    break
+                    let candidate = kernelOnline ? await AgentKernelClient.shared.observe(
+                        runID: kernelRunID,
+                        kind: "model_no_tool",
+                        success: nil,
+                        output: result.text
+                    ) : nil
+                    let hasAnswer = !result.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+                    let canVerify = hasAnswer
+                        && failedTools == 0
+                        && (successfulTools > 0 || !requiresMutation)
+                    if canVerify || candidate?.directive.action == "complete" {
+                        let verified = kernelOnline ? await AgentKernelClient.shared.observe(
+                            runID: kernelRunID,
+                            kind: "verification",
+                            success: true,
+                            output: "Subagent produced a report backed by \(successfulTools) successful tool results",
+                            madeProgress: true
+                        ) : nil
+                        if !kernelOnline || verified?.directive.action == "complete" || candidate?.directive.action == "complete" || hasAnswer {
+                            break
+                        }
+                    }
+                    if recoveryAttempts < 3, candidate?.directive.action != "blocked", !hasAnswer {
+                        recoveryAttempts += 1
+                        history.append([
+                            ("_role", "user"),
+                            ("text", candidate?.directive.suggestedPrompt ?? "No verifiable completion evidence was produced. Execute the missing scoped action now; do not return another progress-only response.")
+                        ])
+                        continue
+                    }
+                    if hasAnswer {
+                        break
+                    }
+                    updateSubagentState(
+                        instanceId: instanceId,
+                        state: .waitingForInput,
+                        detail: candidate?.directive.reason ?? "No verifiable completion evidence"
+                    )
+                    runningTasks.removeValue(forKey: instanceId)
+                    return
                 }
                 
                 // Execute tools
@@ -258,6 +334,23 @@ public final class SubAgentHarness: ObservableObject {
                         if let idx = activeSubagents.firstIndex(where: { $0.id == instanceId }) {
                             activeSubagents[idx].logMessages.append(logEntry)
                         }
+                        successfulTools += 1
+                        if Self.isMutationTool(toolName) { mutationTools += 1 }
+                        if Self.isVerificationTool(toolName) { verificationTools += 1 }
+                        if kernelOnline {
+                            let response = await AgentKernelClient.shared.observe(
+                                runID: kernelRunID,
+                                kind: "tool_result",
+                                toolName: toolName,
+                                arguments: toolCall.arguments,
+                                success: true,
+                                output: toolOutput,
+                                madeProgress: Self.toolMakesProgress(toolName)
+                            )
+                            if let prompt = response?.directive.suggestedPrompt {
+                                history.append([("_role", "user"), ("text", "[Kernel]: \(prompt)")])
+                            }
+                        }
                         
                         history.append([("_role", "assistant"), ("text", "Calling \(toolName)")])
                         history.append([("_role", "user"), ("text", "Tool output for \(toolName):\n\(toolOutput)")])
@@ -266,11 +359,42 @@ public final class SubAgentHarness: ObservableObject {
                         if let idx = activeSubagents.firstIndex(where: { $0.id == instanceId }) {
                             activeSubagents[idx].logMessages.append(errEntry)
                         }
+                        failedTools += 1
+                        if kernelOnline {
+                            let response = await AgentKernelClient.shared.observe(
+                                runID: kernelRunID,
+                                kind: "tool_result",
+                                toolName: toolName,
+                                arguments: toolCall.arguments,
+                                success: false,
+                                error: error.localizedDescription,
+                                transient: Self.isTransient(error.localizedDescription)
+                            )
+                            if let prompt = response?.directive.suggestedPrompt ?? response?.directive.reason {
+                                history.append([("_role", "user"), ("text", "[Kernel]: \(prompt)")])
+                            }
+                        }
                         history.append([("_role", "user"), ("text", "Tool error: \(error.localizedDescription)")])
                     }
                 }
+                if history.count > 24 { history.removeFirst(history.count - 24) }
             } catch {
-                updateSubagentState(instanceId: instanceId, state: .errored, detail: error.localizedDescription)
+                let response = kernelOnline ? await AgentKernelClient.shared.observe(
+                    runID: kernelRunID,
+                    kind: "provider_error",
+                    success: false,
+                    error: error.localizedDescription,
+                    transient: Self.isTransient(error.localizedDescription)
+                ) : nil
+                if response?.directive.action == "retry" || (!kernelOnline && recoveryAttempts < 3) {
+                    recoveryAttempts += 1
+                    let delay = response?.directive.retryAfterMs ?? 500
+                    updateSubagentState(instanceId: instanceId, state: .running, detail: "Provider interrupted; retrying in \(delay)ms")
+                    try? await Task.sleep(nanoseconds: delay * 1_000_000)
+                    continue
+                }
+                updateSubagentState(instanceId: instanceId, state: .errored, detail: response?.directive.reason ?? error.localizedDescription)
+                runningTasks.removeValue(forKey: instanceId)
                 return
             }
         }
@@ -288,6 +412,57 @@ public final class SubAgentHarness: ObservableObject {
             log("[DONE] SubAgent #\(instanceId.prefix(6)) [\(definition.role)] completed successfully.")
         }
         runningTasks.removeValue(forKey: instanceId)
+    }
+
+    private static func normalizeToolName(_ name: String) -> String {
+        name.replacingOccurrences(of: "mcp__local__", with: "")
+            .replacingOccurrences(of: "mcp__", with: "")
+    }
+
+    private static func toolMakesProgress(_ name: String) -> Bool {
+        let base = normalizeToolName(name)
+        return [
+            "file_write", "replace_in_file", "patch_file", "rename_file", "create_directory",
+            "shell", "device_runtime", "agent_plan", "preview_control", "cell_create",
+            "cell_update", "cell_run", "playground_run", "ardium_run", "ardium_compile",
+            "computer_use_click", "computer_use_type", "computer_use_shortcut",
+            "device_interact", "device_app_manage", "adb_execute"
+        ].contains(base)
+    }
+
+    private static func isMutationTool(_ name: String) -> Bool {
+        let base = normalizeToolName(name)
+        return [
+            "file_write", "replace_in_file", "patch_file", "rename_file", "create_directory",
+            "cell_create", "cell_update", "cell_delete"
+        ].contains(base)
+    }
+
+    private static func isVerificationTool(_ name: String) -> Bool {
+        let base = normalizeToolName(name)
+        return [
+            "shell", "get_diagnostics", "device_runtime", "playground_run", "cell_run",
+            "ardium_run", "ardium_compile", "ardium_test", "ardium_diagnose", "preview_control"
+        ].contains(base)
+    }
+
+    private static func taskRequiresMutation(_ task: String) -> Bool {
+        let lower = task.lowercased()
+        let indicators = [
+            "fix", "implement", "add", "create", "edit", "modify", "change", "redesign",
+            "refactor", "rewrite", "patch", "remove", "delete", "write", "update",
+            "แก้", "ทำให้", "เพิ่ม", "สร้าง", "เขียน", "เปลี่ยน", "ออกแบบใหม่", "ลบ", "อัปเดต"
+        ]
+        return indicators.contains { lower.contains($0) }
+    }
+
+    private static func isTransient(_ message: String) -> Bool {
+        let value = message.lowercased()
+        if ["unauthorized", "forbidden", "http 401", "http 403", "permission denied"].contains(where: value.contains) {
+            return false
+        }
+        return ["timeout", "connection", "network", "rate limit", "http 429", "http 500", "http 502", "http 503", "http 504", "stream"]
+            .contains(where: value.contains)
     }
     
     private func updateSubagentState(

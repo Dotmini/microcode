@@ -18,7 +18,7 @@ set -e
 # Configuration
 APP_NAME="MicroCode"
 BUNDLE_ID="com.dotmini.microcode"
-VERSION="${VERSION:-2.0.0 Developer}"
+VERSION="${VERSION:-2.0.1}"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 APP_PATH="${APP_PATH:-$SCRIPT_DIR/Dist/$APP_NAME.app}"
 DMG_PATH="${DMG_PATH:-$SCRIPT_DIR/Dist/$APP_NAME-$VERSION.dmg}"

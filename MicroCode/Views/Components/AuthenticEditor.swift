@@ -25,10 +25,15 @@ struct AuthenticEditor: NSViewRepresentable {
         
         let textContainer = NSTextContainer(size: CGSize(width: scrollView.contentSize.width, height: CGFloat.greatestFiniteMagnitude))
         textContainer.widthTracksTextView = true
+        textContainer.heightTracksTextView = false
         layoutManager.addTextContainer(textContainer)
         
-        let textView = NSTextView(frame: .zero, textContainer: textContainer)
-        textView.autoresizingMask = [.width, .height]
+        let textView = NSTextView(frame: NSRect(origin: .zero, size: scrollView.contentSize), textContainer: textContainer)
+        textView.minSize = NSSize(width: 0.0, height: 0.0)
+        textView.maxSize = NSSize(width: CGFloat.greatestFiniteMagnitude, height: CGFloat.greatestFiniteMagnitude)
+        textView.isVerticallyResizable = true
+        textView.isHorizontallyResizable = false
+        textView.autoresizingMask = [.width]
         textView.delegate = context.coordinator
         
         // Configure Editor Properties
@@ -39,11 +44,11 @@ struct AuthenticEditor: NSViewRepresentable {
         textView.isAutomaticTextReplacementEnabled = false
         textView.isAutomaticSpellingCorrectionEnabled = false
         textView.font = font
-        textView.backgroundColor = ThemeManager.shared.editorBackgroundColor
-        textView.textColor = ThemeManager.shared.editorForegroundColor
-        textView.insertionPointColor = ThemeManager.shared.caretColor
+        textView.backgroundColor = .black
+        textView.textColor = .white
+        textView.insertionPointColor = .white
         textView.selectedTextAttributes = [
-            .backgroundColor: NSColor.selectedTextBackgroundColor,
+            .backgroundColor: NSColor(red: 0.15, green: 0.20, blue: 0.28, alpha: 1.0),
             .foregroundColor: NSColor.white
         ]
         
@@ -52,6 +57,9 @@ struct AuthenticEditor: NSViewRepresentable {
         
         // Setup Line Numbers Ruler (Native ObjC++)
         let rulerView = AuthenticLineNumberRuler(scrollView: scrollView, orientation: .verticalRuler)
+        rulerView.backgroundColor = .black
+        rulerView.textColor = NSColor(white: 0.35, alpha: 1.0)
+        rulerView.separatorColor = NSColor(white: 1.0, alpha: 0.08)
         scrollView.verticalRulerView = rulerView
         scrollView.hasVerticalRuler = true
         scrollView.rulersVisible = true
@@ -89,10 +97,9 @@ struct AuthenticEditor: NSViewRepresentable {
         
         // Update Helper: Apply Theme to Ruler
         if let ruler = nsView.verticalRulerView as? AuthenticLineNumberRuler {
-            let theme = ThemeManager.shared
-            ruler.backgroundColor = theme.editorGutterColor
-            ruler.textColor = theme.editorGutterTextColor
-            ruler.separatorColor = theme.editorForegroundColor.withAlphaComponent(0.1)
+            ruler.backgroundColor = .black
+            ruler.textColor = NSColor(white: 0.35, alpha: 1.0)
+            ruler.separatorColor = NSColor(white: 1.0, alpha: 0.08)
             // Force redraw if needed
             ruler.needsDisplay = true
         }
@@ -191,6 +198,9 @@ struct AuthenticEditor: NSViewRepresentable {
             if language != currentLanguage {
                 currentLanguage = language
             }
+            
+            // Unconditionally ensure MicroCode Pro Dark (Xcode Style) theme is active
+            engine.themeManager.setActiveTheme("default-dark")
             
             // Use per-instance engine to avoid shared-state race conditions
             engine.setDocument(textStorage.string, language: currentLanguage)

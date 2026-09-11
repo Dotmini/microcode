@@ -50,6 +50,9 @@ struct ConversationSummary: Codable, Identifiable {
     let filesDiscussed: [String]
     let createdAt: Date
     let messageCount: Int
+    /// Summaries are aids for retrieval, never independent evidence.  These
+    /// IDs let a UI or agent reopen the exact durable transcript entries.
+    let sourceMessageIDs: [String]?
 }
 
 // MARK: - Topic Cluster
@@ -75,8 +78,13 @@ class AgentMemoryService: ObservableObject {
     @Published private(set) var isLoaded = false
     
     private let embeddingDim = 512
-    private let maxMemories = 2000
-    private let maxSummaries = 100
+    // Keep semantic recall resident and predictable. Older builds retained
+    // 2,000 full messages plus 512-float vectors and rewrote all of them after
+    // every turn. The bounded tier keeps hot recall under a few MB; durable
+    // transcripts remain in AgentTranscriptStore.
+    private let maxMemories = 512
+    private let maxMemoryContentCharacters = 6_000
+    private let maxSummaries = 64
     private let similarityThreshold: Float = 0.12
     private let decayHalfLifeDays: Double = 7.0  // Memory relevance halves every 7 days
     
@@ -85,7 +93,8 @@ class AgentMemoryService: ObservableObject {
     private let trigramWeight: Float = 2.0
     private var embeddingCache: [String: [Float]] = [:]
     private var embeddingCacheOrder: [String] = []
-    private let maximumEmbeddingCacheEntries = 256
+    private let maximumEmbeddingCacheEntries = 64
+    private var pendingMemorySave: Task<Void, Never>?
     
     private var storageURL: URL {
         let appSupport = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first!
@@ -109,13 +118,14 @@ class AgentMemoryService: ObservableObject {
     
     func storeMemory(content: String, chatId: String, role: String) {
         guard content.trimmingCharacters(in: .whitespacesAndNewlines).count > 10 else { return }
+        let compactContent = boundedMemoryContent(content)
         
         // Calculate importance based on content
-        let importance = calculateImportance(content, role: role)
+        let importance = calculateImportance(compactContent, role: role)
         
         Task {
-            let embedding = await fetchEmbeddingFromBackend(content)
-            let entry = MemoryEntry(content: content, chatId: chatId, role: role, importance: importance, embedding: embedding)
+            let embedding = await fetchEmbeddingFromBackend(compactContent)
+            let entry = MemoryEntry(content: compactContent, chatId: chatId, role: role, importance: importance, embedding: embedding)
             
             // Deduplicate: check if highly similar memory already exists
             let isDuplicate = memories.suffix(20).contains { existing in
@@ -134,7 +144,23 @@ class AgentMemoryService: ObservableObject {
                 pruneMemories()
             }
             
-            await saveMemories()
+            scheduleMemorySave()
+        }
+    }
+
+    private func boundedMemoryContent(_ content: String) -> String {
+        guard content.count > maxMemoryContentCharacters else { return content }
+        let headCount = maxMemoryContentCharacters * 2 / 3
+        let tailCount = maxMemoryContentCharacters - headCount
+        return String(content.prefix(headCount)) + "\n…[memory compacted; full turn remains in transcript]…\n" + String(content.suffix(tailCount))
+    }
+
+    private func scheduleMemorySave() {
+        pendingMemorySave?.cancel()
+        pendingMemorySave = Task { [weak self] in
+            try? await Task.sleep(nanoseconds: 400_000_000)
+            guard !Task.isCancelled else { return }
+            await self?.saveMemories()
         }
     }
     
@@ -279,7 +305,7 @@ class AgentMemoryService: ObservableObject {
     
     // MARK: - Conversation Summarization
     
-    func summarizeChat(chatId: String, messages: [(role: String, content: String)]) {
+    func summarizeChat(chatId: String, messages: [(id: String, role: String, content: String)]) {
         guard messages.count > 4 else { return }
         
         // Extract key information
@@ -323,7 +349,8 @@ class AgentMemoryService: ObservableObject {
             keyDecisions: Array(decisions.prefix(5)),
             filesDiscussed: Array(Set(files)).sorted(),
             createdAt: Date(),
-            messageCount: messages.count
+            messageCount: messages.count,
+            sourceMessageIDs: messages.map(\.id)
         )
         
         summaries.append(summary)
@@ -336,6 +363,27 @@ class AgentMemoryService: ObservableObject {
         Task.detached { [weak self] in
             await self?.saveSummaries()
         }
+    }
+
+    /// Returns only summaries belonging to the active task.  Cross-task
+    /// summaries are deliberately never auto-injected into Science Mode.
+    func formatSummariesForContext(chatId: String, maxTokens: Int = 500) -> String {
+        let selected = summaries
+            .filter { $0.chatId == chatId }
+            .suffix(3)
+        guard !selected.isEmpty else { return "" }
+
+        var output = "Rolling conversation summary (verify against cited transcript messages when precision matters):\n"
+        var remaining = max(128, maxTokens * 4)
+        for summary in selected.reversed() {
+            guard remaining > 0 else { break }
+            let sources = (summary.sourceMessageIDs ?? []).prefix(3).joined(separator: ", ")
+            let marker = sources.isEmpty ? "" : " [source messages: \(sources)]"
+            let line = "- \(summary.summary)\(marker)\n"
+            output += String(line.prefix(remaining))
+            remaining -= line.count
+        }
+        return output
     }
     
     // MARK: - Topic Detection
@@ -542,7 +590,7 @@ class AgentMemoryService: ObservableObject {
         memories = Array(sorted.prefix(maxMemories))
     }
     
-    private func buildSummary(_ messages: [(role: String, content: String)]) -> String {
+    private func buildSummary(_ messages: [(id: String, role: String, content: String)]) -> String {
         // Extractive summarization: pick key sentences
         var keyPoints: [String] = []
         
@@ -583,6 +631,7 @@ class AgentMemoryService: ObservableObject {
         do {
             let data = try Data(contentsOf: storageURL)
             memories = try JSONDecoder().decode([MemoryEntry].self, from: data)
+            if memories.count > maxMemories { pruneMemories() }
             isLoaded = true
             print("[Memory] Loaded \(memories.count) memories (v2)")
         } catch {

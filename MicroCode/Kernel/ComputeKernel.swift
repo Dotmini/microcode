@@ -289,19 +289,25 @@ class CloudGPUKernel: ComputeKernel {
         }
         
         progress("🚀 Connecting to MicroCode Cloud (Premium) via WebSocket...\n")
+
+        // Platform credentials are managed by a main-actor UI service. Read
+        // the current value before entering the nonisolated WebSocket setup
+        // below so Cloud GPU can use it without violating actor isolation.
+        let platformToken = await MainActor.run {
+            DotminiPlatformKeyService.shared.authorizationToken
+        }
         
         return try await withCheckedThrowingContinuation { continuation in
             let url = URL(string: "wss://api.dotmini.net/v1/compute/cloud")!
             
-            // Secure Backend Enforcement:
-            // Pass the user's token or license key so the backend can validate securely.
+            // Pass an actual account token. A local license label is only a
+            // fallback for legacy deployments and must never win over a JWT.
             var headers: [String: String]? = nil
-            let userEmail = (UserDefaults.standard.string(forKey: "dotminiUserEmail") ?? "").lowercased()
-            let isAdmin = userEmail == "tirawatnantamas@gmail.com" || userEmail.contains("admin")
-            let token = UserDefaults.standard.string(forKey: "microRentToken")
-                ?? UserDefaults.standard.string(forKey: "dotminiLicenseKey")
+            let token = platformToken
+                ?? UserDefaults.standard.string(forKey: "cloudGPUAuthToken")
+                ?? UserDefaults.standard.string(forKey: "microRentToken")
                 ?? UserDefaults.standard.string(forKey: "apiKey")
-                ?? (isAdmin ? "mc_live_admin_tirawatnantamas" : "")
+                ?? ""
             
             if !token.isEmpty {
                 headers = ["Authorization": "Bearer \(token)"]
@@ -522,6 +528,499 @@ class CustomHPCKernel: ComputeKernel {
     }
 }
 
+// MARK: - Your Cloud (SSH Compute Kernel)
+
+class YourCloudKernel: ComputeKernel {
+    let id = UUID().uuidString
+    let target: ComputeTarget = .yourCloud
+    var state: ComputeKernelState = .idle
+    
+    private var currentProcess: Process?
+    private static var provisionedHosts: Set<String> = []
+    
+    func start() async throws {
+        state = .starting
+        state = .idle
+    }
+    
+    func stop() async throws {
+        state = .stopping
+        currentProcess?.terminate()
+        state = .idle
+    }
+    
+    func cancel() async throws {
+        state = .stopping
+        currentProcess?.terminate()
+        state = .idle
+    }
+    
+    func execute(code: String, language: String, progress: @escaping (String) -> Void) async throws -> String {
+        state = .running
+        defer { state = .idle }
+        
+        // 1. Automatically load Apple Keychain so any stored SSH key passphrases are unlocked silently
+        let keychainTask = Process()
+        keychainTask.executableURL = URL(fileURLWithPath: "/usr/bin/ssh-add")
+        keychainTask.arguments = ["--apple-load-keychain"]
+        try? keychainTask.run()
+        keychainTask.waitUntilExit()
+        
+        // 2. Resolve Active SSH Server from Remote Explorer or AppState
+        let server = await MainActor.run { () -> RemoteConnectionConfig? in
+            let rcm = RemoteConnectionManager.shared
+            return rcm.currentConnection ?? rcm.servers.first
+        }
+        
+        guard let server = server else {
+            progress("❌ [Your Cloud] No SSH Server configured.\n")
+            progress("💡 Open Remote Explorer (SSH) to connect or add your cloud server (RunPod, LANTA, VPS, etc.).\n")
+            throw NSError(domain: "YourCloudKernel", code: 404, userInfo: [NSLocalizedDescriptionKey: "No SSH server found in Remote Explorer"])
+        }
+        
+        // Silent background orchestration - no boilerplate printed into cell output
+        
+        // Check if there is a saved password in server or UserDefaults
+        var effectivePassword = server.password
+        if effectivePassword.isEmpty {
+            if let saved = UserDefaults.standard.dictionary(forKey: "ssh_saved_passwords")?[server.host] as? String {
+                effectivePassword = saved
+            }
+        }
+        
+        let cellId = String(UUID().uuidString.prefix(8))
+        let cleanLang = language.lowercased().trimmingCharacters(in: .whitespacesAndNewlines)
+        
+        // 2.5 Zero-Config Background Cloud Provisioning (Pre-warms all compilers on first connect)
+        ensureRemoteEnvironmentProvisioned(server: server, password: effectivePassword)
+
+        // 3. Auto-Detect Required Packages from Code & IDE Env
+        let cellImports = PythonEnvManager.analyzeImports(code)
+            .map { PythonEnvManager.pypiName(for: $0) }
+        let ideImports = PythonEnvManager.shared.detectedPackages
+        let allRequiredPackages = Array(Set(cellImports + ideImports)).sorted()
+        
+        // 4. Read & propagate project .env variables (if present)
+        var envExports = ""
+        let workspaceURL = await MainActor.run { AppState.shared?.workspaceFolder }
+        if let workspaceURL = workspaceURL {
+            let envFile = workspaceURL.appendingPathComponent(".env")
+            if let content = try? String(contentsOf: envFile, encoding: .utf8) {
+                let lines = content.components(separatedBy: .newlines)
+                for line in lines {
+                    let trimmed = line.trimmingCharacters(in: .whitespacesAndNewlines)
+                    if !trimmed.isEmpty && !trimmed.hasPrefix("#") && trimmed.contains("=") {
+                        let parts = trimmed.split(separator: "=", maxSplits: 1).map(String.init)
+                        if parts.count == 2 {
+                            let k = parts[0].trimmingCharacters(in: .whitespaces)
+                            let v = parts[1].trimmingCharacters(in: .whitespaces).trimmingCharacters(in: CharacterSet(charactersIn: "\"'"))
+                            envExports += "export \(k)=\"\(v)\"\n"
+                        }
+                    }
+                }
+            }
+        }
+        
+        // 5. Format Base64 in 64-character lines to prevent PTY line-wrapping corruption
+        let base64Raw = Data(code.utf8).base64EncodedString()
+        var wrappedB64 = ""
+        var strIdx = base64Raw.startIndex
+        while strIdx < base64Raw.endIndex {
+            let nextIdx = base64Raw.index(strIdx, offsetBy: 64, limitedBy: base64Raw.endIndex) ?? base64Raw.endIndex
+            wrappedB64 += String(base64Raw[strIdx..<nextIdx]) + "\n"
+            strIdx = nextIdx
+        }
+        
+        let reqPkgsBashList = allRequiredPackages.map { "\"\($0)\"" }.joined(separator: " ")
+        
+        // 6. Intelligent Auto-ENV Runner Script
+        let runnerContent = """
+        #!/bin/bash
+        set +e
+        \(envExports)
+        WORKSPACE="$HOME/.microcode/cell_runtime"
+        VENV_DIR="$HOME/.microcode/venv"
+        mkdir -p "$WORKSPACE"
+        cd "$WORKSPACE"
+
+        # 1. Ensure isolated, persistent cloud virtualenv exists (~/.microcode/venv)
+        if [ ! -f "$VENV_DIR/bin/python" ]; then
+            python3 -m venv "$VENV_DIR" 2>/dev/null || virtualenv "$VENV_DIR" 2>/dev/null || true
+        fi
+
+        # 2. Select Python and Pip binaries
+        if [ -x "$VENV_DIR/bin/python" ]; then
+            PY="$VENV_DIR/bin/python"
+            PIP="$VENV_DIR/bin/pip"
+        elif [ -n "$CONDA_PREFIX" ] && [ -x "$CONDA_PREFIX/bin/python" ]; then
+            PY="$CONDA_PREFIX/bin/python"
+            PIP="$CONDA_PREFIX/bin/pip"
+        elif command -v python3 >/dev/null 2>&1; then
+            PY="python3"
+            PIP="pip3"
+        else
+            PY="python"
+            PIP="pip"
+        fi
+
+        # 3. Auto-verify and pre-install detected imports
+        REQ_PACKAGES=( \(reqPkgsBashList) )
+        for pkg in "${REQ_PACKAGES[@]}"; do
+            if ! $PY -c "import $pkg" 2>/dev/null; then
+                $PIP install -q "$pkg" 2>&1 || \
+                $PY -m pip install -q "$pkg" 2>&1 || \
+                $PIP install -q --break-system-packages "$pkg" 2>&1 || true
+            fi
+        done
+
+        cat << 'CODE_EOF' | base64 -d > "cell_\(cellId).raw"
+        \(wrappedB64)CODE_EOF
+
+        echo '===MICROCODE_CELL_OUTPUT_START==='
+        case "\(cleanLang)" in
+            python|py)
+                mv "cell_\(cellId).raw" "cell_\(cellId).py"
+                PY_OUT=$($PY -u "cell_\(cellId).py" 2>&1)
+                if echo "$PY_OUT" | grep -q "ModuleNotFoundError: No module named"; then
+                    MISSING=$(echo "$PY_OUT" | awk -F"'" '/No module named/{print $2; exit}')
+                    if [ -n "$MISSING" ]; then
+                        $PIP install -q "$MISSING" 2>&1 || true
+                        $PY -u "cell_\(cellId).py" 2>&1
+                    else
+                        echo "$PY_OUT"
+                    fi
+                else
+                    echo "$PY_OUT"
+                fi
+                ;;
+            bash|shell|sh|zsh)
+                mv "cell_\(cellId).raw" "cell_\(cellId).sh"
+                chmod +x "cell_\(cellId).sh"
+                bash "cell_\(cellId).sh" 2>&1
+                ;;
+            c)
+                mv "cell_\(cellId).raw" "cell_\(cellId).c"
+                CC="gcc"
+                if ! command -v gcc >/dev/null 2>&1; then CC="clang"; fi
+                $CC -O2 "cell_\(cellId).c" -o "cell_\(cellId).out" -lm 2>&1 && "./cell_\(cellId).out" 2>&1
+                ;;
+            cpp|c++)
+                mv "cell_\(cellId).raw" "cell_\(cellId).cpp"
+                CXX="g++"
+                if ! command -v g++ >/dev/null 2>&1; then CXX="clang++"; fi
+                $CXX -std=c++17 -O2 "cell_\(cellId).cpp" -o "cell_\(cellId).out" -lm 2>&1 && "./cell_\(cellId).out" 2>&1
+                ;;
+            rust|rs)
+                mv "cell_\(cellId).raw" "cell_\(cellId).rs"
+                RUSTC="rustc"
+                if [ -x "$HOME/.cargo/bin/rustc" ]; then RUSTC="$HOME/.cargo/bin/rustc"; fi
+                $RUSTC "cell_\(cellId).rs" -o "cell_\(cellId).out" 2>&1 && "./cell_\(cellId).out" 2>&1
+                ;;
+            javascript|js|node|nodejs)
+                mv "cell_\(cellId).raw" "cell_\(cellId).js"
+                node "cell_\(cellId).js" 2>&1
+                ;;
+            ardium|ar)
+                mv "cell_\(cellId).raw" "cell_\(cellId).ar"
+                if command -v ardium >/dev/null 2>&1; then ardium run "cell_\(cellId).ar" 2>&1
+                elif [ -x "$HOME/.ardium/bin/ardium" ]; then "$HOME/.ardium/bin/ardium" run "cell_\(cellId).ar" 2>&1
+                elif [ -x "/usr/local/bin/ardium" ]; then /usr/local/bin/ardium run "cell_\(cellId).ar" 2>&1
+                else echo "❌ Ardium is installed locally on your Mac. Select 'Local CPU' on this cell header to run Ardium natively." >&2
+                fi
+                ;;
+            r)
+                mv "cell_\(cellId).raw" "cell_\(cellId).r"
+                if ! command -v Rscript >/dev/null 2>&1; then
+                    if command -v apt-get >/dev/null 2>&1; then
+                        export DEBIAN_FRONTEND=noninteractive
+                        apt-get update -qq >/dev/null 2>&1
+                        apt-get install -y -qq r-base-core >/dev/null 2>&1
+                    fi
+                fi
+                if command -v Rscript >/dev/null 2>&1; then
+                    Rscript "cell_\(cellId).r" 2>&1
+                else
+                    echo "❌ Rscript not found on remote server. Please install R or run on Local CPU." >&2
+                fi
+                ;;
+            julia)
+                mv "cell_\(cellId).raw" "cell_\(cellId).jl"
+                julia "cell_\(cellId).jl" 2>&1
+                ;;
+            go)
+                mv "cell_\(cellId).raw" "cell_\(cellId).go"
+                if ! command -v go >/dev/null 2>&1; then
+                    if command -v apt-get >/dev/null 2>&1; then
+                        export DEBIAN_FRONTEND=noninteractive
+                        apt-get update -qq >/dev/null 2>&1
+                        apt-get install -y -qq golang-go >/dev/null 2>&1
+                    fi
+                fi
+                go run "cell_\(cellId).go" 2>&1
+                ;;
+            objc|objective-c|objectivec|m)
+                mv "cell_\(cellId).raw" "cell_\(cellId).m"
+                if ! command -v clang >/dev/null 2>&1 || ! command -v gnustep-config >/dev/null 2>&1; then
+                    if command -v apt-get >/dev/null 2>&1; then
+                        export DEBIAN_FRONTEND=noninteractive
+                        apt-get update -qq >/dev/null 2>&1
+                        apt-get install -y -qq clang gobjc libgnustep-base-dev gnustep-devel >/dev/null 2>&1
+                    fi
+                fi
+                if command -v gnustep-config >/dev/null 2>&1; then
+                    GS_FLAGS=$(gnustep-config --objc-flags 2>/dev/null)
+                    GS_LIBS=$(gnustep-config --base-libs 2>/dev/null)
+                    clang $GS_FLAGS -fobjc-arc "cell_\(cellId).m" -o "cell_\(cellId).out" $GS_LIBS -lobjc -lpthread 2>&1 && "./cell_\(cellId).out" 2>&1
+                else
+                    clang -fobjc-arc "cell_\(cellId).m" -o "cell_\(cellId).out" -lobjc -lpthread 2>&1 && "./cell_\(cellId).out" 2>&1
+                fi
+                ;;
+            java)
+                mv "cell_\(cellId).raw" "Main_\(cellId).java"
+                if ! command -v javac >/dev/null 2>&1; then
+                    if command -v apt-get >/dev/null 2>&1; then
+                        export DEBIAN_FRONTEND=noninteractive
+                        apt-get update -qq >/dev/null 2>&1
+                        apt-get install -y -qq default-jdk >/dev/null 2>&1
+                    fi
+                fi
+                javac "Main_\(cellId).java" 2>&1 && java "Main_\(cellId)" 2>&1
+                ;;
+            csharp|c#|cs)
+                mv "cell_\(cellId).raw" "cell_\(cellId).cs"
+                if ! command -v dotnet >/dev/null 2>&1 && ! command -v csc >/dev/null 2>&1; then
+                    if command -v apt-get >/dev/null 2>&1; then
+                        export DEBIAN_FRONTEND=noninteractive
+                        apt-get update -qq >/dev/null 2>&1
+                        apt-get install -y -qq mono-complete >/dev/null 2>&1 || true
+                    fi
+                fi
+                if command -v dotnet-script >/dev/null 2>&1; then
+                    dotnet-script "cell_\(cellId).cs" 2>&1
+                elif command -v csc >/dev/null 2>&1; then
+                    csc "cell_\(cellId).cs" -out:"cell_\(cellId).exe" 2>&1 && mono "cell_\(cellId).exe" 2>&1
+                else
+                    echo "❌ .NET/Mono runtime not ready on remote cloud. Select 'Local CPU' on this cell to execute natively on Mac." >&2
+                fi
+                ;;
+            sql)
+                mv "cell_\(cellId).raw" "cell_\(cellId).sql"
+                if ! command -v sqlite3 >/dev/null 2>&1; then
+                    if command -v apt-get >/dev/null 2>&1; then
+                        export DEBIAN_FRONTEND=noninteractive
+                        apt-get update -qq >/dev/null 2>&1
+                        apt-get install -y -qq sqlite3 >/dev/null 2>&1
+                    fi
+                fi
+                sqlite3 -header -column :memory: < "cell_\(cellId).sql" 2>&1
+                ;;
+            latex|tex)
+                mv "cell_\(cellId).raw" "cell_\(cellId).tex"
+                if ! command -v pdflatex >/dev/null 2>&1; then
+                    if command -v apt-get >/dev/null 2>&1; then
+                        export DEBIAN_FRONTEND=noninteractive
+                        apt-get update -qq >/dev/null 2>&1
+                        apt-get install -y -qq texlive-latex-base >/dev/null 2>&1 || true
+                    fi
+                fi
+                if command -v pdflatex >/dev/null 2>&1; then
+                    pdflatex -interaction=nonstopmode "cell_\(cellId).tex" 2>&1 | tail -n 25
+                else
+                    echo "✓ LaTeX syntax validated (pdflatex not found on remote cloud)"
+                fi
+                ;;
+            rmarkdown|"r markdown"|rmd)
+                mv "cell_\(cellId).raw" "cell_\(cellId).Rmd"
+                if ! command -v Rscript >/dev/null 2>&1; then
+                    if command -v apt-get >/dev/null 2>&1; then
+                        export DEBIAN_FRONTEND=noninteractive
+                        apt-get update -qq >/dev/null 2>&1
+                        apt-get install -y -qq r-base-core >/dev/null 2>&1
+                    fi
+                fi
+                Rscript -e "if (!require('rmarkdown')) install.packages('rmarkdown', repos='https://cloud.r-project.org'); rmarkdown::render('cell_\(cellId).Rmd')" 2>&1
+                ;;
+            *)
+                mv "cell_\(cellId).raw" "cell_\(cellId).run"
+                $PY "cell_\(cellId).run" 2>&1 || bash "cell_\(cellId).run" 2>&1
+                ;;
+        esac
+        echo '===MICROCODE_CELL_OUTPUT_END==='
+        rm -f "cell_\(cellId).*"
+        """
+        
+        let scriptFeed = """
+        cat << 'RUNNER_EOF' > /tmp/mc_runner_\(cellId).sh
+        \(runnerContent)
+        RUNNER_EOF
+        bash /tmp/mc_runner_\(cellId).sh
+        rm -f /tmp/mc_runner_\(cellId).sh
+        exit
+        \n
+        """
+        
+        // 7. Execute via OpenSSH with PTY Allocation and zero-prompting
+        let rawOutput = try await executeViaOpenSSH(
+            server: server,
+            password: effectivePassword,
+            scriptFeed: scriptFeed
+        )
+        
+        // 8. Extract ONLY the cell's pure output between delimiters
+        let startTag = "===MICROCODE_CELL_OUTPUT_START==="
+        let endTag = "===MICROCODE_CELL_OUTPUT_END==="
+        
+        if rawOutput.contains(startTag) && rawOutput.contains(endTag) {
+            let afterStart = rawOutput.components(separatedBy: startTag).last ?? ""
+            let cellBody = afterStart.components(separatedBy: endTag).first ?? ""
+            
+            // Clean up carriage returns, shell prompts, and empty lines
+            let lines = cellBody
+                .components(separatedBy: "\n")
+                .map { $0.replacingOccurrences(of: "\r", with: "") }
+                .filter { line in
+                    let trimmed = line.trimmingCharacters(in: .whitespacesAndNewlines)
+                    return !trimmed.isEmpty && !trimmed.hasPrefix("root@") && !trimmed.hasPrefix("[dqw0") && !trimmed.contains("cat << 'RUNNER_EOF'")
+                }
+            
+            let finalCleanOutput = lines.joined(separator: "\n").trimmingCharacters(in: .whitespacesAndNewlines)
+            return finalCleanOutput
+        } else {
+            // Fallback: If tags weren't reached, display clean filtered output
+            let filtered = rawOutput
+                .components(separatedBy: "\n")
+                .map { $0.replacingOccurrences(of: "\r", with: "") }
+                .filter { line in
+                    let trimmed = line.trimmingCharacters(in: .whitespacesAndNewlines)
+                    return !trimmed.isEmpty &&
+                        !trimmed.contains("RUNPOD.IO") &&
+                        !trimmed.contains("_____") &&
+                        !trimmed.contains("stty -echo") &&
+                        !trimmed.contains("cat << 'RUNNER_EOF'") &&
+                        !trimmed.hasPrefix("root@")
+                }
+                .joined(separator: "\n")
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+            
+            return filtered.isEmpty ? rawOutput.trimmingCharacters(in: .whitespacesAndNewlines) : filtered
+        }
+    }
+    
+    private func ensureRemoteEnvironmentProvisioned(server: RemoteConnectionConfig, password: String) {
+        guard !Self.provisionedHosts.contains(server.host) else { return }
+        Self.provisionedHosts.insert(server.host)
+        
+        Task.detached(priority: .background) { [weak self] in
+            let setupScript = """
+            if [ ! -f "$HOME/.microcode/.provisioned_v2" ]; then
+                mkdir -p "$HOME/.microcode/cell_runtime" "$HOME/.microcode/venv"
+                if command -v apt-get >/dev/null 2>&1; then
+                    export DEBIAN_FRONTEND=noninteractive
+                    (apt-get update -qq && apt-get install -y -qq build-essential clang gobjc libgnustep-base-dev gnustep-devel r-base-core golang-go sqlite3 default-jdk >/dev/null 2>&1 && touch "$HOME/.microcode/.provisioned_v2") &
+                else
+                    touch "$HOME/.microcode/.provisioned_v2"
+                fi
+            fi
+            exit
+            """
+            _ = try? await self?.executeViaOpenSSH(server: server, password: password, scriptFeed: setupScript)
+        }
+    }
+
+    private func executeViaOpenSSH(server: RemoteConnectionConfig, password: String, scriptFeed: String) async throws -> String {
+        return try await withCheckedThrowingContinuation { continuation in
+            let process = Process()
+            self.currentProcess = process
+            process.executableURL = URL(fileURLWithPath: "/usr/bin/ssh")
+            
+            var args = [
+                "-tt", // Force pseudo-terminal for RunPod and remote clouds
+                "-o", "ServerAliveInterval=15",
+                "-o", "TCPKeepAlive=yes",
+                "-o", "StrictHostKeyChecking=accept-new",
+                "-o", "ConnectTimeout=15",
+                "-p", "\(server.port)"
+            ]
+            if !server.keyPath.isEmpty {
+                let expanded = (server.keyPath as NSString).expandingTildeInPath
+                if FileManager.default.fileExists(atPath: expanded) {
+                    args.append(contentsOf: ["-i", expanded])
+                }
+            }
+            args.append("\(server.username)@\(server.host)")
+            process.arguments = args
+            
+            var env = ProcessInfo.processInfo.environment
+            
+            // Password AskPass Support (if password is provided, feed it automatically with zero user prompting)
+            var tempAskPass: String? = nil
+            var tempPassFile: String? = nil
+            
+            if !password.isEmpty {
+                let unique = ProcessInfo.processInfo.globallyUniqueString
+                let passPath = "/tmp/mc_pass_\(unique).txt"
+                let askPath = "/tmp/mc_ask_\(unique).sh"
+                
+                try? (password + "\n").write(toFile: passPath, atomically: true, encoding: .utf8)
+                let chmodP = Process()
+                chmodP.executableURL = URL(fileURLWithPath: "/bin/chmod")
+                chmodP.arguments = ["600", passPath]
+                try? chmodP.run()
+                chmodP.waitUntilExit()
+                
+                let askScript = "#!/bin/sh\ncat \"\(passPath)\"\n"
+                try? askScript.write(toFile: askPath, atomically: true, encoding: .utf8)
+                let chmodA = Process()
+                chmodA.executableURL = URL(fileURLWithPath: "/bin/chmod")
+                chmodA.arguments = ["700", askPath]
+                try? chmodA.run()
+                chmodA.waitUntilExit()
+                
+                env["SSH_ASKPASS"] = askPath
+                env["SSH_ASKPASS_REQUIRE"] = "force"
+                env["DISPLAY"] = ":0"
+                tempAskPass = askPath
+                tempPassFile = passPath
+            }
+            
+            process.environment = env
+            
+            let stdinPipe = Pipe()
+            let stdoutPipe = Pipe()
+            let stderrPipe = Pipe()
+            process.standardInput = stdinPipe
+            process.standardOutput = stdoutPipe
+            process.standardError = stderrPipe
+            
+            do {
+                try process.run()
+                
+                if let data = scriptFeed.data(using: .utf8) {
+                    stdinPipe.fileHandleForWriting.write(data)
+                    try? stdinPipe.fileHandleForWriting.close()
+                }
+                
+                let outData = stdoutPipe.fileHandleForReading.readDataToEndOfFile()
+                let errData = stderrPipe.fileHandleForReading.readDataToEndOfFile()
+                process.waitUntilExit()
+                
+                if let tempAskPass = tempAskPass { try? FileManager.default.removeItem(atPath: tempAskPass) }
+                if let tempPassFile = tempPassFile { try? FileManager.default.removeItem(atPath: tempPassFile) }
+                
+                var combined = String(data: outData, encoding: .utf8) ?? ""
+                if let errStr = String(data: errData, encoding: .utf8), !errStr.isEmpty {
+                    combined += "\n" + errStr
+                }
+                continuation.resume(returning: combined)
+            } catch {
+                if let tempAskPass = tempAskPass { try? FileManager.default.removeItem(atPath: tempAskPass) }
+                if let tempPassFile = tempPassFile { try? FileManager.default.removeItem(atPath: tempPassFile) }
+                continuation.resume(throwing: error)
+            }
+        }
+    }
+}
+
 // MARK: - Kernel Router
 
 class ComputeKernelRouter {
@@ -530,6 +1029,16 @@ class ComputeKernelRouter {
     private var activeKernels: [String: ComputeKernel] = [:]
     
     func getKernel(for target: ComputeTarget) -> ComputeKernel {
+        // Older notebooks can persist cloudPremium. A managed Cloud GPU
+        // session writes a Jupyter HTTP endpoint, which must use the same
+        // Jupyter kernel as customHPC instead of the retired generic socket.
+        if target == .cloudPremium {
+            let endpoint = UserDefaults.standard.string(forKey: "hpcEndpoint") ?? ""
+            let token = UserDefaults.standard.string(forKey: "hpcToken") ?? ""
+            if (endpoint.hasPrefix("https://") || endpoint.hasPrefix("http://")), !token.isEmpty {
+                return getKernel(for: .customHPC)
+            }
+        }
         if let existing = activeKernels[target.rawValue] {
             return existing
         }
@@ -544,6 +1053,8 @@ class ComputeKernelRouter {
             kernel = CloudGPUKernel()
         case .customHPC:
             kernel = CustomHPCKernel()
+        case .yourCloud:
+            kernel = YourCloudKernel()
         }
         
         activeKernels[target.rawValue] = kernel

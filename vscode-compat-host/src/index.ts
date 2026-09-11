@@ -1,6 +1,7 @@
 
 import * as readline from 'readline';
-import { microcodeShim } from './api';
+import Module from 'module';
+import { createMicroCodeShim } from './api';
 
 const rl = readline.createInterface({
     input: process.stdin,
@@ -8,8 +9,16 @@ const rl = readline.createInterface({
     terminal: false
 });
 
-// Polyfill global vscode
-(global as any).vscode = microcodeShim;
+const emit = (method: string, params: Record<string, unknown>) => {
+    console.log(JSON.stringify({ jsonrpc: '2.0', method, params }));
+};
+const vscode = createMicroCodeShim(emit);
+const originalLoad = (Module as any)._load;
+(Module as any)._load = function(request: string, parent: unknown, isMain: boolean) {
+    if (request === 'vscode') return vscode;
+    return originalLoad.call(this, request, parent, isMain);
+};
+(global as any).vscode = vscode;
 
 console.error("MicroCode Compat Host Started");
 
@@ -25,7 +34,7 @@ rl.on('line', (line: string) => {
 
 function handleMessage(msg: any) {
     if (msg.method === 'ext/load') {
-        const { path } = msg.params;
+            const { path, id } = msg.params;
         try {
             console.error(`Loading extension at: ${path}`);
             // Dynamic require to activate extension
@@ -33,9 +42,9 @@ function handleMessage(msg: any) {
             const extension = require(path);
             if (extension.activate) {
                 // Mock context
-                const context = { subscriptions: [] };
+                const context = { subscriptions: [], extensionPath: require('path').dirname(path) };
                 extension.activate(context);
-                sendResponse(msg.id, { status: 'activated' });
+                sendResponse(msg.id, { status: 'activated', id });
             } else {
                 sendError(msg.id, -32000, "No activate function found");
             }

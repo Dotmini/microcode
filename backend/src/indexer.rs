@@ -5,6 +5,20 @@ use serde::{Deserialize, Serialize};
 use std::path::Path;
 use tree_sitter::{Language, Node, Parser};
 
+const MAX_CHUNK_BYTES: usize = 8 * 1024;
+
+fn compact_chunk_content(content: &str) -> String {
+    if content.len() <= MAX_CHUNK_BYTES {
+        return content.to_string();
+    }
+
+    let mut end = MAX_CHUNK_BYTES;
+    while end > 0 && !content.is_char_boundary(end) {
+        end -= 1;
+    }
+    format!("{}\n…[symbol body truncated]…", &content[..end])
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CodeChunk {
     pub file_path: String,
@@ -55,7 +69,7 @@ impl Indexer {
                     file_path: path.to_string_lossy().to_string(),
                     start_line: 1,
                     end_line: content.lines().count(),
-                    content: content.to_string(),
+                    content: compact_chunk_content(content),
                     symbol_name: None,
                     symbol_kind: "module".to_string(),
                 });
@@ -68,7 +82,7 @@ impl Indexer {
                 file_path: path.to_string_lossy().to_string(),
                 start_line: 1,
                 end_line: content.lines().count(),
-                content: content.to_string(),
+                content: compact_chunk_content(content),
                 symbol_name: None,
                 symbol_kind: "file".to_string(),
             }])
@@ -100,7 +114,7 @@ impl Indexer {
                 file_path: path.to_string_lossy().to_string(),
                 start_line: start,
                 end_line: end,
-                content: chunk_content.to_string(),
+                content: compact_chunk_content(chunk_content),
                 symbol_name: name,
                 symbol_kind: kind.to_string(),
             });

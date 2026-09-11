@@ -134,4 +134,3 @@ pub async fn get_embedding(
 
     Ok(Json(EmbeddingResponse { embedding }))
 }
-

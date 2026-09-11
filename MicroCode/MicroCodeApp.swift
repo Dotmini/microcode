@@ -66,10 +66,6 @@ struct MicroCodeApp: App {
             AppCommands(appState: appState)
         }
 
-        Settings {
-            SettingsView()
-                .environmentObject(appState)
-        }
     }
 
     private func setupWindow() {
@@ -99,16 +95,26 @@ struct MicroCodeApp: App {
         // Start Local MCP & HTTP Daemon Bridge for Omni AI
         MCPServer.shared.startLocalHttpBridge(port: 18888)
         
-        // Ensure active Dotmini License is issued automatically if empty
-        let currentLicense = UserDefaults.standard.string(forKey: "dotminiLicenseKey") ?? ""
-        if currentLicense.isEmpty {
-            let autoKey = "mc_live_auto_" + UUID().uuidString.prefix(8).lowercased()
-            UserDefaults.standard.set(autoKey, forKey: "dotminiLicenseKey")
-            UserDefaults.standard.set("cloud", forKey: "aiKeyMode")
-            if (UserDefaults.standard.string(forKey: "dotminiUserEmail") ?? "").isEmpty {
-                UserDefaults.standard.set("subscriber@dotmini.cloud", forKey: "dotminiUserEmail")
+        // A license must be issued and signed by Dotmini's entitlement service.
+        // Never manufacture mc_live_* values locally: they look valid in the UI
+        // but fail at the gateway and leave the user in a false signed-in state.
+        let defaults = UserDefaults.standard
+        // v2 account migration: values in these UserDefaults keys used to be
+        // Firebase ID tokens. A Supabase session lives in Keychain, so clear
+        // the old credentials once instead of sending them to the new gateway.
+        if !defaults.bool(forKey: "supabaseSessionMigrationV1Complete") {
+            ["cloudGPUAuthToken", "cloudGPURefreshToken", "microRentToken", "dotminiLicenseKey"].forEach {
+                defaults.removeObject(forKey: $0)
             }
-            print("🔑 Auto-issued default MicroCode License Key: \(autoKey)")
+            defaults.set(true, forKey: "supabaseSessionMigrationV1Complete")
+        }
+        let currentLicense = defaults.string(forKey: "dotminiLicenseKey") ?? ""
+        if currentLicense.hasPrefix("mc_live_auto_") ||
+            currentLicense.hasPrefix("mc_live_free_") ||
+            currentLicense.hasPrefix("mc_live_pro_") ||
+            currentLicense == "mc_live_admin_tirawatnantamas" {
+            defaults.removeObject(forKey: "dotminiLicenseKey")
+            print("Removed a legacy locally-generated license label")
         }
         
         // Log startup
@@ -124,6 +130,22 @@ struct MicroCodeApp: App {
     
     private func handleIncomingDeepLink(_ url: URL) {
         NSApp.activate(ignoringOtherApps: true)
+
+        // Supabase OAuth uses the app URL scheme. Its browser callback carries
+        // real access/refresh tokens; do not treat it as a human license key.
+        if url.scheme?.lowercased() == "microcode", url.host?.lowercased() == "auth" {
+            Task { @MainActor in
+                guard await SupabaseAuthService.shared.handleCallback(url) else { return }
+                let session = SupabaseAuthService.shared.session
+                appState.syncGoogleOrDotminiAccount(
+                    email: session?.email ?? "",
+                    token: session?.accessToken ?? "",
+                    displayName: session?.email.components(separatedBy: "@").first ?? "User"
+                )
+                NotificationCenter.default.post(name: NSNotification.Name("MicroCodeAccountLoggedIn"), object: nil)
+            }
+            return
+        }
         
         guard let components = URLComponents(url: url, resolvingAgainstBaseURL: true) else { return }
         let host = components.host ?? url.path
@@ -137,21 +159,32 @@ struct MicroCodeApp: App {
         if let email = queryValue(for: "email"), !email.isEmpty {
             let token = queryValue(for: "token") ?? ""
             let name = queryValue(for: "name") ?? queryValue(for: "display_name") ?? ""
-            let uid = queryValue(for: "uid") ?? ""
-            let key = queryValue(for: "key") ?? queryValue(for: "license_key") ?? (uid.isEmpty ? "" : "mc_live_\(uid)")
-            
-            if !key.isEmpty {
-                UserDefaults.standard.set(key, forKey: "dotminiLicenseKey")
-            }
-            if !token.isEmpty {
-                UserDefaults.standard.set(token, forKey: "microRentToken")
-            }
+            // Legacy web pages can still open snippets, but account/session
+            // tokens are accepted only through Supabase's OAuth callback.
+            let key = ""
             UserDefaults.standard.set(email, forKey: "dotminiUserEmail")
             appState.syncGoogleOrDotminiAccount(email: email, token: token, displayName: name)
             NotificationCenter.default.post(name: NSNotification.Name("MicroCodeAccountLoggedIn"), object: nil, userInfo: ["email": email, "key": key])
-        } else if let key = queryValue(for: "key") ?? queryValue(for: "license_key"), !key.isEmpty {
-            UserDefaults.standard.set(key, forKey: "dotminiLicenseKey")
-            NotificationCenter.default.post(name: NSNotification.Name("MicroCodeAccountLoggedIn"), object: nil, userInfo: ["key": key])
+        }
+        
+        // Universal Preview Dock Deep Link
+        if host == "preview" || host == "preview_dock" || host == "preview-dock" {
+            if let path = queryValue(for: "path"), !path.isEmpty {
+                let fileURL = URL(fileURLWithPath: (path as NSString).expandingTildeInPath)
+                Task { @MainActor in
+                    PreviewDockService.shared.openFile(url: fileURL, makeActive: true)
+                }
+            } else if let tab = queryValue(for: "tab"), !tab.isEmpty {
+                Task { @MainActor in
+                    PreviewDockService.shared.selectTab(id: tab)
+                }
+            } else {
+                Task { @MainActor in
+                    PreviewDockService.shared.isDockVisible = true
+                    DeviceRuntimeService.shared.showingEmbeddedDeviceDock = true
+                }
+            }
+            return
         }
         
         // Code Execution / Open
@@ -195,6 +228,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
             let src = DispatchSource.makeSignalSource(signal: sig, queue: .main)
             src.setEventHandler {
                 ReportLogManager.shared.log("Signal \(sig) — stopping backend", type: .info)
+                DeviceRuntimeService.shared.shutdownAllRuntimes()
                 BackendService.shared.stopBackend()
                 exit(0)
             }
@@ -207,9 +241,17 @@ class AppDelegate: NSObject, NSApplicationDelegate {
 
     func applicationWillTerminate(_ notification: Notification) {
         ReportLogManager.shared.log("App Terminating", type: .info)
-        
+        DeviceRuntimeService.shared.shutdownAllRuntimes()
         // Stop backend server
         BackendService.shared.stopBackend()
+    }
+
+    func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
+        // Terminate runtime children before AppKit tears down the final
+        // window. Without this, an embedded AVD/dev-server could keep the
+        // process responsive-but-unclosable and force users to Force Quit.
+        DeviceRuntimeService.shared.shutdownAllRuntimes()
+        return .terminateNow
     }
 
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool {
@@ -223,6 +265,13 @@ struct AppCommands: Commands {
     @ObservedObject var appState: AppState
     
     var body: some Commands {
+        CommandGroup(replacing: .appSettings) {
+            Button("Settings...") {
+                appState.showingSettingsDialog = true
+            }
+            .keyboardShortcut(",", modifiers: .command)
+        }
+
         CommandGroup(replacing: .newItem) {
             Button("New File") { appState.createNewFile() }
                 .keyboardShortcut("n", modifiers: .command)
@@ -230,6 +279,14 @@ struct AppCommands: Commands {
                 .keyboardShortcut("o", modifiers: .command)
             Button("Open Folder...") { appState.openFolder() }
                 .keyboardShortcut("o", modifiers: [.command, .shift])
+            Divider()
+            Button("Close Workspace") { appState.closeWorkspace() }
+                .keyboardShortcut("w", modifiers: [.command, .shift])
+        }
+
+        CommandGroup(replacing: .help) {
+            Button("Welcome to MicroCode") { appState.showWelcomeScreen() }
+            Button("First-Launch Onboarding...") { appState.showFirstLaunchOnboarding() }
         }
         
         CommandGroup(replacing: .saveItem) {
@@ -265,6 +322,30 @@ struct AppCommands: Commands {
                 .keyboardShortcut("j", modifiers: [.command, .option])
             Button("Toggle Git Panel") { appState.toggleGitPanel() }
                 .keyboardShortcut("g", modifiers: [.command, .option])
+            Button("Remote Explorer (SSH)") { 
+                appState.showingWelcomeHome = false
+                appState.setEditorMode(.remoteX) 
+            }
+                .keyboardShortcut("s", modifiers: [.command, .option])
+            Button("Embed & IoT Studio") {
+                appState.showingWelcomeHome = false
+                appState.setEditorMode(.embedded)
+            }
+            Button("Code Editor") {
+                appState.showingWelcomeHome = false
+                appState.setEditorMode(.code)
+            }
+            Button("Cell Mode (Notebook)") {
+                appState.showingWelcomeHome = false
+                appState.setEditorMode(.notebook)
+            }
+            Button("Playground Mode") {
+                appState.showingWelcomeHome = false
+                appState.setEditorMode(.playground)
+            }
+            Button("API Studio") {
+                appState.openAPIStudio()
+            }
 
             Divider()
             

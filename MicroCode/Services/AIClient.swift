@@ -22,6 +22,7 @@ enum StreamableAIProvider: String, CaseIterable {
     case qwen = "qwen"
     case grok = "grok"
     case glm = "glm"
+    case copilot = "copilot"
     case local = "local"
     
     /// Dotmini Cloud proxy URL (license key route — hides real API keys)
@@ -49,20 +50,22 @@ enum StreamableAIProvider: String, CaseIterable {
         case .grok: return "https://api.x.ai/v1"
         case .qwen: return "https://dashscope.aliyuncs.com/compatible-mode/v1"
         case .glm: return "https://open.bigmodel.cn/api/paas/v4"
+        case .copilot: return "https://api.githubcopilot.com"
         case .local: return LocalLLMService.cachedEndpoint
         }
     }
     
     var defaultModel: String {
         switch self {
-        case .omni: return "gemini-3.6-flash"
+        case .omni: return "gemini-2.5-pro"
         case .anthropic: return "claude-3-7-sonnet"
-        case .openai: return "gpt-5.6-terra"
-        case .gemini: return "gemini-3.6-flash"
-        case .deepseek: return "deepseek-v4-flash"
+        case .openai: return "gpt-4o"
+        case .gemini: return "gemini-2.5-flash"
+        case .deepseek: return "deepseek-chat"
         case .qwen: return "qwen/qwen-2.5-coder-32b-instruct"
         case .grok: return "grok-3"
-        case .glm: return "glm-5.2"
+        case .glm: return "glm-4-plus"
+        case .copilot: return "gpt-4o"
         case .local: return LocalLLMService.cachedModel
         }
     }
@@ -70,7 +73,7 @@ enum StreamableAIProvider: String, CaseIterable {
     /// Whether this provider uses OpenAI-compatible chat/completions API format
     var usesOpenAIFormat: Bool {
         switch self {
-        case .omni, .openai, .deepseek, .grok, .qwen, .glm, .local: return true
+        case .omni, .openai, .deepseek, .grok, .qwen, .glm, .copilot, .local: return true
         case .gemini, .anthropic: return false
         }
     }
@@ -138,15 +141,15 @@ struct AIAttachment: Identifiable {
         guard case .pdf = type, let doc = PDFDocument(data: data) else { return "" }
         var result = ""
         for i in 0..<doc.pageCount {
-            if let page = doc.page(at: i), let pageString = page.string {
-                result += "--- [Page \(i + 1)] ---\n\(pageString)\n\n"
+            if let page = doc.page(at: i), let pageText = page.string {
+                result += pageText + "\n"
             }
         }
-        return result.trimmingCharacters(in: .whitespacesAndNewlines)
+        return result
     }
 }
 
-// MARK: - Tool Call Model
+// MARK: - AI Tool Calling
 
 struct AIToolCall: Identifiable {
     let id: String
@@ -154,27 +157,220 @@ struct AIToolCall: Identifiable {
     let arguments: [String: Any]
 }
 
-// MARK: - Stream Response
-
-enum AIStreamEvent {
-    case text(String)
-    case toolCall(AIToolCall)
-    case done
-    case error(String)
-}
-
-// MARK: - AI Client
+// MARK: - Streaming Client
 
 @MainActor
-class AIClient: ObservableObject {
+final class AIClient: ObservableObject {
     static let shared = AIClient()
     
-    @Published var isStreaming = false
-    @Published var currentStreamedText = ""
+    @Published var isStreaming: Bool = false
+    @Published var currentStreamedText: String = ""
     
     private var streamTask: Task<Void, Never>?
-    private let maxHistoryMessages = 20
-    private let requestTimeout: TimeInterval = 120
+    private let requestTimeout: TimeInterval = 60
+    private var pendingStreamTokens: String = ""
+    private var lastStreamDeliveryUptime: TimeInterval = 0
+    private let streamFlushInterval: TimeInterval = 0.016 // ~60fps target for smooth text render
+    
+    private func appendStreamToken(_ token: String, onToken: @escaping (String) -> Void) {
+        pendingStreamTokens += token
+        let now = ProcessInfo.processInfo.systemUptime
+        if now - lastStreamDeliveryUptime >= streamFlushInterval || token.contains("\n") {
+            flushPendingStreamTokens(onToken: onToken)
+        }
+    }
+    
+    private func flushPendingStreamTokens(onToken: @escaping (String) -> Void) {
+        guard !pendingStreamTokens.isEmpty else { return }
+        let chunk = pendingStreamTokens
+        pendingStreamTokens = ""
+        lastStreamDeliveryUptime = ProcessInfo.processInfo.systemUptime
+        currentStreamedText += chunk
+        onToken(chunk)
+    }
+    
+    private func boundedHistory(_ history: [(role: String, content: String)]) -> [(role: String, content: String)] {
+        let maxMessages = 16
+        let maxCharsPerMessage = 4000
+        let recent = Array(history.suffix(maxMessages))
+        return recent.map { (role: $0.role, content: boundedText($0.content, limit: maxCharsPerMessage)) }
+    }
+    
+    private func normalizeModelName(_ model: String, provider: StreamableAIProvider, baseURL: String) -> String {
+        let trimmed = model.trimmingCharacters(in: .whitespacesAndNewlines)
+        let candidate = trimmed.isEmpty ? provider.defaultModel : trimmed
+        let lower = candidate.lowercased()
+        
+        let isCloudProxy = baseURL == provider.cloudBaseURL
+        if isCloudProxy {
+            if lower == "deepseek-chat" || lower == "deepseek-v4-flash" || lower == "deepseek" {
+                return "deepseek-flash"
+            }
+            if lower == "deepseek-r1" || lower == "deepseek-reasoner" || lower == "deepseek-v4-pro" {
+                return "deepseek-v4-pro"
+            }
+            if lower == "gemini-flash" || lower == "gemini" || lower == "gemini-3.7-flash" {
+                return "gemini-2.5-flash"
+            }
+            if lower == "gemini-pro" {
+                return "gemini-2.5-pro"
+            }
+            if lower == "gpt-4" || lower == "gpt-4o-latest" {
+                return "gpt-4o"
+            }
+        } else if provider == .deepseek {
+            // Official DeepSeek API supports deepseek-chat (V3) and deepseek-reasoner (R1)
+            if lower.contains("reasoner") || lower.contains("r1") || lower == "deepseek-v4-pro" {
+                return "deepseek-reasoner"
+            }
+            if lower.contains("deepseek") || lower.contains("chat") {
+                return "deepseek-chat"
+            }
+        } else if provider == .gemini {
+            if lower == "gemini" || lower == "gemini-flash" || lower == "gemini-3.7-flash" {
+                return "gemini-2.5-flash"
+            }
+            if lower == "gemini-pro" {
+                return "gemini-2.5-pro"
+            }
+        }
+        return candidate
+    }
+    
+    /// Sanitize a tool schema for Gemini API compatibility.
+    /// Gemini's function calling requires every `type: "array"` property
+    /// to have an `items` field and doesn't support OpenAI-only keys like
+    /// `additionalProperties` or `default`.
+    private func sanitizeToolSchemaForGemini(_ tool: [String: Any]) -> [String: Any] {
+        var result = tool
+        if var parameters = result["parameters"] as? [String: Any] {
+            parameters = sanitizeSchemaObject(parameters)
+            result["parameters"] = parameters
+        }
+        return result
+    }
+    
+    private func sanitizeSchemaObject(_ schema: [String: Any]) -> [String: Any] {
+        var s = schema
+        // Remove keys not supported by Gemini's schema
+        s.removeValue(forKey: "additionalProperties")
+        s.removeValue(forKey: "default")
+        
+        // Fix array types missing "items"
+        if let type = s["type"] as? String, type == "array" {
+            if s["items"] == nil {
+                s["items"] = ["type": "string"]
+            } else if var items = s["items"] as? [String: Any] {
+                items = sanitizeSchemaObject(items)
+                s["items"] = items
+            }
+        }
+        
+        // Recursively fix properties
+        if var properties = s["properties"] as? [String: Any] {
+            for (key, value) in properties {
+                if var prop = value as? [String: Any] {
+                    prop = sanitizeSchemaObject(prop)
+                    properties[key] = prop
+                }
+            }
+            s["properties"] = properties
+        }
+        
+        return s
+    }
+
+
+    private func boundedText(_ text: String, limit: Int) -> String {
+        guard text.count > limit, limit > 64 else { return String(text.prefix(max(0, limit))) }
+        let headCount = (limit * 2) / 3
+        return String(text.prefix(headCount)) + "\n…[context truncated]…\n" + String(text.suffix(limit - headCount))
+    }
+    
+    private func resolveSubscriptionToken(for provider: StreamableAIProvider) -> String {
+        let explicitSubName = UserDefaults.standard.string(forKey: "subscriptionActiveProvider")
+        let subType: SubscriptionProviderType
+        if let explicitSubName, let explicit = SubscriptionProviderType(rawValue: explicitSubName),
+           SubscriptionAuthManager.shared.isConnected(explicit) {
+            if (provider == .openai && (explicit == .chatgpt || explicit == .copilot)) ||
+               (provider == .anthropic && (explicit == .claude || explicit == .copilot)) ||
+               (provider == .gemini && explicit == .gemini) ||
+               (provider == .deepseek && explicit == .deepseek) ||
+               (provider == .glm && explicit == .glm) ||
+               (provider == .copilot && explicit == .copilot) {
+                subType = explicit
+            } else {
+                switch provider {
+                case .anthropic: subType = .claude
+                case .glm: subType = .glm
+                case .gemini: subType = .gemini
+                case .deepseek: subType = .deepseek
+                case .copilot: subType = .copilot
+                default: subType = explicit == .copilot ? .copilot : .chatgpt
+                }
+            }
+        } else {
+            switch provider {
+            case .anthropic: subType = .claude
+            case .glm: subType = .glm
+            case .gemini: subType = .gemini
+            case .deepseek: subType = .deepseek
+            case .copilot: subType = .copilot
+            default:
+                if SubscriptionAuthManager.shared.isConnected(.chatgpt) {
+                    subType = .chatgpt
+                } else if SubscriptionAuthManager.shared.isConnected(.copilot) {
+                    subType = .copilot
+                } else {
+                    subType = .chatgpt
+                }
+            }
+        }
+        return SubscriptionAuthManager.shared.getAccount(subType)?.sessionToken ?? ""
+    }
+    
+    /// Returns the full SubscriptionAccount for a given provider (mirrors resolveSubscriptionToken logic)
+    private func resolveSubscriptionAccount(for provider: StreamableAIProvider) -> SubscriptionAccount? {
+        let explicitSubName = UserDefaults.standard.string(forKey: "subscriptionActiveProvider")
+        let subType: SubscriptionProviderType
+        if let explicitSubName, let explicit = SubscriptionProviderType(rawValue: explicitSubName),
+           SubscriptionAuthManager.shared.isConnected(explicit) {
+            if (provider == .openai && (explicit == .chatgpt || explicit == .copilot)) ||
+               (provider == .anthropic && (explicit == .claude || explicit == .copilot)) ||
+               (provider == .gemini && explicit == .gemini) ||
+               (provider == .deepseek && explicit == .deepseek) ||
+               (provider == .glm && explicit == .glm) ||
+               (provider == .copilot && explicit == .copilot) {
+                subType = explicit
+            } else {
+                switch provider {
+                case .anthropic: subType = .claude
+                case .glm: subType = .glm
+                case .gemini: subType = .gemini
+                case .deepseek: subType = .deepseek
+                case .copilot: subType = .copilot
+                default: subType = explicit == .copilot ? .copilot : .chatgpt
+                }
+            }
+        } else {
+            switch provider {
+            case .anthropic: subType = .claude
+            case .glm: subType = .glm
+            case .gemini: subType = .gemini
+            case .deepseek: subType = .deepseek
+            case .copilot: subType = .copilot
+            default:
+                if SubscriptionAuthManager.shared.isConnected(.chatgpt) {
+                    subType = .chatgpt
+                } else if SubscriptionAuthManager.shared.isConnected(.copilot) {
+                    subType = .copilot
+                } else {
+                    subType = .chatgpt
+                }
+            }
+        }
+        return SubscriptionAuthManager.shared.getAccount(subType)
+    }
     
     // MARK: - Send Message (Streaming, Text-only response)
     
@@ -200,16 +396,40 @@ class AIClient: ObservableObject {
         if provider == .local {
             actualKey = ""
             baseURL = provider.directBaseURL
+            
+        } else if keyMode == "subscription" {
+            // ━━━ SUBSCRIPTION MODE ━━━
+            // Uses ONLY tokens from SubscriptionAuthManager (CLI detection / manual input)
+            // Routes directly to provider APIs — no cloud proxy, no BYOK mixing
+            let subToken = resolveSubscriptionToken(for: provider)
+            let account = resolveSubscriptionAccount(for: provider)
+            
+            if !subToken.isEmpty {
+                actualKey = subToken
+                // CLI tokens and manually entered keys go directly to the provider
+                let isCLIToken = account?.source == "Manual"
+                let isManualInput = account?.source == "Manual Input"
+                let isRealAPIKey = subToken.hasPrefix("sk-") || subToken.hasPrefix("AIzaSy") || subToken.hasPrefix("gsk_")
+                if isCLIToken || isManualInput || isRealAPIKey {
+                    baseURL = provider.directBaseURL
+                } else {
+                    // Web session tokens → route through cloud proxy for translation
+                    baseURL = provider.cloudBaseURL
+                }
+            } else {
+                actualKey = ""
+                baseURL = provider.directBaseURL
+            }
+            
         } else if keyMode == "direct" {
-            // User's own API key → hit provider directly
+            // ━━━ BYOK (DIRECT) MODE ━━━
+            // Uses ONLY user's own API keys — no cloud proxy, no subscription
             let specificKey = UserDefaults.standard.string(forKey: "\(provider.rawValue)_api_key") ?? ""
             let legacyKey = UserDefaults.standard.string(forKey: "apiKey") ?? ""
             let passedKey = apiKey.trimmingCharacters(in: .whitespacesAndNewlines)
             
             if !specificKey.isEmpty {
                 actualKey = specificKey
-            } else if provider == .openai && !legacyKey.isEmpty {
-                actualKey = legacyKey
             } else if !passedKey.isEmpty {
                 actualKey = passedKey
             } else if !legacyKey.isEmpty {
@@ -218,100 +438,91 @@ class AIClient: ObservableObject {
                 actualKey = ""
             }
             baseURL = provider.directBaseURL
-        } else {
-            // Dotmini Cloud mode or fallback to BYOK
-            let dotminiKey = UserDefaults.standard.string(forKey: "dotminiLicenseKey") ?? ""
-            let microToken = UserDefaults.standard.string(forKey: "microRentToken") ?? ""
-            let directProviderKey = UserDefaults.standard.string(forKey: "\(provider.rawValue)_api_key") ?? ""
-            let legacyKey = UserDefaults.standard.string(forKey: "apiKey") ?? ""
-            let passedKey = apiKey.trimmingCharacters(in: .whitespacesAndNewlines)
             
-            if !dotminiKey.isEmpty {
-                actualKey = dotminiKey
-                baseURL = provider.cloudBaseURL
-            } else if !microToken.isEmpty {
-                actualKey = microToken
-                baseURL = provider.cloudBaseURL
-            } else if !directProviderKey.isEmpty {
-                actualKey = directProviderKey
-                baseURL = provider.directBaseURL
-            } else if !passedKey.isEmpty {
-                actualKey = passedKey
-                baseURL = provider.directBaseURL
-            } else if provider == .openai && !legacyKey.isEmpty {
-                actualKey = legacyKey
-                baseURL = provider.directBaseURL
-            } else if userEmail.lowercased().contains("tirawat") || userEmail.lowercased().contains("admin") {
-                actualKey = "mc_live_admin_tirawatnantamas"
-                baseURL = provider.cloudBaseURL
-            } else {
-                actualKey = ""
-                baseURL = provider.directBaseURL
-            }
+        } else {
+            // ━━━ CLOUD MODE (Dotmini) ━━━
+            // Uses ONLY Dotmini platform credentials — no BYOK, no subscription
+            let microToken = DotminiPlatformKeyService.shared.authorizationToken
+                ?? SupabaseAuthService.shared.accessToken ?? ""
+            actualKey = microToken
+            baseURL = provider.cloudBaseURL
         }
         
-        if (keyMode == "direct" || baseURL == provider.directBaseURL) && actualKey.isEmpty && provider != .local && provider != .omni {
-            onError("API key missing for \(provider.rawValue). Add your key in Settings → AI Provider, or switch to Dotmini Cloud mode.")
+        // DEBUG: Log key resolution (remove after debugging)
+        let keyPreview = actualKey.isEmpty ? "(empty)" : String(actualKey.prefix(12)) + "..."
+        NSLog("🔑 [AIClient.sendMessage] mode=%@ provider=%@ key=%@ url=%@", keyMode, provider.rawValue, keyPreview, baseURL)
+        
+        if actualKey.isEmpty && provider != .local && provider != .omni {
+            switch keyMode {
+            case "subscription":
+                onError("No subscription session found for \(provider.rawValue). Go to Settings → AI Provider → Subscription to connect.")
+                return
+            case "direct":
+                onError("API key missing for \(provider.rawValue). Go to Settings → AI Provider → BYOK to add your key.")
+                return
+            default:
+                // In cloud mode, requests route to Dotmini Cloud via X-Dotmini-Product and X-Dotmini-License
+                break
+            }
+        }
+
+        if keyMode == "subscription" && actualKey.hasPrefix("ghp_") && provider == .openai {
+            onError("GitHub Personal Access Token (ghp_...) cannot be used directly as an OpenAI API key. Please switch to Direct API Key (BYOK) mode or configure an OpenAI API key in Settings.")
             return
         }
         
         isStreaming = true
         currentStreamedText = ""
+        pendingStreamTokens = ""
+        lastStreamDeliveryUptime = 0
         
-        let trimmedHistory = Array(conversationHistory.suffix(maxHistoryMessages))
+        let trimmedHistory = boundedHistory(conversationHistory)
+        let resolvedModel = normalizeModelName(model, provider: provider, baseURL: baseURL)
         
         streamTask = Task {
+            let requestKey: String
+            if keyMode == "cloud" && baseURL == provider.cloudBaseURL && provider != .local {
+                if let platformKey = DotminiPlatformKeyService.shared.authorizationToken {
+                    requestKey = platformKey
+                } else if SupabaseAuthService.shared.session != nil {
+                    guard let refreshed = await SupabaseAuthService.shared.refreshAccessTokenIfNeeded() else {
+                        onError("Could not refresh your Dotmini session. Check your connection or sign in again.")
+                        self.isStreaming = false
+                        return
+                    }
+                    requestKey = refreshed
+                } else {
+                    requestKey = actualKey
+                }
+            } else {
+                requestKey = actualKey
+            }
             var retryCount = 0
             let maxRetries = 2
             
             while retryCount <= maxRetries {
                 do {
-                    if keyMode == "cloud" && baseURL == provider.cloudBaseURL {
-                        // Dotmini Cloud (OneAPI proxy) handles ALL models via OpenAI protocol
-                        try await streamOpenAI(prompt: prompt, attachments: attachments, systemPrompt: systemPrompt, conversationHistory: trimmedHistory, model: model, apiKey: actualKey, baseURL: baseURL, tools: tools, onToken: onToken, onToolCall: onToolCall)
+                    if baseURL == provider.cloudBaseURL {
+                        // All cloud-routed requests (Dotmini Cloud or Web Subscriptions) use OpenAI-compatible gateway
+                        try await streamOpenAI(prompt: prompt, attachments: attachments, systemPrompt: systemPrompt, conversationHistory: trimmedHistory, model: resolvedModel, apiKey: requestKey, baseURL: baseURL, tools: tools, onToken: onToken, onToolCall: onToolCall)
                     } else {
-                        // Direct mode: use native protocols where necessary
+                        // Direct / BYOK mode: use native protocols where necessary
                         switch provider {
                         case .gemini:
-                            try await streamGemini(prompt: prompt, attachments: attachments, systemPrompt: systemPrompt, conversationHistory: trimmedHistory, model: model, apiKey: actualKey, tools: tools, onToken: onToken, onToolCall: onToolCall)
+                            try await streamGemini(prompt: prompt, attachments: attachments, systemPrompt: systemPrompt, conversationHistory: trimmedHistory, model: resolvedModel, apiKey: actualKey, tools: tools, onToken: onToken, onToolCall: onToolCall)
                         case .anthropic:
-                            try await streamAnthropic(prompt: prompt, attachments: attachments, systemPrompt: systemPrompt, conversationHistory: trimmedHistory, model: model, apiKey: actualKey, tools: tools, onToken: onToken, onToolCall: onToolCall)
-                        case .omni, .openai, .deepseek, .grok, .qwen, .glm, .local:
-                            try await streamOpenAI(prompt: prompt, attachments: attachments, systemPrompt: systemPrompt, conversationHistory: trimmedHistory, model: model, apiKey: actualKey, baseURL: baseURL, tools: tools, onToken: onToken, onToolCall: onToolCall)
+                            try await streamAnthropic(prompt: prompt, attachments: attachments, systemPrompt: systemPrompt, conversationHistory: trimmedHistory, model: resolvedModel, apiKey: actualKey, tools: tools, onToken: onToken, onToolCall: onToolCall)
+                        case .omni, .openai, .deepseek, .grok, .qwen, .glm, .copilot, .local:
+                            try await streamOpenAI(prompt: prompt, attachments: attachments, systemPrompt: systemPrompt, conversationHistory: trimmedHistory, model: resolvedModel, apiKey: actualKey, baseURL: baseURL, tools: tools, onToken: onToken, onToolCall: onToolCall)
                         }
                     }
                     
-                    await MainActor.run {
-                        onComplete(self.currentStreamedText)
-                        self.isStreaming = false
-                    }
+                    self.flushPendingStreamTokens(onToken: onToken)
+                    onComplete(self.currentStreamedText)
+                    self.isStreaming = false
                     return // Success
                     
                 } catch let error as NSError {
-                    // Smart Failover: If Cloud Proxy is unreachable, fallback to direct provider key if available
-                    if keyMode == "cloud" && (error.domain == NSURLErrorDomain || error.code == 502 || error.code == 503 || error.code == 504 || error.code == -1004 || error.code == -1001 || error.code == -1003) {
-                        let directKey = UserDefaults.standard.string(forKey: "\(provider.rawValue)_api_key") ?? UserDefaults.standard.string(forKey: "apiKey") ?? ""
-                        if !directKey.isEmpty {
-                            do {
-                                switch provider {
-                                case .gemini:
-                                    try await self.streamGemini(prompt: prompt, attachments: attachments, systemPrompt: systemPrompt, conversationHistory: trimmedHistory, model: model, apiKey: directKey, tools: tools, onToken: onToken, onToolCall: onToolCall)
-                                case .anthropic:
-                                    try await self.streamAnthropic(prompt: prompt, attachments: attachments, systemPrompt: systemPrompt, conversationHistory: trimmedHistory, model: model, apiKey: directKey, tools: tools, onToken: onToken, onToolCall: onToolCall)
-                                case .omni, .openai, .deepseek, .grok, .qwen, .glm, .local:
-                                    try await self.streamOpenAI(prompt: prompt, attachments: attachments, systemPrompt: systemPrompt, conversationHistory: trimmedHistory, model: model, apiKey: directKey, baseURL: provider.directBaseURL, tools: tools, onToken: onToken, onToolCall: onToolCall)
-                                }
-                                await MainActor.run {
-                                    onComplete(self.currentStreamedText)
-                                    self.isStreaming = false
-                                }
-                                return
-                            } catch {
-                                // Fall through to standard error handler
-                            }
-                        }
-                    }
-                    
                     // Retry on transient errors (429, 503)
                     if (error.code == 429 || error.code == 503) && retryCount < maxRetries {
                         retryCount += 1
@@ -320,10 +531,8 @@ class AIClient: ObservableObject {
                         continue
                     }
                     
-                    await MainActor.run {
-                        onError(self.parseErrorMessage(error))
-                        self.isStreaming = false
-                    }
+                    onError(self.parseErrorMessage(error))
+                    self.isStreaming = false
                     return
                 }
             }
@@ -332,6 +541,7 @@ class AIClient: ObservableObject {
     
     func cancelStream() {
         streamTask?.cancel()
+        pendingStreamTokens = ""
         isStreaming = false
     }
     
@@ -352,15 +562,35 @@ class AIClient: ObservableObject {
         if provider == .local {
             actualKey = ""
             baseURL = provider.directBaseURL
+            
+        } else if keyMode == "subscription" {
+            // ━━━ SUBSCRIPTION MODE ━━━
+            let subToken = resolveSubscriptionToken(for: provider)
+            let account = resolveSubscriptionAccount(for: provider)
+            
+            if !subToken.isEmpty {
+                actualKey = subToken
+                let isCLIToken = account?.source == "Manual"
+                let isManualInput = account?.source == "Manual Input"
+                let isRealAPIKey = subToken.hasPrefix("sk-") || subToken.hasPrefix("AIzaSy") || subToken.hasPrefix("gsk_")
+                if isCLIToken || isManualInput || isRealAPIKey {
+                    baseURL = provider.directBaseURL
+                } else {
+                    baseURL = provider.cloudBaseURL
+                }
+            } else {
+                actualKey = ""
+                baseURL = provider.directBaseURL
+            }
+            
         } else if keyMode == "direct" {
+            // ━━━ BYOK (DIRECT) MODE ━━━
             let specificKey = UserDefaults.standard.string(forKey: "\(provider.rawValue)_api_key") ?? ""
             let legacyKey = UserDefaults.standard.string(forKey: "apiKey") ?? ""
             let passedKey = apiKey.trimmingCharacters(in: .whitespacesAndNewlines)
             
             if !specificKey.isEmpty {
                 actualKey = specificKey
-            } else if provider == .openai && !legacyKey.isEmpty {
-                actualKey = legacyKey
             } else if !passedKey.isEmpty {
                 actualKey = passedKey
             } else if !legacyKey.isEmpty {
@@ -369,61 +599,30 @@ class AIClient: ObservableObject {
                 actualKey = ""
             }
             baseURL = provider.directBaseURL
-        } else {
-            let dotminiKey = UserDefaults.standard.string(forKey: "dotminiLicenseKey") ?? ""
-            let microToken = UserDefaults.standard.string(forKey: "microRentToken") ?? ""
-            let directProviderKey = UserDefaults.standard.string(forKey: "\(provider.rawValue)_api_key") ?? ""
-            let legacyKey = UserDefaults.standard.string(forKey: "apiKey") ?? ""
-            let userEmail = UserDefaults.standard.string(forKey: "dotminiUserEmail") ?? ""
             
-            if !dotminiKey.isEmpty {
-                actualKey = dotminiKey
-                baseURL = provider.cloudBaseURL
-            } else if !microToken.isEmpty {
-                actualKey = microToken
-                baseURL = provider.cloudBaseURL
-            } else if !directProviderKey.isEmpty {
-                actualKey = directProviderKey
-                baseURL = provider.directBaseURL
-            } else if provider == .openai && !legacyKey.isEmpty {
-                actualKey = legacyKey
-                baseURL = provider.directBaseURL
-            } else {
-                // Privileged credentials must never ship inside the desktop app.
-                // Anonymous access, when enabled, is issued and rate-limited by
-                // the proxy; otherwise the server returns an authentication error.
-                actualKey = ""
-                baseURL = provider.cloudBaseURL
-            }
+        } else {
+            // ━━━ CLOUD MODE (Dotmini) ━━━
+            let sessionToken = await SupabaseAuthService.shared.refreshAccessTokenIfNeeded()
+            let microToken = DotminiPlatformKeyService.shared.authorizationToken ?? sessionToken ?? ""
+            actualKey = microToken
+            baseURL = provider.cloudBaseURL
         }
         
-        if keyMode == "cloud" && baseURL == provider.cloudBaseURL {
-            do {
-                // Dotmini Cloud (OneAPI proxy) handles ALL models via OpenAI protocol
-                return try await syncOpenAI(messages: messages, systemPrompt: systemPrompt, model: model, apiKey: actualKey, baseURL: baseURL, tools: tools)
-            } catch let err as NSError {
-                // Fallback to direct key if available
-                let directKey = UserDefaults.standard.string(forKey: "\(provider.rawValue)_api_key") ?? UserDefaults.standard.string(forKey: "apiKey") ?? ""
-                if !directKey.isEmpty {
-                    switch provider {
-                    case .gemini:
-                        return try await syncGemini(messages: messages, systemPrompt: systemPrompt, model: model, apiKey: directKey, tools: tools)
-                    case .anthropic:
-                        return try await syncAnthropic(messages: messages, systemPrompt: systemPrompt, model: model, apiKey: directKey, tools: tools)
-                    case .omni, .openai, .deepseek, .grok, .qwen, .glm, .local:
-                        return try await syncOpenAI(messages: messages, systemPrompt: systemPrompt, model: model, apiKey: directKey, baseURL: provider.directBaseURL, tools: tools)
-                    }
-                }
-                throw err
-            }
+        // DEBUG: Log key resolution (remove after debugging)
+        let syncKeyPreview = actualKey.isEmpty ? "(empty)" : String(actualKey.prefix(12)) + "..."
+        NSLog("🔑 [AIClient.sendSync] mode=%@ provider=%@ key=%@ url=%@", keyMode, provider.rawValue, syncKeyPreview, baseURL)
+        
+        if baseURL == provider.cloudBaseURL {
+            // Cloud mode → all models via OpenAI protocol through Dotmini proxy
+            return try await syncOpenAI(messages: messages, systemPrompt: systemPrompt, model: model, apiKey: actualKey, baseURL: baseURL, tools: tools)
         } else {
-            // Direct mode: use native protocols
+            // Direct/Subscription mode → use native protocols
             switch provider {
             case .gemini:
                 return try await syncGemini(messages: messages, systemPrompt: systemPrompt, model: model, apiKey: actualKey, tools: tools)
             case .anthropic:
                 return try await syncAnthropic(messages: messages, systemPrompt: systemPrompt, model: model, apiKey: actualKey, tools: tools)
-            case .omni, .openai, .deepseek, .grok, .qwen, .glm, .local:
+            case .omni, .openai, .deepseek, .grok, .qwen, .glm, .copilot, .local:
                 return try await syncOpenAI(messages: messages, systemPrompt: systemPrompt, model: model, apiKey: actualKey, baseURL: baseURL, tools: tools)
             }
         }
@@ -444,30 +643,65 @@ class AIClient: ObservableObject {
         }
     }
     
+    // MARK: - Token Limit Configuration
+    
+    private func maxOutputTokens(for model: String) -> Int {
+        let lower = model.lowercased()
+        if lower.contains("gemini-2.5") || lower.contains("gemini-1.5") {
+            return 65536
+        } else if lower.contains("claude-3-7") {
+            return 64000
+        } else if lower.contains("claude-3-5") {
+            return 8192
+        } else if lower.contains("o1") || lower.contains("o3") {
+            return 65536
+        } else if lower.contains("gpt-4o") {
+            return 16384
+        } else if lower.contains("deepseek-reasoner") {
+            return 64000
+        } else if lower.contains("deepseek") {
+            return 16384
+        } else {
+            return 16384
+        }
+    }
+    
     // MARK: - Gemini Streaming
     
     private func streamGemini(prompt: String, attachments: [AIAttachment], systemPrompt: String?, conversationHistory: [(role: String, content: String)], model: String, apiKey: String, tools: [[String: Any]]?, onToken: @escaping (String) -> Void, onToolCall: ((AIToolCall) -> Void)?) async throws {
-        let keyMode = UserDefaults.standard.string(forKey: "aiKeyMode") ?? "cloud"
-        let baseURL = keyMode == "direct" ? StreamableAIProvider.gemini.directBaseURL : StreamableAIProvider.gemini.cloudBaseURL
-        let url = URL(string: "\(baseURL)/models/\(model):streamGenerateContent?alt=sse&key=\(apiKey)")!
+        let baseURL = StreamableAIProvider.gemini.directBaseURL
+        let cleanModel = model.hasPrefix("models/") ? String(model.dropFirst(7)) : model
+        let url = URL(string: "\(baseURL)/models/\(cleanModel):streamGenerateContent?alt=sse&key=\(apiKey)")!
         
         var request = URLRequest(url: url, timeoutInterval: requestTimeout)
         request.httpMethod = "POST"
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
-        
-        var contents: [[String: Any]] = []
-        
-        if let sys = systemPrompt {
-            contents.append(["role": "user", "parts": [["text": sys]]])
-            contents.append(["role": "model", "parts": [["text": "Understood. I'll follow these instructions."]]])
+        if baseURL.trimmingCharacters(in: CharacterSet(charactersIn: "/")) == StreamableAIProvider.cloudProxyURL.trimmingCharacters(in: CharacterSet(charactersIn: "/")) {
+            request.setValue("microcode", forHTTPHeaderField: "X-Dotmini-Product")
         }
+        
+        var body: [String: Any] = [
+            "generationConfig": ["temperature": 0.7, "maxOutputTokens": maxOutputTokens(for: cleanModel)]
+        ]
+        
+        if let sys = systemPrompt, !sys.isEmpty {
+            body["systemInstruction"] = ["parts": [["text": sys]]]
+        }
+        
+        var rawContents: [[String: Any]] = []
         
         for msg in conversationHistory {
+            let trimmed = msg.content.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !trimmed.isEmpty else { continue }
             let geminiRole = msg.role == "assistant" ? "model" : "user"
-            contents.append(["role": geminiRole, "parts": [["text": msg.content]]])
+            rawContents.append(["role": geminiRole, "parts": [["text": trimmed]]])
         }
         
-        var userParts: [[String: Any]] = [["text": prompt]]
+        var userParts: [[String: Any]] = []
+        let trimmedPrompt = prompt.trimmingCharacters(in: .whitespacesAndNewlines)
+        if !trimmedPrompt.isEmpty {
+            userParts.append(["text": trimmedPrompt])
+        }
         
         for attachment in attachments {
             switch attachment.type {
@@ -482,16 +716,36 @@ class AIClient: ObservableObject {
             }
         }
         
-        contents.append(["role": "user", "parts": userParts])
+        if userParts.isEmpty {
+            userParts.append(["text": "Please continue."])
+        }
+        rawContents.append(["role": "user", "parts": userParts])
         
-        var body: [String: Any] = [
-            "contents": contents,
-            "generationConfig": ["temperature": 0.7, "maxOutputTokens": 4096]
-        ]
+        // Coalesce consecutive messages with same role
+        var coalesced: [[String: Any]] = []
+        for item in rawContents {
+            if let last = coalesced.last, (last["role"] as? String) == (item["role"] as? String) {
+                var newLast = last
+                var parts = (newLast["parts"] as? [[String: Any]]) ?? []
+                let itemParts = (item["parts"] as? [[String: Any]]) ?? []
+                parts.append(contentsOf: itemParts)
+                newLast["parts"] = parts
+                coalesced[coalesced.count - 1] = newLast
+            } else {
+                coalesced.append(item)
+            }
+        }
         
-        // Add tools for function calling
+        if coalesced.first?["role"] as? String == "model" {
+            coalesced.insert(["role": "user", "parts": [["text": "Begin."]]], at: 0)
+        }
+        
+        body["contents"] = coalesced
+        
+        // Add tools for function calling (sanitize for Gemini API compatibility)
         if let tools = tools, !tools.isEmpty {
-            body["tools"] = [["functionDeclarations": tools]]
+            let sanitized = tools.map { sanitizeToolSchemaForGemini($0) }
+            body["tools"] = [["functionDeclarations": sanitized]]
         }
         
         request.httpBody = try JSONSerialization.data(withJSONObject: body)
@@ -504,9 +758,29 @@ class AIClient: ObservableObject {
         
         guard httpResponse.statusCode == 200 else {
             let code = httpResponse.statusCode
-            let customMsg = parseErrorMessage(NSError(domain: "AIClient", code: code, userInfo: nil))
-            let finalMsg = customMsg == "The operation couldn’t be completed. (AIClient error \(code).)" ? "Gemini API error (\(code))" : customMsg
-            throw NSError(domain: "AIClient", code: code, userInfo: [NSLocalizedDescriptionKey: finalMsg])
+            // Read error response body for detailed diagnostics
+            var errorBody = ""
+            for try await line in bytes.lines {
+                errorBody += line
+                if errorBody.count > 500 { break }
+            }
+            // Log to debug file
+            let errDebug = "[\(Date())] GEMINI ERROR \(code): \(errorBody.prefix(300))\n"
+            if let d = errDebug.data(using: .utf8) {
+                if let fh = FileHandle(forWritingAtPath: "/tmp/microcode_ai_debug.log") {
+                    fh.seekToEndOfFile(); fh.write(d); fh.closeFile()
+                }
+            }
+            // Extract message from JSON error if possible
+            var detailedMsg = "Gemini API error (\(code))"
+            if let data = errorBody.data(using: .utf8),
+               let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+               let error = json["error"] as? [String: Any],
+               let message = error["message"] as? String {
+                detailedMsg = "(\(code)): \(message)"
+            }
+            NSLog("❌ [streamGemini] Error %d: %@ body=%@", code, detailedMsg, String(errorBody.prefix(300)))
+            throw NSError(domain: "AIClient", code: code, userInfo: [NSLocalizedDescriptionKey: detailedMsg])
         }
         
         for try await line in bytes.lines {
@@ -522,15 +796,12 @@ class AIClient: ObservableObject {
             
             for part in parts {
                 if let text = part["text"] as? String {
-                    await MainActor.run {
-                        self.currentStreamedText += text
-                        onToken(text)
-                    }
+                    appendStreamToken(text, onToken: onToken)
                 } else if let fc = part["functionCall"] as? [String: Any],
                           let name = fc["name"] as? String {
                     let args = fc["args"] as? [String: Any] ?? [:]
                     let toolCall = AIToolCall(id: UUID().uuidString, name: name, arguments: args)
-                    await MainActor.run { onToolCall?(toolCall) }
+                    onToolCall?(toolCall)
                 }
             }
         }
@@ -556,8 +827,30 @@ class AIClient: ObservableObject {
         var request = URLRequest(url: url, timeoutInterval: requestTimeout)
         request.httpMethod = "POST"
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
-        if !apiKey.isEmpty {
-            request.setValue("Bearer \(apiKey)", forHTTPHeaderField: "Authorization")
+        let isCloudProxy = baseURL.trimmingCharacters(in: CharacterSet(charactersIn: "/")) == StreamableAIProvider.cloudProxyURL.trimmingCharacters(in: CharacterSet(charactersIn: "/"))
+        let isCopilot = baseURL.contains("githubcopilot.com")
+        if isCloudProxy {
+            request.setValue("microcode", forHTTPHeaderField: "X-Dotmini-Product")
+            let dotminiLicense = UserDefaults.standard.string(forKey: "dotminiLicenseKey") ?? ""
+            if !dotminiLicense.isEmpty {
+                request.setValue(dotminiLicense, forHTTPHeaderField: "X-Dotmini-License")
+            }
+            let isJWT = apiKey.components(separatedBy: ".").count >= 3
+            let isPlatformKey = apiKey.hasPrefix("sk-dotmini-") || apiKey.hasPrefix("mci-live-")
+            if (isJWT || isPlatformKey) && !apiKey.isEmpty {
+                request.setValue("Bearer \(apiKey)", forHTTPHeaderField: "Authorization")
+            }
+        } else if isCopilot {
+            let copilotToken = try await SubscriptionAuthManager.shared.getCopilotSessionToken(githubToken: apiKey)
+            request.setValue("Bearer \(copilotToken)", forHTTPHeaderField: "Authorization")
+            request.setValue("vscode/1.95.0", forHTTPHeaderField: "Editor-Version")
+            request.setValue("copilot-chat/0.22.4", forHTTPHeaderField: "Editor-Plugin-Version")
+            request.setValue("vscode-chat", forHTTPHeaderField: "Copilot-Integration-Id")
+            request.setValue("github-copilot", forHTTPHeaderField: "Openai-Organization")
+        } else {
+            if !apiKey.isEmpty {
+                request.setValue("Bearer \(apiKey)", forHTTPHeaderField: "Authorization")
+            }
         }
         
         var messages: [[String: Any]] = []
@@ -593,7 +886,8 @@ class AIClient: ObservableObject {
         }
         messages.append(["role": "user", "content": contentArray])
         
-        var body: [String: Any] = ["model": model, "messages": messages, "stream": true, "temperature": 0.7, "max_tokens": 4096]
+        let effectiveModel = normalizeModelName(model, provider: StreamableAIProvider.detect(from: model), baseURL: baseURL)
+        var body: [String: Any] = ["model": effectiveModel, "messages": messages, "stream": true, "temperature": 0.7, "max_tokens": maxOutputTokens(for: effectiveModel)]
         
         if let tools = tools, !tools.isEmpty {
             body["tools"] = tools.map { ["type": "function", "function": $0] as [String: Any] }
@@ -618,6 +912,7 @@ class AIClient: ObservableObject {
             }
             let customMsg = parseErrorMessage(NSError(domain: "AIClient", code: code, userInfo: nil))
             let finalMsg = parsedMsg ?? customMsg
+            print("[AIClient] HTTP \(code) error from \(url.absoluteString): \(finalMsg)")
             throw NSError(domain: "AIClient", code: code, userInfo: [NSLocalizedDescriptionKey: finalMsg])
         }
         
@@ -634,12 +929,11 @@ class AIClient: ObservableObject {
                   let choices = json["choices"] as? [[String: Any]],
                   let delta = choices.first?["delta"] as? [String: Any] else { continue }
             
-            // Text content
-            if let content = delta["content"] as? String {
-                await MainActor.run {
-                    self.currentStreamedText += content
-                    onToken(content)
-                }
+            // Reasoning tokens (DeepSeek R1 / thinking models)
+            if let reasoning = delta["reasoning_content"] as? String, !reasoning.isEmpty {
+                appendStreamToken(reasoning, onToken: onToken)
+            } else if let content = delta["content"] as? String {
+                appendStreamToken(content, onToken: onToken)
             }
             
             // Tool calls (streamed incrementally)
@@ -662,17 +956,28 @@ class AIClient: ObservableObject {
                 for (_, buffer) in toolCallBuffers {
                     let args = (try? JSONSerialization.jsonObject(with: Data(buffer.args.utf8))) as? [String: Any] ?? [:]
                     let toolCall = AIToolCall(id: UUID().uuidString, name: buffer.name, arguments: args)
-                    await MainActor.run { onToolCall?(toolCall) }
+                    onToolCall?(toolCall)
                 }
+                toolCallBuffers.removeAll()
             }
+        }
+        
+        // Flush any remaining buffered tool calls (e.g. if provider sent finish_reason: "stop" or nil)
+        if !toolCallBuffers.isEmpty {
+            for (_, buffer) in toolCallBuffers {
+                guard !buffer.name.isEmpty else { continue }
+                let args = (try? JSONSerialization.jsonObject(with: Data(buffer.args.utf8))) as? [String: Any] ?? [:]
+                let toolCall = AIToolCall(id: UUID().uuidString, name: buffer.name, arguments: args)
+                onToolCall?(toolCall)
+            }
+            toolCallBuffers.removeAll()
         }
     }
     
     // MARK: - Anthropic Streaming
     
     private func streamAnthropic(prompt: String, attachments: [AIAttachment], systemPrompt: String?, conversationHistory: [(role: String, content: String)], model: String, apiKey: String, tools: [[String: Any]]?, onToken: @escaping (String) -> Void, onToolCall: ((AIToolCall) -> Void)?) async throws {
-        let keyMode = UserDefaults.standard.string(forKey: "aiKeyMode") ?? "cloud"
-        let baseURL = keyMode == "direct" ? StreamableAIProvider.anthropic.directBaseURL : StreamableAIProvider.anthropic.cloudBaseURL
+        let baseURL = StreamableAIProvider.anthropic.directBaseURL
         let url = URL(string: "\(baseURL)/messages")!
         var request = URLRequest(url: url, timeoutInterval: requestTimeout)
         request.httpMethod = "POST"
@@ -680,6 +985,7 @@ class AIClient: ObservableObject {
         request.setValue(apiKey, forHTTPHeaderField: "x-api-key")
         request.setValue("Bearer \(apiKey)", forHTTPHeaderField: "Authorization") // Required for Dotmini Proxy Auth
         request.setValue("2023-06-01", forHTTPHeaderField: "anthropic-version")
+        request.setValue("prompt-caching-2024-07-25", forHTTPHeaderField: "anthropic-beta")
         
         var allMessages: [[String: Any]] = []
         for msg in conversationHistory { allMessages.append(["role": msg.role, "content": msg.content]) }
@@ -709,13 +1015,34 @@ class AIClient: ObservableObject {
         messageContent.append(["type": "text", "text": prompt])
         allMessages.append(["role": "user", "content": messageContent])
         
-        var body: [String: Any] = ["model": model, "max_tokens": 4096, "stream": true, "messages": allMessages]
-        if let sys = systemPrompt { body["system"] = sys }
+        var body: [String: Any] = ["model": model, "max_tokens": maxOutputTokens(for: model), "stream": true, "messages": allMessages]
         
+        // Anthropic Prompt Caching on System Prompt
+        if let sys = systemPrompt, !sys.isEmpty {
+            body["system"] = [
+                [
+                    "type": "text",
+                    "text": sys,
+                    "cache_control": ["type": "ephemeral"]
+                ]
+            ]
+        }
+        
+        // Anthropic Tools with Prompt Caching on last tool
         if let tools = tools, !tools.isEmpty {
-            body["tools"] = tools.map { tool -> [String: Any] in
-                ["name": tool["name"] ?? "", "description": tool["description"] ?? "", "input_schema": tool["parameters"] ?? [:]]
+            var formattedTools: [[String: Any]] = []
+            for (idx, tool) in tools.enumerated() {
+                var toolDict: [String: Any] = [
+                    "name": tool["name"] ?? "",
+                    "description": tool["description"] ?? "",
+                    "input_schema": tool["parameters"] ?? [:]
+                ]
+                if idx == tools.count - 1 {
+                    toolDict["cache_control"] = ["type": "ephemeral"]
+                }
+                formattedTools.append(toolDict)
             }
+            body["tools"] = formattedTools
         }
         
         request.httpBody = try JSONSerialization.data(withJSONObject: body)
@@ -746,10 +1073,7 @@ class AIClient: ObservableObject {
             case "content_block_delta":
                 if let delta = json["delta"] as? [String: Any] {
                     if let text = delta["text"] as? String {
-                        await MainActor.run {
-                            self.currentStreamedText += text
-                            onToken(text)
-                        }
+                        appendStreamToken(text, onToken: onToken)
                     }
                     if let partial = delta["partial_json"] as? String {
                         currentToolArgs += partial
@@ -765,7 +1089,7 @@ class AIClient: ObservableObject {
                 if !currentToolName.isEmpty {
                     let args = (try? JSONSerialization.jsonObject(with: Data(currentToolArgs.utf8))) as? [String: Any] ?? [:]
                     let toolCall = AIToolCall(id: currentToolId, name: currentToolName, arguments: args)
-                    await MainActor.run { onToolCall?(toolCall) }
+                    onToolCall?(toolCall)
                     currentToolName = ""
                     currentToolArgs = ""
                 }
@@ -778,40 +1102,81 @@ class AIClient: ObservableObject {
     // MARK: - Sync Helpers (Non-streaming for Agent loops)
     
     private func syncGemini(messages: [[(String, Any)]], systemPrompt: String?, model: String, apiKey: String, tools: [[String: Any]]?) async throws -> (text: String, toolCalls: [AIToolCall]) {
-        let keyMode = UserDefaults.standard.string(forKey: "aiKeyMode") ?? "cloud"
-        let baseURL = keyMode == "direct" ? StreamableAIProvider.gemini.directBaseURL : StreamableAIProvider.gemini.cloudBaseURL
-        let url = URL(string: "\(baseURL)/models/\(model):generateContent?key=\(apiKey)")!
+        let baseURL = StreamableAIProvider.gemini.directBaseURL
+        let normalizedModel = normalizeModelName(model, provider: .gemini, baseURL: baseURL)
+        let cleanModel = normalizedModel.hasPrefix("models/") ? String(normalizedModel.dropFirst(7)) : normalizedModel
+        let url = URL(string: "\(baseURL)/models/\(cleanModel):generateContent?key=\(apiKey)")!
         var request = URLRequest(url: url, timeoutInterval: requestTimeout)
         request.httpMethod = "POST"
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
         
-        var contents: [[String: Any]] = []
-        if let sys = systemPrompt {
-            contents.append(["role": "user", "parts": [["text": sys]]])
-            contents.append(["role": "model", "parts": [["text": "Understood."]]])
+        var body: [String: Any] = [
+            "generationConfig": ["temperature": 0.7, "maxOutputTokens": maxOutputTokens(for: cleanModel)]
+        ]
+        
+        // Native system instruction
+        if let sys = systemPrompt, !sys.isEmpty {
+            body["systemInstruction"] = ["parts": [["text": sys]]]
         }
         
+        // Build contents properly from messages array
+        var rawContents: [[String: Any]] = []
         for msg in messages {
-            var parts: [[String: Any]] = []
-            for (key, val) in msg {
-                if key == "text" { parts.append(["text": val]) }
-                else if key == "functionResponse", let fr = val as? [String: Any] { parts.append(["functionResponse": fr]) }
-            }
             let role = msg.first(where: { $0.0 == "_role" })?.1 as? String ?? "user"
-            contents.append(["role": role == "assistant" ? "model" : role, "parts": parts])
+            let content = msg.first(where: { $0.0 == "text" })?.1 as? String ?? ""
+            let trimmed = content.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !trimmed.isEmpty else { continue }
+            let geminiRole = role == "assistant" ? "model" : "user"
+            rawContents.append(["role": geminiRole, "parts": [["text": trimmed]]])
         }
         
-        var body: [String: Any] = ["contents": contents, "generationConfig": ["temperature": 0.7, "maxOutputTokens": 4096]]
-        if let tools = tools, !tools.isEmpty { body["tools"] = [["functionDeclarations": tools]] }
+        // Coalesce consecutive messages with the same role (Gemini strict requirement)
+        var coalesced: [[String: Any]] = []
+        for item in rawContents {
+            if let last = coalesced.last, (last["role"] as? String) == (item["role"] as? String) {
+                var newLast = last
+                var parts = (newLast["parts"] as? [[String: Any]]) ?? []
+                let itemParts = (item["parts"] as? [[String: Any]]) ?? []
+                parts.append(contentsOf: itemParts)
+                newLast["parts"] = parts
+                coalesced[coalesced.count - 1] = newLast
+            } else {
+                coalesced.append(item)
+            }
+        }
+        
+        // Ensure at least one message and first message is user
+        if coalesced.isEmpty {
+            coalesced.append(["role": "user", "parts": [["text": "Continue with the task."]]])
+        } else if coalesced.first?["role"] as? String == "model" {
+            coalesced.insert(["role": "user", "parts": [["text": "Please begin."]]], at: 0)
+        }
+        body["contents"] = coalesced
+        
+        if let tools = tools, !tools.isEmpty {
+            let sanitized = tools.map { sanitizeToolSchemaForGemini($0) }
+            body["tools"] = [["functionDeclarations": sanitized]]
+        }
         
         request.httpBody = try JSONSerialization.data(withJSONObject: body)
-        let (data, _) = try await URLSession.shared.data(for: request)
+        let (data, response) = try await URLSession.shared.data(for: request)
+        guard let httpResponse = response as? HTTPURLResponse, httpResponse.statusCode == 200 else {
+            let code = (response as? HTTPURLResponse)?.statusCode ?? -1
+            var detailedMsg = "Gemini API error (\(code))"
+            if let errJson = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+               let errObj = errJson["error"] as? [String: Any],
+               let msg = errObj["message"] as? String {
+                detailedMsg = "(\(code)): \(msg)"
+            }
+            NSLog("❌ [syncGemini] Error %d: %@", code, detailedMsg)
+            throw NSError(domain: "AIClient", code: code, userInfo: [NSLocalizedDescriptionKey: detailedMsg])
+        }
         
         guard let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
               let candidates = json["candidates"] as? [[String: Any]],
               let content = candidates.first?["content"] as? [String: Any],
               let parts = content["parts"] as? [[String: Any]] else {
-            return (text: "Error: Unable to parse Gemini response", toolCalls: [])
+            return (text: "", toolCalls: [])
         }
         
         var text = ""
@@ -830,8 +1195,30 @@ class AIClient: ObservableObject {
         var request = URLRequest(url: url, timeoutInterval: requestTimeout)
         request.httpMethod = "POST"
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
-        if !apiKey.isEmpty {
-            request.setValue("Bearer \(apiKey)", forHTTPHeaderField: "Authorization")
+        let isCloudProxy = baseURL.trimmingCharacters(in: CharacterSet(charactersIn: "/")) == StreamableAIProvider.cloudProxyURL.trimmingCharacters(in: CharacterSet(charactersIn: "/"))
+        let isCopilot = baseURL.contains("githubcopilot.com")
+        if isCloudProxy {
+            request.setValue("microcode", forHTTPHeaderField: "X-Dotmini-Product")
+            let dotminiLicense = UserDefaults.standard.string(forKey: "dotminiLicenseKey") ?? ""
+            if !dotminiLicense.isEmpty {
+                request.setValue(dotminiLicense, forHTTPHeaderField: "X-Dotmini-License")
+            }
+            let isJWT = apiKey.components(separatedBy: ".").count >= 3
+            let isPlatformKey = apiKey.hasPrefix("sk-dotmini-") || apiKey.hasPrefix("mci-live-")
+            if (isJWT || isPlatformKey) && !apiKey.isEmpty {
+                request.setValue("Bearer \(apiKey)", forHTTPHeaderField: "Authorization")
+            }
+        } else if isCopilot {
+            let copilotToken = try await SubscriptionAuthManager.shared.getCopilotSessionToken(githubToken: apiKey)
+            request.setValue("Bearer \(copilotToken)", forHTTPHeaderField: "Authorization")
+            request.setValue("vscode/1.95.0", forHTTPHeaderField: "Editor-Version")
+            request.setValue("copilot-chat/0.22.4", forHTTPHeaderField: "Editor-Plugin-Version")
+            request.setValue("vscode-chat", forHTTPHeaderField: "Copilot-Integration-Id")
+            request.setValue("github-copilot", forHTTPHeaderField: "Openai-Organization")
+        } else {
+            if !apiKey.isEmpty {
+                request.setValue("Bearer \(apiKey)", forHTTPHeaderField: "Authorization")
+            }
         }
         
         var apiMessages: [[String: Any]] = []
@@ -842,19 +1229,39 @@ class AIClient: ObservableObject {
             apiMessages.append(["role": role, "content": content])
         }
         
-        var body: [String: Any] = ["model": model, "messages": apiMessages, "temperature": 0.7, "max_tokens": 4096]
+        var body: [String: Any] = ["model": model, "messages": apiMessages, "temperature": 0.7, "max_tokens": maxOutputTokens(for: model)]
         if let tools = tools, !tools.isEmpty { body["tools"] = tools.map { ["type": "function", "function": $0] as [String: Any] } }
         
         request.httpBody = try JSONSerialization.data(withJSONObject: body)
-        let (data, _) = try await URLSession.shared.data(for: request)
+        let (data, response) = try await URLSession.shared.data(for: request)
+        
+        guard let httpResponse = response as? HTTPURLResponse else {
+            return (text: "Error: No response from server", toolCalls: [])
+        }
+        
+        guard httpResponse.statusCode == 200 else {
+            let errorText: String
+            if let errJson = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+               let errObj = errJson["error"] as? [String: Any],
+               let msg = errObj["message"] as? String {
+                errorText = msg
+            } else {
+                let raw = String(data: data, encoding: .utf8) ?? ""
+                errorText = raw.isEmpty ? "HTTP status \(httpResponse.statusCode)" : raw
+            }
+            return (text: "Error (\(httpResponse.statusCode)): \(errorText)", toolCalls: [])
+        }
         
         guard let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
               let choices = json["choices"] as? [[String: Any]],
               let message = choices.first?["message"] as? [String: Any] else {
-            return (text: "Error: Unable to parse response", toolCalls: [])
+            let raw = String(data: data, encoding: .utf8) ?? ""
+            return (text: "Error: Unable to parse response from \(baseURL) (\(raw.prefix(200)))", toolCalls: [])
         }
         
-        let text = message["content"] as? String ?? ""
+        let content = message["content"] as? String ?? ""
+        let reasoning = message["reasoning_content"] as? String ?? ""
+        let text = content.isEmpty ? reasoning : content
         var toolCalls: [AIToolCall] = []
         if let tcs = message["tool_calls"] as? [[String: Any]] {
             for tc in tcs {
@@ -869,8 +1276,7 @@ class AIClient: ObservableObject {
     }
     
     private func syncAnthropic(messages: [[(String, Any)]], systemPrompt: String?, model: String, apiKey: String, tools: [[String: Any]]?) async throws -> (text: String, toolCalls: [AIToolCall]) {
-        let keyMode = UserDefaults.standard.string(forKey: "aiKeyMode") ?? "cloud"
-        let baseURL = keyMode == "direct" ? StreamableAIProvider.anthropic.directBaseURL : StreamableAIProvider.anthropic.cloudBaseURL
+        let baseURL = StreamableAIProvider.anthropic.directBaseURL
         let url = URL(string: "\(baseURL)/messages")!
         var request = URLRequest(url: url, timeoutInterval: requestTimeout)
         request.httpMethod = "POST"
@@ -878,6 +1284,7 @@ class AIClient: ObservableObject {
         request.setValue(apiKey, forHTTPHeaderField: "x-api-key")
         request.setValue("Bearer \(apiKey)", forHTTPHeaderField: "Authorization") // Required for Dotmini Proxy Auth
         request.setValue("2023-06-01", forHTTPHeaderField: "anthropic-version")
+        request.setValue("prompt-caching-2024-07-25", forHTTPHeaderField: "anthropic-beta")
         
         var apiMessages: [[String: Any]] = []
         for msg in messages {
@@ -886,15 +1293,60 @@ class AIClient: ObservableObject {
             apiMessages.append(["role": role, "content": content])
         }
         
-        var body: [String: Any] = ["model": model, "max_tokens": 4096, "messages": apiMessages]
-        if let sys = systemPrompt { body["system"] = sys }
+        var body: [String: Any] = ["model": model, "max_tokens": maxOutputTokens(for: model), "messages": apiMessages]
+        
+        // Anthropic Prompt Caching on System Prompt
+        if let sys = systemPrompt, !sys.isEmpty {
+            body["system"] = [
+                [
+                    "type": "text",
+                    "text": sys,
+                    "cache_control": ["type": "ephemeral"]
+                ]
+            ]
+        }
+        
+        // Inject tools with Prompt Caching on the last tool
+        if let tools = tools, !tools.isEmpty {
+            var formattedTools: [[String: Any]] = []
+            for (idx, tool) in tools.enumerated() {
+                var toolDict: [String: Any] = [
+                    "name": tool["name"] ?? "",
+                    "description": tool["description"] ?? "",
+                    "input_schema": tool["parameters"] ?? [:]
+                ]
+                if idx == tools.count - 1 {
+                    toolDict["cache_control"] = ["type": "ephemeral"]
+                }
+                formattedTools.append(toolDict)
+            }
+            body["tools"] = formattedTools
+        }
         
         request.httpBody = try JSONSerialization.data(withJSONObject: body)
-        let (data, _) = try await URLSession.shared.data(for: request)
+        let (data, response) = try await URLSession.shared.data(for: request)
+        
+        guard let httpResponse = response as? HTTPURLResponse else {
+            return (text: "Error: No response from server", toolCalls: [])
+        }
+        
+        guard httpResponse.statusCode == 200 else {
+            let errorText: String
+            if let errJson = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+               let errObj = errJson["error"] as? [String: Any],
+               let msg = errObj["message"] as? String {
+                errorText = msg
+            } else {
+                let raw = String(data: data, encoding: .utf8) ?? ""
+                errorText = raw.isEmpty ? "HTTP status \(httpResponse.statusCode)" : raw
+            }
+            return (text: "Error (\(httpResponse.statusCode)): \(errorText)", toolCalls: [])
+        }
         
         guard let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
               let content = json["content"] as? [[String: Any]] else {
-            return (text: "Error: Unable to parse response", toolCalls: [])
+            let raw = String(data: data, encoding: .utf8) ?? ""
+            return (text: "Error: Unable to parse response (\(raw.prefix(200)))", toolCalls: [])
         }
         
         var text = ""

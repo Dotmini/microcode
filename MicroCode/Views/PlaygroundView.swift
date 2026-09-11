@@ -28,6 +28,7 @@ struct PlaygroundDataFile: Identifiable {
 struct PlaygroundView: View {
     @EnvironmentObject var appState: AppState
     @ObservedObject var pythonEnvManager = PythonEnvManager.shared
+    @ObservedObject private var runtimeManager = RuntimeManager.shared
     
     @State private var code: String = "print('Hello, Playground!')"
     @State private var language: String = "python"
@@ -49,10 +50,32 @@ struct PlaygroundView: View {
     @State private var isPreviewLoading: Bool = false
     @State private var showingSettings: Bool = false
     
+    // Live GUI & Dynamic SwiftUI Preview Support
+    enum SwiftUIPreviewMode: String, CaseIterable {
+        case interactive = "Interactive"
+        case snapshot = "Snapshot"
+    }
+    @State private var swiftPreviewMode: SwiftUIPreviewMode = .interactive
+    @State private var selectedPreviewDevice: PreviewDeviceType = .iPhone
+    @State private var swiftPreviewDylibPath: String? = nil
+    @State private var swiftPreviewTrigger: UUID = UUID()
+    @State private var swiftPreviewError: String? = nil
+    @State private var swiftPreviewZoom: CGFloat = 0.55
+    @State private var isManualZoom: Bool = false
+    @State private var responsiveScale: CGFloat = 0.55
+    @State private var dylibCoordinator = SwiftUIPreviewCoordinator()
+    
+    // External GUI Process Control (Python Tkinter/PyQt, Rust egui, Go Gio, etc.)
+    @State private var activeGUIProcess: Process? = nil
+    @State private var isGUIRunning: Bool = false
+    @State private var guiProcessPID: Int32? = nil
+    @State private var guiProcessOutput: String = ""
+    
     // Cell Mode Support
     @State private var isCellMode: Bool = false
     @State private var cells: [PlaygroundCellModel] = [PlaygroundCellModel(code: "print('Hello from Cell 1')", colorTheme: .none)]
     @State private var executionTask: Task<Void, Never>?
+    @State private var currentMicroplayURL: URL? = nil
     
     // Document Mode Support
     @State private var showDocumentMode: Bool = false
@@ -118,12 +141,18 @@ struct PlaygroundView: View {
             if !appState.selectedLanguage.isEmpty && appState.selectedLanguage != language {
                 language = appState.selectedLanguage
             }
+
+            if language == "swift" && (code.contains("import SwiftUI") || code.contains("struct ContentView: View") || code.contains(": View")) {
+                showGUIPreview = true
+                showOutput = false
+            }
             
             // Ensure directory exists asynchronously
             Task {
                 try? FileManager.default.createDirectory(at: playgroundDirectory, withIntermediateDirectories: true)
                 print("🚀 PlaygroundView: Verified directory at \(playgroundDirectory.path)")
             }
+            runtimeManager.detectAll()
         }
         .onChange(of: isDocumentPiP) { newValue in
             if newValue && showDocumentMode {
@@ -162,7 +191,7 @@ struct PlaygroundView: View {
             
             codeEditorPanel
         }
-        .frame(minWidth: 300, maxWidth: .infinity)
+        .frame(maxWidth: .infinity)
     }
     
     private var rightPane: some View {
@@ -181,7 +210,7 @@ struct PlaygroundView: View {
                     .frame(minHeight: 100, maxHeight: showGUIPreview ? .infinity : .infinity)
             }
         }
-        .frame(minWidth: 250, maxWidth: .infinity)
+        .frame(maxWidth: .infinity)
     }
     
     // MARK: - Toolbar
@@ -194,9 +223,10 @@ struct PlaygroundView: View {
                     Button(lang.capitalized) {
                         language = lang
                         updateDefaultCode(for: lang)
-                        // Auto-show preview for latex
-                        if lang == "latex" || lang == "markdown" {
+                        // Auto-show preview for latex, markdown, or swift
+                        if lang == "latex" || lang == "markdown" || lang == "swift" {
                             showGUIPreview = true
+                            showOutput = false
                         }
                     }
                 }
@@ -283,6 +313,10 @@ struct PlaygroundView: View {
             if language == "python" {
                 pythonEnvMenu
             }
+
+            if let runtime = playgroundRuntime(for: language) {
+                runtimeEnvironmentMenu(for: runtime)
+            }
             
             if ["javascript", "typescript"].contains(language.lowercased()) {
                 NodeVersionPicker()
@@ -290,6 +324,50 @@ struct PlaygroundView: View {
             
             Divider()
                 .frame(height: 16)
+            
+            // Playground Mode Switcher (Single Code vs Cell Mode)
+            Picker("", selection: $isCellMode) {
+                Text("Editor").tag(false)
+                Text("Cell Mode").tag(true)
+            }
+            .pickerStyle(.segmented)
+            .frame(width: 140)
+            
+            // Open .microplay
+            Button(action: { openMicroplayFile() }) {
+                HStack(spacing: 4) {
+                    Image(systemName: "folder.badge.gearshape")
+                    Text("Open")
+                }
+                .font(.system(size: 11, weight: .medium))
+                .foregroundColor(.secondary)
+                .padding(.horizontal, 7)
+                .padding(.vertical, 5)
+                .background(
+                    RoundedRectangle(cornerRadius: 6, style: .continuous)
+                        .fill(controlBackground)
+                )
+            }
+            .buttonStyle(.plain)
+            .help("Open .microplay file")
+            
+            // Save .microplay
+            Button(action: { saveMicroplayFile() }) {
+                HStack(spacing: 4) {
+                    Image(systemName: "square.and.arrow.down")
+                    Text("Save")
+                }
+                .font(.system(size: 11, weight: .medium))
+                .foregroundColor(.secondary)
+                .padding(.horizontal, 7)
+                .padding(.vertical, 5)
+                .background(
+                    RoundedRectangle(cornerRadius: 6, style: .continuous)
+                        .fill(controlBackground)
+                )
+            }
+            .buttonStyle(.plain)
+            .help("Save as .microplay file")
             
             // Document Mode Toggle Button
             Button(action: { showDocumentMode.toggle() }) {
@@ -303,7 +381,11 @@ struct PlaygroundView: View {
                 .padding(.vertical, 5)
                 .background(
                     RoundedRectangle(cornerRadius: 6, style: .continuous)
-                        .fill(showDocumentMode ? Color.blue.opacity(0.8) : controlBackground)
+                        .fill(showDocumentMode ? Color.white.opacity(0.16) : controlBackground)
+                        .overlay(
+                            RoundedRectangle(cornerRadius: 6, style: .continuous)
+                                .stroke(showDocumentMode ? Color.white.opacity(0.22) : Color.clear, lineWidth: 1)
+                        )
                 )
             }
             .buttonStyle(.plain)
@@ -322,7 +404,11 @@ struct PlaygroundView: View {
                 .padding(.vertical, 5)
                 .background(
                     RoundedRectangle(cornerRadius: 6, style: .continuous)
-                        .fill(showDataFiles ? Color.orange.opacity(0.8) : controlBackground)
+                        .fill(showDataFiles ? Color.white.opacity(0.16) : controlBackground)
+                        .overlay(
+                            RoundedRectangle(cornerRadius: 6, style: .continuous)
+                                .stroke(showDataFiles ? Color.white.opacity(0.22) : Color.clear, lineWidth: 1)
+                        )
                 )
             }
             .buttonStyle(.plain)
@@ -339,7 +425,11 @@ struct PlaygroundView: View {
                 .padding(.vertical, 5)
                 .background(
                     RoundedRectangle(cornerRadius: 6, style: .continuous)
-                        .fill(showOutput ? Color.cyan.opacity(0.8) : controlBackground)
+                        .fill(showOutput ? Color.white.opacity(0.16) : controlBackground)
+                        .overlay(
+                            RoundedRectangle(cornerRadius: 6, style: .continuous)
+                                .stroke(showOutput ? Color.white.opacity(0.22) : Color.clear, lineWidth: 1)
+                        )
                 )
             }
             .buttonStyle(.plain)
@@ -356,7 +446,11 @@ struct PlaygroundView: View {
                 .padding(.vertical, 5)
                 .background(
                     RoundedRectangle(cornerRadius: 6, style: .continuous)
-                        .fill(showGUIPreview ? Color.purple.opacity(0.8) : controlBackground)
+                        .fill(showGUIPreview ? Color.white.opacity(0.16) : controlBackground)
+                        .overlay(
+                            RoundedRectangle(cornerRadius: 6, style: .continuous)
+                                .stroke(showGUIPreview ? Color.white.opacity(0.22) : Color.clear, lineWidth: 1)
+                        )
                 )
             }
             .buttonStyle(.plain)
@@ -377,12 +471,16 @@ struct PlaygroundView: View {
                     Text("Hot Reload")
                 }
                 .font(.system(size: 11, weight: .medium))
-                .foregroundColor(HotReloadService.shared.isEnabled ? .black : .secondary)
+                .foregroundColor(HotReloadService.shared.isEnabled ? .white : .secondary)
                 .padding(.horizontal, 8)
                 .padding(.vertical, 5)
                 .background(
                     RoundedRectangle(cornerRadius: 6, style: .continuous)
-                        .fill(HotReloadService.shared.isEnabled ? Color.yellow : controlBackground)
+                        .fill(HotReloadService.shared.isEnabled ? Color.white.opacity(0.16) : controlBackground)
+                        .overlay(
+                            RoundedRectangle(cornerRadius: 6, style: .continuous)
+                                .stroke(HotReloadService.shared.isEnabled ? Color.white.opacity(0.22) : Color.clear, lineWidth: 1)
+                        )
                 )
             }
             .buttonStyle(.plain)
@@ -405,7 +503,7 @@ struct PlaygroundView: View {
                 )
             }
             
-            // Run/Stop button (Clean Emerald Green / Danger Red)
+            // Run/Stop button (Sleek Dark Monochrome Action Button)
             Button(action: {
                 if isExecuting {
                     executionTask?.cancel()
@@ -423,12 +521,16 @@ struct PlaygroundView: View {
                     Text(isExecuting ? "Stop" : "Run")
                         .font(.system(size: 12, weight: .semibold))
                 }
-                .foregroundColor(.white)
+                .foregroundColor(isExecuting ? Color(red: 1.0, green: 0.45, blue: 0.45) : .white)
                 .padding(.horizontal, 12)
                 .padding(.vertical, 5)
                 .background(
                     RoundedRectangle(cornerRadius: 6, style: .continuous)
-                        .fill(isExecuting ? Color.red : Color(red: 0.12, green: 0.72, blue: 0.42))
+                        .fill(isExecuting ? Color(red: 0.35, green: 0.1, blue: 0.1) : Color(white: 0.12))
+                        .overlay(
+                            RoundedRectangle(cornerRadius: 6, style: .continuous)
+                                .stroke(isExecuting ? Color.red.opacity(0.4) : Color.white.opacity(0.22), lineWidth: 1)
+                        )
                 )
             }
             .buttonStyle(.plain)
@@ -486,8 +588,88 @@ struct PlaygroundView: View {
     
     private var codeEditorPanel: some View {
         VStack(alignment: .leading, spacing: 0) {
-            codeEditorContent
+            if isCellMode {
+                cellModeContent
+            } else {
+                codeEditorContent
+            }
         }
+    }
+    
+    private var cellModeContent: some View {
+        VStack(spacing: 0) {
+            // Cell Mode Action Header
+            HStack {
+                Text("Cell Mode (\(cells.count) cells)")
+                    .font(.system(size: 11, weight: .semibold))
+                    .foregroundColor(.secondary)
+                
+                Spacer()
+                
+                Button(action: { runAllCells() }) {
+                    HStack(spacing: 4) {
+                        Image(systemName: "play.fill")
+                        Text("Run All")
+                    }
+                    .font(.system(size: 10, weight: .semibold))
+                    .foregroundColor(.white)
+                    .padding(.horizontal, 8)
+                    .padding(.vertical, 4)
+                    .background(
+                        RoundedRectangle(cornerRadius: 4)
+                            .fill(Color(white: 0.14))
+                            .overlay(
+                                RoundedRectangle(cornerRadius: 4)
+                                    .stroke(Color.white.opacity(0.2), lineWidth: 0.5)
+                            )
+                    )
+                }
+                .buttonStyle(.plain)
+                
+                Button(action: {
+                    let newCell = PlaygroundCellModel(code: "# New Cell\n", colorTheme: .none)
+                    cells.append(newCell)
+                }) {
+                    HStack(spacing: 4) {
+                        Image(systemName: "plus")
+                        Text("Add Cell")
+                    }
+                    .font(.system(size: 10, weight: .semibold))
+                    .foregroundColor(.primary)
+                    .padding(.horizontal, 8)
+                    .padding(.vertical, 4)
+                    .background(
+                        RoundedRectangle(cornerRadius: 4)
+                            .fill(controlBackground)
+                    )
+                }
+                .buttonStyle(.plain)
+            }
+            .padding(.horizontal, 16)
+            .padding(.vertical, 8)
+            .background(panelBackground)
+            
+            Divider()
+            
+            ScrollView {
+                LazyVStack(spacing: 8) {
+                    ForEach(cells) { cell in
+                        PlaygroundCellView(
+                            cell: cell,
+                            language: language,
+                            onRun: { runCell(cell) },
+                            onDelete: {
+                                if cells.count > 1 {
+                                    cells.removeAll { $0.id == cell.id }
+                                }
+                            }
+                        )
+                    }
+                }
+                .padding(.vertical, 12)
+            }
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
     }
     
     private var codeEditorHeader: some View {
@@ -511,14 +693,14 @@ struct PlaygroundView: View {
     private func frameworkBadge(_ framework: String) -> some View {
         HStack(spacing: 4) {
             Image(systemName: "macwindow")
-                .foregroundColor(.green)
+                .foregroundColor(.secondary)
             Text(framework)
                 .font(.system(size: 10))
                 .foregroundColor(.secondary)
         }
         .padding(.horizontal, 6)
         .padding(.vertical, 2)
-        .background(Color.green.opacity(0.1))
+        .background(Color.white.opacity(0.08))
         .cornerRadius(4)
     }
     
@@ -560,7 +742,43 @@ struct PlaygroundView: View {
     
     private var outputPanel: some View {
         VStack(alignment: .leading, spacing: 0) {
-            
+            // Header with title, clear, and close buttons
+            HStack {
+                HStack(spacing: 5) {
+                    Image(systemName: "terminal")
+                        .foregroundColor(.secondary)
+                        .font(.system(size: 10))
+                    Text("Output")
+                        .font(.system(size: 11, weight: .semibold))
+                        .foregroundColor(.secondary)
+                }
+
+                Spacer()
+
+                if !output.isEmpty {
+                    Button(action: { output = "" }) {
+                        Image(systemName: "trash")
+                            .font(.system(size: 10))
+                            .foregroundColor(.secondary)
+                    }
+                    .buttonStyle(.plain)
+                    .help("Clear Output")
+                }
+
+                Button(action: { showOutput = false }) {
+                    Image(systemName: "xmark")
+                        .font(.system(size: 10, weight: .medium))
+                        .foregroundColor(.secondary)
+                }
+                .buttonStyle(.plain)
+                .help("Close Output")
+            }
+            .padding(.horizontal, 10)
+            .padding(.vertical, 6)
+            .background(panelBackground)
+
+            Divider()
+
             PlaygroundTerminalView(
                 text: $output,
                 fontSize: $appState.playgroundFontSize,
@@ -782,28 +1000,157 @@ struct PlaygroundView: View {
     
     private var guiPreviewPanel: some View {
         VStack(alignment: .leading, spacing: 0) {
-            // Header — only for SwiftUI preview (needs Refresh). Document
-            // previews (Markdown/LaTeX) are headerless so the preview pane
-            // lines up exactly with the editor pane on the other side.
+            // Header — only for SwiftUI preview (needs Refresh) or GUI frameworks.
             if language != "latex" && language != "markdown" {
-                HStack {
-                    Image(systemName: "macwindow")
-                        .foregroundColor(.purple)
-                    Text("SwiftUI Preview")
-                        .font(.system(size: 11, weight: .semibold))
+                HStack(spacing: 8) {
+                    if language == "swift" && detectedGUIFramework == "SwiftUI" {
+                        HStack(spacing: 6) {
+                            Image(systemName: "swift")
+                                .foregroundColor(.orange)
+                            Text("Preview")
+                                .font(.system(size: 11, weight: .semibold))
+                                .lineLimit(1)
+                                .fixedSize()
 
-                    Spacer()
+                            Picker("", selection: $swiftPreviewMode) {
+                                Text("Live").tag(SwiftUIPreviewMode.interactive)
+                                Text("Snapshot").tag(SwiftUIPreviewMode.snapshot)
+                            }
+                            .pickerStyle(.segmented)
+                            .frame(width: 120)
+                            .fixedSize()
+
+                            Picker("", selection: $selectedPreviewDevice) {
+                                ForEach(PreviewDeviceType.allCases) { dev in
+                                    Text(dev.shortName).tag(dev)
+                                }
+                            }
+                            .pickerStyle(.segmented)
+                            .frame(width: 130)
+                            .fixedSize()
+                            .onChange(of: selectedPreviewDevice) { _ in
+                                isManualZoom = false
+                                renderSwiftUIPreview()
+                            }
+
+                            HStack(spacing: 2) {
+                                Button {
+                                    isManualZoom = true
+                                    swiftPreviewZoom = max(0.25, (isManualZoom ? swiftPreviewZoom : responsiveScale) - 0.05)
+                                } label: {
+                                    Image(systemName: "minus")
+                                        .font(.system(size: 9, weight: .medium))
+                                }
+                                .buttonStyle(.plain)
+
+                                Text("\(Int(round((isManualZoom ? swiftPreviewZoom : responsiveScale) * 100)))%")
+                                    .font(.system(size: 9, weight: .medium, design: .monospaced))
+                                    .foregroundColor(.secondary)
+                                    .frame(width: 32)
+                                    .lineLimit(1)
+
+                                Button {
+                                    isManualZoom = true
+                                    swiftPreviewZoom = min(1.2, (isManualZoom ? swiftPreviewZoom : responsiveScale) + 0.05)
+                                } label: {
+                                    Image(systemName: "plus")
+                                        .font(.system(size: 9, weight: .medium))
+                                }
+                                .buttonStyle(.plain)
+
+                                Button("Fit") {
+                                    withAnimation(.spring(response: 0.25)) {
+                                        isManualZoom = false
+                                    }
+                                }
+                                .buttonStyle(.borderless)
+                                .font(.system(size: 9, weight: isManualZoom ? .regular : .bold))
+                                .foregroundColor(isManualZoom ? .secondary : .accentColor)
+                            }
+                            .padding(.horizontal, 5)
+                            .padding(.vertical, 3)
+                            .background(Color.secondary.opacity(0.12))
+                            .cornerRadius(5)
+                            .fixedSize()
+                        }
+                    } else if let framework = detectedGUIFramework {
+                        Image(systemName: frameworkIcon(for: framework))
+                            .foregroundColor(frameworkColor(for: framework))
+                        Text("\(framework) Preview")
+                            .font(.system(size: 11, weight: .semibold))
+
+                        if isGUIRunning {
+                            HStack(spacing: 4) {
+                                Circle()
+                                    .fill(Color.green)
+                                    .frame(width: 6, height: 6)
+                                Text("Running (PID: \(guiProcessPID ?? 0))")
+                                    .font(.system(size: 10))
+                                    .foregroundColor(.secondary)
+                            }
+                            .padding(.horizontal, 6)
+                            .padding(.vertical, 2)
+                            .background(Color.green.opacity(0.12))
+                            .cornerRadius(4)
+                        }
+                    } else {
+                        Image(systemName: "macwindow")
+                            .foregroundColor(.secondary)
+                        Text("GUI Preview")
+                            .font(.system(size: 11, weight: .semibold))
+                    }
+
+                    Spacer(minLength: 4)
 
                     if isPreviewLoading {
                         ProgressView()
                             .scaleEffect(0.6)
                     }
 
-                    Button("⟳ Refresh") {
-                        renderSwiftUIPreview()
+                    if language == "swift" && detectedGUIFramework == "SwiftUI" {
+                        Button {
+                            renderSwiftUIPreview()
+                        } label: {
+                            Image(systemName: "arrow.clockwise")
+                                .font(.system(size: 11, weight: .medium))
+                        }
+                        .buttonStyle(.borderless)
+                        .help("Refresh Preview")
+
+                        Button {
+                            showGUIPreview = false
+                        } label: {
+                            Image(systemName: "xmark")
+                                .font(.system(size: 10, weight: .medium))
+                                .foregroundColor(.secondary)
+                        }
+                        .buttonStyle(.borderless)
+                        .help("Close Preview")
+                    } else if detectedGUIFramework != nil {
+                        if isGUIRunning {
+                            Button(action: stopGUIApp) {
+                                Label("Stop", systemImage: "stop.fill")
+                            }
+                            .buttonStyle(.bordered)
+                            .tint(.red)
+                            .controlSize(.small)
+                            .font(.system(size: 10))
+
+                            Button(action: launchGUIApp) {
+                                Label("Rerun", systemImage: "arrow.clockwise")
+                            }
+                            .buttonStyle(.borderedProminent)
+                            .controlSize(.small)
+                            .font(.system(size: 10))
+                        } else {
+                            Button(action: launchGUIApp) {
+                                Label("Launch GUI", systemImage: "play.fill")
+                            }
+                            .buttonStyle(.borderedProminent)
+                            .controlSize(.small)
+                            .font(.system(size: 10))
+                        }
                     }
-                    .buttonStyle(.borderless)
-                    .font(.system(size: 11))
                 }
                 .padding(.horizontal, 12)
                 .padding(.vertical, 8)
@@ -824,71 +1171,157 @@ struct PlaygroundView: View {
             }
             // Preview Content
             else if language == "swift" && detectedGUIFramework == "SwiftUI" {
-                // Real SwiftUI Preview in iPhone Frame
-                ScrollView {
-                    iPhoneFrameView(
-                        content: {
-                            if let image = swiftPreviewImage {
-                                Image(nsImage: image)
-                                    .resizable()
-                                    .aspectRatio(contentMode: .fill)
-                            } else if isPreviewLoading {
-                                VStack(spacing: 12) {
-                                    ProgressView()
-                                        .scaleEffect(1.2)
-                                    Text("Compiling...")
-                                        .font(.caption)
-                                        .foregroundColor(.secondary)
+                // Real SwiftUI Preview in Centered, Fully-Responsive Canvas
+                GeometryReader { proxy in
+                    let availableWidth = proxy.size.width
+                    let availableHeight = proxy.size.height
+                    let targetFrameWidth = selectedPreviewDevice.frameWidth
+                    let targetFrameHeight = selectedPreviewDevice.frameHeight
+                    let autoScale = max(0.20, min(0.85, min((availableWidth - 24) / targetFrameWidth, (availableHeight - 48) / targetFrameHeight)))
+                    let currentScale = isManualZoom ? swiftPreviewZoom : autoScale
+                    let hasPreview = (swiftPreviewMode == .interactive && swiftPreviewDylibPath != nil) || swiftPreviewImage != nil
+
+                    ZStack {
+                        GridBackground()
+
+                        VStack(spacing: 8) {
+                            Group {
+                                if selectedPreviewDevice == .iPhone {
+                                    iPhoneFrameView(
+                                        content: {
+                                            previewInnerContent(hasPreview: hasPreview)
+                                        },
+                                        deviceType: .iPhone15Pro,
+                                        colorScheme: appState.appTheme.isDark ? .dark : .light
+                                    )
+                                } else {
+                                    iPadFrameView(
+                                        content: {
+                                            previewInnerContent(hasPreview: hasPreview)
+                                        },
+                                        colorScheme: appState.appTheme.isDark ? .dark : .light
+                                    )
                                 }
-                                .frame(maxWidth: .infinity, maxHeight: .infinity)
-                                .background(panelBackground)
-                            } else {
-                                VStack(spacing: 16) {
-                                    Image(systemName: "swift")
-                                        .font(.system(size: 48))
-                                        .foregroundColor(.orange)
-                                    
-                                    Text("SwiftUI Preview")
-                                        .font(.headline)
-                                    
-                                    Text("Click Refresh to compile")
-                                        .font(.caption)
-                                        .foregroundColor(.secondary)
-                                    
-                                    Button("▶ Compile & Preview") {
-                                        renderSwiftUIPreview()
-                                    }
-                                    .buttonStyle(.borderedProminent)
-                                }
-                                .frame(maxWidth: .infinity, maxHeight: .infinity)
-                                .background(panelBackground)
                             }
-                        },
-                        deviceType: .iPhone15Pro,
-                        colorScheme: appState.appTheme.isDark ? .dark : .light
-                    )
-                    .padding(20)
+                            .scaleEffect(currentScale)
+                            .frame(width: targetFrameWidth * currentScale, height: targetFrameHeight * currentScale)
+
+                            Text("\(selectedPreviewDevice.displayName) (\(Int(round(currentScale * 100)))%)")
+                                .font(.system(size: 10, weight: .medium))
+                                .foregroundColor(.secondary)
+                        }
+                        .frame(maxWidth: .infinity, maxHeight: .infinity)
+                    }
+                    .frame(width: availableWidth, height: availableHeight)
+                    .clipped()
+                    .onAppear {
+                        responsiveScale = autoScale
+                    }
+                    .onChange(of: autoScale) { newScale in
+                        responsiveScale = newScale
+                    }
                 }
-            } else if detectedGUIFramework != nil {
-                // Python/Other GUI - show HTML preview
-                GUIPreviewWebView(htmlContent: guiPreviewHTML)
+            } else if let framework = detectedGUIFramework {
+                VStack(spacing: 0) {
+                    // GUI Control Deck
+                    VStack(alignment: .leading, spacing: 12) {
+                        HStack(spacing: 12) {
+                            ZStack {
+                                RoundedRectangle(cornerRadius: 8)
+                                    .fill(frameworkColor(for: framework).opacity(0.15))
+                                    .frame(width: 40, height: 40)
+                                Image(systemName: frameworkIcon(for: framework))
+                                    .font(.system(size: 20))
+                                    .foregroundColor(frameworkColor(for: framework))
+                            }
+
+                            VStack(alignment: .leading, spacing: 2) {
+                                Text("\(framework) Desktop Application")
+                                    .font(.system(size: 13, weight: .semibold))
+                                Text(isGUIRunning ? "Process active on macOS display" : "Click 'Launch GUI' to run window")
+                                    .font(.system(size: 11))
+                                    .foregroundColor(.secondary)
+                            }
+
+                            Spacer()
+
+                            if isGUIRunning {
+                                Button(action: stopGUIApp) {
+                                    Label("Stop", systemImage: "stop.fill")
+                                }
+                                .buttonStyle(.bordered)
+                                .tint(.red)
+
+                                Button(action: launchGUIApp) {
+                                    Label("Rerun", systemImage: "arrow.clockwise")
+                                }
+                                .buttonStyle(.borderedProminent)
+                            } else {
+                                Button(action: launchGUIApp) {
+                                    Label("Launch GUI", systemImage: "play.fill")
+                                }
+                                .buttonStyle(.borderedProminent)
+                            }
+                        }
+                        .padding(12)
+                        .background(Color(NSColor.controlBackgroundColor).opacity(0.5))
+                        .cornerRadius(8)
+                    }
+                    .padding(12)
+
+                    Divider()
+
+                    // Live GUI Output Console
+                    VStack(alignment: .leading, spacing: 6) {
+                        HStack {
+                            Text("GUI PROCESS LOGS")
+                                .font(.system(size: 10, weight: .bold))
+                                .foregroundColor(.secondary)
+                            Spacer()
+                            if !guiProcessOutput.isEmpty {
+                                Button("Clear") {
+                                    guiProcessOutput = ""
+                                }
+                                .buttonStyle(.borderless)
+                                .font(.system(size: 10))
+                            }
+                        }
+                        .padding(.horizontal, 12)
+                        .padding(.top, 8)
+
+                        ScrollView {
+                            Text(guiProcessOutput.isEmpty ? "No logs yet. Launch GUI to see stdout/stderr." : guiProcessOutput)
+                                .font(.system(size: 11, design: .monospaced))
+                                .foregroundColor(guiProcessOutput.isEmpty ? .secondary : .primary)
+                                .frame(maxWidth: .infinity, alignment: .leading)
+                                .padding(10)
+                        }
+                        .background(Color.black.opacity(0.2))
+                        .cornerRadius(6)
+                        .padding(.horizontal, 12)
+                        .padding(.bottom, 12)
+                    }
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+                }
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+                .background(panelBackground)
             } else {
                 // No GUI detected
                 VStack(spacing: 12) {
                     Image(systemName: "macwindow.badge.plus")
                         .font(.system(size: 40))
                         .foregroundColor(.secondary)
-                    
+
                     Text("No GUI Detected")
                         .font(.headline)
                         .foregroundColor(.secondary)
-                    
+
                     if language == "swift" {
                         Text("Add 'import SwiftUI' to enable preview")
                             .font(.caption)
                             .foregroundColor(.secondary)
                     } else {
-                        Text("Import a GUI framework to see preview")
+                        Text("Import a GUI framework (Tkinter, PyQt, egui, Fyne, etc.) to see preview")
                             .font(.caption)
                             .foregroundColor(.secondary)
                     }
@@ -898,51 +1331,550 @@ struct PlaygroundView: View {
             }
         }
     }
-    
-    /// Compile and render actual SwiftUI code
+
+    @ViewBuilder
+    private func previewInnerContent(hasPreview: Bool) -> some View {
+        let targetWidth = selectedPreviewDevice.screenWidth
+        let targetHeight = selectedPreviewDevice.screenHeight
+
+        ZStack {
+            Color.black
+                .ignoresSafeArea()
+
+            if swiftPreviewMode == .interactive && swiftPreviewDylibPath != nil {
+                DynamicSwiftUIView(
+                    dylibPath: swiftPreviewDylibPath,
+                    trigger: swiftPreviewTrigger,
+                    coordinator: dylibCoordinator,
+                    onError: { err in
+                        swiftPreviewError = err
+                    }
+                )
+                .frame(width: targetWidth, height: targetHeight)
+            } else if let image = swiftPreviewImage {
+                Image(nsImage: image)
+                    .resizable()
+                    .aspectRatio(contentMode: .fit)
+                    .frame(width: targetWidth, height: targetHeight)
+            } else if !isPreviewLoading && swiftPreviewError == nil {
+                VStack(spacing: 16) {
+                    Image(systemName: "swift")
+                        .font(.system(size: 48))
+                        .foregroundColor(.orange)
+
+                    Text("SwiftUI Live Preview")
+                        .font(.headline)
+
+                    Text(swiftPreviewMode == .interactive ? "Sub-second Dynamic Loading" : "High-res Image Snapshot")
+                        .font(.caption)
+                        .foregroundColor(.secondary)
+
+                    Button(swiftPreviewMode == .interactive ? "▶ Compile & Run Live" : "▶ Render Snapshot") {
+                        renderSwiftUIPreview()
+                    }
+                    .buttonStyle(.borderedProminent)
+                }
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+                .background(Color.black)
+            }
+
+            // Zero-flicker loading overlay (Only full screen progress if no preview has ever been loaded)
+            if isPreviewLoading {
+                if hasPreview {
+                    // Discreet bottom-right compilation pill; existing preview stays rock-solid
+                    VStack {
+                        Spacer()
+                        HStack(spacing: 6) {
+                            ProgressView()
+                                .scaleEffect(0.6)
+                            Text("Updating...")
+                                .font(.system(size: 10, weight: .medium))
+                                .foregroundColor(.secondary)
+                        }
+                        .padding(.horizontal, 10)
+                        .padding(.vertical, 4)
+                        .background(.ultraThinMaterial)
+                        .cornerRadius(12)
+                        .shadow(color: .black.opacity(0.15), radius: 4, y: 2)
+                        .padding(.bottom, selectedPreviewDevice.bottomInset + 8)
+                    }
+                    .transition(.opacity)
+                } else {
+                    VStack(spacing: 12) {
+                        ProgressView()
+                            .scaleEffect(1.2)
+                        Text(swiftPreviewMode == .interactive ? "Compiling dynamic library..." : "Rendering snapshot...")
+                            .font(.caption)
+                            .foregroundColor(.secondary)
+                    }
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+                    .background(Color.black)
+                }
+            }
+
+            // Non-destructive error banner (if preview exists, show soft banner; else show full error screen)
+            if let errorMsg = swiftPreviewError {
+                if hasPreview {
+                    VStack {
+                        HStack(alignment: .top, spacing: 8) {
+                            Image(systemName: "exclamationmark.triangle.fill")
+                                .font(.system(size: 12))
+                                .foregroundColor(.yellow)
+                            Text(errorMsg.components(separatedBy: "\n").first ?? "Compilation warning")
+                                .font(.system(size: 10, design: .monospaced))
+                                .foregroundColor(.primary)
+                                .lineLimit(2)
+                            Spacer()
+                            Button("Retry") {
+                                renderSwiftUIPreview()
+                            }
+                            .font(.system(size: 9))
+                            .buttonStyle(.bordered)
+                        }
+                        .padding(8)
+                        .background(.ultraThinMaterial)
+                        .cornerRadius(8)
+                        .padding(.horizontal, 12)
+                        .padding(.top, selectedPreviewDevice.topInset + 4)
+
+                        Spacer()
+                    }
+                } else {
+                    VStack(spacing: 12) {
+                        Image(systemName: "exclamationmark.triangle.fill")
+                            .font(.system(size: 32))
+                            .foregroundColor(.yellow)
+                        Text("Preview Compilation Error")
+                            .font(.headline)
+                        ScrollView {
+                            Text(errorMsg)
+                                .font(.system(size: 10, design: .monospaced))
+                                .foregroundColor(.red)
+                                .padding(8)
+                        }
+                        .frame(maxHeight: 140)
+                        .background(Color.black.opacity(0.3))
+                        .cornerRadius(6)
+
+                        HStack {
+                            Button("Retry") {
+                                renderSwiftUIPreview()
+                            }
+                            .buttonStyle(.borderedProminent)
+
+                            if swiftPreviewMode == .interactive {
+                                Button("Switch to Snapshot") {
+                                    swiftPreviewMode = .snapshot
+                                    renderSwiftUIPreview()
+                                }
+                                .buttonStyle(.bordered)
+                            }
+                        }
+                    }
+                    .padding(16)
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+                    .background(Color.black)
+                }
+            }
+        }
+        .frame(width: targetWidth, height: targetHeight)
+    }
+
+    /// Compile and render SwiftUI code (Live Dylib or Snapshot)
     private func renderSwiftUIPreview() {
         isPreviewLoading = true
-        swiftPreviewImage = nil
+        swiftPreviewError = nil
         output = "🔨 Compiling SwiftUI code...\n"
-        
+
         Task {
-            do {
-                let image = try await compileAndRenderSwiftUI(code: code)
-                await MainActor.run {
-                    swiftPreviewImage = image
-                    isPreviewLoading = false
-                    output += "✅ Preview rendered successfully\n"
+            if swiftPreviewMode == .interactive {
+                do {
+                    let dylibPath = try await compileSwiftUIDylib(code: code)
+                    await MainActor.run {
+                        self.swiftPreviewDylibPath = dylibPath
+                        self.swiftPreviewTrigger = UUID()
+                        self.isPreviewLoading = false
+                        self.output += "✅ Live interactive preview loaded successfully\n"
+                    }
+                } catch {
+                    await MainActor.run {
+                        self.swiftPreviewError = error.localizedDescription
+                        self.isPreviewLoading = false
+                        self.output += "❌ Interactive compilation error: \(error.localizedDescription)\n"
+                    }
                 }
-            } catch {
-                await MainActor.run {
-                    isPreviewLoading = false
-                    output += "❌ Error: \(error.localizedDescription)\n"
+            } else {
+                do {
+                    let image = try await compileAndRenderSwiftUI(code: code)
+                    await MainActor.run {
+                        self.swiftPreviewImage = image
+                        self.isPreviewLoading = false
+                        self.output += "✅ Snapshot preview rendered successfully\n"
+                    }
+                } catch {
+                    await MainActor.run {
+                        self.swiftPreviewError = error.localizedDescription
+                        self.isPreviewLoading = false
+                        self.output += "❌ Snapshot error: \(error.localizedDescription)\n"
+                    }
                 }
             }
         }
     }
-    
+
+    /// Compile SwiftUI code to dynamic library for in-memory live rendering
+    private func compileSwiftUIDylib(code: String) async throws -> String {
+        let tempDir = FileManager.default.temporaryDirectory.appendingPathComponent("SwiftUIDylib_\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: tempDir, withIntermediateDirectories: true)
+
+        let wrapperCode = generateDynamicWrapper(userCode: code)
+        let sourceFile = tempDir.appendingPathComponent("PreviewDynamic.swift")
+        let dylibFile = tempDir.appendingPathComponent("libpreview_\(UUID().uuidString.prefix(8)).dylib")
+
+        try wrapperCode.write(to: sourceFile, atomically: true, encoding: .utf8)
+
+        let compileResult = try await runProcess(
+            executable: "/usr/bin/env",
+            arguments: [
+                "swiftc",
+                "-emit-library",
+                "-o", dylibFile.path,
+                "-framework", "SwiftUI",
+                "-framework", "AppKit",
+                sourceFile.path
+            ],
+            currentDirectory: tempDir
+        )
+
+        if !compileResult.success {
+            throw NSError(domain: "SwiftUIPreview", code: 1, userInfo: [
+                NSLocalizedDescriptionKey: "Compilation failed:\n\(compileResult.stderr)"
+            ])
+        }
+
+        guard FileManager.default.fileExists(atPath: dylibFile.path) else {
+            throw NSError(domain: "SwiftUIPreview", code: 2, userInfo: [
+                NSLocalizedDescriptionKey: "Dynamic library was not generated"
+            ])
+        }
+
+        return dylibFile.path
+    }
+
+    /// Detect the primary root View struct to render
+    private func detectMainViewName(in code: String) -> String {
+        // 1. If #Preview { SomeView(...) } exists, extract SomeView
+        let previewMacroPattern = #"#Preview\s*(?:\([^)]*\))?\s*\{\s*([A-Za-z0-9_]+)\s*\("#
+        if let regex = try? NSRegularExpression(pattern: previewMacroPattern, options: []),
+           let match = regex.firstMatch(in: code, range: NSRange(code.startIndex..., in: code)),
+           let range = Range(match.range(at: 1), in: code) {
+            return String(code[range])
+        }
+
+        // 2. Find all structs conforming to View
+        let structPattern = #"struct\s+(\w+)\s*:\s*(?:[^{]*\b)?View\b"#
+        guard let regex = try? NSRegularExpression(pattern: structPattern, options: []) else {
+            return "ContentView"
+        }
+
+        let matches = regex.matches(in: code, range: NSRange(code.startIndex..., in: code))
+        let names = matches.compactMap { match -> String? in
+            guard let range = Range(match.range(at: 1), in: code) else { return nil }
+            return String(code[range])
+        }
+
+        if names.isEmpty { return "ContentView" }
+        if names.contains("ContentView") { return "ContentView" }
+        if names.contains("MainView") { return "MainView" }
+        if names.contains("RootView") { return "RootView" }
+
+        // Filter out typical subview/row/cell names that need bindings or parameters
+        let mainCandidates = names.filter { name in
+            !name.hasSuffix("RowView") &&
+            !name.hasSuffix("Row") &&
+            !name.hasSuffix("Cell") &&
+            !name.hasSuffix("ItemView") &&
+            !name.hasSuffix("Badge") &&
+            !name.hasSuffix("Card")
+        }
+
+        return mainCandidates.first ?? names.first ?? "ContentView"
+    }
+
+    /// Provide iOS UIKit/SwiftUI compatibility shims and sanitize code for macOS compilation
+    private func sanitizeSwiftUICodeForMacOS(_ userCode: String) -> (cleanedCode: String, shims: String) {
+        let shims = """
+        typealias UIColor = NSColor
+        extension NSColor {
+            static var secondarySystemBackground: NSColor { NSColor(white: 0.11, alpha: 1.0) }
+            static var systemBackground: NSColor { .black }
+            static var tertiarySystemBackground: NSColor { NSColor(white: 0.16, alpha: 1.0) }
+            static var systemGroupedBackground: NSColor { .black }
+            static var secondarySystemGroupedBackground: NSColor { NSColor(white: 0.11, alpha: 1.0) }
+            static var tertiarySystemGroupedBackground: NSColor { NSColor(white: 0.16, alpha: 1.0) }
+            static var systemGray: NSColor { labelColor }
+            static var systemGray2: NSColor { secondaryLabelColor }
+            static var systemGray3: NSColor { separatorColor }
+            static var systemGray4: NSColor { NSColor(white: 0.22, alpha: 1.0) }
+            static var systemGray5: NSColor { NSColor(white: 0.18, alpha: 1.0) }
+            static var systemGray6: NSColor { NSColor(white: 0.12, alpha: 1.0) }
+            static var placeholderText: NSColor { placeholderTextColor }
+        }
+
+        extension Color {
+            init(_ uiColor: NSColor) { self.init(nsColor: uiColor) }
+            static var secondarySystemBackground: Color { Color(white: 0.11) }
+            static var systemBackground: Color { Color.black }
+            static var tertiarySystemBackground: Color { Color(white: 0.16) }
+            static var systemGroupedBackground: Color { Color.black }
+            static var secondarySystemGroupedBackground: Color { Color(white: 0.11) }
+            static var tertiarySystemGroupedBackground: Color { Color(white: 0.16) }
+            static var systemGray: Color { Color(NSColor.labelColor) }
+            static var systemGray2: Color { Color(NSColor.secondaryLabelColor) }
+            static var systemGray3: Color { Color(NSColor.separatorColor) }
+            static var systemGray4: Color { Color(white: 0.22) }
+            static var systemGray5: Color { Color(white: 0.18) }
+            static var systemGray6: Color { Color(white: 0.12) }
+        }
+        """
+
+        var cleaned = userCode
+        cleaned = cleaned.replacingOccurrences(of: "@main\n", with: "// @main (disabled)\n")
+        cleaned = cleaned.replacingOccurrences(of: "@main ", with: "// @main (disabled) ")
+        cleaned = cleaned.replacingOccurrences(of: ".listStyle(.insetGrouped)", with: ".listStyle(.inset)")
+        cleaned = cleaned.replacingOccurrences(of: ".listStyle(.grouped)", with: ".listStyle(.inset)")
+        cleaned = cleaned.replacingOccurrences(of: "EditButton()", with: "Button(\"Edit\") {}")
+        cleaned = cleaned.replacingOccurrences(of: ".navigationBarTitleDisplayMode(.inline)", with: "")
+        cleaned = cleaned.replacingOccurrences(of: ".navigationBarTitleDisplayMode(.large)", with: "")
+        cleaned = cleaned.replacingOccurrences(of: ".navigationBarTitleDisplayMode(.automatic)", with: "")
+        cleaned = cleaned.replacingOccurrences(of: ".navigationBarBackButtonHidden(true)", with: "")
+        cleaned = cleaned.replacingOccurrences(of: ".navigationBarBackButtonHidden(false)", with: "")
+        cleaned = cleaned.replacingOccurrences(of: ".navigationBarHidden(true)", with: "")
+        cleaned = cleaned.replacingOccurrences(of: ".navigationBarHidden(false)", with: "")
+        cleaned = cleaned.replacingOccurrences(of: ".topBarTrailing", with: ".automatic")
+        cleaned = cleaned.replacingOccurrences(of: ".topBarLeading", with: ".automatic")
+        cleaned = cleaned.replacingOccurrences(of: ".navigationBarTrailing", with: ".automatic")
+        cleaned = cleaned.replacingOccurrences(of: ".navigationBarLeading", with: ".automatic")
+        cleaned = cleaned.replacingOccurrences(of: ".bottomBar", with: ".automatic")
+
+        return (cleaned, shims)
+    }
+
+    /// Generate dynamic library wrapper with C-ABI entry point
+    private func generateDynamicWrapper(userCode: String) -> String {
+        let viewName = detectMainViewName(in: userCode)
+        let (cleanedCode, shims) = sanitizeSwiftUICodeForMacOS(userCode)
+        let topInset = selectedPreviewDevice.topInset
+        let bottomInset = selectedPreviewDevice.bottomInset
+
+        return """
+        import SwiftUI
+        import AppKit
+
+        // iOS UIKit & SwiftUI Compatibility Shims for macOS
+        \(shims)
+
+        // User's SwiftUI Code
+        \(cleanedCode)
+
+        // Dynamic C-ABI Bridge
+        @_cdecl("microcode_create_preview")
+        public func microcode_create_preview() -> UnsafeMutableRawPointer {
+            let view = \(viewName)()
+                .safeAreaInset(edge: .top, spacing: 0) {
+                    Color.clear.frame(height: \(topInset))
+                }
+                .safeAreaInset(edge: .bottom, spacing: 0) {
+                    Color.clear.frame(height: \(bottomInset))
+                }
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+                .background(Color.black)
+            let hostingView = NSHostingView(rootView: AnyView(view))
+            hostingView.wantsLayer = true
+            hostingView.layer?.backgroundColor = NSColor.black.cgColor
+            return Unmanaged.passRetained(hostingView).toOpaque()
+        }
+        """
+    }
+
+    /// Launch external GUI application process (Python Tkinter/PyQt, Rust egui, Go Gio, etc.)
+    private func launchGUIApp() {
+        stopGUIApp()
+        let framework = detectedGUIFramework ?? "GUI"
+        guiProcessOutput = "🚀 Launching \(framework) Application...\n"
+        isGUIRunning = true
+
+        Task {
+            let tempDir = FileManager.default.temporaryDirectory.appendingPathComponent("MicroCode_GUI_\(UUID().uuidString)")
+            try? FileManager.default.createDirectory(at: tempDir, withIntermediateDirectories: true)
+
+            let ext = appState.fileExtension(for: language)
+            let scriptPath = tempDir.appendingPathComponent("main.\(ext)")
+            try? code.write(to: scriptPath, atomically: true, encoding: .utf8)
+
+            let process = Process()
+            var executable = "/usr/bin/env"
+            var arguments: [String] = []
+
+            switch language {
+            case "python":
+                let pyPath = pythonEnvManager.activeEnvironment?.pythonPath ?? appState.selectedPythonVersion
+                executable = pythonEnvManager.resolveExecutablePath(pyPath)
+                arguments = [scriptPath.path]
+            case "rust":
+                let binPath = tempDir.appendingPathComponent("gui_bin")
+                await MainActor.run {
+                    self.guiProcessOutput += "🔨 Compiling Rust binary with rustc...\n"
+                }
+                let compileResult = try? await runProcess(
+                    executable: "/usr/bin/env",
+                    arguments: ["rustc", scriptPath.path, "-o", binPath.path],
+                    currentDirectory: tempDir
+                )
+                if compileResult?.success != true {
+                    await MainActor.run {
+                        self.guiProcessOutput += "❌ Rust compilation failed:\n\(compileResult?.stderr ?? "")\n"
+                        self.isGUIRunning = false
+                    }
+                    return
+                }
+                executable = binPath.path
+                arguments = []
+            case "go":
+                executable = "/usr/bin/env"
+                arguments = ["go", "run", scriptPath.path]
+            default:
+                executable = "/usr/bin/env"
+                arguments = [language, scriptPath.path]
+            }
+
+            process.executableURL = URL(fileURLWithPath: executable)
+            process.arguments = arguments
+            process.currentDirectoryURL = tempDir
+
+            var env = ProcessInfo.processInfo.environment
+            let home = NSHomeDirectory()
+            let extraPaths = [
+                "/opt/homebrew/bin",
+                "/opt/homebrew/sbin",
+                "/usr/local/bin",
+                "\(home)/.cargo/bin",
+                "\(home)/.swiftly/bin",
+                "/opt/homebrew/opt/openjdk@21/bin",
+                "/opt/homebrew/opt/openjdk/bin",
+                "/Applications/Xcode.app/Contents/Developer/usr/bin",
+                "/Applications/Xcode-beta.app/Contents/Developer/usr/bin",
+                "/Volumes/MAC/Xcode-beta 2.app/Contents/Developer/usr/bin"
+            ]
+            let currentPath = env["PATH"] ?? "/usr/bin:/bin:/usr/sbin:/sbin"
+            env["PATH"] = (extraPaths + [currentPath]).joined(separator: ":")
+            process.environment = env
+
+            let stdoutPipe = Pipe()
+            let stderrPipe = Pipe()
+            process.standardOutput = stdoutPipe
+            process.standardError = stderrPipe
+
+            stdoutPipe.fileHandleForReading.readabilityHandler = { handle in
+                let data = handle.availableData
+                if !data.isEmpty, let text = String(data: data, encoding: .utf8) {
+                    DispatchQueue.main.async {
+                        self.guiProcessOutput += text
+                    }
+                }
+            }
+
+            stderrPipe.fileHandleForReading.readabilityHandler = { handle in
+                let data = handle.availableData
+                if !data.isEmpty, let text = String(data: data, encoding: .utf8) {
+                    DispatchQueue.main.async {
+                        self.guiProcessOutput += text
+                    }
+                }
+            }
+
+            do {
+                try process.run()
+                await MainActor.run {
+                    self.activeGUIProcess = process
+                    self.guiProcessPID = process.processIdentifier
+                    self.guiProcessOutput += "✅ Process started with PID: \(process.processIdentifier)\n"
+                }
+
+                process.waitUntilExit()
+
+                await MainActor.run {
+                    self.isGUIRunning = false
+                    self.activeGUIProcess = nil
+                    self.guiProcessPID = nil
+                    self.guiProcessOutput += "\n🏁 GUI Process exited with code: \(process.terminationStatus)\n"
+                }
+            } catch {
+                await MainActor.run {
+                    self.isGUIRunning = false
+                    self.activeGUIProcess = nil
+                    self.guiProcessPID = nil
+                    self.guiProcessOutput += "❌ Failed to start GUI process: \(error.localizedDescription)\n"
+                }
+            }
+        }
+    }
+
+    /// Terminate active external GUI process
+    private func stopGUIApp() {
+        if let proc = activeGUIProcess, proc.isRunning {
+            proc.terminate()
+            activeGUIProcess = nil
+            isGUIRunning = false
+            guiProcessPID = nil
+            guiProcessOutput += "🛑 GUI Process stopped by user.\n"
+        }
+    }
+
+    private func frameworkIcon(for framework: String) -> String {
+        switch framework {
+        case "SwiftUI", "UIKit", "AppKit": return "swift"
+        case "Tkinter", "CustomTkinter", "PyQt", "PySide", "Python GUI": return "macwindow"
+        case "egui (Rust)", "Slint (Rust)", "Iced (Rust)": return "gearshape.2"
+        case "Fyne (Go)", "Gio (Go)": return "network"
+        case "Flutter": return "bolt.fill"
+        default: return "macwindow"
+        }
+    }
+
+    private func frameworkColor(for framework: String) -> Color {
+        switch framework {
+        case "SwiftUI": return .orange
+        case "Tkinter", "CustomTkinter": return .blue
+        case "PyQt", "PySide", "Python GUI": return .green
+        case "egui (Rust)", "Slint (Rust)", "Iced (Rust)": return .red
+        case "Fyne (Go)", "Gio (Go)": return .cyan
+        case "Flutter": return .blue
+        default: return .purple
+        }
+    }
+
     /// Compile SwiftUI code and render to image
     private func compileAndRenderSwiftUI(code: String) async throws -> NSImage {
         let tempDir = FileManager.default.temporaryDirectory.appendingPathComponent("SwiftUIPreview_\(UUID().uuidString)")
         try FileManager.default.createDirectory(at: tempDir, withIntermediateDirectories: true)
-        
+
         defer {
             try? FileManager.default.removeItem(at: tempDir)
         }
-        
-        // Create a wrapper that renders the user's view to an image
+
         let wrapperCode = generatePreviewWrapper(userCode: code)
         let sourceFile = tempDir.appendingPathComponent("Preview.swift")
         let outputPath = tempDir.appendingPathComponent("preview_output.png")
         let executablePath = tempDir.appendingPathComponent("PreviewApp")
-        
+
         try wrapperCode.write(to: sourceFile, atomically: true, encoding: .utf8)
-        
-        // Compile with swiftc
+
         let compileResult = try await runProcess(
-            executable: "/usr/bin/swiftc",
+            executable: "/usr/bin/env",
             arguments: [
+                "swiftc",
+                "-parse-as-library",
                 "-o", executablePath.path,
                 "-framework", "SwiftUI",
                 "-framework", "AppKit",
@@ -950,99 +1882,79 @@ struct PlaygroundView: View {
             ],
             currentDirectory: tempDir
         )
-        
+
         if !compileResult.success {
             throw NSError(domain: "SwiftUIPreview", code: 1, userInfo: [
                 NSLocalizedDescriptionKey: "Compilation failed:\n\(compileResult.stderr)"
             ])
         }
-        
-        // Run the executable to generate image
+
         let runResult = try await runProcess(
             executable: executablePath.path,
             arguments: [outputPath.path],
             currentDirectory: tempDir
         )
-        
+
         if !runResult.success {
             throw NSError(domain: "SwiftUIPreview", code: 2, userInfo: [
                 NSLocalizedDescriptionKey: "Execution failed:\n\(runResult.stderr)"
             ])
         }
-        
-        // Load the generated image
+
         guard let image = NSImage(contentsOf: outputPath) else {
             throw NSError(domain: "SwiftUIPreview", code: 3, userInfo: [
                 NSLocalizedDescriptionKey: "Failed to load rendered image"
             ])
         }
-        
+
         return image
     }
-    
+
     /// Generate wrapper code that renders user's SwiftUI view to image
     private func generatePreviewWrapper(userCode: String) -> String {
-        // Extract the struct name if present (find first View struct, not App)
-        let structPattern = #"struct\s+(\w+)\s*:\s*View\s*\{"#
-        var viewName = "ContentView"
-        if let regex = try? NSRegularExpression(pattern: structPattern, options: []),
-           let match = regex.firstMatch(in: userCode, range: NSRange(userCode.startIndex..., in: userCode)),
-           let range = Range(match.range(at: 1), in: userCode) {
-            viewName = String(userCode[range])
-        }
-        
-        // Clean user code for macOS compilation
-        var cleanedCode = userCode
-        
-        // Remove @main attribute (we add our own)
-        cleanedCode = cleanedCode.replacingOccurrences(of: "@main\n", with: "// @main (disabled for preview)\n")
-        cleanedCode = cleanedCode.replacingOccurrences(of: "@main ", with: "// @main (disabled) ")
-        
-        // Replace iOS-only UIColor references with macOS NSColor
-        cleanedCode = cleanedCode.replacingOccurrences(of: ".systemGroupedBackground", with: ".windowBackgroundColor")
-        cleanedCode = cleanedCode.replacingOccurrences(of: ".systemBackground", with: ".windowBackgroundColor")
-        cleanedCode = cleanedCode.replacingOccurrences(of: ".systemGray5", with: ".controlBackgroundColor")
-        cleanedCode = cleanedCode.replacingOccurrences(of: ".systemGray4", with: ".controlBackgroundColor")
-        cleanedCode = cleanedCode.replacingOccurrences(of: ".systemGray3", with: ".separatorColor")
-        cleanedCode = cleanedCode.replacingOccurrences(of: ".systemGray2", with: ".secondaryLabelColor")
-        cleanedCode = cleanedCode.replacingOccurrences(of: ".systemGray", with: ".labelColor")
-        cleanedCode = cleanedCode.replacingOccurrences(of: ".label", with: ".labelColor")
-        cleanedCode = cleanedCode.replacingOccurrences(of: ".secondaryLabel", with: ".secondaryLabelColor")
-        cleanedCode = cleanedCode.replacingOccurrences(of: ".tertiaryLabel", with: ".tertiaryLabelColor")
-        
-        // Replace iOS-only toolbar placements with macOS equivalents
-        cleanedCode = cleanedCode.replacingOccurrences(of: ".topBarTrailing", with: ".automatic")
-        cleanedCode = cleanedCode.replacingOccurrences(of: ".topBarLeading", with: ".automatic")
-        cleanedCode = cleanedCode.replacingOccurrences(of: ".navigationBarTrailing", with: ".automatic")
-        cleanedCode = cleanedCode.replacingOccurrences(of: ".navigationBarLeading", with: ".automatic")
-        cleanedCode = cleanedCode.replacingOccurrences(of: ".bottomBar", with: ".automatic")
-        
+        let viewName = detectMainViewName(in: userCode)
+        let (cleanedCode, shims) = sanitizeSwiftUICodeForMacOS(userCode)
+        let targetWidth = Int(selectedPreviewDevice.screenWidth)
+        let targetHeight = Int(selectedPreviewDevice.screenHeight)
+        let topInset = Int(selectedPreviewDevice.topInset)
+        let bottomInset = Int(selectedPreviewDevice.bottomInset)
+
         return """
         import SwiftUI
         import AppKit
-        
+
+        // iOS UIKit & SwiftUI Compatibility Shims for macOS
+        \(shims)
+
         // User's SwiftUI Code (adapted for macOS)
         \(cleanedCode)
-        
+
         // Preview Renderer
         @main
         struct PreviewRenderer {
+            @MainActor
             static func main() {
                 guard CommandLine.arguments.count > 1 else {
                     print("Usage: PreviewApp <output_path>")
                     exit(1)
                 }
                 let outputPath = CommandLine.arguments[1]
-                
+
                 let view = \(viewName)()
-                    .frame(width: 375, height: 812)
-                    .background(panelBackground)
-                
+                    .safeAreaInset(edge: .top, spacing: 0) {
+                        Color.clear.frame(height: \(topInset))
+                    }
+                    .safeAreaInset(edge: .bottom, spacing: 0) {
+                        Color.clear.frame(height: \(bottomInset))
+                    }
+                    .frame(width: \(targetWidth), height: \(targetHeight))
+                    .background(Color.black)
+
                 let renderer = ImageRenderer(content: view)
                 renderer.scale = 2.0
-                
+
                 if let cgImage = renderer.cgImage {
-                    let nsImage = NSImage(cgImage: cgImage, size: NSSize(width: 375, height: 812))
+                    let nsImage = NSImage(cgImage: cgImage, size: NSSize(width: \(targetWidth), height: \(targetHeight)))
                     if let tiffData = nsImage.tiffRepresentation,
                        let bitmap = NSBitmapImageRep(data: tiffData),
                        let pngData = bitmap.representation(using: .png, properties: [:]) {
@@ -1057,6 +1969,7 @@ struct PlaygroundView: View {
         }
         """
     }
+
     
     /// Run a process and capture output
     private func runProcess(executable: String, arguments: [String], currentDirectory: URL) async throws -> (success: Bool, stdout: String, stderr: String) {
@@ -1066,6 +1979,21 @@ struct PlaygroundView: View {
                 process.executableURL = URL(fileURLWithPath: executable)
                 process.arguments = arguments
                 process.currentDirectoryURL = currentDirectory
+                
+                var env = ProcessInfo.processInfo.environment
+                let home = NSHomeDirectory()
+                let extraPaths = [
+                    "/opt/homebrew/bin",
+                    "/usr/local/bin",
+                    "\(home)/.cargo/bin",
+                    "\(home)/.swiftly/bin",
+                    "/Applications/Xcode.app/Contents/Developer/usr/bin",
+                    "/Applications/Xcode-beta.app/Contents/Developer/usr/bin",
+                    "/Volumes/MAC/Xcode-beta 2.app/Contents/Developer/usr/bin"
+                ]
+                let currentPath = env["PATH"] ?? "/usr/bin:/bin:/usr/sbin:/sbin"
+                env["PATH"] = (extraPaths + [currentPath]).joined(separator: ":")
+                process.environment = env
                 
                 let stdoutPipe = Pipe()
                 let stderrPipe = Pipe()
@@ -1189,6 +2117,57 @@ struct PlaygroundView: View {
         }
         return "Python"
     }
+
+    private func playgroundRuntime(for language: String) -> RuntimeType? {
+        switch language.lowercased() {
+        case "r": return .r
+        case "julia", "jl": return .julia
+        default: return nil
+        }
+    }
+
+    private func runtimeEnvironmentMenu(for runtime: RuntimeType) -> some View {
+        let paths = runtimeManager.availablePaths(for: runtime)
+        let activePath = runtimeManager.selectedExecutable(for: runtime)
+        return Menu {
+            Text("\(runtime.rawValue) Environment")
+                .font(.caption)
+                .foregroundColor(.secondary)
+
+            if paths.isEmpty {
+                Text("No \(runtime.rawValue) runtime detected")
+                    .foregroundColor(.secondary)
+            } else {
+                ForEach(paths, id: \.self) { path in
+                    Button {
+                        runtimeManager.activateRuntime(path, for: runtime)
+                    } label: {
+                        HStack {
+                            Text(URL(fileURLWithPath: path).lastPathComponent)
+                            if activePath == path { Image(systemName: "checkmark") }
+                        }
+                    }
+                }
+            }
+
+            Divider()
+            Button("Refresh Runtimes") { runtimeManager.detectAll() }
+            Button("Manage Environments…") { showingEnvManager = true }
+        } label: {
+            HStack(spacing: 6) {
+                Text(runtime.icon)
+                Text(activePath.map { URL(fileURLWithPath: $0).lastPathComponent } ?? runtime.rawValue)
+                    .font(.system(size: 12, weight: .medium))
+                Image(systemName: "chevron.down")
+                    .font(.system(size: 9, weight: .bold))
+                    .foregroundColor(.secondary)
+            }
+            .padding(.horizontal, 10)
+            .padding(.vertical, 5)
+            .background(RoundedRectangle(cornerRadius: 6, style: .continuous).fill(controlBackground))
+        }
+        .buttonStyle(.plain)
+    }
     
     // MARK: - Analysis Logc
     
@@ -1198,24 +2177,54 @@ struct PlaygroundView: View {
         let lowercased = code.lowercased()
         
         if language == "python" {
-            if lowercased.contains("import tkinter") || lowercased.contains("from tkinter") {
-                detectedFramework = "tkinter"
-            } else if lowercased.contains("import pyqt") || lowercased.contains("from pyqt") {
-                detectedFramework = "PyQt5"
-            } else if lowercased.contains("import customtkinter") || lowercased.contains("from customtkinter") {
-                detectedFramework = "customtkinter"
-            } else if lowercased.contains("import kivy") {
+            if lowercased.contains("customtkinter") {
+                detectedFramework = "CustomTkinter"
+            } else if lowercased.contains("tkinter") {
+                detectedFramework = "Tkinter"
+            } else if lowercased.contains("pyqt6") || lowercased.contains("pyqt5") || lowercased.contains("pyqt") {
+                detectedFramework = "PyQt"
+            } else if lowercased.contains("pyside6") || lowercased.contains("pyside2") || lowercased.contains("pyside") {
+                detectedFramework = "PySide"
+            } else if lowercased.contains("import flet") || lowercased.contains("from flet") {
+                detectedFramework = "Flet"
+            } else if lowercased.contains("import kivy") || lowercased.contains("from kivy") {
                 detectedFramework = "Kivy"
+            } else if lowercased.contains("import pygame") {
+                detectedFramework = "Pygame"
+            } else if lowercased.contains("import wx") {
+                detectedFramework = "wxPython"
             }
         } else if language == "swift" {
-            if lowercased.contains("import swiftui") || lowercased.contains("@main") {
+            if lowercased.contains("import swiftui") || lowercased.contains("struct contentview: view") || lowercased.contains("@main") {
                 detectedFramework = "SwiftUI"
+            } else if lowercased.contains("import uikit") {
+                detectedFramework = "UIKit"
+            } else if lowercased.contains("import appkit") {
+                detectedFramework = "AppKit"
             }
         } else if language == "rust" {
             if lowercased.contains("egui") || lowercased.contains("eframe") {
-                detectedFramework = "egui"
+                detectedFramework = "egui (Rust)"
+            } else if lowercased.contains("slint") {
+                detectedFramework = "Slint (Rust)"
+            } else if lowercased.contains("iced") {
+                detectedFramework = "Iced (Rust)"
             } else if lowercased.contains("gtk") {
-                detectedFramework = "GTK"
+                detectedFramework = "GTK (Rust)"
+            }
+        } else if language == "go" {
+            if lowercased.contains("fyne.io") || lowercased.contains("fyne") {
+                detectedFramework = "Fyne (Go)"
+            } else if lowercased.contains("gioui.org") || lowercased.contains("gio") {
+                detectedFramework = "Gio (Go)"
+            }
+        } else if language == "dart" {
+            if lowercased.contains("package:flutter") {
+                detectedFramework = "Flutter"
+            }
+        } else if language == "kotlin" {
+            if lowercased.contains("androidx.compose") {
+                detectedFramework = "Compose Desktop"
             }
         }
         
@@ -1249,46 +2258,27 @@ struct PlaygroundView: View {
     private func handleCodeChange() {
         coordinatorTask?.cancel()
         coordinatorTask = Task {
-            // 1. Single Debounce for EVERYTHING (Wait 0.6s)
-            // This prevents race conditions where execution starts before analysis finishes
-            try? await Task.sleep(nanoseconds: 600_000_000)
+            // 1. Debounce for Instant Realtime Execution:
+            // 650ms for Swift/SwiftUI preview compilation to avoid background compiler thrashing/flicker
+            // 120ms for lightweight scripts and hot reload
+            let isSwiftUI = language == "swift" && (detectedGUIFramework == "SwiftUI" || code.contains("import SwiftUI") || code.contains(": View"))
+            let debounceNanos: UInt64 = isSwiftUI ? 650_000_000 : 120_000_000
+            try? await Task.sleep(nanoseconds: debounceNanos)
             guard !Task.isCancelled else { return }
             
-            // 2. Perform Analysis (Background)
-            // strictly before any execution logic
             let codeToAnalyze = code
             let currentLang = language
             
-            // Run analysis on background — avoid capturing self in detached task
-            let analysisResult = await withCheckedContinuation { continuation in
-                DispatchQueue.global(qos: .userInitiated).async {
-                    let result = self.analyzeCode(code: codeToAnalyze, language: currentLang)
-                    continuation.resume(returning: result)
+            // 2. Immediate Execution Dispatch (Zero Latency)
+            // Auto Run without waiting for heavy AST/package analysis
+            if autoRunEnabled {
+                executionTask?.cancel()
+                executionTask = Task {
+                    await runCode()
                 }
             }
             
-            guard !Task.isCancelled else { return }
-            
-            // 3. Update State (Main Actor)
-            await MainActor.run {
-                // Update Framework
-                self.detectedGUIFramework = analysisResult.0
-                if self.detectedGUIFramework != nil {
-                    // Auto-open Disabled by user request
-                    // if !self.showGUIPreview { self.showGUIPreview = true }
-                    self.refreshGUIPreview()
-                }
-                
-                // Update Python Imports
-                if let packages = analysisResult.1 {
-                    self.pythonEnvManager.detectedPackages = packages
-                }
-            }
-            
-            // 4. Execution Dispatch
-            // Only now do we allow Hot Reload or Auto Run
-            
-            // A. Trigger Hot Reload (Preview Pane)
+            // Trigger Hot Reload (Preview Pane)
             if ["swift", "rust", "c", "cpp"].contains(currentLang) {
                 HotReloadService.shared.requestReload(
                     sourceCode: codeToAnalyze,
@@ -1296,11 +2286,26 @@ struct PlaygroundView: View {
                 )
             }
             
-            // B. Auto Run (Console Output)
-            if autoRunEnabled {
-                // Cancel previous execution task if still running
-                executionTask?.cancel()
-                await runCode()
+            // 3. Asynchronous Analysis (GUI & Python Imports) decoupled from execution
+            let analysisResult = await withCheckedContinuation { continuation in
+                DispatchQueue.global(qos: .utility).async {
+                    let result = self.analyzeCode(code: codeToAnalyze, language: currentLang)
+                    continuation.resume(returning: result)
+                }
+            }
+            
+            guard !Task.isCancelled else { return }
+            
+            // 4. Update UI State for GUI & Imports
+            await MainActor.run {
+                self.detectedGUIFramework = analysisResult.0
+                if self.detectedGUIFramework != nil {
+                    self.refreshGUIPreview()
+                }
+                
+                if let packages = analysisResult.1 {
+                    self.pythonEnvManager.detectedPackages = packages
+                }
             }
         }
     }
@@ -1514,7 +2519,7 @@ struct PlaygroundView: View {
                 <div class="device-screen">
                     <div class="status-bar">
                         <span>9:41</span>
-                        <span>⚡ 100%</span>
+                        <span>100%</span>
                     </div>
                     <div class="header">
                         <h1>SwiftUI Preview</h1>
@@ -1545,6 +2550,16 @@ struct PlaygroundView: View {
                 output = ""
                 exitCode = 0
                 showGUIPreview = true
+            }
+            return
+        }
+
+        if language == "swift" && (detectedGUIFramework == "SwiftUI" || code.contains("import SwiftUI") || code.contains(": View")) {
+            await MainActor.run {
+                isExecuting = false
+                showGUIPreview = true
+                showOutput = false
+                renderSwiftUIPreview()
             }
             return
         }
@@ -2117,6 +3132,161 @@ struct PlaygroundView: View {
         
         return cleaned
     }
+
+    // MARK: - .microplay File Handling & Cell Mode Operations
+
+    func openMicroplayFile() {
+        let panel = NSOpenPanel()
+        panel.title = "Open Playground Document"
+        panel.allowedContentTypes = [
+            UTType(filenameExtension: "microplay") ?? .json,
+            UTType.json
+        ]
+        panel.allowsMultipleSelection = false
+        panel.canChooseDirectories = false
+        panel.canChooseFiles = true
+        
+        if panel.runModal() == .OK, let selectedURL = panel.url {
+            loadMicroplay(from: selectedURL)
+        }
+    }
+
+    func loadMicroplay(from url: URL) {
+        do {
+            let data = try Data(contentsOf: url)
+            let decoder = JSONDecoder()
+            let doc = try decoder.decode(MicroplayDocument.self, from: data)
+            
+            self.currentMicroplayURL = url
+            
+            if !doc.cells.isEmpty {
+                // Switch to Cell Mode
+                self.isCellMode = true
+                self.cells = doc.cells.map { cellData in
+                    var theme: CellColorTheme = .none
+                    if let themeStr = cellData.colorTheme,
+                       let matchedTheme = CellColorTheme(rawValue: themeStr) {
+                        theme = matchedTheme
+                    }
+                    let cell = PlaygroundCellModel(
+                        id: UUID(uuidString: cellData.id) ?? UUID(),
+                        code: cellData.content,
+                        output: cellData.output ?? "",
+                        colorTheme: theme
+                    )
+                    return cell
+                }
+                if let firstCellLang = doc.cells.first?.language, !firstCellLang.isEmpty {
+                    self.language = firstCellLang
+                }
+                self.output = "📖 Loaded \(doc.cells.count) cell(s) from \(url.lastPathComponent)\n"
+            } else {
+                self.output = "📖 Loaded \(url.lastPathComponent)\n"
+            }
+        } catch {
+            self.output = "❌ Failed to open .microplay: \(error.localizedDescription)\n"
+        }
+    }
+
+    func saveMicroplayFile() {
+        let panel = NSSavePanel()
+        panel.title = "Save Playground Document"
+        panel.allowedContentTypes = [
+            UTType(filenameExtension: "microplay") ?? .json
+        ]
+        panel.nameFieldStringValue = currentMicroplayURL?.lastPathComponent ?? "Playground.microplay"
+        
+        if panel.runModal() == .OK, let targetURL = panel.url {
+            saveMicroplay(to: targetURL)
+        }
+    }
+
+    func saveMicroplay(to url: URL) {
+        let microplayCells: [MicroplayCellData]
+        if isCellMode {
+            microplayCells = cells.map { cell in
+                MicroplayCellData(
+                    id: cell.id.uuidString,
+                    type: "code",
+                    language: self.language,
+                    content: cell.code,
+                    output: cell.output,
+                    colorTheme: cell.colorTheme.rawValue,
+                    isCollapsed: false,
+                    generatedCode: ""
+                )
+            }
+        } else {
+            microplayCells = [
+                MicroplayCellData(
+                    id: UUID().uuidString,
+                    type: "code",
+                    language: self.language,
+                    content: self.code,
+                    output: self.output,
+                    colorTheme: CellColorTheme.none.rawValue,
+                    isCollapsed: false,
+                    generatedCode: ""
+                )
+            ]
+        }
+        
+        let doc = MicroplayDocument(
+            name: url.lastPathComponent,
+            mode: "playground",
+            cells: microplayCells
+        )
+        
+        do {
+            let encoder = JSONEncoder()
+            encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
+            let data = try encoder.encode(doc)
+            try data.write(to: url, options: .atomic)
+            self.currentMicroplayURL = url
+            self.output = "💾 Successfully saved to \(url.lastPathComponent)\n"
+        } catch {
+            self.output = "❌ Failed to save .microplay: \(error.localizedDescription)\n"
+        }
+    }
+
+    func runCell(_ cell: PlaygroundCellModel) {
+        cell.isExecuting = true
+        cell.output = ""
+        let startTime = Date()
+        
+        Task {
+            let (stdout, stderr, code) = await appState.executeScript(code: cell.code, language: language)
+            await MainActor.run {
+                cell.output = stdout
+                if !stderr.isEmpty {
+                    cell.output += (cell.output.isEmpty ? "" : "\n") + stderr
+                }
+                cell.executionTime = Date().timeIntervalSince(startTime)
+                cell.isExecuting = false
+            }
+        }
+    }
+
+    func runAllCells() {
+        Task {
+            for cell in cells {
+                await MainActor.run {
+                    cell.isExecuting = true
+                    cell.output = ""
+                }
+                let startTime = Date()
+                let (stdout, stderr, _) = await appState.executeScript(code: cell.code, language: language)
+                await MainActor.run {
+                    cell.output = stdout
+                    if !stderr.isEmpty {
+                        cell.output += (cell.output.isEmpty ? "" : "\n") + stderr
+                    }
+                    cell.executionTime = Date().timeIntervalSince(startTime)
+                    cell.isExecuting = false
+                }
+            }
+        }
+    }
 }
 
 // MARK: - GUI Preview WebView
@@ -2371,19 +3541,265 @@ struct MarkdownPreviewWebView: NSViewRepresentable {
     """
 }
 
+// MARK: - Preview Device Type & iPad Frame View
+
+enum PreviewDeviceType: String, CaseIterable, Identifiable {
+    case iPhone = "iPhone"
+    case iPad = "iPad"
+    
+    var id: String { rawValue }
+    
+    var displayName: String {
+        switch self {
+        case .iPhone: return "iPhone 15 Pro"
+        case .iPad: return "iPad Pro M5"
+        }
+    }
+    
+    var shortName: String {
+        switch self {
+        case .iPhone: return "iPhone"
+        case .iPad: return "iPad"
+        }
+    }
+    
+    var screenWidth: CGFloat {
+        switch self {
+        case .iPhone: return 393
+        case .iPad: return 938
+        }
+    }
+    
+    var screenHeight: CGFloat {
+        switch self {
+        case .iPhone: return 852
+        case .iPad: return 646
+        }
+    }
+    
+    var frameWidth: CGFloat {
+        switch self {
+        case .iPhone: return 413
+        case .iPad: return 1024
+        }
+    }
+    
+    var frameHeight: CGFloat {
+        switch self {
+        case .iPhone: return 872
+        case .iPad: return 729
+        }
+    }
+    
+    var topInset: CGFloat {
+        switch self {
+        case .iPhone: return 59
+        case .iPad: return 24
+        }
+    }
+    
+    var bottomInset: CGFloat {
+        switch self {
+        case .iPhone: return 34
+        case .iPad: return 20
+        }
+    }
+}
+
+/// Photorealistic iPad Pro M5 Landscape frame with official hardware bezel
+struct iPadFrameView<Content: View>: View {
+    @ViewBuilder let content: () -> Content
+    var colorScheme: ColorScheme = .dark
+    
+    // Official Bezel specs: 1024x729 total, screen 938x646 (43px border left/right, 41.5px top/bottom), corner radius 28
+    private let screenWidth: CGFloat = 938
+    private let screenHeight: CGFloat = 646
+    private let frameWidth: CGFloat = 1024
+    private let frameHeight: CGFloat = 729
+    private let screenCornerRadius: CGFloat = 28
+    
+    var body: some View {
+        let isDark = colorScheme == .dark
+        
+        ZStack {
+            // 1. Fallback hardware chassis (Solid matte black with soft rounded edges)
+            RoundedRectangle(cornerRadius: 38)
+                .fill(Color.black)
+                .frame(width: frameWidth, height: frameHeight)
+                .shadow(color: .black.opacity(0.6), radius: 24, x: 0, y: 12)
+            
+            // 2. Screen Area (Nested in transparent cutout)
+            ZStack {
+                // Display background
+                RoundedRectangle(cornerRadius: screenCornerRadius)
+                    .fill(Color.black)
+                
+                // Screen content
+                content()
+                    .frame(width: screenWidth, height: screenHeight)
+                    .background(Color.black)
+                
+                // iPad Status Bar (Top)
+                VStack {
+                    HStack {
+                        Text("9:41 AM")
+                            .font(.system(size: 13, weight: .semibold))
+                            .foregroundColor(isDark ? .white : .black)
+                        
+                        Spacer()
+                        
+                        HStack(spacing: 8) {
+                            Image(systemName: "wifi")
+                            Image(systemName: "battery.100")
+                        }
+                        .font(.system(size: 12))
+                        .foregroundColor(isDark ? .white : .black)
+                    }
+                    .padding(.horizontal, 32)
+                    .padding(.top, 8)
+                    
+                    Spacer()
+                }
+                .allowsHitTesting(false)
+                
+                // iPad Home Indicator (Bottom)
+                VStack {
+                    Spacer()
+                    Capsule()
+                        .fill((isDark ? Color.white : Color.black).opacity(0.45))
+                        .frame(width: 280, height: 5)
+                        .padding(.bottom, 6)
+                }
+                .allowsHitTesting(false)
+            }
+            .frame(width: screenWidth, height: screenHeight)
+            .clipShape(RoundedRectangle(cornerRadius: screenCornerRadius))
+            
+            // 3. Official Bezel PNG Overlay with Center Cutout
+            if let bezelImage = DeviceFrameAssets.loadIPadProBezel() {
+                Image(nsImage: bezelImage)
+                    .resizable()
+                    .aspectRatio(contentMode: .fill)
+                    .frame(width: frameWidth, height: frameHeight)
+                    .allowsHitTesting(false)
+            }
+            
+            // 4. Front Facing Camera & TrueDepth Sensor (Centered at top border)
+            VStack {
+                HStack {
+                    Spacer()
+                    Circle()
+                        .fill(Color.black.opacity(0.95))
+                        .frame(width: 8, height: 8)
+                        .overlay(
+                            Circle()
+                                .stroke(Color(white: 0.2), lineWidth: 0.5)
+                        )
+                    Spacer()
+                }
+                .padding(.top, 16)
+                Spacer()
+            }
+            .allowsHitTesting(false)
+        }
+        .frame(width: frameWidth, height: frameHeight)
+    }
+}
+
 // MARK: - iPhone Frame View
 
-/// Photorealistic iPhone 15 Pro frame for SwiftUI preview
+/// Photorealistic iPhone frame for SwiftUI live preview matching Editor Preview Canvas
 struct iPhoneFrameView<Content: View>: View {
     @ViewBuilder let content: () -> Content
     var deviceType: iPhoneDevice = .iPhone15Pro
     var colorScheme: ColorScheme = .dark
     
     var body: some View {
-        content()
-            .cornerRadius(12)
-            .shadow(radius: 5)
-            .padding(10)
+        let (width, height, cornerRadius, hasDynamicIsland) = deviceType.config
+        let isDark = colorScheme == .dark
+        
+        ZStack {
+            // Device Body (Titanium / Aluminum frame)
+            RoundedRectangle(cornerRadius: cornerRadius + 8)
+                .fill(
+                    LinearGradient(
+                        colors: deviceType.titaniumColors,
+                        startPoint: .topLeading,
+                        endPoint: .bottomTrailing
+                    )
+                )
+                .frame(width: width + 20, height: height + 20)
+                .shadow(color: .black.opacity(0.45), radius: 24, y: 12)
+            
+            // Inner bezel (black)
+            RoundedRectangle(cornerRadius: cornerRadius + 4)
+                .fill(Color.black)
+                .frame(width: width + 10, height: height + 10)
+            
+            // Screen area
+            ZStack {
+                // Screen background
+                RoundedRectangle(cornerRadius: cornerRadius)
+                    .fill(isDark ? Color.black : Color(white: 0.95))
+                
+                // Content View (Live or snapshot)
+                content()
+                    .frame(width: width, height: height)
+                    .background(isDark ? Color.black : Color(white: 0.95))
+                
+                // Dynamic Island / Notch
+                if hasDynamicIsland {
+                    VStack {
+                        Capsule()
+                            .fill(Color.black)
+                            .frame(width: 126, height: 36)
+                            .padding(.top, 11)
+                        Spacer()
+                    }
+                    .allowsHitTesting(false)
+                }
+                
+                // Status Bar (9:41, icons)
+                VStack {
+                    HStack {
+                        Text("9:41")
+                            .font(.system(size: 14, weight: .semibold))
+                            .foregroundColor(isDark ? .white : .black)
+                        
+                        Spacer()
+                        
+                        HStack(spacing: 5) {
+                            Image(systemName: "cellularbars")
+                            Image(systemName: "wifi")
+                            Image(systemName: "battery.100")
+                        }
+                        .font(.system(size: 11))
+                        .foregroundColor(isDark ? .white : .black)
+                    }
+                    .padding(.horizontal, hasDynamicIsland ? 32 : 20)
+                    .padding(.top, hasDynamicIsland ? 14 : 10)
+                    
+                    Spacer()
+                }
+                .allowsHitTesting(false)
+                
+                // Home Indicator
+                if deviceType != .iPhoneSE {
+                    VStack {
+                        Spacer()
+                        Capsule()
+                            .fill((isDark ? Color.white : Color.black).opacity(0.5))
+                            .frame(width: 134, height: 5)
+                            .padding(.bottom, 8)
+                    }
+                    .allowsHitTesting(false)
+                }
+            }
+            .frame(width: width, height: height)
+            .clipShape(RoundedRectangle(cornerRadius: cornerRadius))
+            
+        }
+        .frame(width: width + 20, height: height + 20)
     }
 }
 
@@ -2464,3 +3880,85 @@ struct BatteryIcon: View {
         }
     }
 }
+
+// MARK: - SwiftUI Dynamic Live Preview
+
+final class SwiftUIPreviewCoordinator {
+    var currentHandle: UnsafeMutableRawPointer?
+    
+    deinit {
+        closeCurrent()
+    }
+    
+    func closeCurrent() {
+        if let handle = currentHandle {
+            dlclose(handle)
+            currentHandle = nil
+        }
+    }
+}
+
+struct DynamicSwiftUIView: NSViewRepresentable {
+    let dylibPath: String?
+    let trigger: UUID
+    let coordinator: SwiftUIPreviewCoordinator
+    let onError: (String) -> Void
+    
+    func makeNSView(context: Context) -> NSView {
+        let container = NSView()
+        container.wantsLayer = true
+        container.layer?.backgroundColor = NSColor.black.cgColor
+        loadDylib(into: container)
+        return container
+    }
+    
+    func updateNSView(_ nsView: NSView, context: Context) {
+        nsView.wantsLayer = true
+        nsView.layer?.backgroundColor = NSColor.black.cgColor
+        loadDylib(into: nsView)
+    }
+    
+    private func loadDylib(into container: NSView) {
+        guard let path = dylibPath, FileManager.default.fileExists(atPath: path) else {
+            return
+        }
+        
+        guard let handle = dlopen(path, RTLD_NOW | RTLD_LOCAL) else {
+            let err = dlerror().map { String(cString: $0) } ?? "dlopen error"
+            DispatchQueue.main.async {
+                onError("Failed to load dylib: \(err)")
+            }
+            return
+        }
+        
+        guard let sym = dlsym(handle, "microcode_create_preview") else {
+            dlclose(handle)
+            let err = dlerror().map { String(cString: $0) } ?? "Symbol microcode_create_preview not found"
+            DispatchQueue.main.async {
+                onError("Missing symbol: \(err)")
+            }
+            return
+        }
+        
+        coordinator.closeCurrent()
+        coordinator.currentHandle = handle
+        
+        typealias MakePreviewFn = @convention(c) () -> UnsafeMutableRawPointer
+        let makeFn = unsafeBitCast(sym, to: MakePreviewFn.self)
+        let rawPtr = makeFn()
+        let hostedView = Unmanaged<NSView>.fromOpaque(rawPtr).takeRetainedValue()
+        hostedView.wantsLayer = true
+        hostedView.layer?.backgroundColor = NSColor.black.cgColor
+        
+        container.subviews.forEach { $0.removeFromSuperview() }
+        container.addSubview(hostedView)
+        hostedView.translatesAutoresizingMaskIntoConstraints = false
+        NSLayoutConstraint.activate([
+            hostedView.topAnchor.constraint(equalTo: container.topAnchor),
+            hostedView.bottomAnchor.constraint(equalTo: container.bottomAnchor),
+            hostedView.leadingAnchor.constraint(equalTo: container.leadingAnchor),
+            hostedView.trailingAnchor.constraint(equalTo: container.trailingAnchor)
+        ])
+    }
+}
+

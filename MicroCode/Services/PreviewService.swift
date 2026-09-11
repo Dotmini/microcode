@@ -2,9 +2,9 @@
 //  PreviewService.swift
 //  MicroCode
 //
-//  The Brain: SwiftUI Preview & Simulator Control
-//  - ImageRenderer for View → Image conversion
-//  - xcrun simctl for real simulator control
+//  SwiftUI Canvas handoff & simulator control.
+//  Xcode owns the public SwiftUI preview renderer; MicroCode must not
+//  manufacture a guessed image from source code and call it a preview.
 //
 //  SPU AI CLUB - Dotmini Software
 //
@@ -109,63 +109,14 @@ class PreviewService: ObservableObject {
     
     // MARK: - Core Logic: Run Preview
     
-    /// Run Swift Playground and render preview using ImageRenderer
+    /// Kept for compatibility with the legacy preview window.  A source file
+    /// cannot be rendered faithfully by parsing Swift text: use the real Xcode
+    /// Canvas handoff in `RightPreviewPanel` instead.
     func runSwiftPlayground(filePath: String) async {
-        await MainActor.run {
-            self.isPreviewLoading = true
-            self.previewError = nil
-            self.previewImage = nil
-            self.appendLog("▶️ Building \(URL(fileURLWithPath: filePath).lastPathComponent)...")
-        }
-        
-        // Simulate compile delay
-        try? await Task.sleep(nanoseconds: 1_000_000_000)
-        
-        // Read source code
-        let code = (try? String(contentsOfFile: filePath, encoding: .utf8)) ?? ""
-        
-        // Create demo view based on code analysis
-        let isDark = configuration.colorScheme == .dark
-        let device = configuration.device
-        
-        let mockView = createDemoView(from: code, isDark: isDark)
-            .frame(width: device.width, height: device.height)
-            .background(isDark ? Color.black : Color.white)
-        
-        
-        await MainActor.run {
-            if let nsImage = renderToImage(view: mockView, scale: 2.0) {
-                self.previewImage = nsImage
-                self.appendLog("✅ Build Success: View Rendered")
-            } else {
-                self.previewError = "Failed to render view"
-                self.appendLog("❌ Error: Render failed")
-            }
-            self.isPreviewLoading = false
-        }
-    }
-    
-    // MARK: - Compatibility Render
-    @MainActor
-    private func renderToImage<V: View>(view: V, scale: CGFloat) -> NSImage? {
-        if #available(macOS 13.0, *), let image = ImageRenderer(content: view).nsImage {
-            let renderer = ImageRenderer(content: view)
-            renderer.scale = scale
-            return renderer.nsImage
-        } else {
-            // macOS 12 Fallback using NSHostingView
-            let hostingView = NSHostingView(rootView: view)
-            let size = hostingView.fittingSize
-            hostingView.frame = CGRect(origin: .zero, size: size)
-            hostingView.layout()
-            
-            guard let rep = hostingView.bitmapImageRepForCachingDisplay(in: hostingView.bounds) else { return nil }
-            hostingView.cacheDisplay(in: hostingView.bounds, to: rep)
-            
-            let image = NSImage(size: size)
-            image.addRepresentation(rep)
-            return image
-        }
+        previewImage = nil
+        previewError = "SwiftUI Canvas is rendered by Xcode. Use Save & Open Xcode Canvas."
+        appendLog("↗️ Open \(URL(fileURLWithPath: filePath).lastPathComponent) in Xcode Canvas for the real preview.")
+        isPreviewLoading = false
     }
 
     
@@ -173,115 +124,13 @@ class PreviewService: ObservableObject {
     
     @Published var universalPreviewImages: [UUID: NSImage] = [:]
     
-    /// Run preview for multiple devices
+    /// The old multi-device surface also produced guessed mockups.  Real
+    /// multi-device testing belongs to Device Runtime / Xcode previews.
     func runUniversalPreview(filePath: String, devices: [DeviceFrame], isDark: Bool) async {
-        await MainActor.run {
-            self.isPreviewLoading = true
-            self.previewError = nil
-            self.universalPreviewImages = [:]
-            self.appendLog("▶️ Generating Universal Previews for \(devices.count) devices...")
-        }
-        
-        // Simulate compile delay
-        try? await Task.sleep(nanoseconds: 1_000_000_000)
-        
-        // Read source code
-        let code = (try? String(contentsOfFile: filePath, encoding: .utf8)) ?? ""
-        
-        // Generate for each device
-        var newImages: [UUID: NSImage] = [:]
-        
-        for device in devices {
-            // Create view
-            let mockView = createDemoView(from: code, isDark: isDark)
-                .frame(width: device.width, height: device.height)
-                .background(isDark ? Color.black : Color.white)
-            
-            // Render
-            if let image = self.renderToImage(view: mockView, scale: 2.0) {
-                newImages[device.id] = image
-            }
-        }
-        
-        await MainActor.run {
-            self.universalPreviewImages = newImages
-            self.isPreviewLoading = false
-            self.appendLog("✅ Universal Generation Complete")
-        }
-    }
-    
-    /// Create demo SwiftUI view based on code analysis
-    @ViewBuilder
-    private func createDemoView(from code: String, isDark: Bool) -> some View {
-        let textColor: Color = isDark ? .white : .black
-        
-        VStack(spacing: 20) {
-            Spacer()
-            
-            // App icon
-            Image(systemName: "swift")
-                .font(.system(size: 60))
-                .foregroundColor(.orange)
-            
-            // Title
-            Group {
-                if code.contains("Text(") {
-                    Text("Hello, SwiftUI!")
-                        .font(.largeTitle)
-                        .fontWeight(.bold)
-                        .foregroundColor(textColor)
-                } else {
-                    Text("Swift Preview")
-                        .font(.largeTitle)
-                        .fontWeight(.bold)
-                        .foregroundColor(textColor)
-                }
-            }
-            
-            Text("Running on MicroCode")
-                .font(.subheadline)
-                .foregroundColor(.secondary)
-            
-            // Sample UI elements based on code
-            if code.contains("Button") {
-                Button("Tap Me") {}
-                    .buttonStyle(.borderedProminent)
-                    .controlSize(.large)
-            }
-            
-            if code.contains("TextField") {
-                TextField("Enter text...", text: .constant(""))
-                    .textFieldStyle(.roundedBorder)
-                    .padding(.horizontal, 40)
-            }
-            
-            if code.contains("List") || code.contains("ForEach") {
-                VStack(spacing: 8) {
-                    ForEach(1...3, id: \.self) { i in
-                        HStack {
-                            Circle()
-                                .fill(Color.blue.opacity(0.3))
-                                .frame(width: 40, height: 40)
-                            VStack(alignment: .leading) {
-                                Text("Item \(i)")
-                                    .fontWeight(.medium)
-                                    .foregroundColor(textColor)
-                                Text("Subtitle")
-                                    .font(.caption)
-                                    .foregroundColor(.secondary)
-                            }
-                            Spacer()
-                        }
-                        .padding()
-                        .background(Color.gray.opacity(0.1))
-                        .cornerRadius(10)
-                    }
-                }
-                .padding(.horizontal, 20)
-            }
-            
-            Spacer()
-        }
+        universalPreviewImages = [:]
+        previewError = "Use Xcode Canvas or Device Runtime for real multi-device previews."
+        appendLog("↗️ MicroCode did not generate a mock multi-device preview for \(URL(fileURLWithPath: filePath).lastPathComponent).")
+        isPreviewLoading = false
     }
     
     // MARK: - Simulator Control (xcrun simctl)

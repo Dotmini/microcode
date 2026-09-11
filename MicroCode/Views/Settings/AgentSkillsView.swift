@@ -69,16 +69,27 @@ final class AgentSkillsStore: ObservableObject {
         let home = NSHomeDirectory()
         
         let searchRoots = [
+            "\(home)/.agents/skills",
+            "\(home)/.codex/skills",
+            "\(home)/.codex/plugins/cache",
             "\(home)/.gemini/config/skills",
             "\(home)/.gemini/config/plugins",
             "\(home)/.gemini/antigravity/builtin/skills"
         ]
         
         var foundPaths: [String] = []
+        let ignoredDirectoryNames: Set<String> = [
+            ".git", ".build", "target", "node_modules", "DerivedData", "dist", "build"
+        ]
         
         for root in searchRoots {
             if let enumerator = fm.enumerator(atPath: root) {
                 while let element = enumerator.nextObject() as? String {
+                    let component = URL(fileURLWithPath: element).lastPathComponent
+                    if ignoredDirectoryNames.contains(component) {
+                        enumerator.skipDescendants()
+                        continue
+                    }
                     if element.hasSuffix("SKILL.md") || element.hasSuffix("skill.md") {
                         let fullPath = "\(root)/\(element)"
                         foundPaths.append(fullPath)
@@ -86,6 +97,7 @@ final class AgentSkillsStore: ObservableObject {
                 }
             }
         }
+        foundPaths = Array(Set(foundPaths)).sorted()
         
         let enabledSet = Set(UserDefaults.standard.stringArray(forKey: enabledKey) ?? [
             "antigravity-guide", "agy-customizations", "modern-web-guidance",
@@ -286,6 +298,7 @@ final class AgentSkillsStore: ObservableObject {
             snippet += "Path: \(s.filePath)\n"
             snippet += "\(s.description)\n\n"
         }
+        snippet += "Before applying a skill, use file_read on its SKILL.md path and follow the complete instructions. A description is discovery metadata, not the skill itself.\n"
         return snippet
     }
 }

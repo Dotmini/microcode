@@ -59,6 +59,8 @@ public final class SyntaxHighlightingEngine: @unchecked Sendable {
         register("c") { createSwiftLexer() } // Fallback
         register("cpp") { createSwiftLexer() }
         register("c++") { createSwiftLexer() }
+        register("arduino") { createSwiftLexer() }
+        register("ino") { createSwiftLexer() }
         register("h") { createSwiftLexer() }
         register("hpp") { createSwiftLexer() }
         register("objc") { createSwiftLexer() }
@@ -563,17 +565,6 @@ public final class SyntaxHighlightingEngine: @unchecked Sendable {
         
         let fgColor = themeManager.editorForegroundColor
         let defaultFont = font ?? NSFont.monospacedSystemFont(ofSize: fontSize, weight: .regular)
-        
-        let fullRange = NSRange(location: 0, length: textStorage.length)
-        if fullRange.length > 0 {
-            textStorage.beginEditing()
-            textStorage.addAttributes([
-                .foregroundColor: fgColor,
-                .font: defaultFont,
-                .ligature: 0
-            ], range: fullRange)
-            textStorage.endEditing()
-        }
         
         // CHUNK SIZE: Apply 2000 tokens at a time to keep frame rate high
         // 2000 tokens ~ 200 lines of code roughly.

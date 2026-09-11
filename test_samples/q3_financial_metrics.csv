@@ -1,0 +1,9 @@
+ID,Metric Name,Category,Q1 Actual,Q2 Actual,Q3 Target,Status,Notes
+1,Monthly Active Users (MAU),Product Growth,125000,182000,250000,On Track,Strong organic referral
+2,API Response Time (p95),Performance,42ms,38ms,30ms,Exceeded,Rust proxy optimization
+3,Monthly Recurring Revenue,Finance,$48200,$69500,$95000,On Track,Enterprise conversion up 18%
+4,Crash Free Sessions,Reliability,99.82%,99.91%,99.95%,Target Met,Auto-healer caught 14 traps
+5,Inference Latency,AI Gateway,120ms,88ms,75ms,Near Target,Local CoreML bridge active
+6,Customer Retention,Marketing,84.5%,87.2%,90.0%,Monitoring,New onboarding tour launched
+7,Test Coverage,Engineering,78.4%,82.1%,88.0%,In Progress,Adding UI integration suites
+8,Cloud Compute Cost,Infrastructure,$3400,$2950,$2600,Reduced,Serverless tier migration

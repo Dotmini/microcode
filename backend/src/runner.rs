@@ -64,6 +64,10 @@ pub async fn execute_stream(
         "d" | "dlang" => "d",
         "typescript" | "ts" => "ts",
         "r" => "R",
+        "rmarkdown" | "r_markdown" | "rmd" => "Rmd",
+        "julia" | "jl" => "jl",
+        "c" => "c",
+        "c++" | "cpp" => "cpp",
         "objective-c" | "objc" => "m",
         "objective-cpp" | "objcpp" => "mm",
         "ardium" | "ar" => "ar",
@@ -91,7 +95,9 @@ pub async fn execute_stream(
             .stderr(Stdio::piped())
             .kill_on_drop(true)
             .spawn()
-            .map_err(|e| AppError::ExecutionError(format!("Failed to spawn Ardium at {}: {}", ardium_bin, e)))?;
+            .map_err(|e| {
+                AppError::ExecutionError(format!("Failed to spawn Ardium at {}: {}", ardium_bin, e))
+            })?;
 
         let stdout = child
             .stdout
@@ -128,11 +134,15 @@ pub async fn execute_stream(
         "rust" => ("cargo", vec!["script".to_string(), temp_file.clone()]),
         "go" => ("go", vec!["run".to_string(), temp_file.clone()]),
         "d" | "dlang" => ("rdmd", vec![temp_file.clone()]),
-        "r" => {
-            // Special handling for R with proper library paths
+        "r" | "rmarkdown" | "r_markdown" | "rmd" => {
+            // Special handling for R and R Markdown with proper library paths
             return streaming_execute_r(&temp_file).await;
         }
-        "objective-c" | "objc" | "objective-cpp" | "objcpp" => {
+        "julia" | "jl" => {
+            let julia_bin = find_julia();
+            return streaming_execute_custom(&julia_bin, &["--startup-file=no".to_string(), temp_file.clone()]).await;
+        }
+        "c" | "c++" | "cpp" | "objective-c" | "objc" | "objective-cpp" | "objcpp" => {
             // Special handling for compilation-based streaming
             return streaming_execute_compilation_lang(lang_id.as_str(), &temp_file).await;
         }
@@ -202,6 +212,8 @@ pub async fn execute(
         "swift" => execute_swift(code).await?,
         "ardium" | "ar" => execute_ardium(code).await?,
         "r" => execute_r(code).await?,
+        "rmarkdown" | "r_markdown" | "rmd" => execute_rmarkdown(code).await?,
+        "julia" | "jl" => execute_julia(code).await?,
 
         "c" => execute_c(code).await?,
         "c++" | "cpp" => execute_cpp(code).await?,
@@ -834,7 +846,12 @@ async fn execute_ardium(code: &str) -> Result<ExecutionResult> {
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()
-        .map_err(|e| AppError::ExecutionError(format!("Failed to spawn Ardium at {}: {}", ardium_binary, e)))?;
+        .map_err(|e| {
+            AppError::ExecutionError(format!(
+                "Failed to spawn Ardium at {}: {}",
+                ardium_binary, e
+            ))
+        })?;
 
     let stdout = child.stdout.take().unwrap();
     let stderr = child.stderr.take().unwrap();
@@ -1041,6 +1058,137 @@ async fn streaming_execute_r(
         stream: merged_stream,
         _child: child,
     }))
+}
+
+/// Find Julia binary
+fn find_julia() -> String {
+    let home = std::env::var("HOME").unwrap_or_else(|_| "/Users".to_string());
+    let julia_paths = [
+        "/opt/homebrew/bin/julia".to_string(),
+        "/usr/local/bin/julia".to_string(),
+        format!("{}/.juliaup/bin/julia", home),
+        "/Applications/Julia-1.11.app/Contents/Resources/julia/bin/julia".to_string(),
+        "/Applications/Julia-1.10.app/Contents/Resources/julia/bin/julia".to_string(),
+        "/Applications/Julia-1.9.app/Contents/Resources/julia/bin/julia".to_string(),
+    ];
+
+    for path in &julia_paths {
+        if std::path::Path::new(path).exists() {
+            return path.to_string();
+        }
+    }
+
+    "julia".to_string()
+}
+
+async fn execute_julia(code: &str) -> Result<ExecutionResult> {
+    let temp_file = create_temp_file("jl", code).await?;
+    let julia_bin = find_julia();
+
+    let mut child = Command::new(&julia_bin)
+        .arg("--startup-file=no")
+        .arg(&temp_file)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .map_err(|e| {
+            AppError::ExecutionError(format!(
+                "Failed to spawn Julia: {}. Ensure Julia is installed.",
+                e
+            ))
+        })?;
+
+    let stdout = child.stdout.take().unwrap();
+    let stderr = child.stderr.take().unwrap();
+
+    let stdout_reader = BufReader::new(stdout);
+    let stderr_reader = BufReader::new(stderr);
+
+    let mut stdout_lines = stdout_reader.lines();
+    let mut stderr_lines = stderr_reader.lines();
+
+    let mut stdout_output = String::new();
+    let mut stderr_output = String::new();
+
+    while let Ok(Some(line)) = stdout_lines.next_line().await {
+        stdout_output.push_str(&line);
+        stdout_output.push('\n');
+    }
+
+    while let Ok(Some(line)) = stderr_lines.next_line().await {
+        stderr_output.push_str(&line);
+        stderr_output.push('\n');
+    }
+
+    let timeout_duration = std::time::Duration::from_secs(60);
+    let status_result = tokio::time::timeout(timeout_duration, child.wait()).await;
+
+    let status = match status_result {
+        Ok(Ok(s)) => s,
+        Ok(Err(e)) => {
+            return Err(AppError::ExecutionError(format!(
+                "Failed to wait for Julia: {}",
+                e
+            )))
+        }
+        Err(_) => {
+            let _ = child.kill().await;
+            return Err(AppError::ExecutionError(
+                "Julia execution timed out (60s limit)".to_string(),
+            ));
+        }
+    };
+
+    cleanup_temp_file(&temp_file).await;
+
+    Ok(ExecutionResult {
+        stdout: stdout_output,
+        stderr: stderr_output,
+        exit_code: status.code().unwrap_or(-1),
+    })
+}
+
+async fn streaming_execute_custom(
+    program: &str,
+    args: &[String],
+) -> Result<Pin<Box<dyn Stream<Item = std::result::Result<StreamEvent, AppError>> + Send>>> {
+    let mut child = Command::new(program)
+        .args(args)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .kill_on_drop(true)
+        .spawn()
+        .map_err(|e| AppError::ExecutionError(format!("Failed to spawn {}: {}", program, e)))?;
+
+    let stdout = child
+        .stdout
+        .take()
+        .ok_or_else(|| AppError::ExecutionError("Failed to capture stdout".into()))?;
+    let stderr = child
+        .stderr
+        .take()
+        .ok_or_else(|| AppError::ExecutionError("Failed to capture stderr".into()))?;
+
+    let stdout_stream = FramedRead::new(stdout, LinesCodec::new()).map(|line| {
+        line.map(StreamEvent::Output)
+            .map_err(|e| AppError::ExecutionError(e.to_string()))
+    });
+
+    let stderr_stream = FramedRead::new(stderr, LinesCodec::new()).map(|line| {
+        line.map(StreamEvent::Error)
+            .map_err(|e| AppError::ExecutionError(e.to_string()))
+    });
+
+    let merged_stream = futures::stream::select(stdout_stream, stderr_stream);
+
+    Ok(Box::pin(ProcessStream {
+        stream: merged_stream,
+        _child: child,
+    }))
+}
+
+async fn execute_rmarkdown(code: &str) -> Result<ExecutionResult> {
+    execute_r(code).await
 }
 
 async fn execute_cpp(code: &str) -> Result<ExecutionResult> {

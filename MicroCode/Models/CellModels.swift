@@ -20,6 +20,7 @@ enum ComputeTarget: String, CaseIterable, Identifiable, Codable {
     case localNvidia = "Nvidia GPU (CUDA/eGPU)"
     case cloudPremium = "Microrent Cloud (Serverless)"
     case customHPC = "Custom Cloud GPU (RunPod/Vast.ai/Akamai)"
+    case yourCloud = "Your Cloud (SSH)"
 
     var id: String { rawValue }
 
@@ -33,6 +34,7 @@ enum ComputeTarget: String, CaseIterable, Identifiable, Codable {
         case .localNvidia:   return "Local Nvidia GPU"
         case .cloudPremium:  return "MicroCode Cloud (Premium)"
         case .customHPC:     return "MicroCode Cloud"
+        case .yourCloud:     return "Your Cloud (SSH)"
         }
     }
 
@@ -40,7 +42,7 @@ enum ComputeTarget: String, CaseIterable, Identifiable, Codable {
     // cloudPremium is legacy (separate stub kernel) — all premium GPUs now
     // ship through the customHPC / Jupyter path managed by CloudGPUService.
     static var userSelectable: [ComputeTarget] {
-        [.localCPU, .localMLX, .localNvidia, .customHPC]
+        [.localCPU, .localMLX, .localNvidia, .customHPC, .yourCloud]
     }
 
     var icon: String {
@@ -50,6 +52,7 @@ enum ComputeTarget: String, CaseIterable, Identifiable, Codable {
         case .localNvidia: return "memorychip"
         case .cloudPremium: return "cloud.fill"
         case .customHPC: return "cloud.fill"
+        case .yourCloud: return "server.rack"
         }
     }
 
@@ -175,15 +178,63 @@ struct CustomCellColor: Codable, Equatable {
 // MARK: - Playground Cell Model
 
 final class PlaygroundCellModel: ObservableObject, Identifiable {
-    let id = UUID()
+    let id: UUID
     @Published var code: String
     @Published var output: String = ""
     @Published var colorTheme: CellColorTheme
     @Published var isExecuting: Bool = false
     @Published var executionTime: Double = 0.0
     
-    init(code: String, colorTheme: CellColorTheme = .none) {
+    init(id: UUID = UUID(), code: String, output: String = "", colorTheme: CellColorTheme = .none) {
+        self.id = id
         self.code = code
+        self.output = output
         self.colorTheme = colorTheme
+    }
+}
+
+// MARK: - .microplay Document Format Support
+
+public struct MicroplayCellData: Codable, Identifiable {
+    public var id: String
+    public var type: String // "code"
+    public var language: String
+    public var content: String
+    public var output: String?
+    public var colorTheme: String?
+    public var isCollapsed: Bool?
+    public var generatedCode: String?
+    
+    public init(id: String = UUID().uuidString, type: String = "code", language: String, content: String, output: String? = nil, colorTheme: String? = nil, isCollapsed: Bool? = false, generatedCode: String? = nil) {
+        self.id = id
+        self.type = type
+        self.language = language
+        self.content = content
+        self.output = output
+        self.colorTheme = colorTheme
+        self.isCollapsed = isCollapsed
+        self.generatedCode = generatedCode
+    }
+}
+
+public struct MicroplayDocument: Codable {
+    public var version: Int
+    public var id: String
+    public var name: String
+    public var createdAt: String
+    public var modifiedAt: String
+    public var mode: String // "playground"
+    public var cells: [MicroplayCellData]
+    
+    public init(id: String = UUID().uuidString, name: String = "Playground.microplay", mode: String = "playground", cells: [MicroplayCellData]) {
+        self.version = 1
+        self.id = id
+        self.name = name
+        let isoFormatter = ISO8601DateFormatter()
+        let now = isoFormatter.string(from: Date())
+        self.createdAt = now
+        self.modifiedAt = now
+        self.mode = mode
+        self.cells = cells
     }
 }

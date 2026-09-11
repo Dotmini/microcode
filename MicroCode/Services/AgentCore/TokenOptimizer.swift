@@ -14,24 +14,23 @@ import NaturalLanguage
 // MARK: - Token Budget Configuration
 
 struct TokenBudget {
-    var maxSystemTokens: Int = 4000
-    var maxHistoryTokens: Int = 8000
-    var maxContextTokens: Int = 6000
-    var maxUserTokens: Int = 4000
-    var totalBudget: Int = 24000
+    var maxSystemTokens: Int = 64_000
+    var maxHistoryTokens: Int = 1_000_000
+    var maxContextTokens: Int = 1_500_000
+    var maxUserTokens: Int = 250_000
+    var totalBudget: Int = 2_500_000
     
-    /// Dynamic budget allocation based on task complexity
+    /// Dynamic budget allocation based on task complexity (supporting modern 1M–2M+ context models)
     static func forTask(_ complexity: TaskComplexity) -> TokenBudget {
         switch complexity {
         case .simple:
-            return TokenBudget(maxSystemTokens: 2000, maxHistoryTokens: 3000, maxContextTokens: 2000, maxUserTokens: 2000, totalBudget: 10000)
+            return TokenBudget(maxSystemTokens: 32_000, maxHistoryTokens: 250_000, maxContextTokens: 250_000, maxUserTokens: 64_000, totalBudget: 500_000)
         case .moderate:
-            return TokenBudget(maxSystemTokens: 3000, maxHistoryTokens: 6000, maxContextTokens: 5000, maxUserTokens: 3000, totalBudget: 18000)
+            return TokenBudget(maxSystemTokens: 64_000, maxHistoryTokens: 500_000, maxContextTokens: 750_000, maxUserTokens: 128_000, totalBudget: 1_200_000)
         case .complex:
-            return TokenBudget(maxSystemTokens: 20000, maxHistoryTokens: 100000, maxContextTokens: 150000, maxUserTokens: 30000, totalBudget: 300000)
+            return TokenBudget(maxSystemTokens: 128_000, maxHistoryTokens: 1_200_000, maxContextTokens: 1_800_000, maxUserTokens: 500_000, totalBudget: 2_500_000)
         case .chat:
-            // Casual conversation needs much less context
-            return TokenBudget(maxSystemTokens: 800, maxHistoryTokens: 3000, maxContextTokens: 500, maxUserTokens: 2000, totalBudget: 6500)
+            return TokenBudget(maxSystemTokens: 16_000, maxHistoryTokens: 150_000, maxContextTokens: 64_000, maxUserTokens: 32_000, totalBudget: 300_000)
         }
     }
     
@@ -201,7 +200,7 @@ class TokenOptimizer: ObservableObject {
     // MARK: - Compress File Content
     
     /// Compress file content by extracting relevant sections
-    func compressFileContent(_ content: String, query: String? = nil, budget: Int = 3000) -> String {
+    func compressFileContent(_ content: String, query: String? = nil, budget: Int = 150_000) -> String {
         let tokens = estimateTokens(content)
         if tokens <= budget { return content }
         
@@ -308,7 +307,7 @@ class TokenOptimizer: ObservableObject {
     // MARK: - Compress Tool Output
     
     /// Compress tool execution output (grep results, directory listings, etc.)
-    func compressToolOutput(_ output: String, toolName: String, budget: Int = 2000) -> String {
+    func compressToolOutput(_ output: String, toolName: String, budget: Int = 100_000) -> String {
         let tokens = estimateTokens(output)
         if tokens <= budget { return output }
         
@@ -374,11 +373,13 @@ class TokenOptimizer: ObservableObject {
             "tell me about", "explain", "what is", "who is", "why",
             "ช่วยอธิบาย", "คืออะไร", "เล่าให้ฟัง", "คุยกัน", "ถาม",
             "opinion", "think about", "recommend", "suggest", "คิดยังไง",
-            "joke", "story", "fun", "interesting", "cool"
+            "joke", "story", "fun", "interesting", "cool",
+            "ไหน", "เป็นไง", "ทำไม", "ยังไง", "ไม่ได้", "ใช้ได้ไหม", "ตอบหน่อย", "คุยหน่อย"
         ]
         let isChat = chatIndicators.contains(where: { lower.contains($0) }) &&
             !lower.contains("code") && !lower.contains("file") && !lower.contains("project") &&
-            !lower.contains("build") && !lower.contains("fix") && !lower.contains("create")
+            !lower.contains("build") && !lower.contains("fix") && !lower.contains("create") &&
+            !lower.contains("แก้") && !lower.contains("สร้าง") && !lower.contains("รัน")
         
         if isChat { return .chat }
         
@@ -523,7 +524,7 @@ class TokenOptimizer: ObservableObject {
     /// while summarizing older tool outputs to avoid context blowup and AI slop.
     func compressIterativeToolHistory(
         _ history: [(role: String, content: String)],
-        budget: Int = 18000
+        budget: Int = 1_500_000
     ) -> [(role: String, content: String)] {
         guard history.count > 4 else { return history }
         

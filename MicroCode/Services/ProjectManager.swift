@@ -239,15 +239,30 @@ class ProjectManager: ObservableObject {
         
         switch projectType {
         case .xcode:
+            var actualProjectPath = projectPath
+            var schemeName = URL(fileURLWithPath: projectPath).deletingPathExtension().lastPathComponent
+            
+            // If projectPath is directory, check for .xcodeproj or .xcworkspace inside
+            if !projectPath.hasSuffix(".xcodeproj") && !projectPath.hasSuffix(".xcworkspace") {
+                if let sub = try? FileManager.default.contentsOfDirectory(atPath: projectPath),
+                   let xcodeFile = sub.first(where: { $0.hasSuffix(".xcodeproj") || $0.hasSuffix(".xcworkspace") }) {
+                    actualProjectPath = (projectPath as NSString).appendingPathComponent(xcodeFile)
+                    schemeName = URL(fileURLWithPath: xcodeFile).deletingPathExtension().lastPathComponent
+                }
+            }
+            
+            let isWorkspace = actualProjectPath.hasSuffix(".xcworkspace")
+            let projFlag = isWorkspace ? "-workspace" : "-project"
+            
             switch action {
             case .build:
-                return ("xcodebuild", ["-configuration", isDebug ? "Debug" : "Release", "-project", projectPath])
+                return ("xcodebuild", ["-configuration", isDebug ? "Debug" : "Release", projFlag, actualProjectPath, "-scheme", schemeName])
             case .run:
-                return ("xcodebuild", ["-configuration", isDebug ? "Debug" : "Release", "-project", projectPath, "build"])
+                return ("xcodebuild", ["-configuration", isDebug ? "Debug" : "Release", projFlag, actualProjectPath, "-scheme", schemeName, "build"])
             case .clean:
-                return ("xcodebuild", ["clean", "-project", projectPath])
+                return ("xcodebuild", ["clean", projFlag, actualProjectPath, "-scheme", schemeName])
             case .test:
-                return ("xcodebuild", ["test", "-project", projectPath])
+                return ("xcodebuild", ["test", projFlag, actualProjectPath, "-scheme", schemeName])
             default:
                 return nil
             }

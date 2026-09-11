@@ -21,6 +21,9 @@ struct GitPanelView: View {
     @State private var diffContent = ""
     @State private var showConfirmDiscard = false
     @State private var discardTarget = ""
+    @State private var showAccountSheet = false
+    @State private var commitToRevert: GitCommit?
+    @State private var showRevertConfirm = false
     
     var body: some View {
         VStack(spacing: 0) {
@@ -49,12 +52,22 @@ struct GitPanelView: View {
             }
         }
         .sheet(isPresented: $showGitSettings) { GitSettingsView().environmentObject(appState) }
+        .sheet(isPresented: $showAccountSheet) { gitAccountsSheet }
         .sheet(isPresented: $showCommitSheet) { commitSheet }
         .alert("Discard Changes?", isPresented: $showConfirmDiscard) {
             Button("Discard", role: .destructive) { appState.gitDiscardFile(discardTarget) }
             Button("Cancel", role: .cancel) {}
         } message: {
             Text("This will discard all changes to \(discardTarget)")
+        }
+        .alert("Create Revert Commit?", isPresented: $showRevertConfirm) {
+            Button("Cancel", role: .cancel) { commitToRevert = nil }
+            Button("Create Revert", role: .destructive) {
+                if let commit = commitToRevert { appState.gitRevertCommit(commit.hash) }
+                commitToRevert = nil
+            }
+        } message: {
+            Text("MicroCode will create a new commit that reverses \(commitToRevert?.hash.prefix(7) ?? "this commit"). Shared history is preserved.")
         }
     }
     
@@ -64,6 +77,9 @@ struct GitPanelView: View {
             Image(systemName: "arrow.triangle.branch").foregroundColor(.orange)
             Text("Source Control").font(.system(size: 11, weight: .semibold))
             Spacer()
+            Button { showAccountSheet = true } label: {
+                Image(systemName: "person.badge.key").font(.system(size: 10))
+            }.buttonStyle(.borderless).help("Connect GitHub, GitLab, or GitKraken")
             Button { appState.gitRefresh() } label: {
                 Image(systemName: "arrow.clockwise").font(.system(size: 10))
             }.buttonStyle(.borderless).help("Refresh")
@@ -366,6 +382,16 @@ struct GitPanelView: View {
                             Spacer()
                             Text(commit.timestamp).font(.system(size: 9)).foregroundColor(.secondary)
                         }
+                        HStack {
+                            Spacer()
+                            Button("Revert") {
+                                commitToRevert = commit
+                                showRevertConfirm = true
+                            }
+                            .buttonStyle(.bordered)
+                            .controlSize(.mini)
+                            .help("Create a new commit that safely reverses this commit")
+                        }
                     }
                     .padding(.horizontal, 12).padding(.vertical, 6)
                     Divider().padding(.leading, 12)
@@ -519,11 +545,16 @@ struct GitPanelView: View {
             }.buttonStyle(.bordered)
             
             Spacer()
+
+            if appState.gitIsWorking {
+                ProgressView().controlSize(.small)
+            }
             
             Menu {
                 Button("Fetch All") { appState.gitFetch() }
                 Divider()
                 Button("Stage All") { appState.gitStageAll() }
+                Button("Undo Last Commit (Keep Changes)") { appState.gitUndoLastCommit() }
                 Divider()
                 Button("Discard All", role: .destructive) { discardAll() }
             } label: {
@@ -554,6 +585,21 @@ struct GitPanelView: View {
                     Button(p) { commitMessage = p + " " }.buttonStyle(.bordered).controlSize(.small)
                 }
             }
+            HStack(spacing: 8) {
+                Button {
+                    Task {
+                        if let suggestion = await appState.gitGenerateCommitMessage() {
+                            commitMessage = suggestion
+                        }
+                    }
+                } label: {
+                    Label(appState.gitIsGeneratingCommitMessage ? "Generating…" : "Generate with AI", systemImage: "sparkles")
+                }
+                .buttonStyle(.bordered)
+                .disabled(appState.gitIsGeneratingCommitMessage)
+                Text("Sends the current diff only after you click, then you review the message.")
+                    .font(.caption2).foregroundColor(.secondary)
+            }
             HStack {
                 Toggle("Stage all", isOn: .constant(true)).controlSize(.small)
                 Spacer()
@@ -570,34 +616,48 @@ struct GitPanelView: View {
     
     // MARK: - Actions
     private func initRepo() {
-        guard let folder = appState.workspaceFolder else { return }
-        let p = Process()
-        p.executableURL = URL(fileURLWithPath: "/usr/bin/git")
-        p.arguments = ["init"]
-        p.currentDirectoryURL = folder
-        try? p.run(); p.waitUntilExit()
-        appState.gitRefresh()
+        Task { _ = await appState.gitInitializeRepository() }
     }
     
     private func doCommit() {
         guard !commitMessage.isEmpty else { return }
         Task {
-            appState.gitStageAll()
-            try? await Task.sleep(nanoseconds: 300_000_000)
-            await appState.commitChanges(message: commitMessage)
-            await MainActor.run { commitMessage = ""; showCommitSheet = false; appState.gitRefresh() }
+            if await appState.gitCommitAllChanges(message: commitMessage, pushAfterCommit: false) {
+                commitMessage = ""
+                showCommitSheet = false
+            }
         }
     }
     
     private func doCommitAndPush() {
         guard !commitMessage.isEmpty else { return }
         Task {
-            appState.gitStageAll()
-            try? await Task.sleep(nanoseconds: 300_000_000)
-            await appState.commitChanges(message: commitMessage)
-            appState.gitPush()
-            await MainActor.run { commitMessage = ""; showCommitSheet = false }
+            if await appState.gitCommitAllChanges(message: commitMessage, pushAfterCommit: true) {
+                commitMessage = ""
+                showCommitSheet = false
+            }
         }
+    }
+
+    private var gitAccountsSheet: some View {
+        VStack(alignment: .leading, spacing: 16) {
+            HStack {
+                VStack(alignment: .leading, spacing: 3) {
+                    Text("Git Accounts").font(.headline)
+                    Text("Sign in with the provider's own secure flow. Tokens stay in its credential store.")
+                        .font(.caption).foregroundColor(.secondary)
+                }
+                Spacer()
+                Button { showAccountSheet = false } label: { Image(systemName: "xmark.circle.fill") }
+                    .buttonStyle(.plain).foregroundColor(.secondary)
+            }
+            GitHostingAccountsView()
+            Divider()
+            Text("GitHub and GitLab OAuth authorize repository access, push/pull, and CI permissions requested during sign-in. GitKraken uses standard Git remotes, SSH, and Keychain credentials.")
+                .font(.caption).foregroundColor(.secondary)
+        }
+        .padding(20)
+        .frame(width: 520)
     }
     
     private func discardAll() {

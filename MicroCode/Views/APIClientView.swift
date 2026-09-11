@@ -5,7 +5,7 @@ struct APIClientView: View {
     @StateObject private var service = APIClientService.shared
     @State private var method: HTTPMethod = .post
     @State private var url: String = "https://api.dotmini.net/v1/chat/completions"
-    @State private var requestBody: String = "{\n  \"model\": \"gemini-3.6-flash\",\n  \"messages\": [\n    {\n      \"role\": \"user\",\n      \"content\": \"Hello\"\n    }\n  ],\n  \"max_tokens\": 4096,\n  \"stream\": false\n}"
+    @State private var requestBody: String = "{\n  \"model\": \"gemini-2.5-flash\",\n  \"messages\": [\n    {\n      \"role\": \"user\",\n      \"content\": \"Hello\"\n    }\n  ],\n  \"max_tokens\": 4096,\n  \"stream\": false\n}"
     @State private var headers: [KeyValueItem] = [
         KeyValueItem(key: "Content-Type", value: "application/json"),
         KeyValueItem(key: "Authorization", value: "Bearer ")
@@ -20,6 +20,9 @@ struct APIClientView: View {
     @State private var requestName = "New Request"
     @State private var showEnvSheet = false
     @State private var searchText = ""
+    @State private var showCodeExportSheet = false
+    @State private var selectedExportLanguage: CodeSnippetLanguage = .swift
+    @State private var toastMessage: String? = nil
 
     @Environment(\.presentationMode) var presentationMode
 
@@ -34,38 +37,137 @@ struct APIClientView: View {
     var body: some View {
         VStack(spacing: 0) {
             // Header Bar
-            HStack {
-                HStack(spacing: 8) {
-                    Image(systemName: "network")
-                        .foregroundColor(.accentColor)
-                        .font(.system(size: 13, weight: .semibold))
-                    Text("API & HTTP Client")
-                        .font(.system(size: 13, weight: .bold))
-                }
-                Spacer()
-                Button(action: { presentationMode.wrappedValue.dismiss() }) {
-                    Image(systemName: "xmark")
-                        .font(.system(size: 10, weight: .bold))
-                        .foregroundColor(.secondary)
-                        .padding(5)
-                        .background(Color.primary.opacity(0.06))
-                        .clipShape(Circle())
-                }
-                .buttonStyle(.plain)
-            }
-            .padding(.horizontal, 14)
-            .padding(.vertical, 8)
-            .background(panelBg)
+            headerBar
 
             Divider()
 
             HSplitView {
-                sidebar.frame(minWidth: 230, maxWidth: 290)
+                sidebar.frame(minWidth: 240, maxWidth: 320)
                 mainContent
             }
         }
         .background(editorBg)
-        .frame(minWidth: 960, minHeight: 640)
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .sheet(isPresented: $showCodeExportSheet) { codeExportSheet }
+        .sheet(isPresented: $showCurlSheet) { curlSheet }
+    }
+
+    // MARK: - Header Bar
+    private var headerBar: some View {
+        HStack(spacing: 12) {
+            // Studio Title & Native Badge
+            HStack(spacing: 8) {
+                Image(systemName: "network")
+                    .foregroundColor(.accentColor)
+                    .font(.system(size: 14, weight: .semibold))
+                Text("API Studio")
+                    .font(.system(size: 13, weight: .bold))
+                Text("100% Native")
+                    .font(.system(size: 9, weight: .semibold))
+                    .padding(.horizontal, 6)
+                    .padding(.vertical, 2)
+                    .background(Color.accentColor.opacity(0.12))
+                    .foregroundColor(.accentColor)
+                    .cornerRadius(4)
+            }
+
+            if let msg = service.routeScanMessage {
+                Text(msg)
+                    .font(.system(size: 11))
+                    .foregroundColor(.secondary)
+                    .lineLimit(1)
+            } else if let toast = toastMessage {
+                Text(toast)
+                    .font(.system(size: 11))
+                    .foregroundColor(.secondary)
+                    .lineLimit(1)
+            }
+
+            Spacer()
+
+            // Postman-Killer Action Bar
+            HStack(spacing: 8) {
+                // Feature 1: Scan Workspace Routes
+                Button(action: {
+                    Task {
+                        let path = appState.workspaceFolder?.path ?? AgentToolBox.shared.workspaceRoot
+                        _ = await service.scanWorkspaceRoutes(workspacePath: path)
+                        sidebarTab = 1
+                    }
+                }) {
+                    HStack(spacing: 5) {
+                        if service.isScanningRoutes {
+                            ProgressView().scaleEffect(0.5).frame(width: 12, height: 12)
+                        } else {
+                            Image(systemName: "sparkles").font(.system(size: 11))
+                        }
+                        Text("Scan Routes").font(.system(size: 11, weight: .medium))
+                    }
+                    .padding(.horizontal, 9)
+                    .padding(.vertical, 5)
+                    .background(Color.primary.opacity(0.06))
+                    .cornerRadius(6)
+                }
+                .buttonStyle(.plain)
+                .help("Scan FastAPI, Next.js, Express, Axum, Go routes in workspace")
+
+                // Feature 2: Load Project .env
+                Button(action: {
+                    let path = appState.workspaceFolder?.path ?? AgentToolBox.shared.workspaceRoot
+                    let count = service.loadProjectDotEnv(workspacePath: path)
+                    toastMessage = "Loaded \(count) variables from .env"
+                    sidebarTab = 2
+                }) {
+                    HStack(spacing: 5) {
+                        Image(systemName: "key.fill").font(.system(size: 10))
+                        Text("Load .env").font(.system(size: 11, weight: .medium))
+                    }
+                    .padding(.horizontal, 9)
+                    .padding(.vertical, 5)
+                    .background(Color.primary.opacity(0.06))
+                    .cornerRadius(6)
+                }
+                .buttonStyle(.plain)
+                .help("Load environment variables from project .env")
+
+                // Feature 3: Code Snippet / SDK
+                Button(action: {
+                    showCodeExportSheet = true
+                }) {
+                    HStack(spacing: 5) {
+                        Image(systemName: "curlybraces").font(.system(size: 11))
+                        Text("Code Snippet").font(.system(size: 11, weight: .medium))
+                    }
+                    .padding(.horizontal, 9)
+                    .padding(.vertical, 5)
+                    .background(Color.primary.opacity(0.06))
+                    .cornerRadius(6)
+                }
+                .buttonStyle(.plain)
+                .help("Generate modern Swift, TypeScript, Python, Rust or cURL code")
+
+                Divider().frame(height: 14)
+
+                // Return to Code Editor
+                Button(action: {
+                    appState.setEditorMode(.code)
+                }) {
+                    HStack(spacing: 4) {
+                        Image(systemName: "chevron.left").font(.system(size: 10, weight: .semibold))
+                        Text("Exit to Code").font(.system(size: 11, weight: .medium))
+                    }
+                    .padding(.horizontal, 9)
+                    .padding(.vertical, 5)
+                    .background(Color.primary.opacity(0.06))
+                    .cornerRadius(6)
+                }
+                .buttonStyle(.plain)
+                .help("Return to Code Editor")
+            }
+        }
+        .padding(.horizontal, 14)
+        .padding(.vertical, 8)
+        .background(panelBg)
     }
 
     // MARK: - Sidebar
@@ -227,7 +329,7 @@ struct APIClientView: View {
                             Spacer()
                             if service.activeEnvironment?.id == env.id {
                                 Image(systemName: "checkmark.circle.fill")
-                                    .foregroundColor(.green)
+                                    .foregroundColor(Color(red: 0.22, green: 0.60, blue: 0.44))
                                     .font(.system(size: 10))
                             }
                         }
@@ -291,13 +393,13 @@ struct APIClientView: View {
                     } else {
                         Image(systemName: "paperplane.fill").font(.system(size: 10))
                     }
-                    Text("Send").font(.system(size: 12, weight: .bold))
+                    Text("Send").font(.system(size: 12, weight: .semibold))
                 }
-                .padding(.horizontal, 14)
+                .padding(.horizontal, 16)
                 .padding(.vertical, 6)
                 .background(
                     RoundedRectangle(cornerRadius: 6, style: .continuous)
-                        .fill(Color(red: 0.12, green: 0.72, blue: 0.42))
+                        .fill(Color.accentColor)
                 )
                 .foregroundColor(.white)
             }
@@ -563,6 +665,7 @@ struct APIClientView: View {
                 respTabBtn("Body", tab: 0)
                 respTabBtn("Headers", tab: 1)
                 respTabBtn("Raw", tab: 2)
+                respTabBtn("AI Tests (\(service.activeTestAssertions.count))", tab: 3)
                 Spacer()
             }
             .padding(.horizontal, 8)
@@ -576,12 +679,25 @@ struct APIClientView: View {
                     switch selectedRespTab {
                     case 0: responseBodyView(r)
                     case 1: responseHeadersView(r)
-                    default: responseRawView(r)
+                    case 2: responseRawView(r)
+                    default: responseAITestsView(r)
                     }
                 } else if let err = service.error {
                     VStack(spacing: 8) {
-                        Image(systemName: "exclamationmark.triangle").font(.system(size: 24)).foregroundColor(.red)
-                        Text(err).font(.system(size: 11)).foregroundColor(.red).multilineTextAlignment(.center)
+                        Image(systemName: "exclamationmark.triangle").font(.system(size: 24)).foregroundColor(Color(red: 0.82, green: 0.32, blue: 0.32))
+                        Text(err).font(.system(size: 11)).foregroundColor(Color(red: 0.82, green: 0.32, blue: 0.32)).multilineTextAlignment(.center)
+                    }
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+                } else if selectedRespTab == 3 {
+                    VStack(spacing: 8) {
+                        Image(systemName: "sparkles")
+                            .font(.system(size: 28))
+                            .foregroundColor(.accentColor.opacity(0.4))
+                        Text("No tests executed yet")
+                            .font(.system(size: 12, weight: .semibold))
+                        Text("Send any request to auto-verify status, SLA latency, schema & headers")
+                            .font(.system(size: 11))
+                            .foregroundColor(.secondary)
                     }
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
                 } else {
@@ -606,8 +722,8 @@ struct APIClientView: View {
                 .font(.system(size: 11, weight: selectedRespTab == tab ? .semibold : .regular))
                 .padding(.horizontal, 10)
                 .padding(.vertical, 4)
-                .background(selectedRespTab == tab ? Color.green.opacity(0.18) : Color.clear)
-                .foregroundColor(selectedRespTab == tab ? .green : .secondary)
+                .background(selectedRespTab == tab ? Color.accentColor.opacity(0.14) : Color.clear)
+                .foregroundColor(selectedRespTab == tab ? .accentColor : .secondary)
                 .cornerRadius(5)
         }
         .buttonStyle(.plain)
@@ -622,6 +738,126 @@ struct APIClientView: View {
                 .frame(maxWidth: .infinity, alignment: .leading)
         }
         .background(editorBg)
+    }
+
+    // MARK: - AI Test Assertions View
+    private func responseAITestsView(_ r: APIResponse) -> some View {
+        VStack(alignment: .leading, spacing: 10) {
+            HStack {
+                let passCount = service.activeTestAssertions.filter { $0.passed }.count
+                let totalCount = service.activeTestAssertions.count
+                
+                HStack(spacing: 6) {
+                    Image(systemName: passCount == totalCount ? "checkmark.circle.fill" : "exclamationmark.triangle.fill")
+                        .foregroundColor(passCount == totalCount ? Color(red: 0.22, green: 0.60, blue: 0.44) : Color(red: 0.85, green: 0.55, blue: 0.20))
+                    Text("AI Contract & SLA Verification: \(passCount)/\(totalCount) Passed")
+                        .font(.system(size: 12, weight: .bold))
+                }
+                
+                Spacer()
+                
+                Button(action: {
+                    let req = buildRequest()
+                    _ = service.generateAITestSuite(for: req, response: r)
+                }) {
+                    Label("Re-run Tests", systemImage: "arrow.clockwise")
+                        .font(.system(size: 10, weight: .medium))
+                        .padding(.horizontal, 8)
+                        .padding(.vertical, 4)
+                        .background(Color.primary.opacity(0.06))
+                        .cornerRadius(5)
+                }
+                .buttonStyle(.plain)
+            }
+            .padding(.horizontal, 12)
+            .padding(.top, 10)
+
+            Divider()
+
+            ScrollView {
+                LazyVStack(spacing: 8) {
+                    ForEach(service.activeTestAssertions) { assertion in
+                        HStack(alignment: .top, spacing: 10) {
+                            Image(systemName: assertion.passed ? "checkmark.circle.fill" : "xmark.circle.fill")
+                                .foregroundColor(assertion.passed ? Color(red: 0.22, green: 0.60, blue: 0.44) : Color(red: 0.82, green: 0.32, blue: 0.32))
+                                .font(.system(size: 13))
+                                .padding(.top, 2)
+                            
+                            VStack(alignment: .leading, spacing: 3) {
+                                Text(assertion.name)
+                                    .font(.system(size: 11, weight: .semibold))
+                                    .foregroundColor(.primary)
+                                Text(assertion.details)
+                                    .font(.system(size: 10, design: .monospaced))
+                                    .foregroundColor(.secondary)
+                            }
+                            
+                            Spacer()
+                            
+                            Text(assertion.passed ? "PASS" : "FAIL")
+                                .font(.system(size: 9, weight: .bold, design: .monospaced))
+                                .padding(.horizontal, 6)
+                                .padding(.vertical, 2)
+                                .background(assertion.passed ? Color(red: 0.22, green: 0.60, blue: 0.44).opacity(0.15) : Color(red: 0.82, green: 0.32, blue: 0.32).opacity(0.15))
+                                .foregroundColor(assertion.passed ? Color(red: 0.22, green: 0.60, blue: 0.44) : Color(red: 0.82, green: 0.32, blue: 0.32))
+                                .cornerRadius(4)
+                        }
+                        .padding(10)
+                        .background(Color.primary.opacity(0.03))
+                        .cornerRadius(6)
+                        .padding(.horizontal, 12)
+                    }
+                }
+                .padding(.vertical, 6)
+            }
+        }
+        .background(editorBg)
+    }
+
+    // MARK: - Code Snippet Sheet
+    private var codeExportSheet: some View {
+        VStack(spacing: 12) {
+            HStack {
+                HStack(spacing: 6) {
+                    Image(systemName: "curlybraces")
+                        .foregroundColor(.accentColor)
+                    Text("Generate Code & SDK").font(.headline)
+                }
+                Spacer()
+                Picker("", selection: $selectedExportLanguage) {
+                    ForEach(CodeSnippetLanguage.allCases) { lang in
+                        Text(lang.rawValue).tag(lang)
+                    }
+                }
+                .frame(width: 190)
+            }
+            
+            let code = service.generateCodeSnippet(for: buildRequest(), language: selectedExportLanguage)
+            
+            ScrollView {
+                Text(code)
+                    .font(.system(size: 11, design: .monospaced))
+                    .textSelection(.enabled)
+                    .padding(12)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+            }
+            .background(Color.primary.opacity(0.04))
+            .cornerRadius(6)
+            .frame(height: 280)
+            
+            HStack {
+                Button("Close") { showCodeExportSheet = false }
+                Spacer()
+                Button("Copy Code") {
+                    NSPasteboard.general.clearContents()
+                    NSPasteboard.general.setString(code, forType: .string)
+                    showCodeExportSheet = false
+                }
+                .buttonStyle(.borderedProminent)
+            }
+        }
+        .padding(20)
+        .frame(width: 580)
     }
 
     private func responseHeadersView(_ r: APIResponse) -> some View {
@@ -727,7 +963,7 @@ struct APIClientView: View {
 
     // MARK: - Helpers
     private func statusBadge(_ code: Int, size: CGFloat) -> some View {
-        Circle().fill(code >= 200 && code < 300 ? Color.green : code >= 400 ? Color.red : Color.orange)
+        Circle().fill(code >= 200 && code < 300 ? Color(red: 0.22, green: 0.60, blue: 0.44) : code >= 400 ? Color(red: 0.82, green: 0.32, blue: 0.32) : Color(red: 0.85, green: 0.55, blue: 0.20))
             .frame(width: size, height: size)
     }
 

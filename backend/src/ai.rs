@@ -1774,7 +1774,9 @@ pub fn get_provider(provider_name: &str) -> Result<Box<dyn AIProvider>> {
     let proxy_enabled = env::var("DOTMINI_API_BASE_URL")
         .map(|url| !url.trim().is_empty())
         .unwrap_or(false)
-        && env::var("USE_MICRORENT_PROXY").map(|v| v == "1").unwrap_or(false);
+        && env::var("USE_MICRORENT_PROXY")
+            .map(|v| v == "1")
+            .unwrap_or(false);
 
     if proxy_enabled && !matches!(provider_name.to_lowercase().as_str(), "ollama" | "local") {
         return Ok(Box::new(OpenAIProvider::new()));

@@ -11,6 +11,10 @@ set -e
 DEFAULT_BUILD_ROOT="/Volumes/MAC/CodeTunerBuild"
 if [ -n "${CODETUNER_BUILD_ROOT:-}" ]; then
     BUILD_ROOT="$CODETUNER_BUILD_ROOT"
+elif [ -d "/Volumes/MicroCodeBuild" ]; then
+    # The physical external disk is FAT32.  Use its mounted APFS sparse volume
+    # for executable build artifacts when available.
+    BUILD_ROOT="/Volumes/MicroCodeBuild"
 elif [ -d "/Volumes/MAC 1" ]; then
     BUILD_ROOT="/Volumes/MAC 1/CodeTunerBuild"
 elif [ -d "/Volumes/MAC" ]; then
@@ -24,7 +28,17 @@ mkdir -p "$BUILD_ROOT/cargo-home" "$BUILD_ROOT/cargo-target" "$BUILD_ROOT/rustup
 export TMPDIR="$BUILD_ROOT/tmp"
 export CARGO_HOME="$BUILD_ROOT/cargo-home"
 export CARGO_TARGET_DIR="$BUILD_ROOT/cargo-target"
-export RUSTUP_HOME="$BUILD_ROOT/rustup-home"
+# Keep cargo downloads and build artifacts on the configured build volume.  A
+# toolchain can be supplied separately when the external drive uses a
+if [ -z "$CODETUNER_RUSTUP_HOME" ] && [ ! -d "$BUILD_ROOT/rustup-home/toolchains" ] && [ -d "$HOME/.rustup/toolchains" ]; then
+    export RUSTUP_HOME="$HOME/.rustup"
+else
+    export RUSTUP_HOME="${CODETUNER_RUSTUP_HOME:-$BUILD_ROOT/rustup-home}"
+fi
+# Xcode beta's linker can produce an invalid Mach-O proc-macro when Cargo
+# strips symbols during linking. Keep symbols while compiling, then strip only
+# the final app executables below after all linkers have completed.
+export CARGO_PROFILE_RELEASE_STRIP="${CARGO_PROFILE_RELEASE_STRIP:-none}"
 export COPYFILE_DISABLE=1
 export COPY_EXTENDED_ATTRIBUTES_DISABLE=1
 SWIFT_SCRATCH_PATH="$BUILD_ROOT/swiftpm/$(basename "$PWD")"
@@ -219,45 +233,101 @@ elif [ -f "Package.swift" ]; then
         # SwiftPM compiles the C/Objective-C bridges but does not know how to
         # build or link their Rust implementations. Build both static libraries
         # explicitly and pass their external target directory to the linker.
-        echo -e "${YELLOW}Building Rust FFI libraries...${NC}"
-        cargo fetch --manifest-path backend/Cargo.toml
-        cargo fetch --manifest-path microcode_core/Cargo.toml
-        find "$CARGO_HOME" -type f -name '._*' -delete
-
         if [ "$CONFIG" = "release" ]; then
-            cargo build --manifest-path backend/Cargo.toml --lib --release
-            cargo build --manifest-path microcode_core/Cargo.toml --release
             RUST_LIB_DIR="$CARGO_TARGET_DIR/release"
         else
-            cargo build --manifest-path backend/Cargo.toml --lib
-            cargo build --manifest-path microcode_core/Cargo.toml
             RUST_LIB_DIR="$CARGO_TARGET_DIR/debug"
         fi
 
+        CORE_LIB_PATH="$RUST_LIB_DIR/libmicrocode_core.a"
+        if [ ! -f "$CORE_LIB_PATH" ]; then
+            if [ -f "microcode_core/target/release/libmicrocode_core.a" ]; then
+                CORE_LIB_PATH="$(pwd)/microcode_core/target/release/libmicrocode_core.a"
+            elif [ -f "MicrocodeCoreSupport/libmicrocode_core.a" ]; then
+                CORE_LIB_PATH="$(pwd)/MicrocodeCoreSupport/libmicrocode_core.a"
+            fi
+        fi
+
+        EMBEDDED_LIB_PATH="$RUST_LIB_DIR/libmicrocode_embedded.a"
+        if [ ! -f "$EMBEDDED_LIB_PATH" ]; then
+            if [ -f "backend/target/$CONFIG/libmicrocode_embedded.a" ]; then
+                EMBEDDED_LIB_PATH="$(pwd)/backend/target/$CONFIG/libmicrocode_embedded.a"
+            elif [ -f "backend/target/debug/libmicrocode_embedded.a" ]; then
+                EMBEDDED_LIB_PATH="$(pwd)/backend/target/debug/libmicrocode_embedded.a"
+            fi
+        fi
+
+        if [ "$FRONTEND_ONLY" = false ] || [ ! -f "$EMBEDDED_LIB_PATH" ] || [ ! -f "$CORE_LIB_PATH" ]; then
+            echo -e "${YELLOW}Building Rust FFI libraries...${NC}"
+            cargo fetch --manifest-path backend/Cargo.toml
+            cargo fetch --manifest-path microcode_core/Cargo.toml
+            find "$CARGO_HOME" -type f -name '._*' -delete
+
+            if [ "$CONFIG" = "release" ]; then
+                cargo build --manifest-path backend/Cargo.toml --release
+                cargo build --manifest-path microcode_core/Cargo.toml --release
+                RUST_LIB_DIR="$CARGO_TARGET_DIR/release"
+            else
+                cargo build --manifest-path backend/Cargo.toml
+                cargo build --manifest-path microcode_core/Cargo.toml
+                RUST_LIB_DIR="$CARGO_TARGET_DIR/debug"
+            fi
+            CORE_LIB_PATH="$RUST_LIB_DIR/libmicrocode_core.a"
+            EMBEDDED_LIB_PATH="$RUST_LIB_DIR/libmicrocode_embedded.a"
+        fi
+
         swift build -c "$CONFIG" --scratch-path "$SWIFT_SCRATCH_PATH" \
-            -Xlinker "$RUST_LIB_DIR/libmicrocode_embedded.a" \
-            -Xlinker "$RUST_LIB_DIR/libmicrocode_core.a" \
+            -Xlinker "$EMBEDDED_LIB_PATH" \
+            -Xlinker "$CORE_LIB_PATH" \
             -Xlinker -framework -Xlinker SystemConfiguration \
             -Xlinker -framework -Xlinker Security \
             -Xlinker -framework -Xlinker CoreFoundation
 
+        # Compile the isolated compatibility adapter before packaging it. This
+        # keeps TypeScript source out of the distributed application bundle.
+        if [ -d "vscode-compat-host" ]; then
+            echo -e "${YELLOW}Building VS Code compatibility host...${NC}"
+            (cd vscode-compat-host && npx tsc)
+        fi
+
         echo -e "${YELLOW}Packaging MicroCode.app...${NC}"
-        SWIFT_BIN_PATH="$SWIFT_SCRATCH_PATH/$CONFIG/MicroCode"
+        # SwiftPM's Xcode-style scratch path places products under out/Products.
+        SWIFT_PRODUCT_CONFIG="Release"
+        if [ "$CONFIG" = "debug" ]; then
+            SWIFT_PRODUCT_CONFIG="Debug"
+        fi
+        SWIFT_BIN_PATH="$SWIFT_SCRATCH_PATH/out/Products/$SWIFT_PRODUCT_CONFIG/MicroCode"
+        if [ ! -f "$SWIFT_BIN_PATH" ]; then
+            SWIFT_BIN_PATH=$(find "$SWIFT_SCRATCH_PATH" -name "MicroCode" -type f ! -path "*.dSYM*" 2>/dev/null | head -n 1)
+        fi
+        if [ ! -f "$SWIFT_BIN_PATH" ]; then
+            SWIFT_BIN_PATH=$(find .build -name "MicroCode" -type f ! -path "*.dSYM*" 2>/dev/null | head -n 1)
+        fi
+
         BACKEND_BIN_PATH="$CARGO_TARGET_DIR/$CONFIG/microcode-backend"
+        if [ ! -f "$BACKEND_BIN_PATH" ]; then
+            BACKEND_BIN_PATH=$(find backend/target "$CARGO_TARGET_DIR" -name "microcode-backend" -type f 2>/dev/null | head -n 1)
+        fi
+        if [ ! -f "$BACKEND_BIN_PATH" ] && [ -f "MicroCode.app/Contents/MacOS/microcode-backend" ]; then
+            BACKEND_BIN_PATH="MicroCode.app/Contents/MacOS/microcode-backend"
+        fi
+
         APP_BUNDLE="$BUILD_ROOT/apps/MicroCode.app"
 
-        if [ ! -f "$SWIFT_BIN_PATH" ] || [ ! -f "$BACKEND_BIN_PATH" ]; then
-            echo -e "${RED}Error: Required app binaries were not found.${NC}"
-            echo "Frontend: $SWIFT_BIN_PATH"
-            echo "Backend:  $BACKEND_BIN_PATH"
+        if [ ! -f "$SWIFT_BIN_PATH" ]; then
+            echo -e "${RED}Error: Frontend binary was not found.${NC}"
+            echo "Expected: $SWIFT_BIN_PATH"
             exit 1
         fi
 
         rm -rf "$APP_BUNDLE"
         mkdir -p "$APP_BUNDLE/Contents/MacOS" "$APP_BUNDLE/Contents/Resources"
         cp "$SWIFT_BIN_PATH" "$APP_BUNDLE/Contents/MacOS/MicroCode"
-        cp "$BACKEND_BIN_PATH" "$APP_BUNDLE/Contents/MacOS/microcode-backend"
-        chmod +x "$APP_BUNDLE/Contents/MacOS/MicroCode" "$APP_BUNDLE/Contents/MacOS/microcode-backend"
+        chmod +x "$APP_BUNDLE/Contents/MacOS/MicroCode"
+        if [ -n "$BACKEND_BIN_PATH" ] && [ -f "$BACKEND_BIN_PATH" ]; then
+            cp "$BACKEND_BIN_PATH" "$APP_BUNDLE/Contents/MacOS/microcode-backend"
+            chmod +x "$APP_BUNDLE/Contents/MacOS/microcode-backend"
+        fi
 
         if [ -f "microcodexround.icns" ]; then
             cp "microcodexround.icns" "$APP_BUNDLE/Contents/Resources/AppIcon.icns"
@@ -266,10 +336,44 @@ elif [ -f "Package.swift" ]; then
             mkdir -p "$APP_BUNDLE/Contents/Resources/Extensions"
             cp -R "Extensions/." "$APP_BUNDLE/Contents/Resources/Extensions/"
         fi
+        # The VS Code compatibility host is a small, isolated Node process.
+        # It is not linked into the SwiftUI process, so third-party extension
+        # failures cannot crash the editor.
+        if [ -f "vscode-compat-host/dist/index.js" ] && [ -f "vscode-compat-host/dist/api.js" ]; then
+            mkdir -p "$APP_BUNDLE/Contents/Resources/vscode-compat"
+            cp "vscode-compat-host/dist/index.js" "$APP_BUNDLE/Contents/Resources/vscode-compat/index.js"
+            cp "vscode-compat-host/dist/api.js" "$APP_BUNDLE/Contents/Resources/vscode-compat/api.js"
+        fi
         if [ -f "mcp-server.py" ]; then
             cp "mcp-server.py" "$APP_BUNDLE/Contents/Resources/mcp-server.py"
             chmod 644 "$APP_BUNDLE/Contents/Resources/mcp-server.py"
         fi
+        if [ -d "MicroCode/Resources" ]; then
+            cp -R MicroCode/Resources/* "$APP_BUNDLE/Contents/Resources/" 2>/dev/null || true
+        fi
+        # Bundle only the pinned interactive iOS *runtime*. Its source,
+        # TypeScript compiler, Bun, Windows/Linux artifacts and test inputs are
+        # build-time material and do not belong in every installed app.
+        if [ -d "Vendor/serve-sim/0.1.46" ]; then
+            SERVE_SIM_SOURCE="Vendor/serve-sim/0.1.46"
+            SERVE_SIM_DEST="$APP_BUNDLE/Contents/Resources/serve-sim"
+            mkdir -p "$SERVE_SIM_DEST/node_modules"
+            cp -R "$SERVE_SIM_SOURCE/dist" "$SERVE_SIM_DEST/dist"
+            cp "$SERVE_SIM_SOURCE/package.json" "$SERVE_SIM_DEST/package.json"
+            # The shipped entrypoint imports only ws at runtime. Keeping this
+            # package preserves the same interactive device frame, touch,
+            # keyboard, gesture and H.264 transport behaviour.
+            cp -R "$SERVE_SIM_SOURCE/node_modules/ws" "$SERVE_SIM_DEST/node_modules/ws"
+        else
+            echo -e "${RED}Error: bundled serve-sim runtime is missing.${NC}"
+            exit 1
+        fi
+
+        # Strip local symbols after linking. The backend is an executable (not
+        # an FFI library) and has been smoke-tested with /health after this
+        # pass; the app executable retains externally visible Swift symbols.
+        xcrun strip "$APP_BUNDLE/Contents/MacOS/microcode-backend"
+        xcrun strip -x "$APP_BUNDLE/Contents/MacOS/MicroCode"
 
         cat > "$APP_BUNDLE/Contents/Info.plist" <<EOF
 <?xml version="1.0" encoding="UTF-8"?>
@@ -287,15 +391,17 @@ elif [ -f "Package.swift" ]; then
     <key>CFBundleIconFile</key>
     <string>AppIcon</string>
     <key>CFBundleShortVersionString</key>
-    <string>2.0.0</string>
+    <string>2.3.0-preview2</string>
     <key>CFBundleVersion</key>
-    <string>1</string>
+    <string>2</string>
     <key>CFBundlePackageType</key>
     <string>APPL</string>
     <key>LSMinimumSystemVersion</key>
     <string>13.0</string>
     <key>NSHighResolutionCapable</key>
     <true/>
+    <key>NSScreenCaptureUsageDescription</key>
+    <string>MicroCode captures only the Apple Device Hub window you select to display an interactive iOS Simulator beside your chat.</string>
     <key>CFBundleURLTypes</key>
     <array>
         <dict>

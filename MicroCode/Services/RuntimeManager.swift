@@ -14,10 +14,21 @@ import Foundation
 enum RuntimeType: String, CaseIterable, Identifiable {
     case python = "Python"
     case nodejs = "Node.js"
+    case bun = "Bun"
+    case deno = "Deno"
+    case r = "R"
+    case julia = "Julia"
+    case java = "Java"
+    case kotlin = "Kotlin"
+    case c = "C"
+    case cpp = "C++"
     case go = "Go"
     case rust = "Rust"
     case swift = "Swift"
     case dotnet = ".NET"
+    case ruby = "Ruby"
+    case php = "PHP"
+    case lua = "Lua"
     
     var id: String { rawValue }
     
@@ -25,21 +36,34 @@ enum RuntimeType: String, CaseIterable, Identifiable {
         switch self {
         case .python: return "🐍"
         case .nodejs: return "⬢"
+        case .bun: return "🥟"
+        case .deno: return "🦕"
+        case .r: return "Ⓡ"
+        case .julia: return "●"
+        case .java: return "☕️"
+        case .kotlin: return "◆"
+        case .c: return "C"
+        case .cpp: return "C++"
         case .go: return "🐹"
         case .rust: return "🦀"
         case .swift: return "🐦"
         case .dotnet: return "🔷"
+        case .ruby: return "💎"
+        case .php: return "🐘"
+        case .lua: return "🌙"
         }
     }
     
     var color: Color {
         switch self {
-        case .python: return .yellow
-        case .nodejs: return .green
+        case .python, .r, .julia: return .yellow
+        case .nodejs, .bun, .deno: return .green
+        case .java, .kotlin: return .red
+        case .c, .cpp: return .blue
         case .go: return .cyan
         case .rust: return .orange
         case .swift: return .orange
-        case .dotnet: return .purple
+        case .dotnet, .ruby, .php, .lua: return .purple
         }
     }
     
@@ -47,10 +71,21 @@ enum RuntimeType: String, CaseIterable, Identifiable {
         switch self {
         case .python: return "python3"
         case .nodejs: return "node"
+        case .bun: return "bun"
+        case .deno: return "deno"
+        case .r: return "R"
+        case .julia: return "julia"
+        case .java: return "java"
+        case .kotlin: return "kotlinc"
+        case .c: return "clang"
+        case .cpp: return "clang++"
         case .go: return "go"
         case .rust: return "rustc"
         case .swift: return "swift"
         case .dotnet: return "dotnet"
+        case .ruby: return "ruby"
+        case .php: return "php"
+        case .lua: return "lua"
         }
     }
 
@@ -59,12 +94,9 @@ enum RuntimeType: String, CaseIterable, Identifiable {
     /// (matches bundle_runtimes.sh RUNTIMES_ROOT layout).
     var bundleDirName: String {
         switch self {
-        case .python: return "python"
         case .nodejs: return "nodejs"
-        case .go: return "go"
-        case .rust: return "rust"
-        case .swift: return "swift"
         case .dotnet: return "dotnet"
+        default: return rawValue.lowercased().replacingOccurrences(of: "+", with: "p")
         }
     }
     
@@ -89,7 +121,7 @@ enum RuntimeType: String, CaseIterable, Identifiable {
             }
         case .rust:
             return ("https://static.rust-lang.org/rustup/dist/aarch64-apple-darwin/rustup-init", "~8 MB", "rustup-init")
-        case .swift:
+        case .bun, .swift, .deno, .r, .julia, .java, .kotlin, .c, .cpp, .ruby, .php, .lua:
             return nil // Built into macOS
         case .dotnet:
             return ("https://dot.net/v1/dotnet-install.sh", "~1 MB", "dotnet-install.sh")
@@ -164,9 +196,58 @@ class RuntimeManager: ObservableObject {
             }
         }
     }
+
+    /// All discovered installs, including version managers. This makes Node,
+    /// Bun, .NET, Julia, R, etc. switchable from the Editor at runtime rather
+    /// than relying on whichever executable happened to be first in PATH.
+    func availablePaths(for type: RuntimeType) -> [String] {
+        let fm = FileManager.default
+        let home = fm.homeDirectoryForCurrentUser.path
+        var candidates = Set<String>()
+        if let current = runtimes.first(where: { $0.type == type })?.path { candidates.insert(current) }
+        if let saved = UserDefaults.standard.string(forKey: "runtimeOverride.\(type.rawValue)"),
+           fm.isExecutableFile(atPath: saved) { candidates.insert(saved) }
+        if type == .nodejs {
+            for root in ["\(home)/.nvm/versions/node", "\(home)/.asdf/installs/nodejs"] {
+                for version in (try? fm.contentsOfDirectory(atPath: root)) ?? [] {
+                    let path = "\(root)/\(version)/bin/node"
+                    if fm.isExecutableFile(atPath: path) { candidates.insert(path) }
+                }
+            }
+        }
+        if type == .dotnet {
+            for root in ["/usr/local/share/dotnet", "\(home)/.dotnet"] {
+                let path = "\(root)/dotnet"
+                if fm.isExecutableFile(atPath: path) { candidates.insert(path) }
+            }
+        }
+        return candidates.sorted()
+    }
+
+    func activateRuntime(_ path: String, for type: RuntimeType) {
+        UserDefaults.standard.set(path, forKey: "runtimeOverride.\(type.rawValue)")
+        detectAll()
+    }
+
+    /// The executable chosen in Manage Environments. Callers that execute
+    /// code must use this rather than `/usr/bin/env` so a GUI-launched app
+    /// honours the user's Homebrew/asdf/custom R and Julia installations.
+    func selectedExecutable(for type: RuntimeType) -> String? {
+        let fm = FileManager.default
+        if let override = UserDefaults.standard.string(forKey: "runtimeOverride.\(type.rawValue)"),
+           fm.isExecutableFile(atPath: override) {
+            return override
+        }
+        return runtimes.first(where: { $0.type == type && $0.isInstalled })?.path
+    }
     
     private func detectRuntime(_ type: RuntimeType) -> (isInstalled: Bool, version: String?, path: String?) {
         let fm = FileManager.default
+
+        if let override = UserDefaults.standard.string(forKey: "runtimeOverride.\(type.rawValue)"),
+           DeveloperToolsGuard.isSafeToExecute(override) {
+            return (true, getVersion(for: type, at: override) ?? "selected", override)
+        }
 
         // 1. FULL BUNDLE: runtime embedded inside the .app
         //    (App.app/Contents/Resources/RuntimeLib/<dir>/bin/<bin>).
@@ -176,7 +257,7 @@ class RuntimeManager: ObservableObject {
                 .appendingPathComponent("bin")
                 .appendingPathComponent(type.binaryName)
             if fm.isExecutableFile(atPath: embedded.path) {
-                return (true, getVersion(for: type) ?? "bundled", embedded.path)
+                return (true, getVersion(for: type, at: embedded.path) ?? "bundled", embedded.path)
             }
         }
 
@@ -197,13 +278,14 @@ class RuntimeManager: ObservableObject {
         //    user-installed languages. Resolve through the user's LOGIN shell
         //    (which sources their profile), then scan common install dirs.
         if let p = resolveViaLoginShell(type.binaryName) ?? searchCommonInstallPaths(type.binaryName) {
-            return (true, getVersion(for: type), p)
+            return (true, getVersion(for: type, at: p), p)
         }
 
-        // 4. Last resort: default minimal PATH.
+        // 4. Last resort: default minimal PATH if safe.
         let whichResult = runCommand("/usr/bin/which", arguments: [type.binaryName])
-        if let path = whichResult.output?.trimmingCharacters(in: .whitespacesAndNewlines), !path.isEmpty {
-            return (true, getVersion(for: type), path)
+        if let path = whichResult.output?.trimmingCharacters(in: .whitespacesAndNewlines),
+           !path.isEmpty, DeveloperToolsGuard.isSafeToExecute(path) {
+            return (true, getVersion(for: type, at: path), path)
         }
 
         return (false, nil, nil)
@@ -218,7 +300,7 @@ class RuntimeManager: ObservableObject {
         let r = runCommand(shell, arguments: ["-l", "-c", "command -v \(bin) 2>/dev/null"])
         if let out = r.output?.split(separator: "\n").first.map(String.init)?
             .trimmingCharacters(in: .whitespacesAndNewlines),
-           !out.isEmpty, FileManager.default.isExecutableFile(atPath: out) {
+           !out.isEmpty, DeveloperToolsGuard.isSafeToExecute(out) {
             return out
         }
         return nil
@@ -230,39 +312,40 @@ class RuntimeManager: ObservableObject {
         let fm = FileManager.default
         let home = fm.homeDirectoryForCurrentUser.path
         var dirs = [
-            "/opt/homebrew/bin", "/usr/local/bin", "/usr/bin", "/bin",
+            "/opt/homebrew/bin", "/usr/local/bin",
             "\(home)/.cargo/bin", "\(home)/.local/bin", "\(home)/go/bin",
             "/usr/local/go/bin", "\(home)/.pyenv/shims",
             "/opt/homebrew/opt/python@3.12/bin", "/opt/homebrew/opt/python@3.11/bin",
             "/Library/Frameworks/Python.framework/Versions/Current/bin",
             "/usr/local/share/dotnet", "\(home)/.dotnet"
         ]
+        if DeveloperToolsGuard.hasCommandLineTools {
+            dirs.append("/usr/bin")
+            dirs.append("/bin")
+        }
         let nvmRoot = "\(home)/.nvm/versions/node"
         if let versions = try? fm.contentsOfDirectory(atPath: nvmRoot) {
             for v in versions { dirs.append("\(nvmRoot)/\(v)/bin") }
         }
         for d in dirs {
             let p = (d as NSString).appendingPathComponent(bin)
-            if fm.isExecutableFile(atPath: p) { return p }
+            if DeveloperToolsGuard.isSafeToExecute(p) { return p }
         }
         return nil
     }
     
-    private func getVersion(for type: RuntimeType) -> String? {
+    private func getVersion(for type: RuntimeType, at executablePath: String? = nil) -> String? {
+        let exe = executablePath ?? runtimes.first(where: { $0.type == type })?.path
+        guard let validExe = exe, DeveloperToolsGuard.isSafeToExecute(validExe) else { return nil }
+        
         let result: CommandResult
         switch type {
-        case .python:
-            result = runCommand("/usr/bin/env", arguments: ["python3", "--version"])
-        case .nodejs:
-            result = runCommand("/usr/bin/env", arguments: ["node", "--version"])
+        case .python, .nodejs, .bun, .deno, .r, .julia, .java, .kotlin, .c, .cpp, .ruby, .php, .lua, .dotnet:
+            result = runCommand(validExe, arguments: ["--version"])
         case .go:
-            result = runCommand("/usr/bin/env", arguments: ["go", "version"])
-        case .rust:
-            result = runCommand("/usr/bin/env", arguments: ["rustc", "--version"])
-        case .swift:
-            result = runCommand("/usr/bin/env", arguments: ["swift", "--version"])
-        case .dotnet:
-            result = runCommand("/usr/bin/env", arguments: ["dotnet", "--version"])
+            result = runCommand(validExe, arguments: ["version"])
+        case .rust, .swift:
+            result = runCommand(validExe, arguments: ["--version"])
         }
         
         if let output = result.output?.trimmingCharacters(in: .whitespacesAndNewlines) {
