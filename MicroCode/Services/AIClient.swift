@@ -189,6 +189,31 @@ final class AIClient: ObservableObject {
         onToken(chunk)
     }
     
+    private func detectStreamRepetitionLoop(_ fullText: String) -> Bool {
+        let lines = fullText.components(separatedBy: .newlines)
+            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+            .filter { $0.count >= 8 }
+        
+        let count = lines.count
+        guard count >= 3 else { return false }
+        
+        // 1. Triple repetition of identical line: A, A, A
+        if lines[count - 1] == lines[count - 2] && lines[count - 2] == lines[count - 3] {
+            return true
+        }
+        
+        // 2. Alternating 2-line cycle: A, B, A, B, A, B
+        if count >= 6 {
+            let n = count
+            if lines[n-1] == lines[n-3] && lines[n-3] == lines[n-5] &&
+               lines[n-2] == lines[n-4] && lines[n-4] == lines[n-6] {
+                return true
+            }
+        }
+        
+        return false
+    }
+    
     private func boundedHistory(_ history: [(role: String, content: String)]) -> [(role: String, content: String)] {
         // Scaled for modern 1M-2M+ token architectures (no artificial message or char caps)
         let maxMessages = 1000
@@ -777,6 +802,10 @@ final class AIClient: ObservableObject {
             for part in parts {
                 if let text = part["text"] as? String {
                     appendStreamToken(text, onToken: onToken)
+                    if detectStreamRepetitionLoop(currentStreamedText) {
+                        NSLog("⚠️ [AIClient] Streaming repetition loop detected in streamGemini. Breaking stream.")
+                        break
+                    }
                 } else if let fc = part["functionCall"] as? [String: Any],
                           let name = fc["name"] as? String {
                     let args = fc["args"] as? [String: Any] ?? [:]
@@ -867,7 +896,15 @@ final class AIClient: ObservableObject {
         messages.append(["role": "user", "content": contentArray])
         
         let effectiveModel = normalizeModelName(model, provider: StreamableAIProvider.detect(from: model), baseURL: baseURL)
-        var body: [String: Any] = ["model": effectiveModel, "messages": messages, "stream": true, "temperature": 0.7, "max_tokens": maxOutputTokens(for: effectiveModel)]
+        var body: [String: Any] = [
+            "model": effectiveModel,
+            "messages": messages,
+            "stream": true,
+            "temperature": 0.7,
+            "frequency_penalty": 0.3,
+            "presence_penalty": 0.2,
+            "max_tokens": maxOutputTokens(for: effectiveModel)
+        ]
         
         if let tools = tools, !tools.isEmpty {
             body["tools"] = tools.map { ["type": "function", "function": $0] as [String: Any] }
@@ -914,6 +951,11 @@ final class AIClient: ObservableObject {
                 appendStreamToken(reasoning, onToken: onToken)
             } else if let content = delta["content"] as? String {
                 appendStreamToken(content, onToken: onToken)
+            }
+            
+            if detectStreamRepetitionLoop(currentStreamedText) {
+                NSLog("⚠️ [AIClient] Streaming repetition loop detected in streamOpenAI. Breaking stream.")
+                break
             }
             
             // Tool calls (streamed incrementally)
@@ -1209,7 +1251,14 @@ final class AIClient: ObservableObject {
             apiMessages.append(["role": role, "content": content])
         }
         
-        var body: [String: Any] = ["model": model, "messages": apiMessages, "temperature": 0.7, "max_tokens": maxOutputTokens(for: model)]
+        var body: [String: Any] = [
+            "model": model,
+            "messages": apiMessages,
+            "temperature": 0.7,
+            "frequency_penalty": 0.3,
+            "presence_penalty": 0.2,
+            "max_tokens": maxOutputTokens(for: model)
+        ]
         if let tools = tools, !tools.isEmpty { body["tools"] = tools.map { ["type": "function", "function": $0] as [String: Any] } }
         
         request.httpBody = try JSONSerialization.data(withJSONObject: body)
