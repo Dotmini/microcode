@@ -299,6 +299,9 @@ struct AIAgentView: View {
             .environmentObject(appState)
         }
         .onReceive(NotificationCenter.default.publisher(for: .agentProcessQueueItem)) { notification in
+            let targetScope: AgentSessionScope = agent.domain == .science ? .science : .editor
+            guard sessionScope == targetScope else { return }
+            guard !agent.isLoading else { return }
             if let queued = notification.object as? QueuedMessage {
                 executeMessage(queued.text, attachments: queued.attachments)
             }
@@ -1358,10 +1361,12 @@ struct AIAgentView: View {
                 
                 // Steer Now (Stop current and execute immediately)
                 Button(action: {
-                    guard let first = agent.messageQueue.first else { return }
-                    agent.stopGeneration()
-                    executeMessage(first.text, attachments: first.attachments)
-                    agent.messageQueue.removeFirst()
+                    guard !agent.messageQueue.isEmpty else { return }
+                    let nextItem = agent.messageQueue.removeFirst()
+                    agent.stopGeneration(autoProcessQueue: false)
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) {
+                        executeMessage(nextItem.text, attachments: nextItem.attachments)
+                    }
                 }) {
                     Text("Steer Now")
                         .font(.system(size: 9.5, weight: .medium))
@@ -1967,7 +1972,7 @@ struct AIAgentView: View {
         attachments = []
         
         // If AI is busy, queue the message
-        if agent.isLoading {
+        if agent.isLoading || agent.isProcessingQueue {
             agent.enqueueMessage(userText, attachments: currentAttachments)
             return
         }
