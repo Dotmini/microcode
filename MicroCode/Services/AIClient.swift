@@ -190,8 +190,9 @@ final class AIClient: ObservableObject {
     }
     
     private func boundedHistory(_ history: [(role: String, content: String)]) -> [(role: String, content: String)] {
-        let maxMessages = 16
-        let maxCharsPerMessage = 4000
+        // Scaled for modern 1M-2M+ token architectures (no artificial message or char caps)
+        let maxMessages = 1000
+        let maxCharsPerMessage = 4_000_000
         let recent = Array(history.suffix(maxMessages))
         return recent.map { (role: $0.role, content: boundedText($0.content, limit: maxCharsPerMessage)) }
     }
@@ -201,38 +202,17 @@ final class AIClient: ObservableObject {
         let candidate = trimmed.isEmpty ? provider.defaultModel : trimmed
         let lower = candidate.lowercased()
         
-        let isCloudProxy = baseURL == provider.cloudBaseURL
-        if isCloudProxy {
-            if lower == "deepseek-chat" || lower == "deepseek-v4-flash" || lower == "deepseek" {
-                return "deepseek-flash"
-            }
-            if lower == "deepseek-r1" || lower == "deepseek-reasoner" || lower == "deepseek-v4-pro" {
-                return "deepseek-v4-pro"
-            }
-            if lower == "gemini-flash" || lower == "gemini" || lower == "gemini-3.7-flash" {
-                return "gemini-2.5-flash"
-            }
-            if lower == "gemini-pro" {
-                return "gemini-2.5-pro"
-            }
-            if lower == "gpt-4" || lower == "gpt-4o-latest" {
-                return "gpt-4o"
-            }
-        } else if provider == .deepseek {
+        if provider == .deepseek {
             // Official DeepSeek API supports deepseek-chat (V3) and deepseek-reasoner (R1)
-            if lower.contains("reasoner") || lower.contains("r1") || lower == "deepseek-v4-pro" {
+            if lower.contains("reasoner") || lower.contains("r1") {
                 return "deepseek-reasoner"
             }
-            if lower.contains("deepseek") || lower.contains("chat") {
-                return "deepseek-chat"
-            }
+            return "deepseek-chat"
         } else if provider == .gemini {
-            if lower == "gemini" || lower == "gemini-flash" || lower == "gemini-3.7-flash" {
-                return "gemini-2.5-flash"
-            }
-            if lower == "gemini-pro" {
+            if lower.contains("pro") {
                 return "gemini-2.5-pro"
             }
+            return "gemini-2.5-flash"
         }
         return candidate
     }
@@ -1236,7 +1216,7 @@ final class AIClient: ObservableObject {
         let (data, response) = try await URLSession.shared.data(for: request)
         
         guard let httpResponse = response as? HTTPURLResponse else {
-            return (text: "Error: No response from server", toolCalls: [])
+            throw NSError(domain: "AIClient", code: -1, userInfo: [NSLocalizedDescriptionKey: "No response from server"])
         }
         
         guard httpResponse.statusCode == 200 else {
@@ -1249,7 +1229,7 @@ final class AIClient: ObservableObject {
                 let raw = String(data: data, encoding: .utf8) ?? ""
                 errorText = raw.isEmpty ? "HTTP status \(httpResponse.statusCode)" : raw
             }
-            return (text: "Error (\(httpResponse.statusCode)): \(errorText)", toolCalls: [])
+            throw NSError(domain: "AIClient", code: httpResponse.statusCode, userInfo: [NSLocalizedDescriptionKey: "API error (\(httpResponse.statusCode)): \(errorText)"])
         }
         
         guard let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
@@ -1327,7 +1307,7 @@ final class AIClient: ObservableObject {
         let (data, response) = try await URLSession.shared.data(for: request)
         
         guard let httpResponse = response as? HTTPURLResponse else {
-            return (text: "Error: No response from server", toolCalls: [])
+            throw NSError(domain: "AIClient", code: -1, userInfo: [NSLocalizedDescriptionKey: "No response from server"])
         }
         
         guard httpResponse.statusCode == 200 else {
@@ -1340,7 +1320,7 @@ final class AIClient: ObservableObject {
                 let raw = String(data: data, encoding: .utf8) ?? ""
                 errorText = raw.isEmpty ? "HTTP status \(httpResponse.statusCode)" : raw
             }
-            return (text: "Error (\(httpResponse.statusCode)): \(errorText)", toolCalls: [])
+            throw NSError(domain: "AIClient", code: httpResponse.statusCode, userInfo: [NSLocalizedDescriptionKey: "API error (\(httpResponse.statusCode)): \(errorText)"])
         }
         
         guard let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],

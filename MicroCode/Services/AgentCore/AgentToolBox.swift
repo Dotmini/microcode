@@ -172,9 +172,9 @@ class AgentToolBox: ObservableObject {
                 readCache.removeAll(keepingCapacity: true)
             }
             
-            // Truncate very large outputs
-            if result.count > 15000 {
-                return String(result.prefix(15000)) + "\n\n... (output truncated at 15K chars)"
+            // Allow rich tool outputs up to 2M characters (~500k tokens)
+            if result.count > 2_000_000 {
+                return String(result.prefix(2_000_000)) + "\n\n... (output truncated at 2M chars)"
             }
             return result
         } catch {
@@ -586,8 +586,8 @@ struct FileReadTool: AgentTool {
             if text.isEmpty {
                 return "[PDF: \(url.lastPathComponent) (\(doc.pageCount) pages)] (No selectable text found, document may be scanned images)"
             }
-            if text.count > 12000 {
-                return String(text.prefix(12000)) + "\n\n... (PDF text truncated at 12K chars, total pages: \(doc.pageCount))"
+            if text.count > 500000 {
+                return String(text.prefix(500000)) + "\n\n... (PDF text truncated at 500K chars, total pages: \(doc.pageCount))"
             }
             return "[PDF: \(url.lastPathComponent) (\(doc.pageCount) pages)]\n\n\(text)"
         }
@@ -617,16 +617,16 @@ struct FileReadTool: AgentTool {
         
         do {
             let content = try String(contentsOf: url, encoding: .utf8)
-            // Truncate only ridiculously massive files (>250K chars / ~6000 lines)
-            if content.count > 250000 {
-                return String(content.prefix(250000)) + "\n\n... (file truncated at 250K chars, total: \(content.count) chars)"
+            // Scaled for 2M token context (up to 2,000,000 chars)
+            if content.count > 2_000_000 {
+                return String(content.prefix(2_000_000)) + "\n\n... (file truncated at 2M chars, total: \(content.count) chars)"
             }
             return content
         } catch {
             // Fallback for different encodings
             if let content = try? String(contentsOf: url, encoding: .isoLatin1) {
-                if content.count > 250000 {
-                    return String(content.prefix(250000)) + "\n\n... (file truncated at 250K chars, total: \(content.count) chars)"
+                if content.count > 2_000_000 {
+                    return String(content.prefix(2_000_000)) + "\n\n... (file truncated at 2M chars, total: \(content.count) chars)"
                 }
                 return content
             }
@@ -807,8 +807,8 @@ struct GrepSearchTool: AgentTool {
         }
         
         // Truncate if too many results
-        if output.count > 8000 {
-            return String(output.prefix(8000)) + "\n... (results truncated)"
+        if output.count > 500_000 {
+            return String(output.prefix(500_000)) + "\n... (results truncated at 500K chars)"
         }
         return output
     }
@@ -1067,8 +1067,8 @@ struct ShellCommandTool: AgentTool {
         // A non-zero command must be a failed tool result.  Previously this
         // returned ordinary text, so the agent recorded a failed xcodebuild
         // as success and later tried to complete from prose alone.
-        let boundedOutput = output.count > 15000
-            ? String(output.suffix(15000)).trimmingCharacters(in: .whitespacesAndNewlines) + "\n... (leading output truncated)"
+        let boundedOutput = output.count > 1_000_000
+            ? String(output.suffix(1_000_000)).trimmingCharacters(in: .whitespacesAndNewlines) + "\n... (leading output truncated at 1M chars)"
             : output
         guard didSucceed else {
             throw ToolBoxError.executionFailed(boundedOutput.isEmpty
@@ -1217,8 +1217,8 @@ struct ShellCommandTool: AgentTool {
             ]
         )
         
-        let boundedOutput = output.count > 15000
-            ? String(output.suffix(15000)).trimmingCharacters(in: .whitespacesAndNewlines) + "\n... (leading output truncated)"
+        let boundedOutput = output.count > 1_000_000
+            ? String(output.suffix(1_000_000)).trimmingCharacters(in: .whitespacesAndNewlines) + "\n... (leading output truncated at 1M chars)"
             : output
         guard didSucceed else {
             throw ToolBoxError.executionFailed(boundedOutput.isEmpty
@@ -1274,8 +1274,8 @@ struct WebFetchTool: AgentTool {
         let (data, _) = try await URLSession.shared.data(from: url)
         let content = String(data: data, encoding: .utf8) ?? ""
         
-        if content.count > 5000 {
-            return String(content.prefix(5000)) + "\n... (truncated)"
+        if content.count > 500_000 {
+            return String(content.prefix(500_000)) + "\n... (truncated at 500K chars)"
         }
         return content
     }

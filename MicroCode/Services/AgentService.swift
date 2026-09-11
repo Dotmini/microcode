@@ -826,7 +826,9 @@ class AgentService: ObservableObject {
         // Detect task complexity and choose budget
         let complexity = tokenOptimizer.detectComplexity(content)
         let budget = TokenBudget.forTask(complexity)
-        let isChatMode = domain == .software && complexity == .chat
+        let isContinuation = isContinuationRequest(content)
+        // Never degrade into chat mode if an active run exists or if continuing prior work
+        let isChatMode = domain == .software && complexity == .chat && !isContinuation && activeKernelRunID == nil
         let requiresNativeExecution = domain == .software && !isChatMode && requestRequiresNativeExecution(content)
         let requiresRuntimeLaunch = domain == .software && !isChatMode && requestRequiresRuntimeLaunch(content)
         let requiresMutation = domain == .software && !isChatMode && requestRequiresMutation(content)
@@ -839,7 +841,7 @@ class AgentService: ObservableObject {
         if domain == .software, !isChatMode {
             prepareAutonomousTaskArtifacts(
                 objective: content,
-                isContinuation: isContinuationRequest(content)
+                isContinuation: isContinuation
             )
         }
         
@@ -851,9 +853,10 @@ class AgentService: ObservableObject {
             await MCPClient.shared.ensureConnected(workspacePath: toolBox.workspaceRoot)
         }
         
-        let toolSchemas = isChatMode ? [] : toolBox.toolSchemas()  // No tools in chat mode
+        // Always provide tools in AgentService so the agent can always execute actions
+        let toolSchemas = toolBox.toolSchemas()
         let toolNames = toolSchemas.compactMap { $0["name"] as? String }
-        let kernelRunID = (!isChatMode && isContinuationRequest(content) ? activeKernelRunID : nil) ?? userMessage.id
+        let kernelRunID = (!isChatMode && isContinuation ? activeKernelRunID : nil) ?? userMessage.id
         activeKernelRunID = isChatMode ? nil : kernelRunID
         if !isChatMode {
             UserDefaults.standard.set(kernelRunID, forKey: durableRunStorageKey)
@@ -1214,15 +1217,16 @@ class AgentService: ObservableObject {
                         break
                     }
 
-                    // If native work was explicitly promised (like build/run) but never executed,
-                    // provide recovery attempts
+                    // If the model monologued intentions without calling tools, OR native work was promised but never executed,
+                    // provide autonomous harness follow-through attempts (up to 8 times)
+                    let hasUnfinishedIntent = containsUnfinishedActionIntention(streamedText)
                     if !isChatMode,
-                       nativeWorkWasPromised,
-                       !nativeWorkWasExecuted,
-                       kernelRecoveryCount < 2,
+                       (hasUnfinishedIntent || (nativeWorkWasPromised && !nativeWorkWasExecuted)),
+                       kernelRecoveryCount < 8,
                        kernelResponse?.directive.action != "blocked" {
                         kernelRecoveryCount += 1
                         usedFollowThroughRecovery = true
+                        logActivity(.info, "Harness follow-through: model stated intention without tool call (attempt \(kernelRecoveryCount)/8). Auto-prompting immediate tool execution...")
                         if kernelResponse?.directive.action == "retry",
                            let delay = kernelResponse?.directive.retryAfterMs {
                             currentToolExecution = "Waiting to retry from the durable checkpoint..."
@@ -1230,10 +1234,21 @@ class AgentService: ObservableObject {
                             try? await Task.sleep(nanoseconds: delay * 1_000_000)
                         }
                         history.append((role: "assistant", content: streamedText))
-                        history.append((role: "user", content: kernelResponse?.directive.suggestedPrompt ?? """
-                        Verification failed: the objective has no deterministic completion evidence. Execute the missing action now, then run the relevant build/test/diagnostic. Do not answer with another plan or progress-only message.
-                        """))
-                        currentToolExecution = "Recovering incomplete agent work..."
+                        let followUpPrompt: String
+                        if hasUnfinishedIntent {
+                            let snippet = String(streamedText.suffix(180)).trimmingCharacters(in: .whitespacesAndNewlines)
+                            followUpPrompt = """
+                            You stated what you intend to do ("...\(snippet)..."), but you did not call any tools.
+                            In MicroCode Agent, you must EXECUTE actions using tools, not just describe them in text.
+                            Immediately call the appropriate tool (e.g. `file_read`, `file_write`, `patch_file`, `shell`, etc.) RIGHT NOW to perform the work. Do not stop until the objective is finished.
+                            """
+                        } else {
+                            followUpPrompt = kernelResponse?.directive.suggestedPrompt ?? """
+                            Verification failed: the objective has no deterministic completion evidence. Execute the missing action now, then run the relevant build/test/diagnostic. Do not answer with another plan or progress-only message.
+                            """
+                        }
+                        history.append((role: "user", content: followUpPrompt))
+                        currentToolExecution = "Prompting tool execution follow-through..."
                         agentPhase = .thinking
                         continue
                     }
@@ -1513,7 +1528,30 @@ class AgentService: ObservableObject {
 
     private func isContinuationRequest(_ content: String) -> Bool {
         let normalized = content.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
-        return ["ต่อ", "ทำต่อ", "ต่อไป", "continue", "resume", "keep going", "go on"].contains(normalized)
+        let continuationKeywords = [
+            "ต่อ", "ทำต่อ", "ต่อไป", "ไงต่อ", "แล้วไงต่อ", "ไปต่อ", "ทำไงต่อ", "ต่อเลย", "ลุยต่อ",
+            "continue", "resume", "keep going", "go on", "next", "proceed", "keep working", "finish it", "finish"
+        ]
+        return continuationKeywords.contains(where: { normalized == $0 || normalized.hasPrefix($0) })
+    }
+
+    private func containsUnfinishedActionIntention(_ text: String) -> Bool {
+        let lower = text.lowercased()
+        let actionPhrases = [
+            "let me read", "let me check", "let me inspect", "let me get", "let me look",
+            "let me find", "let me search", "let me write", "let me create", "let me update",
+            "let me delete", "let me run", "let me build", "let me execute", "let me probe",
+            "i'll read", "i will read", "i'll check", "i will check", "i'll inspect",
+            "i'll write", "i will write", "i'll create", "i will create", "i'll run", "i will run",
+            "i'll execute", "i will execute", "now i'll", "now i will",
+            "i need to read", "i need to check", "i need to inspect", "i need to write",
+            "i need to get", "i need to find", "i need to run",
+            "writing the", "reading the", "executing the", "inspecting the",
+            "then write", "then build", "then remove", "next step", "next, i",
+            "consolidating", "consolidate",
+            "จะเริ่ม", "กำลังอ่าน", "กำลังเขียน", "ขอดึง", "ขอตรวจ", "ต่อไปจะ", "จะทำการ", "จะรัน"
+        ]
+        return actionPhrases.contains(where: { lower.contains($0) })
     }
     
     // MARK: - Streaming Message Update & 30ms Coalesced Throttle Buffer
