@@ -27,8 +27,11 @@ DerivedData/
 !default.perspectivev3
 
 # ----- Swift Package Manager -----
+.build
 .build/
 .build_dist/
+__pycache__/
+*.pyc
 .swiftpm/
 Package.resolved
 *.xcodeproj

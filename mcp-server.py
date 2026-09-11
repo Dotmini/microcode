@@ -46,8 +46,16 @@ PROTOCOL_VERSION = "2024-11-05"
 # Workspace root — set via env or auto-detect
 WORKSPACE = os.path.realpath(os.path.expanduser(os.environ.get("MICROCODE_WORKSPACE", os.getcwd())))
 
-# Security: Allowed paths
-ALLOWED_PATHS = [WORKSPACE, "/tmp"]
+# Security: Allowed paths (supports Workspace, Temp, External SSDs in /Volumes, and Agent Skills)
+ALLOWED_PATHS = [
+    WORKSPACE,
+    "/tmp",
+    "/private/tmp",
+    "/Volumes",
+    os.path.expanduser("~/.gemini"),
+    os.path.expanduser("~/.agents"),
+    os.path.expanduser("~/.codex")
+]
 
 # ============================================================
 # Sandbox Validation
@@ -99,8 +107,12 @@ def validate_read_only_shell(command: str) -> list[str]:
     allowed = {"git", "rg", "grep", "find", "ls", "pwd", "head", "tail", "sed", "wc", "stat"}
     if args[0] not in allowed:
         raise PermissionError("Only read-only workspace inspection commands are available through MCP.")
-    if any(arg.startswith("/") or ".." in arg for arg in args[1:]):
-        raise PermissionError("Absolute paths and parent traversal are not allowed in MCP terminal commands.")
+    allowed_roots = [WORKSPACE, "/Volumes", "/tmp", "/private/tmp", os.path.expanduser("~")]
+    for arg in args[1:]:
+        if ".." in arg:
+            raise PermissionError("Parent traversal is not allowed in MCP terminal commands.")
+        if arg.startswith("/") and not any(arg.startswith(r) for r in allowed_roots):
+            raise PermissionError(f"Absolute path '{arg}' is outside allowed workspace/volumes.")
     if args[0] == "git" and len(args) > 1 and args[1] not in {"status", "diff", "log", "branch", "show", "rev-parse"}:
         raise PermissionError("Only read-only git operations are available through MCP.")
     if args[0] == "find" and any(arg in {"-delete", "-exec", "-execdir"} for arg in args[1:]):

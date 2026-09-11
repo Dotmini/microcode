@@ -198,14 +198,21 @@ struct AgenticEditorWorkspace: View {
                 agent.setWorkspace(workspace.path)
             }
         }
-        .onChange(of: appState.editorMode) { _ in
-            surface = .editor
+        .onChange(of: appState.editorMode) { newMode in
+            if newMode == .aiAgent {
+                surface = .agent
+            } else {
+                surface = .editor
+            }
         }
     }
 
     @ViewBuilder
     private var activeEditorSurface: some View {
         switch appState.editorMode {
+        case .aiAgent:
+            AIAgentView(allowsChatSidebar: false)
+                .environmentObject(appState)
         case .notebook:
             NotebookView()
                 .environmentObject(appState)
@@ -431,16 +438,17 @@ struct AgenticEditorWorkspace: View {
             HStack(spacing: 2) {
                 Button {
                     surface = .agent
+                    appState.setEditorMode(.aiAgent)
                 } label: {
                     HStack(spacing: 4) {
                         Image(systemName: "brain")
                             .font(.system(size: 10))
                         Text("Agent")
-                            .font(.system(size: 11, weight: surface == .agent ? .semibold : .medium))
+                            .font(.system(size: 11, weight: (surface == .agent || appState.editorMode == .aiAgent) ? .semibold : .medium))
                             .lineLimit(1)
                     }
                 }
-                .agenticTabStyle(active: surface == .agent)
+                .agenticTabStyle(active: surface == .agent || appState.editorMode == .aiAgent)
 
                 Button {
                     surface = .editor
@@ -595,6 +603,7 @@ private extension View {
             .padding(.horizontal, 10)
             .padding(.vertical, 4)
             .background(active ? Color.primary.opacity(0.1) : Color.clear)
+            .contentShape(Rectangle())
             .clipShape(RoundedRectangle(cornerRadius: 5))
     }
 }

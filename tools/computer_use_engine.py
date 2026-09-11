@@ -93,12 +93,14 @@ class MicroCodeComputerUse:
     def _find_window(self) -> Tuple[Optional[int], Optional[int], Optional[Dict[str, float]]]:
         """Find MicroCode process PID and CGWindow info."""
         try:
-            pid_str = subprocess.check_output(
-                ["pgrep", "-f", "/Volumes/MicroCodeBuild/apps/MicroCode.app/Contents/MacOS/MicroCode"]
-            ).decode().strip().split("\n")[0]
+            pid_str = subprocess.check_output(["pgrep", "-x", "MicroCode"]).decode().strip().split("\n")[0]
             pid = int(pid_str)
         except Exception:
-            return None, None, None
+            try:
+                pid_str = subprocess.check_output(["pgrep", "-f", "MicroCode"]).decode().strip().split("\n")[0]
+                pid = int(pid_str)
+            except Exception:
+                return None, None, None
 
         window_id = None
         bounds = None
@@ -253,6 +255,15 @@ class MicroCodeComputerUse:
 
     def click_element(self, query: str, role: Optional[str] = None, click_count: int = 1) -> Dict[str, Any]:
         """Find an element and click its center point."""
+        try:
+            from AppKit import NSRunningApplication, NSApplicationActivateIgnoringOtherApps
+            app = NSRunningApplication.runningApplicationWithProcessIdentifier_(self.pid)
+            if app:
+                app.activateWithOptions_(NSApplicationActivateIgnoringOtherApps)
+                time.sleep(0.08)
+        except Exception:
+            pass
+
         el = self.find_element(query, role=role)
         if not el:
             raise ValueError(f"UI Element matching '{query}' not found in MicroCode window!")
