@@ -121,71 +121,99 @@ class AgentService: ObservableObject {
     
     // MARK: - Stop Generation
     
-    func stopGeneration() {
-        isCancelled = true
-        aiClient.cancelStream()
-        isLoading = false
-        agentPhase = .idle
-        currentToolExecution = nil
-        logActivity(.info, "Generation stopped by user")
-        if let runID = activeKernelRunID {
-            Task { await agentKernel.cancel(runID: runID) }
+    func stopGeneration(autoProcessQueue: Bool = false) {
+        let block = { [weak self] in
+            guard let self = self else { return }
+            self.isCancelled = true
+            self.aiClient.cancelStream()
+            self.isLoading = false
+            self.agentPhase = .idle
+            self.currentToolExecution = nil
+            self.logActivity(.info, "Generation stopped by user")
+            if let runID = self.activeKernelRunID {
+                Task { await self.agentKernel.cancel(runID: runID) }
+            }
+            self.activeKernelRunID = nil
+            UserDefaults.standard.removeObject(forKey: self.durableRunStorageKey)
+            
+            // Append stop marker to last AI message
+            if let lastIdx = self.messages.lastIndex(where: { $0.role == .assistant }) {
+                let current = self.messages[lastIdx].content
+                self.messages[lastIdx] = AgentMessageModel(
+                    id: self.messages[lastIdx].id, role: .assistant,
+                    content: current + "\n\n⏹ *Generation stopped*",
+                    toolResults: self.messages[lastIdx].toolResults,
+                    pendingChanges: self.messages[lastIdx].pendingChanges,
+                    timestamp: self.messages[lastIdx].timestamp
+                )
+            }
+            
+            if autoProcessQueue {
+                self.processQueue()
+            }
         }
-        activeKernelRunID = nil
-        UserDefaults.standard.removeObject(forKey: durableRunStorageKey)
-        
-        // Append stop marker to last AI message
-        if let lastIdx = messages.lastIndex(where: { $0.role == .assistant }) {
-            let current = messages[lastIdx].content
-            messages[lastIdx] = AgentMessageModel(
-                id: messages[lastIdx].id, role: .assistant,
-                content: current + "\n\n⏹ *Generation stopped*",
-                toolResults: messages[lastIdx].toolResults,
-                pendingChanges: messages[lastIdx].pendingChanges,
-                timestamp: messages[lastIdx].timestamp
-            )
-        }
-        
-        // Auto process next in queue if user didn't clear
-        processQueue()
+        if Thread.isMainThread { block() } else { DispatchQueue.main.async(execute: block) }
     }
     
     // MARK: - Message Queue (Non-Destructive Execution)
     
+    private var isProcessingQueueItem = false
+    
     func enqueueMessage(_ text: String, attachments: [AIAttachment] = []) {
-        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !trimmed.isEmpty || !attachments.isEmpty else { return }
-        
-        let item = QueuedMessage(text: trimmed, attachments: attachments)
-        messageQueue.append(item)
-        isProcessingQueue = !messageQueue.isEmpty
-        logActivity(.info, "Queued request (\(messageQueue.count) pending)")
-        
-        if !isLoading {
-            processQueue()
+        let block = { [weak self] in
+            guard let self = self else { return }
+            let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !trimmed.isEmpty || !attachments.isEmpty else { return }
+            
+            let item = QueuedMessage(text: trimmed, attachments: attachments)
+            self.messageQueue.append(item)
+            self.isProcessingQueue = !self.messageQueue.isEmpty
+            self.logActivity(.info, "Queued request (\(self.messageQueue.count) pending)")
+            
+            if !self.isLoading {
+                self.processQueue()
+            }
         }
+        if Thread.isMainThread { block() } else { DispatchQueue.main.async(execute: block) }
     }
     
     func cancelQueuedMessage(id: UUID) {
-        messageQueue.removeAll(where: { $0.id == id })
-        isProcessingQueue = !messageQueue.isEmpty
+        let block = { [weak self] in
+            guard let self = self else { return }
+            self.messageQueue.removeAll(where: { $0.id == id })
+            self.isProcessingQueue = !self.messageQueue.isEmpty
+        }
+        if Thread.isMainThread { block() } else { DispatchQueue.main.async(execute: block) }
     }
     
     func clearQueue() {
-        messageQueue.removeAll()
-        isProcessingQueue = false
+        let block = { [weak self] in
+            guard let self = self else { return }
+            self.messageQueue.removeAll()
+            self.isProcessingQueue = false
+        }
+        if Thread.isMainThread { block() } else { DispatchQueue.main.async(execute: block) }
     }
     
     func processQueue() {
-        guard !messageQueue.isEmpty, !isLoading else {
-            isProcessingQueue = !messageQueue.isEmpty
-            return
+        let block = { [weak self] in
+            guard let self = self else { return }
+            guard !self.messageQueue.isEmpty, !self.isLoading, !self.isProcessingQueueItem else {
+                self.isProcessingQueue = !self.messageQueue.isEmpty
+                return
+            }
+            self.isProcessingQueueItem = true
+            let next = self.messageQueue.removeFirst()
+            self.isProcessingQueue = !self.messageQueue.isEmpty
+            
+            // Post notification to execute with full app state context
+            NotificationCenter.default.post(name: .agentProcessQueueItem, object: next)
+            
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { [weak self] in
+                self?.isProcessingQueueItem = false
+            }
         }
-        let next = messageQueue.removeFirst()
-        isProcessingQueue = !messageQueue.isEmpty
-        
-        // Post notification to execute with full app state context
-        NotificationCenter.default.post(name: .agentProcessQueueItem, object: next)
+        if Thread.isMainThread { block() } else { DispatchQueue.main.async(execute: block) }
     }
     
     // MARK: - System Prompt (Dual Mode: Chat + Agent)
@@ -783,12 +811,29 @@ class AgentService: ObservableObject {
         apiKey: String = "",
         attachments: [AIAttachment] = []
     ) async {
-        // Add user message
+        guard !isLoading else {
+            logActivity(.info, "Agent is already busy. Enqueuing request.")
+            await MainActor.run {
+                enqueueMessage(content, attachments: attachments)
+            }
+            return
+        }
+        
+        isLoading = true
+        isCancelled = false
+        agentPhase = .thinking
+        filesModified = []
+        suggestedAction = nil
+        logActivity(.thinking, "Processing request...")
+        
+        // Add user message on main actor
         let userMessage = AgentMessageModel(
             id: UUID().uuidString, role: .user, content: content,
             toolResults: [], pendingChanges: [], timestamp: Date()
         )
-        messages.append(userMessage)
+        await MainActor.run {
+            messages.append(userMessage)
+        }
         
         // Store memory
         if let chatId = activeChatId {
@@ -803,13 +848,6 @@ class AgentService: ObservableObject {
                 }
             }
         }
-        
-        isLoading = true
-        isCancelled = false
-        agentPhase = .thinking
-        filesModified = []
-        suggestedAction = nil
-        logActivity(.thinking, "Processing request...")
         defer {
             isLoading = false
             agentPhase = .idle
@@ -1507,14 +1545,15 @@ class AgentService: ObservableObject {
             toolResults: allToolResults, pendingChanges: allChanges, timestamp: Date()
         )
         
-        // Replace streaming placeholder with final
-        if let lastIdx = messages.indices.last, messages[lastIdx].role == .assistant {
-            messages[lastIdx] = assistantMessage
-        } else {
-            messages.append(assistantMessage)
+        // Replace streaming placeholder with final on MainActor
+        await MainActor.run {
+            if let lastIdx = messages.indices.last, messages[lastIdx].role == .assistant {
+                messages[lastIdx] = assistantMessage
+            } else {
+                messages.append(assistantMessage)
+            }
+            pendingChanges.append(contentsOf: allChanges)
         }
-        
-        pendingChanges.append(contentsOf: allChanges)
         
         // Verification is an Agent responsibility.  Do not turn an internal
         // build/run step into a "Run Project?" request for the user after the
@@ -1689,11 +1728,18 @@ class AgentService: ObservableObject {
             id: "streaming", role: .assistant, content: text,
             toolResults: toolResults, pendingChanges: [], timestamp: Date()
         )
-        
-        if let lastIdx = messages.indices.last, messages[lastIdx].id == "streaming" {
-            messages[lastIdx] = streamMsg
+        let block = { [weak self] in
+            guard let self = self else { return }
+            if let lastIdx = self.messages.indices.last, self.messages[lastIdx].id == "streaming" {
+                self.messages[lastIdx] = streamMsg
+            } else {
+                self.messages.append(streamMsg)
+            }
+        }
+        if Thread.isMainThread {
+            block()
         } else {
-            messages.append(streamMsg)
+            DispatchQueue.main.async(execute: block)
         }
     }
 
@@ -2458,10 +2504,17 @@ class AgentService: ObservableObject {
     
     func logActivity(_ type: AgentActivity.ActivityType, _ message: String, detail: String? = nil) {
         let activity = AgentActivity(type: type, message: message, detail: detail, timestamp: Date())
-        activityLog.append(activity)
-        // Keep last 100 entries
-        if activityLog.count > 100 {
-            activityLog.removeFirst(activityLog.count - 100)
+        let update = { [weak self] in
+            guard let self = self else { return }
+            self.activityLog.append(activity)
+            if self.activityLog.count > 100 {
+                self.activityLog.removeFirst(self.activityLog.count - 100)
+            }
+        }
+        if Thread.isMainThread {
+            update()
+        } else {
+            DispatchQueue.main.async(execute: update)
         }
     }
     
