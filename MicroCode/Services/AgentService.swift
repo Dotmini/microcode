@@ -1624,9 +1624,41 @@ class AgentService: ObservableObject {
     private var pendingStreamFullText: String = ""
     private var streamThrottleTimer: Timer? = nil
     
+    private func detectStreamingRepetition(_ fullText: String) -> Bool {
+        let lines = fullText.components(separatedBy: .newlines)
+            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+            .filter { $0.count >= 8 }
+        
+        let count = lines.count
+        guard count >= 3 else { return false }
+        
+        // 1. Triple repetition of identical line: A, A, A
+        if lines[count - 1] == lines[count - 2] && lines[count - 2] == lines[count - 3] {
+            return true
+        }
+        
+        // 2. Alternating 2-line cycle: A, B, A, B, A, B
+        if count >= 6 {
+            let n = count
+            if lines[n-1] == lines[n-3] && lines[n-3] == lines[n-5] &&
+               lines[n-2] == lines[n-4] && lines[n-4] == lines[n-6] {
+                return true
+            }
+        }
+        
+        return false
+    }
+
     private func pushStreamingToken(_ token: String, currentFullText: inout String, toolResults: [ToolResultModel]) {
         currentFullText += token
         pendingStreamFullText = currentFullText
+        
+        // Real-time Circuit Breaker: detect repetitive stream output as it arrives
+        if detectStreamingRepetition(currentFullText) {
+            logActivity(.info, "Real-time streaming repetition loop detected. Aborting token stream.")
+            aiClient.cancelStream()
+            return
+        }
         
         let now = ProcessInfo.processInfo.systemUptime
         // 30ms throttle: drops 100Hz token redraws down to smooth 33fps without lag
@@ -2070,11 +2102,42 @@ class AgentService: ObservableObject {
         return result.reversed()
     }
 
+    private func deduplicateRepetitiveLines(_ text: String) -> String {
+        let lines = text.components(separatedBy: .newlines)
+        guard lines.count > 3 else { return text }
+        
+        var result: [String] = []
+        var lastNonEmpty = ""
+        var repeatCount = 0
+        
+        for line in lines {
+            let trimmed = line.trimmingCharacters(in: .whitespacesAndNewlines)
+            if trimmed.isEmpty {
+                if !result.isEmpty && !result.last!.isEmpty {
+                    result.append("")
+                }
+                continue
+            }
+            if trimmed == lastNonEmpty {
+                repeatCount += 1
+                if repeatCount < 2 {
+                    result.append(line)
+                }
+            } else {
+                lastNonEmpty = trimmed
+                repeatCount = 0
+                result.append(line)
+            }
+        }
+        return result.joined(separator: "\n")
+    }
+
     private func boundedHistoryText(_ text: String, limit: Int) -> String {
-        guard text.count > limit, limit > 64 else { return String(text.prefix(max(0, limit))) }
+        let sanitized = deduplicateRepetitiveLines(text)
+        guard sanitized.count > limit, limit > 64 else { return String(sanitized.prefix(max(0, limit))) }
         let headCount = (limit * 2) / 3
         let tailCount = limit - headCount
-        return String(text.prefix(headCount)) + "\n…[history truncated]…\n" + String(text.suffix(tailCount))
+        return String(sanitized.prefix(headCount)) + "\n…[history truncated]…\n" + String(sanitized.suffix(tailCount))
     }
     
     private func buildSyncMessages(history: [(role: String, content: String)], lastText: String, toolResults: [ToolResultModel]) -> [[(String, Any)]] {
