@@ -72,13 +72,35 @@ class ACPAgentSession: ObservableObject, Identifiable {
         state = .connecting
         self.model = model
         
+        // Resolve and validate executable path before spawning
+        guard let resolvedExecutable = ACPHostService.resolveExecutablePath(config.command) else {
+            let errMsg: String
+            switch config.type {
+            case .codexEngine:
+                errMsg = "OpenAI Codex CLI is not installed on this Mac (executable '\(config.command)' not found). To use Codex, install it via 'npm install -g @openai/codex' or select Antigravity (AGY), OpenCode, or Claude Code."
+            case .claudeCode:
+                errMsg = "Anthropic Claude Code CLI is not installed (executable '\(config.command)' not found). Install it via 'npm install -g @anthropic-ai/claude-code' or select another agent."
+            case .agy:
+                errMsg = "Antigravity CLI is not installed (executable '\(config.command)' not found). Install via 'curl -fsSL https://antigravity.google/install.sh | bash'."
+            case .openCode:
+                errMsg = "OpenCode CLI is not installed (executable '\(config.command)' not found). Install via 'curl -fsSL https://opencode.ai/install | bash'."
+            default:
+                errMsg = "CLI executable '\(config.command)' for \(config.type.displayName) was not found in PATH or standard system directories. Please ensure it is installed and executable."
+            }
+            state = .error(errMsg)
+            print("[ACP] \(errMsg)")
+            eventContinuation?.yield(.error(errMsg))
+            eventContinuation?.finish()
+            return
+        }
+        
         let process = Process()
         let stdin = Pipe()
         let stdout = Pipe()
         let stderr = Pipe()
         
         // Configure process based on agent type
-        configureProcess(process, task: task, workspacePath: workspacePath)
+        configureProcess(process, executablePath: resolvedExecutable, task: task, workspacePath: workspacePath)
         
         process.standardInput = stdin
         process.standardOutput = stdout
@@ -203,10 +225,8 @@ class ACPAgentSession: ObservableObject, Identifiable {
     
     // MARK: - Process Configuration
     
-    private func configureProcess(_ process: Process, task: String, workspacePath: String) {
-        // Resolve executable path
-        let resolvedCommand = resolveCommand(config.command)
-        process.executableURL = URL(fileURLWithPath: resolvedCommand)
+    private func configureProcess(_ process: Process, executablePath: String, task: String, workspacePath: String) {
+        process.executableURL = URL(fileURLWithPath: executablePath)
         process.currentDirectoryURL = URL(fileURLWithPath: workspacePath)
         
         // Build environment
@@ -251,8 +271,7 @@ class ACPAgentSession: ObservableObject, Identifiable {
         var args = [
             "-p", task,
             "--output-format", "stream-json",
-            "--verbose",
-            "--include-partial-messages"
+            "--verbose"
         ]
         
         if let model = model, !model.isEmpty {
@@ -336,29 +355,8 @@ class ACPAgentSession: ObservableObject, Identifiable {
     }
     
     /// Resolve command name to full path
-    private func resolveCommand(_ command: String) -> String {
-        // If already an absolute path, use it
-        if command.hasPrefix("/") { return command }
-        
-        // Try common locations
-        let searchPaths = [
-            "/opt/homebrew/bin/",
-            "/usr/local/bin/",
-            "\(FileManager.default.homeDirectoryForCurrentUser.path)/.local/bin/",
-            "\(FileManager.default.homeDirectoryForCurrentUser.path)/.opencode/bin/",
-            "\(FileManager.default.homeDirectoryForCurrentUser.path)/.cargo/bin/",
-            "/usr/bin/"
-        ]
-        
-        for path in searchPaths {
-            let full = path + command
-            if FileManager.default.isExecutableFile(atPath: full) {
-                return full
-            }
-        }
-        
-        // Fallback: try `which` via shell
-        return command
+    private func resolveCommand(_ command: String) -> String? {
+        return ACPHostService.resolveExecutablePath(command)
     }
     
     // MARK: - Stream Processing
@@ -478,53 +476,63 @@ class ACPHostService: ObservableObject {
         }
     }
     
+    /// Resolve command name or path to a verified executable path on disk
+    static func resolveExecutablePath(_ command: String) -> String? {
+        let trimmed = command.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return nil }
+        
+        // If already an absolute path, verify it is an executable file
+        if trimmed.hasPrefix("/") {
+            return FileManager.default.isExecutableFile(atPath: trimmed) ? trimmed : nil
+        }
+        
+        let home = FileManager.default.homeDirectoryForCurrentUser.path
+        let checkPaths = [
+            "\(home)/.local/bin/\(trimmed)",
+            "\(home)/.opencode/bin/\(trimmed)",
+            "/opt/homebrew/bin/\(trimmed)",
+            "/usr/local/bin/\(trimmed)",
+            "\(home)/.cargo/bin/\(trimmed)",
+            "\(home)/.bun/bin/\(trimmed)",
+            "\(home)/.npm-global/bin/\(trimmed)",
+            "/usr/bin/\(trimmed)"
+        ]
+        
+        for p in checkPaths {
+            if FileManager.default.isExecutableFile(atPath: p) {
+                return p
+            }
+        }
+        
+        // Search via /usr/bin/which
+        let process = Process()
+        let pipe = Pipe()
+        process.executableURL = URL(fileURLWithPath: "/usr/bin/which")
+        process.arguments = [trimmed]
+        process.standardOutput = pipe
+        process.standardError = FileHandle.nullDevice
+        
+        do {
+            try process.run()
+            process.waitUntilExit()
+            if process.terminationStatus == 0 {
+                let data = pipe.fileHandleForReading.readDataToEndOfFile()
+                if let path = String(data: data, encoding: .utf8)?.trimmingCharacters(in: .whitespacesAndNewlines),
+                   !path.isEmpty, FileManager.default.isExecutableFile(atPath: path) {
+                    return path
+                }
+            }
+        } catch {}
+        
+        return nil
+    }
+    
     /// Detect a single agent type
     private func detectAgent(_ type: ACPAgentType) {
         let command = type.defaultCommand
         guard !command.isEmpty else { return }
         
-        let home = FileManager.default.homeDirectoryForCurrentUser.path
-        let checkPaths = [
-            "\(home)/.local/bin/\(command)",
-            "\(home)/.opencode/bin/\(command)",
-            "/opt/homebrew/bin/\(command)",
-            "/usr/local/bin/\(command)",
-            "\(home)/.cargo/bin/\(command)",
-            "/usr/bin/\(command)"
-        ]
-        
-        var resolvedPath: String? = nil
-        for p in checkPaths {
-            if FileManager.default.isExecutableFile(atPath: p) {
-                resolvedPath = p
-                break
-            }
-        }
-        
-        if resolvedPath == nil {
-            // Use /usr/bin/which to find the binary
-            let process = Process()
-            let pipe = Pipe()
-            process.executableURL = URL(fileURLWithPath: "/usr/bin/which")
-            process.arguments = [command]
-            process.standardOutput = pipe
-            process.standardError = FileHandle.nullDevice
-            
-            do {
-                try process.run()
-                process.waitUntilExit()
-                
-                if process.terminationStatus == 0 {
-                    let data = pipe.fileHandleForReading.readDataToEndOfFile()
-                    if let path = String(data: data, encoding: .utf8)?.trimmingCharacters(in: .whitespacesAndNewlines),
-                       !path.isEmpty, FileManager.default.isExecutableFile(atPath: path) {
-                        resolvedPath = path
-                    }
-                }
-            } catch {}
-        }
-        
-        if let path = resolvedPath {
+        if let path = Self.resolveExecutablePath(command) {
             detectedAgents[type] = path
             print("[ACP] Detected \(type.displayName) at \(path)")
             if !registeredConfigs.contains(where: { $0.type == type }) {
@@ -532,6 +540,8 @@ class ACPHostService: ObservableObject {
                 registeredConfigs.append(cfg)
                 saveConfigs()
             }
+        } else {
+            detectedAgents.removeValue(forKey: type)
         }
     }
     
