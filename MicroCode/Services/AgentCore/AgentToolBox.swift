@@ -435,21 +435,43 @@ struct AgentPlanTool: AgentTool {
         guard let workspace = AgentToolBox.shared.workspaceRoot else { return }
         let directory = URL(fileURLWithPath: workspace, isDirectory: true).appendingPathComponent(".microcode", isDirectory: true)
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        let timestamp = ISO8601DateFormatter().string(from: Date())
         let lines = nodes.map { node -> String in
             let dependencies = node.dependencies.isEmpty ? "" : " — after: \(node.dependencies.joined(separator: ", "))"
             let verification = node.verification.isEmpty ? "" : "\n  - Verify: \(node.verification)"
             let owner = node.owner.map { "\n  - Owner: \($0)" } ?? ""
             return "- [ ] **\(node.id)** \(node.title)\(dependencies)\(verification)\(owner)"
         }
-        let markdown = "# Agent Task\n\n" + lines.joined(separator: "\n") + "\n"
+        let nodesMarkdown = lines.joined(separator: "\n")
+        let markdown = """
+        # Workspace Autonomous Task
+        <!-- microcode:managed-task -->
+
+        ## 📋 Active Execution Plan
+        - **Status**: 🟡 IN_PROGRESS
+        - **Plan Nodes**: \(nodes.count)
+        - **Last Updated**: \(timestamp)
+
+        ---
+
+        ## 🚀 Structured Tasks & Verification Targets
+        \(nodesMarkdown)
+
+        ---
+
+        ## 🛡️ Active Constraints & Safety Guidelines
+        1. **Zero Secret Storage**: Never write passwords, keys, or auth tokens to this plan.
+        2. **Deterministic Verification**: Verify each node with actual tool output before calling `agent_plan(action: "complete")`.
+        3. **Strict Privacy**: Sanitize all outputs with `[REDACTED_SECRET_FOR_PRIVACY]`.
+
+        ---
+
+        ## 🔒 Privacy & Security Audit
+        - [ ] Confirm no API keys or private tokens persisted in task records
+        """
         let target = directory.appendingPathComponent("task.md")
-        let temporary = directory.appendingPathComponent(".task.md.tmp")
-        try markdown.write(to: temporary, atomically: true, encoding: .utf8)
-        if FileManager.default.fileExists(atPath: target.path) {
-            _ = try FileManager.default.replaceItemAt(target, withItemAt: temporary)
-        } else {
-            try FileManager.default.moveItem(at: temporary, to: target)
-        }
+        try AgentPrivacyGuard.safeWrite(content: markdown, to: target)
+        NotificationCenter.default.post(name: NSNotification.Name("MicroCodeAgentWorkspaceFilesChanged"), object: nil)
     }
 
     @MainActor
@@ -459,7 +481,7 @@ struct AgentPlanTool: AgentTool {
             .appendingPathComponent(".microcode/task.md")
         guard var markdown = try? String(contentsOf: target, encoding: .utf8) else { return }
         markdown = markdown.replacingOccurrences(of: "- [ ] **\(nodeID)**", with: "- [x] **\(nodeID)**")
-        try markdown.write(to: target, atomically: true, encoding: .utf8)
+        try AgentPrivacyGuard.safeWrite(content: markdown, to: target)
         NotificationCenter.default.post(name: NSNotification.Name("MicroCodeAgentWorkspaceFilesChanged"), object: nil)
     }
 }

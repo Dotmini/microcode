@@ -19,7 +19,10 @@ done
 
 # 1. Build Swift (assuming Rust is built or handled separately/before)
 # We assume Rust lib is at backend/target/debug/libmicrocode_embedded.a
-echo "🏗️ Building Swift frontend..."
+echo "🏗️ Building Swift frontend on External SSD..."
+export TMPDIR="${TMPDIR:-/Volumes/MicroCodeBuild/tmp}"
+mkdir -p "$TMPDIR"
+
 swift build -c debug \
     -Xlinker -Lbackend/target/debug -Xlinker -L/Volumes/MicroCodeBuild/cargo-target/release -Xlinker -L/Volumes/MicroCodeBuild/cargo-target/debug -Xlinker -lmicrocode_embedded \
     -Xlinker -Lmicrocode_core/target/release \
@@ -29,10 +32,12 @@ swift build -c debug \
     -Xlinker -framework -Xlinker CoreFoundation \
     -Xlinker -headerpad_max_install_names
 
-# 2. Create Bundle
-BUNDLE_NAME="MicroCode.app"
-echo "📦 Creating Bundle: $BUNDLE_NAME"
-rm -rf "$BUNDLE_NAME"
+# 2. Create Bundle on External SSD
+EXTERNAL_BUNDLE="/Volumes/MicroCodeBuild/apps/MicroCode.app"
+mkdir -p "/Volumes/MicroCodeBuild/apps"
+rm -rf "$EXTERNAL_BUNDLE"
+BUNDLE_NAME="$EXTERNAL_BUNDLE"
+echo "📦 Creating Bundle on External SSD: $BUNDLE_NAME"
 mkdir -p "$BUNDLE_NAME/Contents/MacOS"
 mkdir -p "$BUNDLE_NAME/Contents/Resources"
 
@@ -88,6 +93,12 @@ cat > "$BUNDLE_NAME/Contents/Info.plist" <<EOF
     <true/>
     <key>NSScreenCaptureUsageDescription</key>
     <string>MicroCode captures only the Apple Device Hub window you select to display an interactive iOS Simulator beside your chat.</string>
+    <key>NSCameraUsageDescription</key>
+    <string>MicroCode requires camera and video input access to preview and mirror physical iOS devices (iPhone and iPad) connected via USB.</string>
+    <key>NSMicrophoneUsageDescription</key>
+    <string>MicroCode requires microphone access for audio preview.</string>
+    <key>NSCameraUseContinuityCameraDeviceType</key>
+    <true/>
 </dict>
 </plist>
 EOF
@@ -131,3 +142,8 @@ fi
 echo ""
 echo "📊 Dev Bundle Size: $(du -sh "$BUNDLE_NAME" | cut -f1)"
 echo "✅ Dev Bundle Ready: $BUNDLE_NAME"
+
+# Symlink to root workspace so standard open / shortcuts work with 0 disk overhead on internal drive
+rm -rf "MicroCode.app"
+ln -sfn "$BUNDLE_NAME" "MicroCode.app"
+echo "🔗 Workspace symlink updated: MicroCode.app -> $BUNDLE_NAME"

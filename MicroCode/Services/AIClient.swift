@@ -57,15 +57,15 @@ enum StreamableAIProvider: String, CaseIterable {
     
     var defaultModel: String {
         switch self {
-        case .omni: return "gemini-2.5-pro"
+        case .omni: return "gpt-6-astra"
         case .anthropic: return "claude-3-7-sonnet"
-        case .openai: return "gpt-4o"
-        case .gemini: return "gemini-2.5-flash"
-        case .deepseek: return "deepseek-chat"
+        case .openai: return "gpt-6-astra"
+        case .gemini: return "gemini-2.5-pro"
+        case .deepseek: return "deepseek-v4-flash"
         case .qwen: return "qwen/qwen-2.5-coder-32b-instruct"
         case .grok: return "grok-3"
         case .glm: return "glm-4-plus"
-        case .copilot: return "gpt-4o"
+        case .copilot: return "claude-3-7-sonnet"
         case .local: return LocalLLMService.cachedModel
         }
     }
@@ -228,16 +228,18 @@ final class AIClient: ObservableObject {
         let lower = candidate.lowercased()
         
         if provider == .deepseek {
-            // Official DeepSeek API supports deepseek-chat (V3) and deepseek-reasoner (R1)
+            if lower == "deepseek" || lower.isEmpty {
+                return "deepseek-v4-flash"
+            }
             if lower.contains("reasoner") || lower.contains("r1") {
                 return "deepseek-reasoner"
             }
-            return "deepseek-chat"
+            return candidate
         } else if provider == .gemini {
-            if lower.contains("pro") {
+            if lower == "gemini" || lower.isEmpty {
                 return "gemini-2.5-pro"
             }
-            return "gemini-2.5-flash"
+            return candidate
         }
         return candidate
     }
@@ -652,17 +654,17 @@ final class AIClient: ObservableObject {
     
     private func maxOutputTokens(for model: String) -> Int {
         let lower = model.lowercased()
-        if lower.contains("gemini-2.5") || lower.contains("gemini-1.5") {
+        if lower.contains("gemini-3") || lower.contains("gemini-2.5") || lower.contains("gemini-1.5") {
             return 65536
-        } else if lower.contains("claude-3-7") {
+        } else if lower.contains("claude-sonnet-4") || lower.contains("claude-opus-4") || lower.contains("claude-3-7") {
             return 64000
         } else if lower.contains("claude-3-5") {
             return 8192
-        } else if lower.contains("o1") || lower.contains("o3") {
+        } else if lower.contains("o1") || lower.contains("o3") || lower.contains("gpt-6") || lower.contains("gpt-5") {
             return 65536
-        } else if lower.contains("gpt-4o") {
+        } else if lower.contains("gpt-4o") || lower.contains("gpt-4.5") {
             return 16384
-        } else if lower.contains("deepseek-reasoner") {
+        } else if lower.contains("deepseek-reasoner") || lower.contains("deepseek-v4") {
             return 64000
         } else if lower.contains("deepseek") {
             return 16384
@@ -788,6 +790,8 @@ final class AIClient: ObservableObject {
             throw NSError(domain: "AIClient", code: code, userInfo: [NSLocalizedDescriptionKey: detailedMsg])
         }
         
+        var isStreamingReasoning = false
+        
         for try await line in bytes.lines {
             if Task.isCancelled { break }
             guard line.hasPrefix("data: ") else { continue }
@@ -800,19 +804,41 @@ final class AIClient: ObservableObject {
                   let parts = content["parts"] as? [[String: Any]] else { continue }
             
             for part in parts {
+                let isThought = (part["thought"] as? Bool) ?? false
                 if let text = part["text"] as? String {
-                    appendStreamToken(text, onToken: onToken)
+                    if isThought {
+                        if !isStreamingReasoning {
+                            isStreamingReasoning = true
+                            appendStreamToken("<thought>", onToken: onToken)
+                        }
+                        appendStreamToken(text, onToken: onToken)
+                    } else {
+                        if isStreamingReasoning {
+                            isStreamingReasoning = false
+                            appendStreamToken("</thought>\n\n", onToken: onToken)
+                        }
+                        appendStreamToken(text, onToken: onToken)
+                    }
                     if detectStreamRepetitionLoop(currentStreamedText) {
                         NSLog("⚠️ [AIClient] Streaming repetition loop detected in streamGemini. Breaking stream.")
                         break
                     }
                 } else if let fc = part["functionCall"] as? [String: Any],
                           let name = fc["name"] as? String {
+                    if isStreamingReasoning {
+                        isStreamingReasoning = false
+                        appendStreamToken("</thought>\n\n", onToken: onToken)
+                    }
                     let args = fc["args"] as? [String: Any] ?? [:]
                     let toolCall = AIToolCall(id: UUID().uuidString, name: name, arguments: args)
                     onToolCall?(toolCall)
                 }
             }
+        }
+        
+        if isStreamingReasoning {
+            isStreamingReasoning = false
+            appendStreamToken("</thought>\n\n", onToken: onToken)
         }
     }
     
@@ -896,15 +922,18 @@ final class AIClient: ObservableObject {
         messages.append(["role": "user", "content": contentArray])
         
         let effectiveModel = normalizeModelName(model, provider: StreamableAIProvider.detect(from: model), baseURL: baseURL)
+        let isReasoning = effectiveModel.hasPrefix("o1") || effectiveModel.hasPrefix("o3") || effectiveModel.hasPrefix("o4")
         var body: [String: Any] = [
             "model": effectiveModel,
             "messages": messages,
-            "stream": true,
-            "temperature": 0.7,
-            "frequency_penalty": 0.3,
-            "presence_penalty": 0.2,
-            "max_tokens": maxOutputTokens(for: effectiveModel)
+            "stream": true
         ]
+        if isReasoning {
+            body["max_completion_tokens"] = maxOutputTokens(for: effectiveModel)
+        } else {
+            body["temperature"] = 0.7
+            body["max_tokens"] = maxOutputTokens(for: effectiveModel)
+        }
         
         if let tools = tools, !tools.isEmpty {
             body["tools"] = tools.map { ["type": "function", "function": $0] as [String: Any] }
@@ -935,6 +964,7 @@ final class AIClient: ObservableObject {
         
         // Buffer for streaming tool calls
         var toolCallBuffers: [String: (name: String, args: String)] = [:]
+        var isStreamingReasoning = false
         
         for try await line in bytes.lines {
             if Task.isCancelled { break }
@@ -946,10 +976,18 @@ final class AIClient: ObservableObject {
                   let choices = json["choices"] as? [[String: Any]],
                   let delta = choices.first?["delta"] as? [String: Any] else { continue }
             
-            // Reasoning tokens (DeepSeek R1 / thinking models)
+            // Reasoning tokens (DeepSeek R1 / thinking models / GLM)
             if let reasoning = delta["reasoning_content"] as? String, !reasoning.isEmpty {
+                if !isStreamingReasoning {
+                    isStreamingReasoning = true
+                    appendStreamToken("<thought>", onToken: onToken)
+                }
                 appendStreamToken(reasoning, onToken: onToken)
             } else if let content = delta["content"] as? String {
+                if isStreamingReasoning {
+                    isStreamingReasoning = false
+                    appendStreamToken("</thought>\n\n", onToken: onToken)
+                }
                 appendStreamToken(content, onToken: onToken)
             }
             
@@ -984,6 +1022,11 @@ final class AIClient: ObservableObject {
             }
         }
         
+        if isStreamingReasoning {
+            isStreamingReasoning = false
+            appendStreamToken("</thought>\n\n", onToken: onToken)
+        }
+        
         // Flush any remaining buffered tool calls (e.g. if provider sent finish_reason: "stop" or nil)
         if !toolCallBuffers.isEmpty {
             for (_, buffer) in toolCallBuffers {
@@ -1007,7 +1050,6 @@ final class AIClient: ObservableObject {
         request.setValue(apiKey, forHTTPHeaderField: "x-api-key")
         request.setValue("Bearer \(apiKey)", forHTTPHeaderField: "Authorization") // Required for Dotmini Proxy Auth
         request.setValue("2023-06-01", forHTTPHeaderField: "anthropic-version")
-        request.setValue("prompt-caching-2024-07-25", forHTTPHeaderField: "anthropic-beta")
         
         var allMessages: [[String: Any]] = []
         for msg in conversationHistory { allMessages.append(["role": msg.role, "content": msg.content]) }
@@ -1251,14 +1293,17 @@ final class AIClient: ObservableObject {
             apiMessages.append(["role": role, "content": content])
         }
         
+        let isReasoning = model.hasPrefix("o1") || model.hasPrefix("o3") || model.hasPrefix("o4")
         var body: [String: Any] = [
             "model": model,
-            "messages": apiMessages,
-            "temperature": 0.7,
-            "frequency_penalty": 0.3,
-            "presence_penalty": 0.2,
-            "max_tokens": maxOutputTokens(for: model)
+            "messages": apiMessages
         ]
+        if isReasoning {
+            body["max_completion_tokens"] = maxOutputTokens(for: model)
+        } else {
+            body["temperature"] = 0.7
+            body["max_tokens"] = maxOutputTokens(for: model)
+        }
         if let tools = tools, !tools.isEmpty { body["tools"] = tools.map { ["type": "function", "function": $0] as [String: Any] } }
         
         request.httpBody = try JSONSerialization.data(withJSONObject: body)
@@ -1290,7 +1335,14 @@ final class AIClient: ObservableObject {
         
         let content = message["content"] as? String ?? ""
         let reasoning = message["reasoning_content"] as? String ?? ""
-        let text = content.isEmpty ? reasoning : content
+        let text: String
+        if !reasoning.isEmpty && !content.isEmpty {
+            text = "<thought>\(reasoning)</thought>\n\n\(content)"
+        } else if !reasoning.isEmpty {
+            text = "<thought>\(reasoning)</thought>"
+        } else {
+            text = content
+        }
         var toolCalls: [AIToolCall] = []
         if let tcs = message["tool_calls"] as? [[String: Any]] {
             for tc in tcs {
@@ -1313,7 +1365,6 @@ final class AIClient: ObservableObject {
         request.setValue(apiKey, forHTTPHeaderField: "x-api-key")
         request.setValue("Bearer \(apiKey)", forHTTPHeaderField: "Authorization") // Required for Dotmini Proxy Auth
         request.setValue("2023-06-01", forHTTPHeaderField: "anthropic-version")
-        request.setValue("prompt-caching-2024-07-25", forHTTPHeaderField: "anthropic-beta")
         
         var apiMessages: [[String: Any]] = []
         for msg in messages {

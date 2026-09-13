@@ -126,6 +126,9 @@ class AgentService: ObservableObject {
             guard let self = self else { return }
             self.isCancelled = true
             self.aiClient.cancelStream()
+            Task { @MainActor in
+                ACPHostService.shared.stopActiveAgent()
+            }
             self.isLoading = false
             self.agentPhase = .idle
             self.currentToolExecution = nil
@@ -343,10 +346,11 @@ class AgentService: ObservableObject {
             ## Workflow: Modify Code
             1. file_read → 2. replace_in_file/patch_file → 3. shell (verify) → 4. Report
             
-            ## Task Persistence & Autonomy
-            - You MUST read `.microcode/task.md` to understand your current objectives.
-            - Once you complete a task, YOU MUST edit `.microcode/task.md` to check it off (change `[ ]` to `[x]`).
-            - Always follow instructions and rules declared in `.microcode/agent.md`.
+            ## Task Persistence, Rules & Strict Privacy
+            - You MUST read `.microcode/task.md` to understand your current objectives and active plan phases.
+            - Once you complete a task phase or item, YOU MUST edit `.microcode/task.md` to check it off (change `[ ]` to `[x]`) and record verification evidence.
+            - Always follow instructions, prohibitions, and rules declared in `.microcode/agent.md`.
+            - 🔒 ZERO-PRIVACY LEAKAGE MANDATE: NEVER write, log, or persist API keys, passwords, bearer tokens, or sensitive credentials in `.microcode/` files or workspace code. Always sanitize secrets with [REDACTED_SECRET_FOR_PRIVACY].
             
             ## SubAgent Orchestration & Multi-Model Combo Delegation
             You have full authority to assess complex tasks and deploy specialized SubAgents with tailored models:
@@ -436,15 +440,17 @@ class AgentService: ObservableObject {
             prompt += "\n\n\(teamTaskContext)"
         }
         
-        // Inject agent.md (compressed)
+        // Inject agent.md (compressed & sanitized)
         if domain == .software, !isChatMode, let agentMd = agentMdContent, !agentMd.isEmpty {
-            let compressed = tokenOptimizer.compressText(agentMd, targetTokens: 800)
+            let sanitizedAgentMd = AgentPrivacyGuard.sanitize(agentMd)
+            let compressed = tokenOptimizer.compressText(sanitizedAgentMd, targetTokens: 1500)
             prompt += "\n\n## agent.md\n\(compressed)"
         }
         
-        // Inject task.md (compressed)
+        // Inject task.md (compressed & sanitized)
         if domain == .software, !isChatMode, let taskMd = taskMdContent, !taskMd.isEmpty {
-            let compressed = tokenOptimizer.compressText(taskMd, targetTokens: 500)
+            let sanitizedTaskMd = AgentPrivacyGuard.sanitize(taskMd)
+            let compressed = tokenOptimizer.compressText(sanitizedTaskMd, targetTokens: 1200)
             prompt += "\n\n## task.md\n\(compressed)"
         }
         
@@ -452,6 +458,21 @@ class AgentService: ObservableObject {
         let skillsSnippet = AgentSkillsStore.shared.activeSkillsPromptSnippet()
         if !skillsSnippet.isEmpty {
             prompt += skillsSnippet
+        }
+
+        // Inject Multi-Platform Rules (Cursor .cursorrules / .cursor/rules/*.mdc, Windsurf, Cline, Copilot, Zed)
+        if domain == .software, !isChatMode {
+            var activeFiles: [String] = []
+            if let file = editorContext?.activeFile {
+                activeFiles.append(file)
+            }
+            if let openFiles = editorContext?.openFiles {
+                activeFiles.append(contentsOf: openFiles)
+            }
+            let multiPlatformRules = MultiPlatformRulesEngine.shared.formatPromptSection(forFiles: activeFiles, maxTokens: 800)
+            if !multiPlatformRules.isEmpty {
+                prompt += multiPlatformRules
+            }
         }
 
         prompt += "\n\n## Provider Harness Contract\n\(providerHarnessProfile(for: provider, model: model))"
@@ -473,6 +494,20 @@ class AgentService: ObservableObject {
             return "Claude / \(model): use native tool calls for intended actions; do not put tool JSON in prose unless native tools are unavailable.\n\(common)"
         case .deepseek:
             return "DeepSeek / \(model): prefer the OpenAI-compatible structured tool interface and use a JSON fallback only when native calls are unavailable.\n\(common)"
+        case .glm:
+            return """
+            Zhipu AI GLM / \(model):
+            - Full bilingual proficiency (Thai, English, Chinese); provide exact, high-density technical solutions.
+            - For coding tasks and CodeGeeX-4: inspect existing source before editing, emit surgical unified edits, and test with execution tools.
+            - Follow OpenAI-compatible structured tool calling protocol; never leak tool signatures into user-visible prose.
+            \(common)
+            """
+        case .qwen:
+            return "Qwen / \(model): maintain strict code precision, respect workspace rules, and utilize structured tool calls.\n\(common)"
+        case .gemini:
+            return "Gemini / \(model): leverage multimodal analysis, large-context workspace comprehension, and direct tool calling.\n\(common)"
+        case .copilot:
+            return "GitHub Copilot / \(model): adhere strictly to editor conventions, respect repository structure, and emit concise diffs.\n\(common)"
         default:
             return "\(provider.rawValue) / \(model):\n\(common)"
         }
@@ -565,6 +600,7 @@ class AgentService: ObservableObject {
         // scientific research session. Science has its own indexed evidence.
         if activeScope == .editor {
             loadAgentWorkspaceFiles(path)
+            MultiPlatformRulesEngine.shared.refresh(workspaceRoot: path)
             MCPClient.shared.start(workspacePath: path)
         } else {
             agentMdContent = nil
@@ -640,6 +676,125 @@ class AgentService: ObservableObject {
         return compressed
     }
     
+    // MARK: - Advanced .microcode Templates & Directives
+    
+    public static func defaultAgentMarkdown() -> String {
+        return """
+        # MicroCode Workspace Agent Directive
+        <!-- microcode:managed-agent -->
+
+        ## 1. Operating Identity & Core Mandate
+        - You are the autonomous MicroCode workspace engineer and code orchestrator.
+        - You have direct access to native developer tools (`file_read`, `replace_in_file`, `patch_file`, `shell`, `device_runtime`, `subagent_orchestration`).
+        - Your core duty is delivering reliable, high-stability code changes backed by verified test and build results.
+
+        ## 2. Strict Prohibitions & Hard Constraints (ข้อห้ามเด็ดขาด - DO NOTs)
+        - 🚫 **STRICT ZERO-PRIVACY LEAKAGE (ห้ามเก็บข้อมูลส่วนตัว/รหัสลับเด็ดขาด)**:
+          - NEVER write, log, commit, or persist API keys (`sk-...`, `AIza...`, `ghp_...`), auth tokens, bearer tokens, passwords, private keys, SSH certificates, session cookies, database credentials, or Personally Identifiable Information (PII) into `.microcode/agent.md`, `.microcode/task.md`, `.microcode/walkthrough.md`, git history, or any workspace file.
+          - All credentials must be accessed strictly via OS Keychain, `.env` (gitignored), or environment variables.
+          - Always sanitize and redact sensitive values with `[REDACTED_SECRET_FOR_PRIVACY]`.
+        - 🚫 **NO Destructive / Irreversible Operations**:
+          - Never execute destructive commands without confirmation (`rm -rf /`, `rm -rf ~`, `DROP DATABASE`, `mkfs`, force-killing critical system daemons).
+          - Never run `git reset --hard`, `git clean -fd`, or force-push without explicit user request.
+        - 🚫 **NO Phantom / Hallucinated Verification**:
+          - Never claim that code compiles, tests pass, or bugs are fixed without real terminal tool execution evidence.
+          - Never ask the user to manually run verification steps or press "Run" when native agent tools are available.
+        - 🚫 **NO Half-Finished Placeholder Implementations**:
+          - Never leave unfinished stubs (`// TODO: implement later`, `pass`, `...`) in production logic.
+        - 🚫 **NO Scope Creep**:
+          - Do not rewrite unrelated files or introduce unrequested third-party dependencies outside the assigned task scope.
+
+        ## 3. Four-Phase Autonomous Execution Protocol
+        Every non-trivial task must progress through four sequential phases:
+        1. **Phase 1: Deep Workspace Inspection & Baseline Diagnostics**
+           - Read relevant source files using native read tools before proposing edits.
+           - Inspect compiler diagnostics, LSP errors, dependencies, and git status.
+           - Formulate a clear plan with dependencies before modifying code.
+        2. **Phase 2: Atomic Implementation**
+           - Apply surgical, localized edits (`replace_in_file`, `patch_file`, or focused rewrites).
+           - Maintain consistent coding style, indentation, architecture patterns, and naming conventions.
+           - Guard against syntax errors and type mismatches.
+        3. **Phase 3: Deterministic Verification & Validation**
+           - Run compilation commands (e.g. `swift build`, `cargo check`, `npm run build`, `gradle compileDebugSources`).
+           - Run unit tests and integration tests relevant to the changed modules.
+           - Check device runtimes or emulators when developing mobile or cross-platform code.
+           - Capture clean evidence (exit code, build duration, test pass counts).
+        4. **Phase 4: Privacy & Git Safety Audit**
+           - Review git status and diff (`git diff`) before finalizing.
+           - Verify that NO private secrets or credentials have been written into `.microcode/` or workspace files.
+           - Update `.microcode/task.md` checklist with completion evidence.
+
+        ## 4. Multi-Model Collaboration & Task Partitioning
+        - When delegating subtasks to subagents via `invoke_subagent`, each subtask must have a distinct, non-overlapping owner.
+        - Specialized roles: `architect`, `frontend_engineer`, `backend_engineer`, `bug_hunter`, `test_runner`, `security_auditor`.
+
+        ## 5. Durable Project Conventions
+        <!-- Add durable project conventions, tech stack guidelines, or architecture patterns below -->
+        """
+    }
+
+    public static func defaultTaskMarkdown(objective: String = "") -> String {
+        let safeObjective = objective.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+            ? "<!-- Describe the objective here -->"
+            : String(objective.trimmingCharacters(in: .whitespacesAndNewlines).prefix(8000))
+        let timestamp = ISO8601DateFormatter().string(from: Date())
+        
+        return """
+        # Workspace Autonomous Task
+        <!-- microcode:managed-task -->
+
+        ## 📋 Task Overview
+        - **Objective**: \(safeObjective)
+        - **Status**: 🟡 IN_PROGRESS  <!-- PENDING | IN_PROGRESS | COMPLETED | FAILED -->
+        - **Active Owner**: main
+        - **Last Updated**: \(timestamp)
+
+        ---
+
+        ## 🎯 Scope Boundaries
+        - **In Scope**: Targeted changes requested for this objective.
+        - **Out of Scope**: Unrelated refactoring, third-party library additions, modifying secrets.
+
+        ---
+
+        ## 🚀 Execution Phases & Structured TODOs
+
+        ### Phase 1: Inspection & Baseline Analysis
+        - [ ] **1.1** Inspect workspace files, dependencies, and existing architectural patterns.
+        - [ ] **1.2** Check compiler diagnostics, LSP errors, and current git status.
+        - [ ] **1.3** Formulate atomic changes and verify preconditions.
+
+        ### Phase 2: Implementation & Code Changes
+        - [ ] **2.1** Implement core changes surgically using targeted edit tools.
+        - [ ] **2.2** Ensure full backward compatibility and adhere to project code style.
+        - [ ] **2.3** Preserve all existing functionality and comments.
+
+        ### Phase 3: Verification & Evidence Capture
+        - [ ] **3.1** Run build/compilation tool and ensure zero errors.
+        - [ ] **3.2** Run test suite to verify no regressions.
+        - [ ] **3.3** Verify live app behavior or inspect UI elements.
+
+        ### Phase 4: Privacy Audit & Completion
+        - [ ] **4.1** Verify git diff to ensure no unexpected files were touched.
+        - [ ] **4.2** 🔒 **PRIVACY CHECK**: Confirm ZERO API keys, tokens, credentials, or PII are present in `.microcode/` or project files.
+        - [ ] **4.3** Mark task as COMPLETED and report verified results.
+
+        ---
+
+        ## 🛡️ Active Constraints & Safety Guidelines
+        1. **Zero Secret Storage**: Never write passwords, keys, or auth headers into this file.
+        2. **Autonomous Execution**: Run build and test tools directly; do not offload execution to the user.
+        3. **Evidence-Based Completion**: Mark items `[x]` ONLY after tool verification has succeeded.
+
+        ---
+
+        ## 📊 Verification Log
+        - Baseline check: Pending
+        - Build status: Pending
+        - Privacy audit: Clean
+        """
+    }
+    
     // MARK: - Load agent.md / task.md / AI.arx
     
     func reloadAgentWorkspaceFiles() {
@@ -669,54 +824,26 @@ class AgentService: ObservableObject {
         
         // Load or create agent.md
         let agentMdPath = (microcodeDir as NSString).appendingPathComponent("agent.md")
+        let agentURL = URL(fileURLWithPath: agentMdPath)
         if fm.fileExists(atPath: agentMdPath) {
             agentMdContent = try? String(contentsOfFile: agentMdPath, encoding: .utf8)
             logActivity(.info, "Loaded agent.md")
         } else {
-            let defaultAgentMd = """
-            # Agent Instructions
-            
-            ## Project Context
-            This file provides project-level instructions to the MicroCode AI Agent.
-            Edit this file to customize how the agent behaves in this workspace.
-            
-            ## Rules
-            - Follow existing code style and conventions
-            - Write tests for new features
-            - Use descriptive commit messages
-            
-            ## Tech Stack
-            <!-- Add your project's tech stack here -->
-            
-            ## Important Files
-            <!-- List key files the agent should know about -->
-            """
-            try? defaultAgentMd.write(toFile: agentMdPath, atomically: true, encoding: .utf8)
+            let defaultAgentMd = Self.defaultAgentMarkdown()
+            try? AgentPrivacyGuard.safeWrite(content: defaultAgentMd, to: agentURL)
             agentMdContent = defaultAgentMd
             logActivity(.info, "Created agent.md")
         }
         
         // Load or create task.md
         let taskMdPath = (microcodeDir as NSString).appendingPathComponent("task.md")
+        let taskURL = URL(fileURLWithPath: taskMdPath)
         if fm.fileExists(atPath: taskMdPath) {
             taskMdContent = try? String(contentsOfFile: taskMdPath, encoding: .utf8)
             logActivity(.info, "Loaded task.md")
         } else {
-            let defaultTaskMd = """
-            # Current Task
-            
-            ## Objective
-            <!-- Describe the current task here -->
-            
-            ## Steps
-            - [ ] Step 1
-            - [ ] Step 2
-            - [ ] Step 3
-            
-            ## Notes
-            <!-- Any additional context for the AI agent -->
-            """
-            try? defaultTaskMd.write(toFile: taskMdPath, atomically: true, encoding: .utf8)
+            let defaultTaskMd = Self.defaultTaskMarkdown()
+            try? AgentPrivacyGuard.safeWrite(content: defaultTaskMd, to: taskURL)
             taskMdContent = defaultTaskMd
             logActivity(.info, "Created task.md")
         }
@@ -825,6 +952,16 @@ class AgentService: ObservableObject {
         filesModified = []
         suggestedAction = nil
         logActivity(.thinking, "Processing request...")
+        
+        // Universal Context Protocol & Mentions Expansion (@file, @git, @diagnostics, @symbol, @rules)
+        let mentionContext = await AgentContextProtocolBridge.shared.expandMentions(
+            prompt: content,
+            workspaceRoot: toolBox.workspaceRoot
+        )
+        let effectiveContent = mentionContext.expandedPrompt
+        if !mentionContext.resolvedMentions.isEmpty {
+            logActivity(.info, "Bridge: Expanded mentions: \(mentionContext.resolvedMentions.joined(separator: ", "))")
+        }
         
         // Add user message on main actor
         let userMessage = AgentMessageModel(
@@ -982,7 +1119,7 @@ class AgentService: ObservableObject {
                     var text = ""
                     
                     aiClient.sendMessage(
-                        prompt: content,
+                        prompt: effectiveContent,
                         attachments: attachments,
                         systemPrompt: optimizedSystemPrompt,
                         conversationHistory: history,
@@ -2031,24 +2168,12 @@ class AgentService: ObservableObject {
 
             let existingAgent = (try? String(contentsOf: agentURL, encoding: .utf8)) ?? ""
             let isLegacyBoilerplate = existingAgent.contains("This file provides project-level instructions to the MicroCode AI Agent.")
-                && existingAgent.contains("<!-- Add your project's tech stack here -->")
+                || existingAgent.contains("<!-- Add your project's tech stack here -->")
+                || (existingAgent.contains("<!-- microcode:managed-agent -->") && existingAgent.count < 600)
             if existingAgent.isEmpty || isLegacyBoilerplate {
-                let agentMarkdown = """
-                # MicroCode Agent Instructions
-                <!-- microcode:managed-agent -->
-
-                ## Autonomous execution
-                - Read the workspace and this file before editing.
-                - Create and maintain `.microcode/task.md` from each user request.
-                - Execute required commands yourself; never ask the user to press Run for verification.
-                - After every source change, run the relevant build, test, diagnostic, or device command.
-                - Report only work backed by tool output.
-
-                ## Project-specific instructions
-                <!-- Add durable project conventions below this line. -->
-                """
-                try agentMarkdown.write(to: agentURL, atomically: true, encoding: .utf8)
-                logActivity(.info, "Generated .microcode/agent.md")
+                let agentMarkdown = Self.defaultAgentMarkdown()
+                try AgentPrivacyGuard.safeWrite(content: agentMarkdown, to: agentURL)
+                logActivity(.info, "Generated advanced .microcode/agent.md")
             }
 
             guard !isContinuation else {
@@ -2060,32 +2185,16 @@ class AgentService: ObservableObject {
             let isManaged = existing.contains("<!-- microcode:managed-task -->")
                 || existing.contains("<!-- Describe the current task here -->")
                 || existing.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
-            let safeObjective = String(trimmedObjective.prefix(8_000))
-            let taskSection = """
-            # Agent Task
-            <!-- microcode:managed-task -->
-
-            ## Objective
-            \(safeObjective)
-
-            ## Autonomous plan
-            - [ ] **inspect** Read instructions and inspect the relevant workspace state.
-            - [ ] **implement** Complete the requested change with native tools.
-            - [ ] **verify** Run the relevant build, test, diagnostics, or device command and record evidence.
-
-            ## Execution policy
-            The agent owns execution. Do not ask the user to run commands that the agent can run itself.
-            """
             let nextContent: String
             if isManaged {
-                nextContent = taskSection
+                nextContent = Self.defaultTaskMarkdown(objective: trimmedObjective)
             } else {
                 nextContent = existing.trimmingCharacters(in: .whitespacesAndNewlines)
                     + "\n\n---\n\n"
-                    + taskSection
+                    + Self.defaultTaskMarkdown(objective: trimmedObjective)
             }
-            try nextContent.write(to: taskURL, atomically: true, encoding: .utf8)
-            logActivity(.info, "Generated autonomous task.md from the request")
+            try AgentPrivacyGuard.safeWrite(content: nextContent, to: taskURL)
+            logActivity(.info, "Generated advanced autonomous task.md from the request")
             reloadAgentWorkspaceFiles()
         } catch {
             logActivity(.error, "Could not prepare agent task files: \(error.localizedDescription)")

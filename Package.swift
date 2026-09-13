@@ -41,7 +41,8 @@ let package = Package(
                 "Views/Design/DesignLayersPanel.swift",
                 "Views/Design/DesignToolbar.swift",
                 "Views/Design/PropertiesInspector.swift",
-                "Views/Design/DesignRulerView.swift"
+                "Views/Design/DesignRulerView.swift",
+                "Services/DeviceMetalShaders.metal"
             ],
             sources: [
                 "MicroCodeApp.swift",
@@ -84,6 +85,9 @@ let package = Package(
                 "Services/MLTrainer.swift",
                 "Views/AI/AITrainerView.swift",
                 "Views/AI/AIAgentView.swift",
+                "Views/AI/PlatformCompatibilityInspectorView.swift",
+                "Views/AI/AgentEcosystemConfigView.swift",
+                "Views/AI/AgentConnectionsView.swift",
                 "Views/TeamTasksView.swift",
                 "Views/ScienceModeView.swift",
                 "Services/ScienceService.swift",
@@ -133,7 +137,23 @@ let package = Package(
                 "Views/ExtensionSettingsView.swift",
                 "Models/AICodeReport.swift",
                 "Services/AgentCore/AgentToolBox.swift",
+                "Services/AgentCore/AgentPrivacyGuard.swift",
                 "Services/AgentCore/AppleVisionEngine.swift",
+                "Services/AgentCore/MultiPlatformRulesEngine.swift",
+                "Services/AgentCore/AgentContextProtocolBridge.swift",
+                "Services/AgentCore/ACPProtocol.swift",
+                "Services/AgentCore/ACPHostService.swift",
+                "Services/AgentCore/ACPServerService.swift",
+                "Services/AgentCore/ACPGhostTextBridge.swift",
+                "Views/AI/ACPAgentConfigView.swift",
+                "Views/AI/ACPAgentChatView.swift",
+                "Views/AI/ACPPermissionView.swift",
+                "Services/DeviceStreamDecoder.swift",
+                "Services/DeviceMetalRenderer.swift",
+                "Services/IOSDeviceCaptureService.swift",
+                "Services/IOSDeviceControlService.swift",
+                "Services/AndroidStreamService.swift",
+                "Views/PhysicalDeviceSurfaceView.swift",
                 "Services/AuthService.swift",
                 "Services/SupabaseAuthService.swift",
                 "Services/CollaborationService.swift",
@@ -196,6 +216,7 @@ let package = Package(
                 "Services/TelemetryService.swift",    // Opt-in product analytics
                 "Services/GitAuthService.swift",      // Hosting auth via secure vendor CLIs
                 "Services/AIModelCatalog.swift",       // Shared dynamic model registry
+                "Services/LocalEcosystemDiscovery.swift", // Real discovered models from Codex, AGY, Claude Code, Zed
                 "Services/DotminiPlatformKeyService.swift", // Platform API-key bridge
                 "Services/AIProviderAuthService.swift",// Multi-provider Auth + Keychain
                 "Services/KeychainManager.swift",      // Keychain CRUD + Rust FFI Bridge
@@ -222,6 +243,7 @@ let package = Package(
                 "Views/Components/InteractiveImagePreviewView.swift",
                 "Views/Components/UniversalSpreadsheetView.swift",
                 "Views/Components/InteractivePDFPreviewView.swift",
+                "Views/Components/InteractiveCodePreviewView.swift",
                 "Views/Components/VisualEffectView.swift",
                 "Views/Components/AutocompletePopupView.swift",
                 "Views/Components/DeviceFrameView.swift",
