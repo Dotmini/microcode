@@ -134,7 +134,39 @@ struct EmbeddedDeviceDockView: View {
                         .help("Flutter Hot Reload")
                     }
 
-                    if deviceRuntime.embeddedDockMode == .android {
+                    if deviceRuntime.embeddedDockMode == .android || dockService.activeTab?.kind == .android {
+                        // Hardware Skin Switcher (Samsung Note 20 Ultra / Google Pixel 9 Pro)
+                        Menu {
+                            ForEach(AndroidDeviceSkin.allCases) { skin in
+                                Button {
+                                    deviceRuntime.selectedAndroidSkin = skin
+                                } label: {
+                                    HStack {
+                                        Text(skin.rawValue)
+                                        if deviceRuntime.selectedAndroidSkin == skin {
+                                            Image(systemName: "checkmark")
+                                        }
+                                    }
+                                }
+                            }
+                        } label: {
+                            HStack(spacing: 3) {
+                                Image(systemName: "candybarphone")
+                                    .font(.system(size: 10))
+                                Text(deviceRuntime.selectedAndroidSkin.shortName)
+                                    .font(.system(size: 10, weight: .medium))
+                                Image(systemName: "chevron.down")
+                                    .font(.system(size: 7, weight: .bold))
+                                    .foregroundColor(.secondary)
+                            }
+                            .padding(.horizontal, 6)
+                            .padding(.vertical, 3)
+                            .background(Color.primary.opacity(0.08))
+                            .cornerRadius(5)
+                        }
+                        .menuStyle(.borderlessButton)
+                        .help("Select Android Hardware Frame & Skin")
+
                         Button { deviceRuntime.sendEmbeddedAndroidKey("4") } label: { Image(systemName: "chevron.left").font(.system(size: 11)) }
                             .buttonStyle(.plain).help("Android Back")
                         Button { deviceRuntime.sendEmbeddedAndroidKey("3") } label: { Image(systemName: "circle").font(.system(size: 11)) }
