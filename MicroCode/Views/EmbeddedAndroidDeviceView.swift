@@ -23,41 +23,16 @@ struct EmbeddedAndroidDeviceView: View {
                 // The real AVD screen is only the screen; Android's desktop
                 // window must not leak its black letterbox into MicroCode.
                 canvasColor
-                if let image = runtime.embeddedAndroidImage {
-                    AndroidDeviceSurface(
-                        image: image,
-                        officialFrame: runtime.embeddedAndroidFrame,
-                        availableSize: proxy.size,
-                        runtime: runtime
-                    )
-                } else {
-                    VStack(spacing: 12) {
-                        ProgressView()
-                            .controlSize(.regular)
-                        Text(runtime.embeddedAndroidStatus.isEmpty ? "Connecting to Android Emulator…" : runtime.embeddedAndroidStatus)
-                            .font(.system(size: 12, weight: .medium))
-                            .foregroundColor(.primary)
-                            .multilineTextAlignment(.center)
-                            .padding(.horizontal, 24)
-                        
-                        Button {
-                            Task {
-                                await runtime.startPreferredEmbeddedAndroid()
-                            }
-                        } label: {
-                            HStack(spacing: 6) {
-                                Image(systemName: "arrow.clockwise")
-                                Text("Attach / Retry Connection")
-                            }
-                            .font(.system(size: 11, weight: .medium))
-                        }
-                        .buttonStyle(.borderedProminent)
-                        .controlSize(.small)
-                        .padding(.top, 4)
-                    }
-                    .padding(20)
-                }
+
+                AndroidDeviceSurface(
+                    image: runtime.embeddedAndroidImage,
+                    officialFrame: runtime.embeddedAndroidFrame ?? DeviceFrameAssets.loadAndroidPixelProBezel(),
+                    officialMask: runtime.embeddedAndroidMask ?? DeviceFrameAssets.loadAndroidPixelProMask(),
+                    availableSize: proxy.size,
+                    runtime: runtime
+                )
             }
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
         }
         .background(canvasColor)
         .onAppear {
@@ -70,13 +45,14 @@ struct EmbeddedAndroidDeviceView: View {
     }
 }
 
-/// A native device host for the *real* ADB screen capture.  Its measurements
+/// A native device host for the *real* ADB screen capture. Its measurements
 /// match the installed Pixel 9 Pro Android skin: 1408 x 2974 outer frame with
-/// the 1280 x 2856 display inset at x:60, y:61.  This keeps the result flush
-/// and device-like instead of centering a naked screenshot in a black panel.
+/// the 1280 x 2856 display inset at x:60, y:61. This keeps the result flush
+/// and device-like with the authentic hardware chassis, camera punch hole, and buttons.
 private struct AndroidDeviceSurface: View {
-    let image: NSImage
+    let image: NSImage?
     let officialFrame: NSImage?
+    let officialMask: NSImage?
     let availableSize: CGSize
     @ObservedObject var runtime: DeviceRuntimeService
 
@@ -88,57 +64,104 @@ private struct AndroidDeviceSurface: View {
     private let screenY: CGFloat = 61
 
     var body: some View {
-        let frameAspect = officialFrame != nil ? (bodyWidth / bodyHeight) : (image.size.width / max(image.size.height, 1))
-        let usableWidth = max(availableSize.width - 36, 120)
-        let usableHeight = max(availableSize.height - 28, 160)
+        let frameAspect = bodyWidth / bodyHeight
+        let usableWidth = max(availableSize.width - 32, 120)
+        let usableHeight = max(availableSize.height - 24, 160)
         let frameHeight = min(usableHeight, usableWidth / frameAspect)
         let frameWidth = frameHeight * frameAspect
-        let displayWidth = officialFrame != nil ? (frameWidth * screenWidth / bodyWidth) : frameWidth
-        let displayHeight = officialFrame != nil ? (frameHeight * screenHeight / bodyHeight) : frameHeight
-        let screenOffset = officialFrame != nil ? CGSize(
+        let displayWidth = frameWidth * screenWidth / bodyWidth
+        let displayHeight = frameHeight * screenHeight / bodyHeight
+        let screenOffset = CGSize(
             width: frameWidth * ((screenX + screenWidth / 2) / bodyWidth - 0.5),
             height: frameHeight * ((screenY + screenHeight / 2) / bodyHeight - 0.5)
-        ) : .zero
+        )
         // The official Pixel 9 Pro skin declares a 109 px display radius in
-        // a 1,280 px display. This clips only the live screen; the physical
-        // chassis itself comes from Android SDK's official `back.webp` asset.
-        let screenCorner = max(displayWidth * 109 / (officialFrame != nil ? screenWidth : displayWidth), 12)
+        // a 1,280 px display.
+        let screenCorner = max(displayWidth * 109 / screenWidth, 14)
 
         ZStack {
-            Image(nsImage: image)
-                .resizable()
-                .interpolation(.high)
-                .frame(width: displayWidth, height: displayHeight)
-                .clipShape(RoundedRectangle(cornerRadius: screenCorner, style: .continuous))
-                .offset(screenOffset)
+            // 1. Screen Viewport (Display)
+            ZStack {
+                Color.black
+                if let image {
+                    Image(nsImage: image)
+                        .resizable()
+                        .interpolation(.high)
+                        .frame(width: displayWidth, height: displayHeight)
+                } else {
+                    VStack(spacing: 12) {
+                        ProgressView()
+                            .controlSize(.regular)
+                        Text(runtime.embeddedAndroidStatus.isEmpty ? "Connecting to Android Emulator…" : runtime.embeddedAndroidStatus)
+                            .font(.system(size: 11, weight: .medium))
+                            .foregroundColor(.white.opacity(0.85))
+                            .multilineTextAlignment(.center)
+                            .padding(.horizontal, 20)
 
-            // AppKit receives the focused Mac keyboard plus continuous mouse
-            // wheel/trackpad events. SwiftUI DragGesture only fires the old
-            // implementation's swipe after the user has lifted their finger.
-            AndroidDeviceInputOverlay(runtime: runtime)
-                .frame(width: displayWidth, height: displayHeight)
-                .offset(screenOffset)
-                .clipShape(RoundedRectangle(cornerRadius: screenCorner, style: .continuous))
+                        Button {
+                            Task {
+                                await runtime.startPreferredEmbeddedAndroid()
+                            }
+                        } label: {
+                            HStack(spacing: 5) {
+                                Image(systemName: "arrow.clockwise")
+                                Text("Attach / Retry")
+                            }
+                            .font(.system(size: 10, weight: .medium))
+                        }
+                        .buttonStyle(.borderedProminent)
+                        .controlSize(.small)
+                        .padding(.top, 4)
+                    }
+                    .padding(16)
+                }
+            }
+            .frame(width: displayWidth, height: displayHeight)
+            .clipShape(RoundedRectangle(cornerRadius: screenCorner, style: .continuous))
+            .offset(screenOffset)
 
-            if let officialFrame {
-                Image(nsImage: officialFrame)
+            // 2. Official Punch-Hole Camera Cutout (Mask)
+            if let officialMask {
+                Image(nsImage: officialMask)
+                    .resizable()
+                    .interpolation(.high)
+                    .frame(width: displayWidth, height: displayHeight)
+                    .clipShape(RoundedRectangle(cornerRadius: screenCorner, style: .continuous))
+                    .offset(screenOffset)
+                    .allowsHitTesting(false)
+            } else {
+                // Centered punch-hole camera hardware cutout fallback
+                Circle()
+                    .fill(Color.black)
+                    .frame(width: max(8, displayWidth * 0.038), height: max(8, displayWidth * 0.038))
+                    .overlay(
+                        Circle()
+                            .stroke(Color(white: 0.18), lineWidth: 0.8)
+                    )
+                    .offset(x: screenOffset.width, y: screenOffset.height - displayHeight / 2 + displayHeight * 0.024)
+                    .allowsHitTesting(false)
+            }
+
+            // 3. AppKit Input Interaction Overlay (keyboard, mouse drag, wheel scroll)
+            if image != nil {
+                AndroidDeviceInputOverlay(runtime: runtime)
+                    .frame(width: displayWidth, height: displayHeight)
+                    .offset(screenOffset)
+                    .clipShape(RoundedRectangle(cornerRadius: screenCorner, style: .continuous))
+            }
+
+            // 4. Genuine Hardware Chassis & Bezel Frame (Always Real, Never Missing)
+            if let frame = officialFrame ?? DeviceFrameAssets.loadAndroidPixelProBezel() {
+                Image(nsImage: frame)
                     .resizable()
                     .interpolation(.high)
                     .frame(width: frameWidth, height: frameHeight)
                     .allowsHitTesting(false)
-            } else {
-                // A physical device may not expose an SDK skin. Keep the
-                // fallback neutral, but never use it for a configured AVD.
-                RoundedRectangle(cornerRadius: screenCorner, style: .continuous)
-                    .stroke(Color.primary.opacity(0.22), lineWidth: 1)
-                    .allowsHitTesting(false)
             }
-
         }
         .frame(width: frameWidth, height: frameHeight)
-        .shadow(color: .black.opacity(officialFrame == nil ? 0.16 : 0.10), radius: 8, y: 3)
+        .shadow(color: .black.opacity(0.40), radius: 18, x: 0, y: 8)
     }
-
 }
 
 /// Focused, transparent AppKit input surface for the real Android display.

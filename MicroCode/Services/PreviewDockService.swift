@@ -81,13 +81,13 @@ public final class PreviewDockService: ObservableObject {
     private init() {
         // Default standard runtime tabs
         openTabs = [
-            PreviewDockTabItem(id: "web", title: "Web", icon: "globe", kind: .web, isClosable: false, url: nil),
-            PreviewDockTabItem(id: "ios", title: "iOS", icon: "iphone", kind: .ios, isClosable: false, url: nil),
-            PreviewDockTabItem(id: "ios-physical", title: "iPhone", icon: "cable.connector", kind: .iOSPhysical, isClosable: false, url: nil),
+            PreviewDockTabItem(id: "android", title: "Android Emu", icon: "candybarphone", kind: .android, isClosable: false, url: nil),
             PreviewDockTabItem(id: "android-physical", title: "Android USB", icon: "cable.connector", kind: .androidPhysical, isClosable: false, url: nil),
-            PreviewDockTabItem(id: "android", title: "Android", icon: "apps.iphone", kind: .android, isClosable: false, url: nil)
+            PreviewDockTabItem(id: "ios", title: "iOS Sim", icon: "iphone", kind: .ios, isClosable: false, url: nil),
+            PreviewDockTabItem(id: "ios-physical", title: "iPhone USB", icon: "cable.connector", kind: .iOSPhysical, isClosable: false, url: nil),
+            PreviewDockTabItem(id: "web", title: "Web", icon: "globe", kind: .web, isClosable: false, url: nil)
         ]
-        activeTabId = "web"
+        activeTabId = "android"
     }
     
     public var activeTab: PreviewDockTabItem? {

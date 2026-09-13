@@ -954,19 +954,15 @@ struct PhysicalAndroidFrameView<Content: View>: View {
                 .position(x: renderFrameW / 2, y: bezelThickness + 13)
                 .allowsHitTesting(false)
 
-                // 5. Bottom Interactive Android Navigation Gesture Bar
-                ZStack(alignment: .bottom) {
-                    Capsule()
-                        .fill(Color.white.opacity(0.7))
-                        .frame(width: screenW * 0.34, height: 4)
-                        .padding(.bottom, 6)
-                }
-                .frame(width: screenW, height: 22)
-                .contentShape(Rectangle())
-                .onTapGesture {
-                    AndroidStreamService.shared.sendKey(3) // Keycode 3 = Android Home
-                }
-                .offset(x: bezelThickness, y: bezelThickness + screenH - 22)
+                // 5. Bottom Interactive Android Navigation Gesture Area
+                Rectangle()
+                    .fill(Color.clear)
+                    .frame(width: screenW, height: 20)
+                    .contentShape(Rectangle())
+                    .onTapGesture {
+                        AndroidStreamService.shared.sendKey(3) // Keycode 3 = Android Home
+                    }
+                    .offset(x: bezelThickness, y: bezelThickness + screenH - 20)
             }
             .frame(width: renderFrameW, height: renderFrameH)
             .position(x: geo.size.width / 2, y: geo.size.height / 2)
