@@ -2401,6 +2401,9 @@ class AgentService: ObservableObject {
         messages = []
         contextLimitReached = false
         saveChats()
+        Task { @MainActor in
+            ACPHostService.shared.resetAllSessions()
+        }
         return newChat
     }
     
@@ -2431,6 +2434,9 @@ class AgentService: ObservableObject {
         if let skillIds = chat.activeSkillIds, !skillIds.isEmpty {
             AgentSkillsStore.shared.restoreSkills(skillIds)
         }
+        Task { @MainActor in
+            ACPHostService.shared.resetAllSessions()
+        }
     }
     
     func deleteChat(_ chatId: String) {
@@ -2453,6 +2459,9 @@ class AgentService: ObservableObject {
         }
         messages.removeAll()
         saveCurrentChatMessages()
+        Task { @MainActor in
+            ACPHostService.shared.resetAllSessions()
+        }
     }
 
     /// Restores one older page only when the user explicitly asks for it.
