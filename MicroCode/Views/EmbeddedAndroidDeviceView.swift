@@ -31,17 +31,42 @@ struct EmbeddedAndroidDeviceView: View {
                         runtime: runtime
                     )
                 } else {
-                    VStack(spacing: 10) {
+                    VStack(spacing: 12) {
                         ProgressView()
-                        Text("Starting the real Android device…")
+                            .controlSize(.regular)
+                        Text(runtime.embeddedAndroidStatus.isEmpty ? "Connecting to Android Emulator…" : runtime.embeddedAndroidStatus)
                             .font(.system(size: 12, weight: .medium))
-                        Text(runtime.embeddedAndroidStatus)
-                            .font(.system(size: 10)).foregroundColor(.secondary)
+                            .foregroundColor(.primary)
+                            .multilineTextAlignment(.center)
+                            .padding(.horizontal, 24)
+                        
+                        Button {
+                            Task {
+                                await runtime.startPreferredEmbeddedAndroid()
+                            }
+                        } label: {
+                            HStack(spacing: 6) {
+                                Image(systemName: "arrow.clockwise")
+                                Text("Attach / Retry Connection")
+                            }
+                            .font(.system(size: 11, weight: .medium))
+                        }
+                        .buttonStyle(.borderedProminent)
+                        .controlSize(.small)
+                        .padding(.top, 4)
                     }
+                    .padding(20)
                 }
             }
         }
         .background(canvasColor)
+        .onAppear {
+            if runtime.embeddedAndroidImage == nil {
+                Task {
+                    await runtime.startPreferredEmbeddedAndroid()
+                }
+            }
+        }
     }
 }
 
@@ -63,21 +88,21 @@ private struct AndroidDeviceSurface: View {
     private let screenY: CGFloat = 61
 
     var body: some View {
-        let frameAspect = bodyWidth / bodyHeight
+        let frameAspect = officialFrame != nil ? (bodyWidth / bodyHeight) : (image.size.width / max(image.size.height, 1))
         let usableWidth = max(availableSize.width - 36, 120)
         let usableHeight = max(availableSize.height - 28, 160)
         let frameHeight = min(usableHeight, usableWidth / frameAspect)
         let frameWidth = frameHeight * frameAspect
-        let displayWidth = frameWidth * screenWidth / bodyWidth
-        let displayHeight = frameHeight * screenHeight / bodyHeight
-        let screenOffset = CGSize(
+        let displayWidth = officialFrame != nil ? (frameWidth * screenWidth / bodyWidth) : frameWidth
+        let displayHeight = officialFrame != nil ? (frameHeight * screenHeight / bodyHeight) : frameHeight
+        let screenOffset = officialFrame != nil ? CGSize(
             width: frameWidth * ((screenX + screenWidth / 2) / bodyWidth - 0.5),
             height: frameHeight * ((screenY + screenHeight / 2) / bodyHeight - 0.5)
-        )
+        ) : .zero
         // The official Pixel 9 Pro skin declares a 109 px display radius in
         // a 1,280 px display. This clips only the live screen; the physical
         // chassis itself comes from Android SDK's official `back.webp` asset.
-        let screenCorner = max(displayWidth * 109 / screenWidth, 12)
+        let screenCorner = max(displayWidth * 109 / (officialFrame != nil ? screenWidth : displayWidth), 12)
 
         ZStack {
             Image(nsImage: image)

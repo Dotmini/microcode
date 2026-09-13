@@ -1905,7 +1905,7 @@ struct AgenticContextInspector: View {
                                 deviceRuntime.embeddedDockMode = .android
                                 deviceRuntime.showingEmbeddedDeviceDock = true
                                 deviceRuntime.showingEmbeddedAppleDock = false
-                                Task { await deviceRuntime.startEmbeddedAndroid() }
+                                Task { await deviceRuntime.startPreferredEmbeddedAndroid() }
                             }
                         }
 

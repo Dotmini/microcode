@@ -61,7 +61,7 @@ final class AndroidStreamService: ObservableObject {
     ///   - adbPath: Path to adb binary (optional, auto-detected)
     ///   - maxFPS: Maximum frame rate (default 60)
     ///   - maxSize: Max dimension in pixels (0 = device native)
-    func startStreaming(serial: String, adbPath: String? = nil, maxFPS: Int = 60, maxSize: Int = 0) async {
+    func startStreaming(serial: String, adbPath: String? = nil, maxFPS: Int = 60, maxSize: Int = 1280) async {
         stopStreaming()
         let resolvedAdb = adbPath ?? resolvedAdbPath ?? "adb"
         self.activeSerial = serial
@@ -118,6 +118,13 @@ final class AndroidStreamService: ObservableObject {
         controlConnection = nil
         serverProcess?.terminate()
         serverProcess = nil
+        if !activeSerial.isEmpty, let adb = resolvedAdbPath {
+            let serial = activeSerial
+            let port = localPort
+            Task {
+                _ = try? await Self.runADB(adb, args: ["-s", serial, "forward", "--remove", "tcp:\(port)"])
+            }
+        }
         decoder = nil
         isStreaming = false
         frameCount = 0
@@ -149,6 +156,9 @@ final class AndroidStreamService: ObservableObject {
     }
     
     private func setupPortForwarding(serial: String, adbPath: String) async throws {
+        // Clear any previous forward on this port first
+        _ = try? await Self.runADB(adbPath, args: ["-s", serial, "forward", "--remove", "tcp:\(localPort)"])
+        
         // Forward TCP port to scrcpy abstract unix socket
         let result = try await Self.runADB(adbPath, args: [
             "-s", serial,
@@ -162,6 +172,7 @@ final class AndroidStreamService: ObservableObject {
     private func launchServer(serial: String, adbPath: String, maxFPS: Int, maxSize: Int) throws {
         let process = Process()
         process.executableURL = URL(fileURLWithPath: adbPath)
+        let effectiveSize = maxSize > 0 ? maxSize : 1280
         process.arguments = [
             "-s", serial,
             "shell",
@@ -170,7 +181,7 @@ final class AndroidStreamService: ObservableObject {
             "com.genymobile.scrcpy.Server",
             "3.3.4",            // version matching scrcpy-server.jar
             "log_level=error",
-            "max_size=\(maxSize)",
+            "max_size=\(effectiveSize)",
             "max_fps=\(maxFPS)",
             "video_codec=h264",
             "audio=false",
@@ -178,7 +189,6 @@ final class AndroidStreamService: ObservableObject {
             "tunnel_forward=true",
             "send_device_meta=false",
             "send_frame_meta=true",
-            "send_stream_meta=false",
             "show_touches=false",
             "stay_awake=true"
         ]
