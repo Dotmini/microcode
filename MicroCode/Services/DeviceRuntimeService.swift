@@ -723,26 +723,63 @@ final class DeviceRuntimeService: ObservableObject {
     /// ADB is the documented, authenticated control channel; no process or RAM
     /// inspection is used.
     func startEmbeddedAndroid() async {
-        guard let device = selectedDevice, device.platform == .android else {
+        // Ensure an Android device is selected; auto-pick booted or available Android device
+        var targetDevice = selectedDevice
+        if targetDevice?.platform != .android {
+            targetDevice = devices.first(where: { $0.platform == .android && $0.state == "Running" })
+                ?? devices.first(where: { $0.platform == .android })
+            if let targetDevice {
+                selectedDeviceID = targetDevice.id
+            }
+        }
+        
+        guard let device = targetDevice, device.platform == .android else {
+            let fresh = await listAndroidDevices()
+            if let first = fresh.first {
+                devices.removeAll { $0.platform == .android }
+                devices.append(contentsOf: fresh)
+                selectedDeviceID = first.id
+                await startEmbeddedAndroid()
+                return
+            }
             statusMessage = "Choose an Android device or AVD first."
+            embeddedAndroidStatus = "No Android device or emulator detected. Make sure the emulator is running."
             return
         }
+        
         isWorking = true
         defer { isWorking = false }
         do {
-            // Reattaching to an already booted AVD is immediate; do this
-            // before asking the emulator binary to launch another instance.
-            if device.id.hasPrefix("avd:"), let serial = await attachedAndroidSerial(named: String(device.id.dropFirst(4))) {
-                startAndroidMirror(serial: serial, deviceName: device.name)
-                statusMessage = "Attached to the running Android Emulator: \(device.name)."
+            // 1. If device ID is an active serial (e.g. "emulator-5554" or USB physical device)
+            if !device.id.hasPrefix("avd:") {
+                startAndroidMirror(serial: device.id, deviceName: device.name)
+                statusMessage = "Attached to Android device: \(device.name)."
                 return
             }
+            
+            let avdName = String(device.id.dropFirst(4))
+            
+            // 2. Reattaching to an already booted AVD is immediate
+            if let serial = await attachedAndroidSerial(named: avdName) {
+                startAndroidMirror(serial: serial, deviceName: device.name)
+                statusMessage = "Attached to running Android Emulator: \(device.name)."
+                return
+            }
+            
+            // 3. Fast fallback: if ANY emulator-* is currently active in ADB, attach to it immediately!
+            if let firstRunning = await firstAttachedEmulatorSerial() {
+                startAndroidMirror(serial: firstRunning, deviceName: device.name)
+                statusMessage = "Attached to running Android Emulator (\(firstRunning)): \(device.name)."
+                return
+            }
+            
             try await startDevice(device)
             let serial = try await readyAndroidSerial(for: device)
             startAndroidMirror(serial: serial, deviceName: device.name)
             statusMessage = "Android Emulator is running inside MicroCode: \(device.name)."
         } catch {
             statusMessage = error.localizedDescription
+            embeddedAndroidStatus = "Could not start emulator: \(error.localizedDescription)"
             appendOutput(error.localizedDescription)
         }
     }
@@ -1323,14 +1360,14 @@ final class DeviceRuntimeService: ObservableObject {
                         id: configured.id,
                         name: configured.name,
                         platform: .android,
-                        state: "Device",
+                        state: "Running",
                         runtime: configured.runtime,
-                        isReadyForLaunch: configured.isReadyForLaunch,
-                        preflightMessage: configured.preflightMessage
+                        isReadyForLaunch: true,
+                        preflightMessage: nil
                     )
                 } else {
                     result.removeAll { $0.id == serial }
-                    result.append(RuntimeDevice(id: serial, name: serial, platform: .android, state: "Device", runtime: "ADB"))
+                    result.append(RuntimeDevice(id: serial, name: serial, platform: .android, state: "Running", runtime: "ADB", isReadyForLaunch: true, preflightMessage: nil))
                 }
             }
         }
@@ -1536,6 +1573,21 @@ final class DeviceRuntimeService: ObservableObject {
             .split(whereSeparator: \.isNewline)
             .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
             .first(where: { !$0.isEmpty && $0 != "OK" })
+    }
+
+    private func firstAttachedEmulatorSerial() async -> String? {
+        guard let adb = try? androidTool("adb"),
+              let result = try? await command(adb, ["devices"], directory: nil) else { return nil }
+        let serials = result.output
+            .split(whereSeparator: \.isNewline)
+            .dropFirst()
+            .compactMap { line -> String? in
+                let parts = line.split(separator: "\t")
+                guard parts.count >= 2, parts[1].trimmingCharacters(in: .whitespacesAndNewlines) == "device" else { return nil }
+                let serial = String(parts[0]).trimmingCharacters(in: .whitespacesAndNewlines)
+                return serial.hasPrefix("emulator-") ? serial : nil
+            }
+        return serials.first
     }
 
     private func androidTool(_ name: String) throws -> String {

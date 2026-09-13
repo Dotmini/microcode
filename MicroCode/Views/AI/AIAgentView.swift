@@ -645,7 +645,7 @@ struct AIAgentView: View {
                                 Button("Android Emulator Preview") {
                                     withAnimation(.easeInOut(duration: 0.16)) {
                                         previewDock.selectTab(id: "android")
-                                        Task { await deviceRuntime.startEmbeddedAndroid() }
+                                        Task { await deviceRuntime.startPreferredEmbeddedAndroid() }
                                     }
                                 }
                                 Button("iPhone USB (Hardware)") {
