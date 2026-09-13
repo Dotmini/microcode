@@ -26,55 +26,62 @@ struct ACPAgentChatView: View {
                 }
                 .padding()
             }
+            .background(Color.black)
             
             Divider()
+                .background(Color.white.opacity(0.08))
             
             // Status bar
             HStack {
                 if let session = acpHost.activeSession {
                     Text(session.config.name)
+                        .foregroundColor(.white)
                     Spacer()
                     Text(session.state.statusLabel)
-                        .foregroundColor(session.state.isActive ? .green : .secondary)
+                        .foregroundColor(session.state.isActive ? .white : Color.white.opacity(0.6))
                     Text(formatTime(session.elapsedSeconds))
+                        .foregroundColor(Color.white.opacity(0.6))
                 } else {
                     Text("No agent connected")
+                        .foregroundColor(Color.white.opacity(0.6))
                     Spacer()
                 }
             }
             .font(.caption)
-            .foregroundColor(.secondary)
             .padding(.horizontal)
             .padding(.vertical, 4)
-            .background(Color(NSColor.windowBackgroundColor))
+            .background(Color.black)
             
             Divider()
+                .background(Color.white.opacity(0.08))
             
             // Input area
             HStack(alignment: .bottom) {
                 TextEditor(text: $inputText)
                     .frame(minHeight: 36, maxHeight: 100)
                     .padding(4)
-                    .background(Color(NSColor.controlBackgroundColor))
+                    .background(Color.black)
                     .cornerRadius(8)
                     .overlay(
                         RoundedRectangle(cornerRadius: 8)
-                            .stroke(Color.gray.opacity(0.3), lineWidth: 1)
+                            .stroke(Color.white.opacity(0.15), lineWidth: 1)
                     )
                 
                 Button(action: sendACPMessage) {
                     Image(systemName: "paperplane.fill")
-                        .foregroundColor(.white)
+                        .foregroundColor(.black)
                         .padding(10)
-                        .background(Color.accentColor)
+                        .background(Color.white)
                         .clipShape(Circle())
                 }
                 .buttonStyle(.plain)
                 .disabled(inputText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
             }
             .padding()
+            .background(Color.black)
         }
         .frame(minWidth: 400, minHeight: 500)
+        .background(Color.black)
     }
     
     private func sendACPMessage() {
@@ -127,8 +134,8 @@ struct ACPChatMessageRow: View {
                 Spacer()
                 Text(message.content)
                     .padding(10)
-                    .background(Color.accentColor)
-                    .foregroundColor(.white)
+                    .background(Color.white)
+                    .foregroundColor(.black)
                     .cornerRadius(12)
             } else {
                 VStack(alignment: .leading, spacing: 4) {
@@ -136,62 +143,83 @@ struct ACPChatMessageRow: View {
                     case .text:
                         Text(message.content)
                             .padding(10)
-                            .background(Color(NSColor.controlBackgroundColor))
+                            .foregroundColor(.white)
+                            .background(Color.white.opacity(0.06))
                             .cornerRadius(12)
+                            .overlay(
+                                RoundedRectangle(cornerRadius: 12)
+                                    .stroke(Color.white.opacity(0.1), lineWidth: 1)
+                            )
                     case .thinking:
                         DisclosureGroup(isExpanded: $isExpanded) {
                             Text(message.content)
                                 .font(.callout)
-                                .foregroundColor(.secondary)
+                                .foregroundColor(Color.white.opacity(0.7))
                         } label: {
                             HStack {
                                 Image(systemName: "brain")
                                 Text("Thinking...")
                             }
-                            .foregroundColor(.secondary)
+                            .foregroundColor(Color.white.opacity(0.7))
                         }
                         .padding(10)
-                        .background(Color(NSColor.controlBackgroundColor).opacity(0.5))
+                        .background(Color.white.opacity(0.04))
                         .cornerRadius(12)
+                        .overlay(
+                            RoundedRectangle(cornerRadius: 12)
+                                .stroke(Color.white.opacity(0.08), lineWidth: 1)
+                        )
                     case .toolCall:
                         DisclosureGroup(isExpanded: $isExpanded) {
                             Text(message.content)
                                 .font(.system(.caption, design: .monospaced))
+                                .foregroundColor(Color.white.opacity(0.85))
                         } label: {
                             HStack {
                                 Image(systemName: "wrench.and.screwdriver")
                                 Text(message.toolName ?? "Tool Call")
                                     .fontWeight(.medium)
                             }
+                            .foregroundColor(.white)
                         }
                         .padding(10)
-                        .background(Color(NSColor.controlBackgroundColor))
+                        .background(Color.white.opacity(0.04))
                         .cornerRadius(12)
                         .overlay(
                             RoundedRectangle(cornerRadius: 12)
-                                .stroke(Color.orange.opacity(0.5), lineWidth: 1)
+                                .stroke(Color.white.opacity(0.12), lineWidth: 1)
                         )
                     case .toolResult:
                         Text(message.content)
                             .font(.system(.caption, design: .monospaced))
+                            .foregroundColor(Color.white.opacity(0.85))
                             .padding(10)
-                            .background(message.isSuccess == true ? Color.green.opacity(0.1) : Color.red.opacity(0.1))
+                            .background(Color.white.opacity(0.04))
                             .cornerRadius(12)
                             .overlay(
                                 RoundedRectangle(cornerRadius: 12)
-                                    .stroke(message.isSuccess == true ? Color.green : Color.red, lineWidth: 1)
+                                    .stroke(Color.white.opacity(0.12), lineWidth: 1)
                             )
                     case .error:
                         Text(message.content)
                             .padding(10)
-                            .background(Color.red.opacity(0.2))
-                            .foregroundColor(.red)
+                            .background(Color.white.opacity(0.08))
+                            .foregroundColor(.white)
                             .cornerRadius(12)
+                            .overlay(
+                                RoundedRectangle(cornerRadius: 12)
+                                    .stroke(Color.white.opacity(0.2), lineWidth: 1)
+                            )
                     case .permission:
                         Text("Permission requested: \(message.content)")
                             .padding(10)
-                            .background(Color.yellow.opacity(0.2))
+                            .background(Color.white.opacity(0.08))
+                            .foregroundColor(.white)
                             .cornerRadius(12)
+                            .overlay(
+                                RoundedRectangle(cornerRadius: 12)
+                                    .stroke(Color.white.opacity(0.2), lineWidth: 1)
+                            )
                     }
                 }
                 Spacer()

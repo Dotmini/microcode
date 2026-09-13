@@ -5918,7 +5918,7 @@ struct AntigravityThoughtBlockView: View {
                 }
                 .padding(.horizontal, 10)
                 .padding(.vertical, 8)
-                .background(Color(NSColor.controlBackgroundColor).opacity(0.4))
+                .background(Color.white.opacity(0.04))
                 .clipShape(RoundedRectangle(cornerRadius: 6, style: .continuous))
                 .overlay(
                     HStack {

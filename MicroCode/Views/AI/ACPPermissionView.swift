@@ -11,11 +11,12 @@ struct ACPPermissionView: View {
     
     var body: some View {
         VStack(alignment: .leading, spacing: 16) {
-            HStack {
-                Image(systemName: "exclamationmark.triangle.fill")
-                    .foregroundColor(.yellow)
+            HStack(spacing: 8) {
+                Image(systemName: "shield.lefthalf.filled")
+                    .foregroundColor(.white)
                 Text("Permission Required")
                     .font(.headline)
+                    .foregroundColor(.white)
             }
             
             if let cmd = command {
@@ -23,46 +24,53 @@ struct ACPPermissionView: View {
                     Text("Command Execution")
                         .font(.subheadline)
                         .fontWeight(.semibold)
+                        .foregroundColor(Color.white.opacity(0.8))
                     
                     Text(cmd)
                         .font(.system(.body, design: .monospaced))
+                        .foregroundColor(.white)
                         .padding()
                         .frame(maxWidth: .infinity, alignment: .leading)
-                        .background(Color(NSColor.controlBackgroundColor))
+                        .background(Color.black)
                         .cornerRadius(8)
+                        .overlay(
+                            RoundedRectangle(cornerRadius: 8)
+                                .stroke(Color.white.opacity(0.12), lineWidth: 1)
+                        )
                 }
             } else {
                 VStack(alignment: .leading, spacing: 8) {
                     Text("File Modification: \(filePath)")
                         .font(.subheadline)
                         .fontWeight(.semibold)
+                        .foregroundColor(Color.white.opacity(0.8))
                     
                     ScrollView {
                         VStack(alignment: .leading, spacing: 2) {
                             ForEach(diffRemoved, id: \.self) { line in
                                 Text("- " + line)
                                     .font(.system(.caption, design: .monospaced))
-                                    .foregroundColor(.red)
+                                    .foregroundColor(Color.white.opacity(0.6))
                                     .padding(.horizontal, 4)
-                                    .background(Color.red.opacity(0.1))
+                                    .background(Color.white.opacity(0.04))
                                     .frame(maxWidth: .infinity, alignment: .leading)
                             }
                             ForEach(diffAdded, id: \.self) { line in
                                 Text("+ " + line)
                                     .font(.system(.caption, design: .monospaced))
-                                    .foregroundColor(.green)
+                                    .foregroundColor(.white)
                                     .padding(.horizontal, 4)
-                                    .background(Color.green.opacity(0.1))
+                                    .background(Color.white.opacity(0.08))
                                     .frame(maxWidth: .infinity, alignment: .leading)
                             }
                         }
                     }
                     .frame(maxHeight: 200)
-                    .background(Color(NSColor.textBackgroundColor))
+                    .background(Color.black)
                     .cornerRadius(8)
                     .overlay(
                         RoundedRectangle(cornerRadius: 8)
-                            .stroke(Color.gray.opacity(0.3), lineWidth: 1)
+                            .stroke(Color.white.opacity(0.12), lineWidth: 1)
                     )
                 }
             }
@@ -70,22 +78,35 @@ struct ACPPermissionView: View {
             HStack(spacing: 16) {
                 Button(action: onReject) {
                     Text("Reject")
+                        .font(.system(size: 11, weight: .medium))
+                        .foregroundColor(.white)
                         .frame(maxWidth: .infinity)
+                        .padding(.vertical, 6)
+                        .background(Color.white.opacity(0.08))
+                        .overlay(
+                            RoundedRectangle(cornerRadius: 6, style: .continuous)
+                                .stroke(Color.white.opacity(0.2), lineWidth: 1)
+                        )
+                        .clipShape(RoundedRectangle(cornerRadius: 6, style: .continuous))
                 }
                 .keyboardShortcut(.delete, modifiers: .command)
-                .buttonStyle(.bordered)
-                .tint(.red)
+                .buttonStyle(.plain)
                 
                 Button(action: onApprove) {
                     Text("Approve")
+                        .font(.system(size: 11, weight: .semibold))
+                        .foregroundColor(.black)
                         .frame(maxWidth: .infinity)
+                        .padding(.vertical, 6)
+                        .background(Color.white)
+                        .clipShape(RoundedRectangle(cornerRadius: 6, style: .continuous))
                 }
                 .keyboardShortcut(.return, modifiers: .command)
-                .buttonStyle(.borderedProminent)
-                .tint(.green)
+                .buttonStyle(.plain)
             }
         }
         .padding()
         .frame(width: 500)
+        .background(Color.black)
     }
 }
