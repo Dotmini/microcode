@@ -145,7 +145,7 @@ public struct AgentConnectionsView: View {
     
     public var body: some View {
         ZStack {
-            Color(NSColor.windowBackgroundColor)
+            Color.black
                 .ignoresSafeArea()
             
             if let target = activeWizardTarget {
@@ -160,6 +160,7 @@ public struct AgentConnectionsView: View {
             }
         }
         .frame(minWidth: 740, idealWidth: 780, minHeight: 580, idealHeight: 620)
+        .background(Color.black)
         .overlay(alignment: .bottom) {
             if let toast = toastMessage {
                 Text(toast)
@@ -167,7 +168,8 @@ public struct AgentConnectionsView: View {
                     .foregroundColor(.white)
                     .padding(.horizontal, 14)
                     .padding(.vertical, 8)
-                    .background(Color.black.opacity(0.85))
+                    .background(Color.black.opacity(0.95))
+                    .overlay(Capsule().stroke(Color.white.opacity(0.2), lineWidth: 1))
                     .clipShape(Capsule())
                     .padding(.bottom, 24)
                     .transition(.move(edge: .bottom).combined(with: .opacity))
@@ -190,11 +192,11 @@ public struct AgentConnectionsView: View {
                 VStack(alignment: .leading, spacing: 4) {
                     Text("Agent connections")
                         .font(.system(size: 17, weight: .bold))
-                        .foregroundColor(.primary)
+                        .foregroundColor(.white)
                     
                     Text("MicroCode runs your tasks on an AI coding agent installed on this computer, under your own subscription. You stay signed in to the agent's own CLI — MicroCode never sees those credentials.")
                         .font(.system(size: 11.5))
-                        .foregroundColor(.secondary)
+                        .foregroundColor(Color.white.opacity(0.6))
                         .lineSpacing(2)
                 }
                 
@@ -205,9 +207,9 @@ public struct AgentConnectionsView: View {
                 } label: {
                     Image(systemName: "xmark")
                         .font(.system(size: 10, weight: .bold))
-                        .foregroundColor(.secondary)
+                        .foregroundColor(Color.white.opacity(0.7))
                         .frame(width: 24, height: 24)
-                        .background(Color.primary.opacity(0.06))
+                        .background(Color.white.opacity(0.08))
                         .clipShape(Circle())
                 }
                 .buttonStyle(.plain)
@@ -232,6 +234,7 @@ public struct AgentConnectionsView: View {
             }
             
             Divider()
+                .background(Color.white.opacity(0.08))
             
             // Footer
             HStack {
@@ -241,19 +244,31 @@ public struct AgentConnectionsView: View {
                     }
                 }
                 .font(.system(size: 11))
-                .buttonStyle(.link)
+                .foregroundColor(Color.white.opacity(0.6))
+                .buttonStyle(.plain)
                 
                 Spacer()
                 
-                Button("Skip for now") {
+                Button {
                     presentationMode.wrappedValue.dismiss()
+                } label: {
+                    Text("Skip for now")
+                        .font(.system(size: 11, weight: .medium))
+                        .foregroundColor(.white)
+                        .padding(.horizontal, 14)
+                        .padding(.vertical, 5)
+                        .background(Color.white.opacity(0.08))
+                        .overlay(
+                            RoundedRectangle(cornerRadius: 6, style: .continuous)
+                                .stroke(Color.white.opacity(0.18), lineWidth: 1)
+                        )
+                        .clipShape(RoundedRectangle(cornerRadius: 6, style: .continuous))
                 }
-                .font(.system(size: 11))
-                .buttonStyle(.bordered)
+                .buttonStyle(.plain)
             }
             .padding(.horizontal, 26)
             .padding(.vertical, 14)
-            .background(Color(NSColor.controlBackgroundColor).opacity(0.4))
+            .background(Color.black)
         }
     }
     
@@ -267,15 +282,17 @@ public struct AgentConnectionsView: View {
             activeWizardTarget = type
         } label: {
             HStack(spacing: 14) {
-                // Icon
+                // Authentic Brand Icon
                 ZStack {
                     RoundedRectangle(cornerRadius: 8, style: .continuous)
-                        .fill(type.iconColor.opacity(0.12))
+                        .fill(Color.white.opacity(0.04))
                         .frame(width: 38, height: 38)
+                        .overlay(
+                            RoundedRectangle(cornerRadius: 8, style: .continuous)
+                                .stroke(Color.white.opacity(0.1), lineWidth: 1)
+                        )
                     
-                    Image(systemName: type.iconName)
-                        .font(.system(size: 16, weight: .medium))
-                        .foregroundColor(type.iconColor)
+                    AIProviderBrandIcon(provider: type.id, size: 24)
                 }
                 
                 // Details
@@ -283,15 +300,15 @@ public struct AgentConnectionsView: View {
                     HStack(spacing: 6) {
                         Text(type.title)
                             .font(.system(size: 13, weight: .semibold))
-                            .foregroundColor(.primary)
+                            .foregroundColor(.white)
                         
                         if !type.requirementBadge.isEmpty {
                             Text(type.requirementBadge)
                                 .font(.system(size: 9, weight: .medium))
                                 .padding(.horizontal, 6)
                                 .padding(.vertical, 2)
-                                .background(Color.primary.opacity(0.06))
-                                .foregroundColor(.secondary)
+                                .background(Color.white.opacity(0.06))
+                                .foregroundColor(Color.white.opacity(0.7))
                                 .clipShape(Capsule())
                         }
                         
@@ -300,25 +317,35 @@ public struct AgentConnectionsView: View {
                                 .font(.system(size: 9, weight: .bold))
                                 .padding(.horizontal, 6)
                                 .padding(.vertical, 2)
-                                .background(Color.blue.opacity(0.14))
-                                .foregroundColor(.blue)
+                                .background(Color.white.opacity(0.12))
+                                .foregroundColor(.white)
                                 .clipShape(Capsule())
+                                .overlay(
+                                    Capsule().stroke(Color.white.opacity(0.25), lineWidth: 0.8)
+                                )
                         }
                     }
                     
                     HStack(spacing: 6) {
                         Circle()
-                            .fill(status.color)
+                            .fill(status.color == .secondary ? Color.white.opacity(0.25) : Color.white.opacity(0.85))
                             .frame(width: 6, height: 6)
                         
                         Text(status.label)
                             .font(.system(size: 11))
-                            .foregroundColor(status.color == .secondary ? .secondary : status.color)
+                            .foregroundColor(Color.white.opacity(0.6))
                         
                         if isConnected {
-                            Text("• Active in Chat")
-                                .font(.system(size: 10, weight: .semibold))
-                                .foregroundColor(.green)
+                            Text("Active in Chat")
+                                .font(.system(size: 9, weight: .semibold))
+                                .padding(.horizontal, 6)
+                                .padding(.vertical, 1.5)
+                                .background(Color.white.opacity(0.15))
+                                .foregroundColor(.white)
+                                .clipShape(Capsule())
+                                .overlay(
+                                    Capsule().stroke(Color.white.opacity(0.3), lineWidth: 0.8)
+                                )
                         }
                     }
                 }
@@ -327,16 +354,16 @@ public struct AgentConnectionsView: View {
                 
                 Image(systemName: "chevron.right")
                     .font(.system(size: 11, weight: .semibold))
-                    .foregroundColor(.secondary.opacity(0.7))
+                    .foregroundColor(Color.white.opacity(0.4))
             }
             .padding(.horizontal, 14)
             .padding(.vertical, 12)
             .background(
                 RoundedRectangle(cornerRadius: 10, style: .continuous)
-                    .fill(Color(NSColor.controlBackgroundColor))
+                    .fill(Color(hex: "#0E0E0E") ?? Color.black)
                     .overlay(
                         RoundedRectangle(cornerRadius: 10, style: .continuous)
-                            .stroke(isConnected ? Color.green.opacity(0.5) : Color.primary.opacity(0.08), lineWidth: isConnected ? 1.5 : 1)
+                            .stroke(isConnected ? Color.white.opacity(0.4) : Color.white.opacity(0.08), lineWidth: isConnected ? 1.5 : 1)
                     )
             )
         }
@@ -352,20 +379,22 @@ public struct AgentConnectionsView: View {
             HStack(spacing: 14) {
                 ZStack {
                     RoundedRectangle(cornerRadius: 8, style: .continuous)
-                        .fill(Color.blue.opacity(0.12))
+                        .fill(Color.white.opacity(0.04))
                         .frame(width: 38, height: 38)
-                    Image(systemName: "gift.fill")
-                        .font(.system(size: 16, weight: .medium))
-                        .foregroundColor(.blue)
+                        .overlay(
+                            RoundedRectangle(cornerRadius: 8, style: .continuous)
+                                .stroke(Color.white.opacity(0.1), lineWidth: 1)
+                        )
+                    AIProviderBrandIcon(provider: "local", size: 24)
                 }
                 
                 VStack(alignment: .leading, spacing: 2) {
                     Text("Don't have an AI subscription? Try a free AI model")
                         .font(.system(size: 12.5, weight: .semibold))
-                        .foregroundColor(.primary)
+                        .foregroundColor(.white)
                     Text("Sets up OpenCode / MicroCode with nemotron-3.5-lightning-free — free to run, no card needed.")
                         .font(.system(size: 10.5))
-                        .foregroundColor(.secondary)
+                        .foregroundColor(Color.white.opacity(0.6))
                 }
                 
                 Spacer()
@@ -374,18 +403,21 @@ public struct AgentConnectionsView: View {
                     .font(.system(size: 10, weight: .semibold))
                     .padding(.horizontal, 8)
                     .padding(.vertical, 4)
-                    .background(Color.blue.opacity(0.15))
-                    .foregroundColor(.blue)
+                    .background(Color.white.opacity(0.12))
+                    .foregroundColor(.white)
                     .clipShape(Capsule())
+                    .overlay(
+                        Capsule().stroke(Color.white.opacity(0.25), lineWidth: 0.8)
+                    )
             }
             .padding(.horizontal, 14)
             .padding(.vertical, 12)
             .background(
                 RoundedRectangle(cornerRadius: 10, style: .continuous)
-                    .fill(Color.blue.opacity(0.04))
+                    .fill(Color(hex: "#0E0E0E") ?? Color.black)
                     .overlay(
                         RoundedRectangle(cornerRadius: 10, style: .continuous)
-                            .stroke(Color.blue.opacity(0.25), lineWidth: 1)
+                            .stroke(Color.white.opacity(0.12), lineWidth: 1)
                     )
             )
         }
@@ -498,6 +530,7 @@ public struct AgentSetupWizardView: View {
     
     @State private var selectedModel: String = "Agent default"
     @State private var selectedEffort: String = "High"
+    @State private var selectedPermission: ACPPermissionMode = .reviewEach
     @State private var copyFeedbackInstall: Bool = false
     @State private var copyFeedbackLogin: Bool = false
     @State private var connectionError: String? = nil
@@ -590,53 +623,55 @@ public struct AgentSetupWizardView: View {
             // Agent Branding Tile
             ZStack {
                 RoundedRectangle(cornerRadius: 8, style: .continuous)
-                    .fill(target.iconColor.opacity(0.14))
+                    .fill(Color.white.opacity(0.04))
                     .frame(width: 38, height: 38)
+                    .overlay(
+                        RoundedRectangle(cornerRadius: 8, style: .continuous)
+                            .stroke(Color.white.opacity(0.1), lineWidth: 1)
+                    )
                 
-                Image(systemName: target.iconName)
-                    .font(.system(size: 17, weight: .semibold))
-                    .foregroundColor(target.iconColor)
+                AIProviderBrandIcon(provider: target.id, size: 24)
             }
             
             VStack(alignment: .leading, spacing: 2) {
                 HStack(spacing: 8) {
                     Text("Connect \(target.title)")
                         .font(.system(size: 15, weight: .semibold))
-                        .foregroundColor(.primary)
+                        .foregroundColor(.white)
                     
                     // Status Badge
                     if isDetected, let path = detectedPath {
                         HStack(spacing: 4) {
                             Circle()
-                                .fill(Color.green)
+                                .fill(Color.white)
                                 .frame(width: 5, height: 5)
                             Text("INSTALLED (\(path))")
                                 .font(.system(size: 9, weight: .bold, design: .monospaced))
-                                .foregroundColor(.green)
+                                .foregroundColor(.white)
                         }
                         .padding(.horizontal, 6)
                         .padding(.vertical, 2)
-                        .background(Color.green.opacity(0.12))
+                        .background(Color.white.opacity(0.12))
                         .clipShape(Capsule())
                     } else {
                         HStack(spacing: 4) {
                             Circle()
-                                .fill(Color.secondary.opacity(0.6))
+                                .fill(Color.white.opacity(0.3))
                                 .frame(width: 5, height: 5)
                             Text("NOT DETECTED IN PATH")
                                 .font(.system(size: 9, weight: .bold))
-                                .foregroundColor(.secondary)
+                                .foregroundColor(Color.white.opacity(0.6))
                         }
                         .padding(.horizontal, 6)
                         .padding(.vertical, 2)
-                        .background(Color.primary.opacity(0.06))
+                        .background(Color.white.opacity(0.06))
                         .clipShape(Capsule())
                     }
                 }
                 
                 Text("AGENT CLIENT PROTOCOL (ACP) • LOCAL STDIO BRIDGE")
                     .font(.system(size: 9.5, weight: .bold))
-                    .foregroundColor(.secondary)
+                    .foregroundColor(Color.white.opacity(0.4))
                     .tracking(0.6)
             }
             
@@ -647,9 +682,9 @@ public struct AgentSetupWizardView: View {
             } label: {
                 Image(systemName: "xmark")
                     .font(.system(size: 10, weight: .bold))
-                    .foregroundColor(.secondary)
+                    .foregroundColor(Color.white.opacity(0.7))
                     .frame(width: 24, height: 24)
-                    .background(Color.primary.opacity(0.06))
+                    .background(Color.white.opacity(0.08))
                     .clipShape(Circle())
             }
             .buttonStyle(.plain)
@@ -657,7 +692,7 @@ public struct AgentSetupWizardView: View {
         }
         .padding(.horizontal, 24)
         .padding(.vertical, 14)
-        .background(Color(NSColor.controlBackgroundColor).opacity(0.3))
+        .background(Color.black)
     }
     
     // MARK: - Security Notice Banner
@@ -666,27 +701,27 @@ public struct AgentSetupWizardView: View {
         HStack(alignment: .top, spacing: 10) {
             Image(systemName: "lock.shield")
                 .font(.system(size: 14))
-                .foregroundColor(.secondary)
+                .foregroundColor(Color.white.opacity(0.6))
                 .padding(.top, 1)
             
             VStack(alignment: .leading, spacing: 2) {
                 Text("Subprocess Sandboxing & Privacy Assurance")
                     .font(.system(size: 11.5, weight: .semibold))
-                    .foregroundColor(.primary)
+                    .foregroundColor(.white)
                 
                 Text("Tasks execute strictly within your local shell via standard input/output (stdio NDJSON). MicroCode does not transmit, intercept, or store credentials; your subscription tokens remain entirely within your local CLI environment.")
                     .font(.system(size: 10.5))
-                    .foregroundColor(.secondary)
+                    .foregroundColor(Color.white.opacity(0.6))
                     .lineSpacing(2)
             }
         }
         .padding(12)
         .frame(maxWidth: .infinity, alignment: .leading)
-        .background(Color(NSColor.controlBackgroundColor).opacity(0.5))
+        .background(Color.white.opacity(0.04))
         .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
         .overlay(
             RoundedRectangle(cornerRadius: 8, style: .continuous)
-                .stroke(Color.primary.opacity(0.06), lineWidth: 1)
+                .stroke(Color.white.opacity(0.08), lineWidth: 1)
         )
     }
     
@@ -697,7 +732,7 @@ public struct AgentSetupWizardView: View {
             HStack {
                 Text("1. CLI TOOLCHAIN INSTALLATION")
                     .font(.system(size: 10, weight: .bold))
-                    .foregroundColor(.secondary)
+                    .foregroundColor(Color.white.opacity(0.5))
                     .tracking(0.6)
                 
                 Spacer()
@@ -705,7 +740,7 @@ public struct AgentSetupWizardView: View {
                 if isDetected {
                     Text("Verified")
                         .font(.system(size: 9.5, weight: .semibold))
-                        .foregroundColor(.green)
+                        .foregroundColor(.white)
                 }
             }
             
@@ -724,7 +759,7 @@ public struct AgentSetupWizardView: View {
         VStack(alignment: .leading, spacing: 6) {
             Text("2. LOCAL AUTHENTICATION")
                 .font(.system(size: 10, weight: .bold))
-                .foregroundColor(.secondary)
+                .foregroundColor(Color.white.opacity(0.5))
                 .tracking(0.6)
             
             commandRow(
@@ -736,7 +771,7 @@ public struct AgentSetupWizardView: View {
             
             Text("Launches the official CLI authentication flow in your local environment. MicroCode never observes or receives credentials.")
                 .font(.system(size: 10))
-                .foregroundColor(.secondary)
+                .foregroundColor(Color.white.opacity(0.5))
         }
     }
     
@@ -747,100 +782,58 @@ public struct AgentSetupWizardView: View {
             HStack {
                 Label("DIAGNOSTICS & VERIFICATION CONSOLE", systemImage: "terminal")
                     .font(.system(size: 10, weight: .bold))
-                    .foregroundColor(.secondary)
+                    .foregroundColor(Color.white.opacity(0.5))
                     .tracking(0.6)
                 
                 Spacer()
                 
                 if isRunningCommand {
-                    HStack(spacing: 4) {
-                        ProgressView()
-                            .controlSize(.mini)
-                        Text("Executing…")
-                            .font(.system(size: 10))
-                            .foregroundColor(.secondary)
-                    }
+                    ProgressView()
+                        .scaleEffect(0.6)
                 }
-                
-                Button("Clear") {
-                    terminalLog = ""
-                }
-                .font(.system(size: 10))
-                .buttonStyle(.plain)
-                .foregroundColor(.secondary)
             }
             
-            VStack(spacing: 0) {
-                ScrollViewReader { proxy in
-                    ScrollView {
-                        Text(terminalLog.isEmpty ? "No active diagnostics. Click 'Run' on any command above to test local execution." : terminalLog)
-                            .font(.system(size: 10.5, design: .monospaced))
-                            .foregroundColor(terminalLog.isEmpty ? .secondary.opacity(0.6) : .white)
-                            .frame(maxWidth: .infinity, alignment: .leading)
-                            .padding(10)
-                            .id("terminal_bottom")
-                    }
-                    .frame(height: 105)
-                    .background(Color(red: 0.10, green: 0.10, blue: 0.12))
-                    .onChange(of: terminalLog) { _ in
-                        proxy.scrollTo("terminal_bottom", anchor: .bottom)
-                    }
-                }
-                
-                Divider()
-                
-                // Terminal Input Line
-                HStack(spacing: 6) {
-                    Text("$")
-                        .font(.system(size: 11, weight: .bold, design: .monospaced))
-                        .foregroundColor(.secondary)
-                    
-                    TextField("Enter shell command or respond to interactive prompt…", text: $terminalInput)
-                        .textFieldStyle(.plain)
+            ScrollViewReader { proxy in
+                ScrollView {
+                    Text(terminalLog)
                         .font(.system(size: 10.5, design: .monospaced))
                         .foregroundColor(.white)
-                        .onSubmit {
-                            let input = terminalInput.trimmingCharacters(in: .whitespacesAndNewlines)
-                            guard !input.isEmpty else { return }
-                            terminalInput = ""
-                            if let _ = currentStdin {
-                                sendInputToRunningProcess(input + "\n")
-                            } else {
-                                runInTerminal(input)
-                            }
-                        }
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .padding(10)
+                        .id("terminalBottom")
                 }
-                .padding(.horizontal, 10)
-                .padding(.vertical, 6)
-                .background(Color(red: 0.08, green: 0.08, blue: 0.09))
+                .frame(height: 120)
+                .background(Color.black)
+                .clipShape(RoundedRectangle(cornerRadius: 6, style: .continuous))
+                .overlay(
+                    RoundedRectangle(cornerRadius: 6, style: .continuous)
+                        .stroke(Color.white.opacity(0.12), lineWidth: 1)
+                )
+                .onChange(of: terminalLog) { _ in
+                    proxy.scrollTo("terminalBottom", anchor: .bottom)
+                }
             }
-            .clipShape(RoundedRectangle(cornerRadius: 6, style: .continuous))
-            .overlay(
-                RoundedRectangle(cornerRadius: 6, style: .continuous)
-                    .stroke(Color.primary.opacity(0.12), lineWidth: 1)
-            )
         }
     }
     
-    // MARK: - Step 4: Reasoning Configuration
+    // MARK: - Step 4: Reasoning & Runtime Configuration
     
     private var reasoningConfigurationSection: some View {
-        VStack(alignment: .leading, spacing: 10) {
-            Text("3. REASONING & RUNTIME CONFIGURATION")
+        VStack(alignment: .leading, spacing: 8) {
+            Text("3. RUNTIME & CAPABILITY PROFILE")
                 .font(.system(size: 10, weight: .bold))
-                .foregroundColor(.secondary)
+                .foregroundColor(Color.white.opacity(0.5))
                 .tracking(0.6)
             
-            HStack(spacing: 16) {
+            HStack(spacing: 12) {
                 VStack(alignment: .leading, spacing: 4) {
-                    Text("DEFAULT MODEL")
+                    Text("AGENT AUTONOMY LEVEL")
                         .font(.system(size: 9.5, weight: .semibold))
-                        .foregroundColor(.secondary)
+                        .foregroundColor(Color.white.opacity(0.5))
                     
-                    Picker("", selection: $selectedModel) {
-                        Text("Agent default").tag("Agent default")
-                        ForEach(availableModelsForTarget(), id: \.self) { m in
-                            Text(m).tag(m)
+                    Picker("", selection: $selectedPermission) {
+                        ForEach(ACPPermissionMode.allCases, id: \.self) { mode in
+                            Text(mode.displayName).tag(mode)
                         }
                     }
                     .pickerStyle(.menu)
@@ -850,7 +843,7 @@ public struct AgentSetupWizardView: View {
                 VStack(alignment: .leading, spacing: 4) {
                     Text("REASONING EFFORT")
                         .font(.system(size: 9.5, weight: .semibold))
-                        .foregroundColor(.secondary)
+                        .foregroundColor(Color.white.opacity(0.5))
                     
                     Picker("", selection: $selectedEffort) {
                         Text("High (Real-time thinking stream)").tag("High")
@@ -866,19 +859,19 @@ public struct AgentSetupWizardView: View {
             HStack(spacing: 5) {
                 Image(systemName: "sparkles")
                     .font(.system(size: 9.5))
-                    .foregroundColor(.accentColor)
+                    .foregroundColor(.white)
                 Text("High reasoning enables real-time token streaming of internal thoughts and step deliberation.")
                     .font(.system(size: 10))
-                    .foregroundColor(.secondary)
+                    .foregroundColor(Color.white.opacity(0.5))
             }
             .padding(.top, 2)
         }
         .padding(14)
-        .background(Color(NSColor.controlBackgroundColor).opacity(0.5))
+        .background(Color.white.opacity(0.04))
         .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
         .overlay(
             RoundedRectangle(cornerRadius: 8, style: .continuous)
-                .stroke(Color.primary.opacity(0.06), lineWidth: 1)
+                .stroke(Color.white.opacity(0.08), lineWidth: 1)
         )
     }
     
@@ -895,29 +888,45 @@ public struct AgentSetupWizardView: View {
                     Text("Back to Agents")
                 }
                 .font(.system(size: 11))
+                .foregroundColor(Color.white.opacity(0.7))
             }
             .buttonStyle(.plain)
-            .foregroundColor(.secondary)
             
             Spacer()
             
-            Button("Cancel") {
+            Button {
                 onBack()
+            } label: {
+                Text("Cancel")
+                    .font(.system(size: 11, weight: .medium))
+                    .foregroundColor(.white)
+                    .padding(.horizontal, 12)
+                    .padding(.vertical, 5)
+                    .background(Color.white.opacity(0.08))
+                    .overlay(
+                        RoundedRectangle(cornerRadius: 6, style: .continuous)
+                            .stroke(Color.white.opacity(0.18), lineWidth: 1)
+                    )
+                    .clipShape(RoundedRectangle(cornerRadius: 6, style: .continuous))
             }
-            .font(.system(size: 11))
-            .buttonStyle(.bordered)
-            .controlSize(.regular)
+            .buttonStyle(.plain)
             
-            Button("Connect \(target.title)") {
+            Button {
                 connectAgent()
+            } label: {
+                Text("Connect \(target.title)")
+                    .font(.system(size: 11, weight: .semibold))
+                    .foregroundColor(.black)
+                    .padding(.horizontal, 14)
+                    .padding(.vertical, 5)
+                    .background(Color.white)
+                    .clipShape(RoundedRectangle(cornerRadius: 6, style: .continuous))
             }
-            .font(.system(size: 11, weight: .semibold))
-            .buttonStyle(.borderedProminent)
-            .controlSize(.regular)
+            .buttonStyle(.plain)
         }
         .padding(.horizontal, 24)
         .padding(.vertical, 12)
-        .background(Color(NSColor.controlBackgroundColor).opacity(0.4))
+        .background(Color.black)
     }
     
     // MARK: - Subviews & Actions
@@ -937,11 +946,11 @@ public struct AgentSetupWizardView: View {
             .padding(.horizontal, 10)
             .padding(.vertical, 7)
             .frame(maxWidth: .infinity, alignment: .leading)
-            .background(Color(NSColor.controlBackgroundColor))
+            .background(Color.black)
             .clipShape(RoundedRectangle(cornerRadius: 6, style: .continuous))
             .overlay(
                 RoundedRectangle(cornerRadius: 6, style: .continuous)
-                    .stroke(Color.primary.opacity(0.08), lineWidth: 1)
+                    .stroke(Color.white.opacity(0.12), lineWidth: 1)
             )
             
             Button {
