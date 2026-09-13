@@ -375,6 +375,16 @@ struct AgenticEditorWorkspace: View {
                             appState.showingPreviewView = true
                             Task { await DeviceRuntimeService.shared.startPreferredEmbeddedAndroid() }
                         }
+                        Button("iPhone USB (Hardware)") {
+                            PreviewDockService.shared.selectTab(id: "ios-physical")
+                            DeviceRuntimeService.shared.showingEmbeddedDeviceDock = true
+                            appState.showingPreviewView = true
+                        }
+                        Button("Android USB (Hardware)") {
+                            PreviewDockService.shared.selectTab(id: "android-physical")
+                            DeviceRuntimeService.shared.showingEmbeddedDeviceDock = true
+                            appState.showingPreviewView = true
+                        }
                         Divider()
                         Button("Choose Device & Run…") {
                             DeviceRuntimeService.shared.showingDeviceRuntimeSheet = true
@@ -2874,6 +2884,19 @@ struct FileTreeRow: View, Equatable {
     
     private var contextMenuContent: some View {
         Group {
+            if !node.isDirectory {
+                Button("Preview in Dock") {
+                    let fileURL = URL(fileURLWithPath: node.path)
+                    PreviewDockService.shared.openFile(url: fileURL, makeActive: true)
+                }
+                
+                Button("Preview Git Diff") {
+                    PreviewDockService.shared.openGitDiff(for: node.path, makeActive: true)
+                }
+                
+                Divider()
+            }
+            
             if node.isDirectory {
                 Button("New Folder") {
                     let alert = NSAlert()

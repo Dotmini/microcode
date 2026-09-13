@@ -1226,12 +1226,12 @@ class AppState: ObservableObject {
             defaults.set(aiModel, forKey: "aiModel")
         } else if hasDeepSeek {
             aiProvider = "deepseek"
-            aiModel = (savedModel?.contains("deepseek") == true) ? savedModel! : "deepseek-chat"
+            aiModel = (savedModel?.contains("deepseek") == true) ? savedModel! : "deepseek-v4-flash"
             defaults.set("deepseek", forKey: "aiProvider")
             defaults.set(aiModel, forKey: "aiModel")
         } else if hasOpenAI {
             aiProvider = "openai"
-            aiModel = (savedModel?.contains("gpt") == true || savedModel?.contains("o1") == true || savedModel?.contains("o3") == true) ? savedModel! : "gpt-4o"
+            aiModel = (savedModel?.contains("gpt") == true || savedModel?.contains("o1") == true || savedModel?.contains("o3") == true) ? savedModel! : "gpt-6-astra"
             defaults.set("openai", forKey: "aiProvider")
             defaults.set(aiModel, forKey: "aiModel")
         } else if hasAnthropic {

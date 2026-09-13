@@ -45,6 +45,11 @@ struct AIAgentView: View {
     @State private var isWalkthroughMode = false
     @State private var showingTeamTasks = false
     @State private var showingTeamIntegrations = false
+    @State private var showingAgentConnections = false
+    @State private var showingAgentEcosystem = false
+    @State private var agentEcosystemTab: EcosystemTab = .agents
+    @State private var activeACPAgent: ACPAgentConfig? = nil
+    @StateObject private var acpHost = ACPHostService.shared
     @ObservedObject private var teamIntegrations = TeamIntegrationService.shared
     @ObservedObject private var deviceRuntime = DeviceRuntimeService.shared
     @ObservedObject private var previewDock = PreviewDockService.shared
@@ -97,7 +102,120 @@ struct AIAgentView: View {
         return "cloud"
     }
     
+    private var activeExternalAgentConfig: ACPAgentConfig? {
+        if let id = acpHost.activeAgentId {
+            return acpHost.registeredConfigs.first(where: { $0.id == id })
+        }
+        if appState.aiProvider == "agy" {
+            return acpHost.registeredConfigs.first(where: { $0.type == .agy })
+        } else if appState.aiProvider == "codex" {
+            return acpHost.registeredConfigs.first(where: { $0.type == .codexEngine })
+        } else if appState.aiProvider == "claude_code" {
+            return acpHost.registeredConfigs.first(where: { $0.type == .claudeCode })
+        } else if appState.aiProvider == "opencode" {
+            return acpHost.registeredConfigs.first(where: { $0.type == .openCode })
+        } else if appState.aiProvider == "zed" {
+            return acpHost.registeredConfigs.first(where: { $0.type == .zedEngine })
+        }
+        return nil
+    }
+    
+    enum AIExecutionMode: String, CaseIterable {
+        case acp = "ACP"
+        case cloud = "Dotmini Cloud"
+        case byok = "BYOK"
+        case subscription = "Subscription"
+        
+        var badgeTitle: String {
+            switch self {
+            case .acp: return "ACP"
+            case .cloud: return "Dotmini Cloud"
+            case .byok: return "BYOK"
+            case .subscription: return "Subscription"
+            }
+        }
+        
+        var icon: String {
+            switch self {
+            case .acp: return "terminal.fill"
+            case .cloud: return "cloud.fill"
+            case .byok: return "key.fill"
+            case .subscription: return "sparkles.rectangle.stack"
+            }
+        }
+        
+        var badgeColor: Color {
+            switch self {
+            case .acp: return .teal
+            case .cloud: return .purple
+            case .byok: return .blue
+            case .subscription: return .orange
+            }
+        }
+    }
+    
+    private var currentExecutionMode: AIExecutionMode {
+        if activeExternalAgentConfig != nil {
+            return .acp
+        }
+        if appState.aiProvider == "omni" || currentKeyMode == "cloud" {
+            return .cloud
+        }
+        if currentKeyMode == "subscription" {
+            return .subscription
+        }
+        return .byok
+    }
+    
+    private func engineColor(for type: ACPAgentType) -> Color {
+        switch type {
+        case .agy: return .indigo
+        case .codexEngine: return .green
+        case .claudeCode: return .blue
+        case .openCode: return .orange
+        case .zedEngine: return .cyan
+        case .aider: return .yellow
+        case .custom: return .accentColor
+        }
+    }
+    
+    private func activeAgentShortName(for config: ACPAgentConfig) -> String {
+        switch config.type {
+        case .agy: return "Antigravity"
+        case .codexEngine: return "Codex"
+        case .claudeCode: return "Claude Code"
+        case .openCode: return "OpenCode"
+        case .zedEngine: return "Zed"
+        case .aider: return "Aider"
+        case .custom: return config.name
+        }
+    }
+    
     private var currentModelDisplayName: String {
+        if let activeAgent = activeExternalAgentConfig {
+            let engineId: String
+            switch activeAgent.type {
+            case .agy: engineId = "agy"
+            case .codexEngine: engineId = "codex"
+            case .claudeCode: engineId = "claude_code"
+            case .openCode: engineId = "opencode"
+            case .zedEngine: engineId = "zed"
+            case .aider: engineId = "aider"
+            case .custom: engineId = "custom"
+            }
+            let engineModels = LocalEcosystemDiscovery.shared.models(for: engineId)
+            if let matched = engineModels.first(where: { $0.id == appState.aiModel }) {
+                return matched.name
+            }
+            if let modelDef = AIModelCatalog.shared.model(id: appState.aiModel) {
+                return modelDef.name
+            }
+            if let defaultModel = engineModels.first {
+                return defaultModel.name
+            }
+            return appState.aiModel.isEmpty ? activeAgent.name : AIModelCatalog.formatModelName(appState.aiModel)
+        }
+        
         if currentKeyMode == "subscription" {
             let activeSub = UserDefaults.standard.string(forKey: "subscriptionActiveProvider")
             let provType = activeSub.flatMap { SubscriptionProviderType(rawValue: $0) }
@@ -108,16 +226,16 @@ struct AIAgentView: View {
                 return info.name
             }
             return appState.aiModel.isEmpty ? "Select Model" : AIModelCatalog.formatModelName(appState.aiModel)
-        } else if currentKeyMode == "direct" {
+        } else if currentKeyMode == "direct" || currentExecutionMode == .byok {
             if let modelDef = AIModelCatalog.shared.model(id: appState.aiModel) {
                 return modelDef.name
             }
-            return appState.aiModel.isEmpty ? "Gemini 2.5 Flash" : AIModelCatalog.formatModelName(appState.aiModel)
+            return appState.aiModel.isEmpty ? "Gemini 3.7 Flash" : AIModelCatalog.formatModelName(appState.aiModel)
         } else {
             if let modelDef = AIModelCatalog.shared.model(id: appState.aiModel) {
                 return modelDef.name
             }
-            return appState.aiModel.isEmpty ? "Dotmini Cloud" : AIModelCatalog.formatModelName(appState.aiModel)
+            return appState.aiModel.isEmpty ? "Omni O1X Pro" : AIModelCatalog.formatModelName(appState.aiModel)
         }
     }
     
@@ -297,6 +415,26 @@ struct AIAgentView: View {
                 deviceRuntime.showingEmbeddedAppleDock = true
             })
             .environmentObject(appState)
+        }
+        .sheet(isPresented: $showingAgentConnections) {
+            AgentConnectionsView()
+                .environmentObject(appState)
+        }
+        .sheet(isPresented: $showingAgentEcosystem) {
+            AgentEcosystemConfigView(initialTab: agentEcosystemTab)
+        }
+        .onReceive(NotificationCenter.default.publisher(for: NSNotification.Name("MicroCode.OpenAgentConnections"))) { _ in
+            showingAgentConnections = true
+        }
+        .onReceive(NotificationCenter.default.publisher(for: NSNotification.Name("MicroCode.OpenAgentEcosystem"))) { notification in
+            if let tabName = notification.object as? String {
+                if tabName == "rules" { agentEcosystemTab = .rules }
+                else if tabName == "mcp" { agentEcosystemTab = .mcp }
+                else if tabName == "context" { agentEcosystemTab = .context }
+                else if tabName == "models" { agentEcosystemTab = .models }
+                else { agentEcosystemTab = .agents }
+            }
+            showingAgentEcosystem = true
         }
         .onReceive(NotificationCenter.default.publisher(for: .agentProcessQueueItem)) { notification in
             let targetScope: AgentSessionScope = agent.domain == .science ? .science : .editor
@@ -510,8 +648,15 @@ struct AIAgentView: View {
                                         Task { await deviceRuntime.startEmbeddedAndroid() }
                                     }
                                 }
-                                Button("Open File in Preview Dock…") {
-                                    previewDock.pickAndOpenFile()
+                                Button("iPhone USB (Hardware)") {
+                                    withAnimation(.easeInOut(duration: 0.16)) {
+                                        previewDock.selectTab(id: "ios-physical")
+                                    }
+                                }
+                                Button("Android USB (Hardware)") {
+                                    withAnimation(.easeInOut(duration: 0.16)) {
+                                        previewDock.selectTab(id: "android-physical")
+                                    }
                                 }
                                 Button(previewDock.isDockVisible || deviceRuntime.showingEmbeddedDeviceDock ? "Hide Preview Dock" : "Show Preview Dock") {
                                     withAnimation(.easeInOut(duration: 0.16)) {
@@ -628,6 +773,46 @@ struct AIAgentView: View {
                         modelSelector
                         
                         Menu {
+                            Button {
+                                showingAgentConnections = true
+                            } label: {
+                                Label("Agent Connections Hub…", systemImage: "link.badge.plus")
+                            }
+                            Button {
+                                agentEcosystemTab = .rules
+                                showingAgentEcosystem = true
+                            } label: {
+                                Label("Platform Rules & Interop", systemImage: "point.3.connected.trianglepath.dotted")
+                            }
+                            if !acpHost.registeredConfigs.isEmpty {
+                                Divider()
+                                ForEach(acpHost.registeredConfigs) { config in
+                                    Button {
+                                        switchToConfig(config)
+                                    } label: {
+                                        HStack {
+                                            Label(config.name, systemImage: config.type.iconName)
+                                            if acpHost.activeAgentId == config.id {
+                                                Spacer()
+                                                Image(systemName: "checkmark")
+                                            }
+                                        }
+                                    }
+                                }
+                                Divider()
+                                Button {
+                                    switchToNativeAgent()
+                                } label: {
+                                    HStack {
+                                        Label("Use Internal AI", systemImage: "brain")
+                                        if acpHost.activeAgentId == nil {
+                                            Spacer()
+                                            Image(systemName: "checkmark")
+                                        }
+                                    }
+                                }
+                            }
+                            Divider()
                             Button { Task { await appState.microCodeService?.indexProject() } } label: {
                                 Label("Index Project", systemImage: "database")
                             }
@@ -649,6 +834,53 @@ struct AIAgentView: View {
                                 .frame(height: 24)
                         }
                         .menuStyle(.borderlessButton)
+
+                        Button(action: {
+                            agentEcosystemTab = .rules
+                            showingAgentEcosystem = true
+                        }) {
+                            Image(systemName: "point.3.connected.trianglepath.dotted")
+                                .font(.system(size: 11))
+                                .foregroundColor(MultiPlatformRulesEngine.shared.discoveredRules.isEmpty ? .secondary : .accentColor)
+                                .frame(width: 20, height: 24)
+                        }
+                        .buttonStyle(.plain)
+                        .help("Platform Rules & Interop (Cursor, Zed, Cline, GLM)")
+                        
+                        Button(action: {
+                            showingAgentConnections = true
+                        }) {
+                            Image(systemName: "link.badge.plus")
+                                .font(.system(size: 11))
+                                .foregroundColor(acpHost.registeredConfigs.isEmpty ? .secondary : .green)
+                                .frame(width: 20, height: 24)
+                        }
+                        .buttonStyle(.plain)
+                        .help("Agent Connections Hub (Workser-style: Claude, AGY, OpenCode, Codex)")
+                        
+                        if let activeAgent = activeExternalAgentConfig {
+                            HStack(spacing: 4) {
+                                Circle()
+                                    .fill(Color.green)
+                                    .frame(width: 5, height: 5)
+                                Text("ACP: \(currentModelDisplayName)")
+                                    .font(.system(size: 9, weight: .medium))
+                                    .foregroundColor(.primary.opacity(0.85))
+                                Button {
+                                    switchToNativeAgent()
+                                } label: {
+                                    Image(systemName: "xmark")
+                                        .font(.system(size: 7, weight: .bold))
+                                        .foregroundColor(.secondary)
+                                }
+                                .buttonStyle(.plain)
+                            }
+                            .padding(.horizontal, 6)
+                            .padding(.vertical, 3)
+                            .background(Color.primary.opacity(0.06))
+                            .cornerRadius(4)
+                            .help("Running via \(activeAgent.name). Click x to return to Native.")
+                        }
                     }
                 }
                 .padding(.horizontal, 8)
@@ -1199,24 +1431,31 @@ struct AIAgentView: View {
         let agentPath = (microcodeDir as NSString).appendingPathComponent("agent.md")
         let walkthroughPath = (microcodeDir as NSString).appendingPathComponent("walkthrough.md")
         
-        taskMdText = (try? String(contentsOfFile: taskPath, encoding: .utf8)) ?? "# Current Task\n\n## Objective\n<!-- Describe the current task here -->\n\n## Steps\n- [ ] Step 1\n- [ ] Step 2\n"
-        agentMdText = (try? String(contentsOfFile: agentPath, encoding: .utf8)) ?? "# Agent Instructions\n\n## Project Context\nEdit this file to customize AI agent behavior.\n\n## Rules\n- Follow existing code style\n- Write tests for new features\n"
-        walkthroughMdText = (try? String(contentsOfFile: walkthroughPath, encoding: .utf8)) ?? "# Walkthrough\n\n## Changes\n- Initial implementation\n\n## Verification\n- Tests passing\n"
+        taskMdText = (try? String(contentsOfFile: taskPath, encoding: .utf8)) ?? AgentService.defaultTaskMarkdown()
+        agentMdText = (try? String(contentsOfFile: agentPath, encoding: .utf8)) ?? AgentService.defaultAgentMarkdown()
+        walkthroughMdText = (try? String(contentsOfFile: walkthroughPath, encoding: .utf8)) ?? "# Walkthrough\n\n## Changes\n- Verified implementation\n\n## Verification\n- Tests passing\n\n## Privacy Audit\n- [x] Zero API keys or secrets detected in artifacts\n"
     }
     
     private func saveTaskFiles() {
         guard let workspace = appState.workspaceFolder?.path else { return }
         let microcodeDir = (workspace as NSString).appendingPathComponent(".microcode")
         
-        try? FileManager.default.createDirectory(atPath: microcodeDir, withIntermediateDirectories: true)
+        let taskURL = URL(fileURLWithPath: (microcodeDir as NSString).appendingPathComponent("task.md"))
+        let agentURL = URL(fileURLWithPath: (microcodeDir as NSString).appendingPathComponent("agent.md"))
+        let walkthroughURL = URL(fileURLWithPath: (microcodeDir as NSString).appendingPathComponent("walkthrough.md"))
         
-        let taskPath = (microcodeDir as NSString).appendingPathComponent("task.md")
-        let agentPath = (microcodeDir as NSString).appendingPathComponent("agent.md")
-        let walkthroughPath = (microcodeDir as NSString).appendingPathComponent("walkthrough.md")
+        // Zero-Privacy-Leakage enforcement: automatically redact any detected secrets before saving to disk
+        let sanitizedTask = AgentPrivacyGuard.sanitize(taskMdText)
+        let sanitizedAgent = AgentPrivacyGuard.sanitize(agentMdText)
+        let sanitizedWalkthrough = AgentPrivacyGuard.sanitize(walkthroughMdText)
         
-        try? taskMdText.write(toFile: taskPath, atomically: true, encoding: .utf8)
-        try? agentMdText.write(toFile: agentPath, atomically: true, encoding: .utf8)
-        try? walkthroughMdText.write(toFile: walkthroughPath, atomically: true, encoding: .utf8)
+        if sanitizedTask != taskMdText { taskMdText = sanitizedTask }
+        if sanitizedAgent != agentMdText { agentMdText = sanitizedAgent }
+        if sanitizedWalkthrough != walkthroughMdText { walkthroughMdText = sanitizedWalkthrough }
+        
+        try? AgentPrivacyGuard.safeWrite(content: sanitizedTask, to: taskURL)
+        try? AgentPrivacyGuard.safeWrite(content: sanitizedAgent, to: agentURL)
+        try? AgentPrivacyGuard.safeWrite(content: sanitizedWalkthrough, to: walkthroughURL)
         
         // Reload into AgentService
         agent.setWorkspace(workspace)
@@ -1323,7 +1562,10 @@ struct AIAgentView: View {
 
                 Spacer(minLength: 0)
 
-                Button(action: { agent.stopGeneration() }) {
+                Button(action: {
+                    agent.stopGeneration()
+                    acpHost.stopActiveAgent()
+                }) {
                     Image(systemName: "stop.fill")
                         .font(.system(size: 9, weight: .semibold))
                         .foregroundColor(.red.opacity(0.9))
@@ -1364,6 +1606,7 @@ struct AIAgentView: View {
                     guard !agent.messageQueue.isEmpty else { return }
                     let nextItem = agent.messageQueue.removeFirst()
                     agent.stopGeneration(autoProcessQueue: false)
+                    acpHost.stopActiveAgent()
                     DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) {
                         executeMessage(nextItem.text, attachments: nextItem.attachments)
                     }
@@ -1531,197 +1774,36 @@ struct AIAgentView: View {
     
     private var modelSelectorDropdown: some View {
         Menu {
-            // Mode Switcher Header
-            Menu("Mode: \(currentKeyMode == "subscription" ? "Web Subscription" : (currentKeyMode == "direct" ? "API Key (BYOK)" : "Dotmini Cloud"))") {
-                Button(action: {
-                    UserDefaults.standard.set("subscription", forKey: "aiKeyMode")
-                    if let first = SubscriptionAuthManager.shared.connectedModelInfos().first {
-                        appState.aiProvider = first.aiProviderID
-                        appState.aiModel = first.modelID
-                        SubscriptionAuthManager.shared.activeProvider = first.provider
-                        UserDefaults.standard.set(first.provider.rawValue, forKey: "subscriptionActiveProvider")
-                    }
-                    appState.saveSettings()
-                }) {
-                    HStack {
-                        Label("Web Subscription (No token charges)", systemImage: "sparkles.rectangle.stack")
-                        if currentKeyMode == "subscription" { Image(systemName: "checkmark") }
-                    }
-                }
-                
-                Button(action: {
-                    UserDefaults.standard.set("direct", forKey: "aiKeyMode")
-                    let providersWithKeys = AIModelCatalog.shared.providers.filter { $0.id != "omni" && !(appState.apiKeys[$0.id]?.isEmpty ?? true) }
-                    if let activeProv = providersWithKeys.first(where: { $0.id == appState.aiProvider }) ?? providersWithKeys.first,
-                       let first = activeProv.models.first {
-                        appState.aiProvider = activeProv.id
-                        appState.aiModel = first.id
-                    }
-                    appState.saveSettings()
-                }) {
-                    HStack {
-                        Label("Direct API Key (BYOK)", systemImage: "key.fill")
-                        if currentKeyMode == "direct" { Image(systemName: "checkmark") }
-                    }
-                }
-                
-                Button(action: {
-                    UserDefaults.standard.set("cloud", forKey: "aiKeyMode")
-                    if let first = AIModelCatalog.shared.provider("omni")?.models.first {
-                        appState.aiProvider = "omni"
-                        appState.aiModel = first.id
-                    }
-                    appState.saveSettings()
-                }) {
-                    HStack {
-                        Label("Dotmini Cloud", systemImage: "cloud.fill")
-                        if currentKeyMode == "cloud" { Image(systemName: "checkmark") }
-                    }
-                }
-            }
-            
-            Button(action: {
-                Task {
-                    await AIModelCatalog.shared.refreshLiveProviderModels()
-                }
-            }) {
-                Label("Refresh Live Models from APIs", systemImage: "arrow.triangle.2.circlepath")
-            }
-            
-            Divider()
-            
-            if currentKeyMode == "subscription" {
-                // ── Web Subscription Mode: Only connected accounts, pure model list ──
-                if SubscriptionAuthManager.shared.hasAnyConnected {
-                    let connectedProviders = SubscriptionAuthManager.shared.connectedProviders()
-                    ForEach(connectedProviders) { prov in
-                        Section(prov.displayName) {
-                            ForEach(prov.modelInfos) { subModel in
-                                Button(action: {
-                                    appState.aiProvider = subModel.aiProviderID
-                                    appState.aiModel = subModel.modelID
-                                    SubscriptionAuthManager.shared.activeProvider = subModel.provider
-                                    UserDefaults.standard.set(subModel.provider.rawValue, forKey: "subscriptionActiveProvider")
-                                    UserDefaults.standard.set("subscription", forKey: "aiKeyMode")
-                                    appState.saveSettings()
-                                }) {
-                                    HStack {
-                                        Text(subModel.name)
-                                        if appState.aiModel == subModel.modelID {
-                                            Image(systemName: "checkmark")
-                                        }
-                                    }
-                                }
-                            }
-                        }
-                    }
-                } else {
-                    Section {
-                        Text("No Web Subscriptions Connected")
-                            .font(.caption)
-                            .foregroundColor(.secondary)
-                        Button(action: {
-                            UserDefaults.standard.set("direct", forKey: "aiKeyMode")
-                            appState.saveSettings()
-                        }) {
-                            Label("Switch to Direct API Key (BYOK)", systemImage: "key.fill")
-                        }
-                        Button(action: {
-                            appState.showingSettingsDialog = true
-                        }) {
-                            Label("Connect Web Subscription...", systemImage: "plus.circle")
-                        }
-                    }
-                }
-            } else if currentKeyMode == "direct" {
-                // ── Direct API (BYOK) Mode: Only providers with configured keys ──
-                let byokProviders = AIModelCatalog.shared.providers.filter { $0.id != "omni" && !(appState.apiKeys[$0.id]?.isEmpty ?? true) }
-                if byokProviders.isEmpty {
-                    Button(action: {
-                        appState.showingSettingsDialog = true
-                    }) {
-                        Label("Add API Key in Settings...", systemImage: "key.fill")
-                    }
-                } else {
-                    ForEach(byokProviders) { providerDef in
-                        Section(providerDef.name) {
-                            ForEach(providerDef.models) { modelDef in
-                                Button(action: {
-                                    let normalized = AIModelCatalog.shared.normalizedSelection(provider: providerDef.id, model: modelDef.id)
-                                    appState.aiProvider = normalized.provider
-                                    appState.aiModel = normalized.model
-                                    UserDefaults.standard.set("direct", forKey: "aiKeyMode")
-                                    appState.saveSettings()
-                                }) {
-                                    HStack {
-                                        Text(modelDef.name)
-                                        if appState.aiModel == modelDef.id {
-                                            Image(systemName: "checkmark")
-                                        }
-                                    }
-                                }
-                            }
-                        }
-                    }
-                }
-            } else {
-                // ── Dotmini Cloud Mode ──
-                if let omni = AIModelCatalog.shared.provider("omni") {
-                    Section("Dotmini Cloud") {
-                        ForEach(omni.models) { modelDef in
-                            Button(action: {
-                                let normalized = AIModelCatalog.shared.normalizedSelection(provider: "omni", model: modelDef.id)
-                                appState.aiProvider = normalized.provider
-                                appState.aiModel = normalized.model
-                                UserDefaults.standard.set("cloud", forKey: "aiKeyMode")
-                                appState.saveSettings()
-                            }) {
-                                HStack {
-                                    Text(modelDef.name)
-                                    if appState.aiModel == modelDef.id {
-                                        Image(systemName: "checkmark")
-                                    }
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-            
-            Divider()
-            
-            Button(action: {
-                appState.showingSettingsDialog = true
-            }) {
-                Label("AI Settings...", systemImage: "gearshape")
-            }
+            modelMenuContent
         } label: {
             HStack(spacing: 5) {
-                if currentKeyMode == "subscription" {
-                    Image(systemName: "sparkles.rectangle.stack")
-                        .font(.system(size: 9))
-                        .foregroundColor(.orange)
-                } else if currentKeyMode == "direct" {
-                    Image(systemName: "key.fill")
-                        .font(.system(size: 9))
-                        .foregroundColor(.blue)
-                } else {
-                    Image(systemName: "cloud.fill")
-                        .font(.system(size: 9))
-                        .foregroundColor(.purple)
-                }
+                // Mode Badge: [ACP] / [Dotmini Cloud] / [BYOK] / [Subscription]
+                Text(currentExecutionMode.badgeTitle)
+                    .font(.system(size: 8.5, weight: .bold))
+                    .padding(.horizontal, 4.5)
+                    .padding(.vertical, 1.5)
+                    .background(currentExecutionMode.badgeColor.opacity(0.12))
+                    .foregroundColor(currentExecutionMode.badgeColor)
+                    .cornerRadius(3.5)
                 
+                // Just Model Name
                 Text(currentModelDisplayName)
                     .font(.system(size: 11, weight: .medium))
-                    .foregroundColor(.secondary)
+                    .foregroundColor(.primary.opacity(0.9))
+                    .lineLimit(1)
+                
                 Image(systemName: "chevron.up.chevron.down")
                     .font(.system(size: 8, weight: .semibold))
-                    .foregroundColor(.secondary.opacity(0.7))
+                    .foregroundColor(.secondary.opacity(0.6))
             }
-            .padding(.horizontal, 8)
+            .padding(.horizontal, 7)
             .padding(.vertical, 4)
-            .background(Color.primary.opacity(0.04))
+            .background(Color.primary.opacity(0.05))
             .cornerRadius(6)
+            .overlay(
+                RoundedRectangle(cornerRadius: 6)
+                    .stroke(Color.white.opacity(0.08), lineWidth: 1)
+            )
         }
         .menuStyle(.borderlessButton)
     }
@@ -1747,7 +1829,10 @@ struct AIAgentView: View {
                     .help("Add to Queue (Runs automatically after active task finishes)")
                 } else {
                     // Stop Button (Only when input is empty)
-                    Button(action: { agent.stopGeneration() }) {
+                    Button(action: {
+                        agent.stopGeneration()
+                        acpHost.stopActiveAgent()
+                    }) {
                         ZStack {
                             Circle()
                                 .fill(Color.red.opacity(0.85))
@@ -2001,6 +2086,238 @@ struct AIAgentView: View {
             agent.setWorkspace(workspace.path)
         }
         
+        // Route to External ACP Agent (Claude Code, Antigravity, OpenCode, Aider, Codex Engine, Zed) if active or if engine selected
+        var targetConfig: ACPAgentConfig? = nil
+        if let activeAgentId = acpHost.activeAgentId,
+           let cfg = acpHost.registeredConfigs.first(where: { $0.id == activeAgentId }) {
+            targetConfig = cfg
+        } else if appState.aiProvider == "agy" {
+            targetConfig = acpHost.registeredConfigs.first(where: { $0.type == .agy }) ?? {
+                let bin = LocalEcosystemDiscovery.shared.engines.first(where: { $0.id == "agy" })?.binaryPath ?? ACPAgentType.agy.defaultCommand
+                let cfg = ACPAgentConfig.defaultConfig(for: .agy, command: bin)
+                acpHost.registerAgent(cfg)
+                return cfg
+            }()
+        } else if appState.aiProvider == "claude_code" {
+            targetConfig = acpHost.registeredConfigs.first(where: { $0.type == .claudeCode }) ?? {
+                let bin = LocalEcosystemDiscovery.shared.engines.first(where: { $0.id == "claude_code" })?.binaryPath ?? ACPAgentType.claudeCode.defaultCommand
+                let cfg = ACPAgentConfig.defaultConfig(for: .claudeCode, command: bin)
+                acpHost.registerAgent(cfg)
+                return cfg
+            }()
+        } else if appState.aiProvider == "opencode" {
+            targetConfig = acpHost.registeredConfigs.first(where: { $0.type == .openCode }) ?? {
+                let bin = LocalEcosystemDiscovery.shared.engines.first(where: { $0.id == "opencode" })?.binaryPath ?? ACPAgentType.openCode.defaultCommand
+                let cfg = ACPAgentConfig.defaultConfig(for: .openCode, command: bin)
+                acpHost.registerAgent(cfg)
+                return cfg
+            }()
+        } else if appState.aiProvider == "codex" {
+            targetConfig = acpHost.registeredConfigs.first(where: { $0.type == .codexEngine }) ?? {
+                let bin = LocalEcosystemDiscovery.shared.engines.first(where: { $0.id == "codex" })?.binaryPath ?? ACPAgentType.codexEngine.defaultCommand
+                let cfg = ACPAgentConfig.defaultConfig(for: .codexEngine, command: bin)
+                acpHost.registerAgent(cfg)
+                return cfg
+            }()
+        } else if appState.aiProvider == "zed" {
+            targetConfig = acpHost.registeredConfigs.first(where: { $0.type == .zedEngine }) ?? {
+                let bin = LocalEcosystemDiscovery.shared.engines.first(where: { $0.id == "zed" })?.binaryPath ?? ACPAgentType.zedEngine.defaultCommand
+                let cfg = ACPAgentConfig.defaultConfig(for: .zedEngine, command: bin)
+                acpHost.registerAgent(cfg)
+                return cfg
+            }()
+        }
+        
+        if let activeConfig = targetConfig {
+            let userMessage = AgentMessageModel(
+                id: UUID().uuidString, role: .user,
+                content: userText + (currentAttachments.isEmpty ? "" : "\n[Attached: \(currentAttachments.map(\.name).joined(separator: ", "))]"),
+                toolResults: [], pendingChanges: [], timestamp: Date()
+            )
+            agent.messages.append(userMessage)
+            
+            let responseId = UUID().uuidString
+            agent.messages.append(AgentMessageModel(
+                id: responseId, role: .assistant, content: "",
+                toolResults: [], pendingChanges: [], timestamp: Date()
+            ))
+            agent.isLoading = true
+            
+            let workspace = appState.workspaceFolder?.path ?? FileManager.default.currentDirectoryPath
+            let session = acpHost.getOrCreateSession(for: activeConfig)
+            let chosenModel: String? = {
+                switch activeConfig.type {
+                case .agy:
+                    let agyModels = LocalEcosystemDiscovery.shared.models(for: "agy").map(\.id)
+                    return agyModels.contains(appState.aiModel) ? appState.aiModel : (agyModels.first ?? "gemini-3.8-flash-high")
+                case .openCode:
+                    let isAuthed = LocalEcosystemDiscovery.shared.engines.first(where: { $0.id == "opencode" })?.isAuthenticated ?? false
+                    let openCodeModels = LocalEcosystemDiscovery.shared.models(for: "opencode").map(\.id)
+                    let current = appState.aiModel
+                    if openCodeModels.contains(current) {
+                        if !isAuthed && !current.contains("free") {
+                            return openCodeModels.first(where: { $0.contains("free") }) ?? "opencode/nemotron-3.5-lightning-free"
+                        }
+                        return current
+                    }
+                    return openCodeModels.first(where: { $0.contains("free") }) ?? "opencode/nemotron-3.5-lightning-free"
+                case .codexEngine:
+                    let codexModels = LocalEcosystemDiscovery.shared.models(for: "codex").map(\.id)
+                    return codexModels.contains(appState.aiModel) ? appState.aiModel : (codexModels.first ?? "gpt-6-astra")
+                case .claudeCode:
+                    let claudeModels = LocalEcosystemDiscovery.shared.models(for: "claude_code").map(\.id)
+                    return claudeModels.contains(appState.aiModel) ? appState.aiModel : (claudeModels.first ?? "haiku")
+                case .zedEngine:
+                    let zedModels = LocalEcosystemDiscovery.shared.models(for: "zed").map(\.id)
+                    return zedModels.contains(appState.aiModel) ? appState.aiModel : (zedModels.first ?? "deepseek-v4-flash")
+                default:
+                    return appState.aiModel.isEmpty ? nil : appState.aiModel
+                }
+            }()
+            if let model = chosenModel, appState.aiModel != model {
+                appState.aiModel = model
+            }
+            
+            Task { @MainActor in
+                let stream = session.eventStream
+                session.start(task: userText, workspacePath: workspace, model: chosenModel)
+                
+                var accumulatedThinking = ""
+                var accumulatedText = ""
+                
+                agent.agentPhase = .thinking
+                agent.currentToolExecution = "\(activeConfig.name) is reasoning..."
+                
+                for await event in stream {
+                    guard let idx = agent.messages.firstIndex(where: { $0.id == responseId }) else { continue }
+                    switch event {
+                    case .text(let delta):
+                        accumulatedText += delta
+                        agent.agentPhase = .idle
+                        agent.currentToolExecution = nil
+                        
+                        let formattedContent: String
+                        if !accumulatedThinking.isEmpty {
+                            formattedContent = "<thought>\(accumulatedThinking)</thought>\n\n\(accumulatedText)"
+                        } else {
+                            formattedContent = accumulatedText
+                        }
+                        agent.messages[idx] = AgentMessageModel(
+                            id: responseId, role: .assistant,
+                            content: formattedContent,
+                            toolResults: agent.messages[idx].toolResults,
+                            pendingChanges: agent.messages[idx].pendingChanges,
+                            timestamp: Date()
+                        )
+                    case .thinking(let thought):
+                        accumulatedThinking += thought
+                        agent.agentPhase = .thinking
+                        agent.currentToolExecution = "\(activeConfig.name) is reasoning..."
+                        
+                        let formattedContent: String
+                        if !accumulatedText.isEmpty {
+                            formattedContent = "<thought>\(accumulatedThinking)</thought>\n\n\(accumulatedText)"
+                        } else {
+                            // Unclosed tag renders as LIVE streaming thought block
+                            formattedContent = "<thought>\(accumulatedThinking)"
+                        }
+                        agent.messages[idx] = AgentMessageModel(
+                            id: responseId, role: .assistant,
+                            content: formattedContent,
+                            toolResults: agent.messages[idx].toolResults,
+                            pendingChanges: agent.messages[idx].pendingChanges,
+                            timestamp: Date()
+                        )
+                    case .toolCall(let call):
+                        agent.agentPhase = .executing(call.name)
+                        agent.currentToolExecution = "Executing \(call.name)..."
+                        
+                        var tools = agent.messages[idx].toolResults
+                        let t = ToolResultModel(
+                            toolCallId: call.id,
+                            toolName: call.name,
+                            toolParams: nil,
+                            success: true,
+                            output: call.displaySummary,
+                            error: nil
+                        )
+                        tools.append(t)
+                        agent.messages[idx] = AgentMessageModel(
+                            id: responseId, role: .assistant,
+                            content: agent.messages[idx].content,
+                            toolResults: tools,
+                            pendingChanges: agent.messages[idx].pendingChanges,
+                            timestamp: Date()
+                        )
+                    case .toolResult(let res):
+                        agent.agentPhase = .thinking
+                        agent.currentToolExecution = "Analyzing output..."
+                        
+                        var tools = agent.messages[idx].toolResults
+                        if let tIdx = tools.firstIndex(where: { $0.toolCallId == res.toolCallId }) {
+                            tools[tIdx] = ToolResultModel(
+                                toolCallId: res.toolCallId,
+                                toolName: tools[tIdx].toolName,
+                                toolParams: nil,
+                                success: !res.isError,
+                                output: res.content,
+                                error: res.isError ? res.content : nil
+                            )
+                        }
+                        agent.messages[idx] = AgentMessageModel(
+                            id: responseId, role: .assistant,
+                            content: agent.messages[idx].content,
+                            toolResults: tools,
+                            pendingChanges: agent.messages[idx].pendingChanges,
+                            timestamp: Date()
+                        )
+                    case .progress(let prog):
+                        agent.agentPhase = .thinking
+                        agent.currentToolExecution = prog.message
+                    case .sessionInit:
+                        agent.agentPhase = .thinking
+                        agent.currentToolExecution = "Connecting to \(activeConfig.name)..."
+                    case .complete:
+                        if !accumulatedThinking.isEmpty && accumulatedText.isEmpty {
+                            agent.messages[idx] = AgentMessageModel(
+                                id: responseId, role: .assistant,
+                                content: "<thought>\(accumulatedThinking)</thought>",
+                                toolResults: agent.messages[idx].toolResults,
+                                pendingChanges: agent.messages[idx].pendingChanges,
+                                timestamp: Date()
+                            )
+                        } else if !accumulatedThinking.isEmpty && !accumulatedText.isEmpty {
+                            agent.messages[idx] = AgentMessageModel(
+                                id: responseId, role: .assistant,
+                                content: "<thought>\(accumulatedThinking)</thought>\n\n\(accumulatedText)",
+                                toolResults: agent.messages[idx].toolResults,
+                                pendingChanges: agent.messages[idx].pendingChanges,
+                                timestamp: Date()
+                            )
+                        }
+                        agent.isLoading = false
+                        agent.agentPhase = .idle
+                        agent.currentToolExecution = nil
+                    case .error(let err):
+                        let curr = agent.messages[idx].content
+                        agent.messages[idx] = AgentMessageModel(
+                            id: responseId, role: .assistant,
+                            content: curr + "\n\n⚠️ \(activeConfig.name) Error: \(err)",
+                            toolResults: agent.messages[idx].toolResults,
+                            pendingChanges: agent.messages[idx].pendingChanges,
+                            timestamp: Date()
+                        )
+                        agent.isLoading = false
+                        agent.agentPhase = .idle
+                        agent.currentToolExecution = nil
+                    default:
+                        break
+                    }
+                }
+            }
+            return
+        }
+        
         let providerString = appState.aiProvider
         let model = appState.aiModel.isEmpty ? "gemini-2.5-flash" : appState.aiModel
         let apiKey = appState.apiKeys[providerString] ?? ""
@@ -2138,6 +2455,94 @@ struct AIAgentView: View {
         }
     }
     
+    // MARK: - Engine & Agent Switching Helpers
+    
+    private func switchToConfig(_ config: ACPAgentConfig) {
+        activeACPAgent = config
+        acpHost.activeAgentId = config.id
+        let engineId: String
+        switch config.type {
+        case .agy: engineId = "agy"
+        case .codexEngine: engineId = "codex"
+        case .claudeCode: engineId = "claude_code"
+        case .openCode: engineId = "opencode"
+        case .zedEngine: engineId = "zed"
+        case .aider: engineId = "aider"
+        case .custom: engineId = "custom"
+        }
+        appState.aiProvider = engineId
+        let engineModels = LocalEcosystemDiscovery.shared.models(for: engineId)
+        if !engineModels.contains(where: { $0.id == appState.aiModel }) {
+            if let firstModel = engineModels.first?.id {
+                appState.aiModel = firstModel
+            }
+        }
+        appState.saveSettings()
+    }
+    
+    private func switchToEngine(_ engineId: String, modelId: String) {
+        let type: ACPAgentType
+        switch engineId {
+        case "agy": type = .agy
+        case "codex": type = .codexEngine
+        case "claude_code": type = .claudeCode
+        case "opencode": type = .openCode
+        case "zed": type = .zedEngine
+        default: type = .agy
+        }
+        
+        let config: ACPAgentConfig
+        if let existing = acpHost.registeredConfigs.first(where: { $0.type == type }) {
+            config = existing
+        } else {
+            let binaryPath = LocalEcosystemDiscovery.shared.engines.first(where: { $0.id == engineId })?.binaryPath ?? type.defaultCommand
+            config = ACPAgentConfig.defaultConfig(for: type, command: binaryPath)
+            acpHost.registerAgent(config)
+        }
+        
+        activeACPAgent = config
+        acpHost.activeAgentId = config.id
+        appState.aiProvider = engineId
+        appState.aiModel = modelId
+        appState.saveSettings()
+    }
+    
+    private func switchToNativeMode(mode: String) {
+        acpHost.stopActiveAgent()
+        agent.isLoading = false
+        acpHost.activeAgentId = nil
+        activeACPAgent = nil
+        UserDefaults.standard.set(mode, forKey: "aiKeyMode")
+        if mode == "subscription" {
+            if let first = SubscriptionAuthManager.shared.connectedModelInfos().first {
+                appState.aiProvider = first.aiProviderID
+                appState.aiModel = first.modelID
+                SubscriptionAuthManager.shared.activeProvider = first.provider
+                UserDefaults.standard.set(first.provider.rawValue, forKey: "subscriptionActiveProvider")
+            }
+        } else if mode == "cloud" {
+            if let first = AIModelCatalog.shared.provider("omni")?.models.first {
+                appState.aiProvider = "omni"
+                appState.aiModel = first.id
+            }
+        } else {
+            // Direct (BYOK)
+            let byok = AIModelCatalog.shared.providers.filter { !["omni", "agy", "codex", "claude_code", "zed"].contains($0.id) && !(appState.apiKeys[$0.id]?.isEmpty ?? true) }
+            if let firstProv = byok.first, let firstM = firstProv.models.first {
+                appState.aiProvider = firstProv.id
+                appState.aiModel = firstM.id
+            } else {
+                appState.aiProvider = "deepseek"
+                appState.aiModel = "deepseek-flash"
+            }
+        }
+        appState.saveSettings()
+    }
+    
+    private func switchToNativeAgent() {
+        switchToNativeMode(mode: UserDefaults.standard.string(forKey: "aiKeyMode") ?? "direct")
+    }
+    
     // MARK: - Model Selector
     
     private var headerModelDisplayName: String {
@@ -2149,47 +2554,55 @@ struct AIAgentView: View {
             modelMenuContent
         } label: {
             HStack(spacing: 4) {
-                if currentKeyMode == "subscription" {
-                    Image(systemName: "sparkles.rectangle.stack")
-                        .font(.system(size: 8))
-                        .foregroundColor(.orange)
-                } else if currentKeyMode == "direct" {
-                    Image(systemName: "key.fill")
-                        .font(.system(size: 8))
-                        .foregroundColor(.blue)
-                } else {
-                    Image(systemName: "cloud.fill")
-                        .font(.system(size: 8))
-                        .foregroundColor(.purple)
-                }
+                // Mode badge: [ACP] / [Dotmini Cloud] / [BYOK] / [Subscription]
+                Text(currentExecutionMode.badgeTitle)
+                    .font(.system(size: 8, weight: .bold))
+                    .padding(.horizontal, 4)
+                    .padding(.vertical, 1)
+                    .background(currentExecutionMode.badgeColor.opacity(0.12))
+                    .foregroundColor(currentExecutionMode.badgeColor)
+                    .cornerRadius(3)
                 
-                Text(appState.aiModel.isEmpty ? "Auto" : headerModelDisplayName)
-                    .font(.system(size: 9, weight: .medium))
+                // Model name only
+                Text(headerModelDisplayName)
+                    .font(.system(size: 9.5, weight: .medium))
                     .lineLimit(1)
                     .truncationMode(.tail)
-                    .foregroundColor(.secondary)
+                    .foregroundColor(.primary.opacity(0.9))
+                
+                Image(systemName: "chevron.down")
+                    .font(.system(size: 7, weight: .semibold))
+                    .foregroundColor(.secondary.opacity(0.7))
             }
             .padding(.horizontal, 6)
             .padding(.vertical, 4)
             .background(Color.primary.opacity(0.05))
-            .cornerRadius(3)
+            .cornerRadius(4)
+            .overlay(
+                RoundedRectangle(cornerRadius: 4)
+                    .stroke(Color.white.opacity(0.08), lineWidth: 0.5)
+            )
         }
         .menuStyle(.borderlessButton)
-        .frame(maxWidth: 160)
-        .help("Select AI Model (\(currentKeyMode.capitalized))")
+        .frame(maxWidth: 220)
+        .help("Select Mode & AI Model (ACP, Dotmini Cloud, BYOK, Subscription)")
     }
     
     @ViewBuilder
     private func providerIcon(for provider: String) -> some View {
         switch provider {
-        case "gemini":    Image(systemName: "sparkles").foregroundColor(.purple)
-        case "openai":    Image(systemName: "brain.head.profile").foregroundColor(.green)
-        case "anthropic": Image(systemName: "bubble.left.and.text.bubble.right").foregroundColor(.orange)
-        case "deepseek":  Image(systemName: "water.waves").foregroundColor(.blue)
-        case "grok":      Image(systemName: "bolt.fill").foregroundColor(.red)
-        case "codex":     Image(systemName: "chevron.left.forwardslash.chevron.right").foregroundColor(.cyan)
-        case "local":     Image(systemName: "desktopcomputer").foregroundColor(.mint)
-        default:          Image(systemName: "cpu").foregroundColor(.accentColor)
+        case "gemini":      Image(systemName: "sparkles").foregroundColor(.purple)
+        case "agy":         Image(systemName: "sparkles").foregroundColor(.purple)
+        case "openai":      Image(systemName: "brain.head.profile").foregroundColor(.green)
+        case "codex":       Image(systemName: "terminal.fill").foregroundColor(.green)
+        case "anthropic":   Image(systemName: "bubble.left.and.text.bubble.right").foregroundColor(.orange)
+        case "claude_code": Image(systemName: "command.square.fill").foregroundColor(.orange)
+        case "opencode":    Image(systemName: "laptopcomputer").foregroundColor(Color(red: 0.88, green: 0.35, blue: 0.28))
+        case "deepseek":    Image(systemName: "water.waves").foregroundColor(.blue)
+        case "zed":         Image(systemName: "chevron.left.forwardslash.chevron.right").foregroundColor(.blue)
+        case "grok":        Image(systemName: "bolt.fill").foregroundColor(.red)
+        case "local":       Image(systemName: "desktopcomputer").foregroundColor(.mint)
+        default:            Image(systemName: "cpu").foregroundColor(.accentColor)
         }
     }
     
@@ -2202,13 +2615,83 @@ struct AIAgentView: View {
     
     @ViewBuilder
     private var modelMenuContent: some View {
-        if currentKeyMode == "subscription" {
-            // ── Web Subscriptions: Only show connected subscription models ──
+        // Section 1: 🔌 ACP (Agent Client Protocol - Local CLI)
+        Section("🔌 ACP (Local CLI Agent)") {
+            ForEach(LocalEcosystemDiscovery.shared.engines) { engine in
+                Menu(engine.name) {
+                    ForEach(engine.models) { m in
+                        Button(action: {
+                            switchToEngine(engine.id, modelId: m.id)
+                        }) {
+                            HStack {
+                                Text(m.name)
+                                if !m.badge.isEmpty { Text("(\(m.badge))") }
+                                if currentExecutionMode == .acp && appState.aiProvider == engine.id && appState.aiModel == m.id {
+                                    Image(systemName: "checkmark")
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        
+        Divider()
+        
+        // Section 2: ☁️ Dotmini Cloud (Sovereign AI)
+        Section("☁️ Dotmini Cloud (Sovereign AI)") {
+            if let omni = AIModelCatalog.shared.provider("omni") {
+                ForEach(omni.models) { m in
+                    Button(action: {
+                        switchToNativeMode(mode: "cloud")
+                        setModel("omni", m.id)
+                    }) {
+                        HStack {
+                            Text(m.name)
+                            if currentExecutionMode == .cloud && appState.aiModel == m.id {
+                                Image(systemName: "checkmark")
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        
+        Divider()
+        
+        // Section 3: 🔑 BYOK (Bring Your Own Key)
+        Section("🔑 BYOK (Bring Your Own Key)") {
+            let byokProviders = AIModelCatalog.shared.providers.filter { !["omni", "agy", "codex", "claude_code", "zed"].contains($0.id) }
+            ForEach(byokProviders) { prov in
+                let hasKey = hasActiveKey(prov.id)
+                Menu("\(prov.name)\(hasKey ? "" : " (No Key)")") {
+                    ForEach(prov.models) { m in
+                        Button(action: {
+                            switchToNativeMode(mode: "direct")
+                            setModel(prov.id, m.id)
+                        }) {
+                            HStack {
+                                Text(m.name)
+                                if currentExecutionMode == .byok && appState.aiProvider == prov.id && appState.aiModel == m.id {
+                                    Image(systemName: "checkmark")
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        
+        Divider()
+        
+        // Section 4: ✨ Subscription (OAuth Accounts)
+        Section("✨ Subscription (ChatGPT / Claude / Gemini / Copilot)") {
             if SubscriptionAuthManager.shared.hasAnyConnected {
                 ForEach(SubscriptionAuthManager.shared.connectedProviders()) { prov in
-                    Section(prov.displayName) {
+                    Menu(prov.displayName) {
                         ForEach(prov.modelInfos) { subModel in
                             Button(action: {
+                                switchToNativeMode(mode: "subscription")
                                 appState.aiProvider = subModel.aiProviderID
                                 appState.aiModel = subModel.modelID
                                 SubscriptionAuthManager.shared.activeProvider = subModel.provider
@@ -2218,7 +2701,7 @@ struct AIAgentView: View {
                             }) {
                                 HStack {
                                     Text(subModel.name)
-                                    if appState.aiModel == subModel.modelID {
+                                    if currentExecutionMode == .subscription && appState.aiModel == subModel.modelID {
                                         Image(systemName: "checkmark")
                                     }
                                 }
@@ -2227,116 +2710,34 @@ struct AIAgentView: View {
                     }
                 }
             } else {
-                Section {
-                    Text("No Web Subscriptions Connected")
-                        .font(.caption)
-                        .foregroundColor(.secondary)
-                    Button(action: {
-                        UserDefaults.standard.set("direct", forKey: "aiKeyMode")
-                        appState.saveSettings()
-                    }) {
-                        Label("Switch to Direct API Key (BYOK)", systemImage: "key.fill")
-                    }
-                    Button(action: {
-                        appState.showingSettingsDialog = true
-                    }) {
-                        Label("Connect Web Subscription...", systemImage: "plus.circle")
-                    }
-                }
-            }
-        } else if currentKeyMode == "direct" {
-            // ── BYOK: Only show configured API providers ──
-            let byokProviders = AIModelCatalog.shared.providers.filter { $0.id != "omni" && hasActiveKey($0.id) }
-            if byokProviders.isEmpty {
-                Button(action: {
-                    appState.showingSettingsDialog = true
-                }) {
-                    Label("Add API Key in Settings...", systemImage: "key.fill")
-                }
-            } else {
-                ForEach(byokProviders) { providerDef in
-                    Section(providerDef.name) {
-                        ForEach(providerDef.models) { model in
-                            Button(action: { setModel(providerDef.id, model.id) }) {
-                                HStack {
-                                    Text(model.name)
-                                    if appState.aiModel == model.id { Image(systemName: "checkmark") }
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-        } else {
-            // ── Dotmini Cloud ──
-            if let omni = modelCatalog.provider("omni") {
-                Section("Dotmini Cloud") {
-                    ForEach(omni.models) { model in
-                        Button(action: { setModel("omni", model.id) }) {
-                            HStack {
-                                Text(model.name)
-                                if appState.aiModel == model.id { Image(systemName: "checkmark") }
-                            }
-                        }
-                    }
+                Button(action: { appState.showingSettingsDialog = true }) {
+                    Label("Connect Subscription in Settings...", systemImage: "plus.circle")
                 }
             }
         }
         
         Divider()
         
-        // Mode Switcher Option in top menu
-        Menu("Switch AI Mode") {
-            Button("Web Subscription") {
-                UserDefaults.standard.set("subscription", forKey: "aiKeyMode")
-                if let first = SubscriptionAuthManager.shared.connectedModelInfos().first {
-                    appState.aiProvider = first.aiProviderID
-                    appState.aiModel = first.modelID
-                    SubscriptionAuthManager.shared.activeProvider = first.provider
-                    UserDefaults.standard.set(first.provider.rawValue, forKey: "subscriptionActiveProvider")
-                }
-                appState.saveSettings()
-            }
-            Button("Direct API Key (BYOK)") {
-                UserDefaults.standard.set("direct", forKey: "aiKeyMode")
-                if let first = AIModelCatalog.shared.providers.first(where: { $0.id != "omni" })?.models.first {
-                    appState.aiProvider = first.provider
-                    appState.aiModel = first.id
-                }
-                appState.saveSettings()
-            }
-            Button("Dotmini Cloud") {
-                UserDefaults.standard.set("cloud", forKey: "aiKeyMode")
-                if let first = AIModelCatalog.shared.provider("omni")?.models.first {
-                    appState.aiProvider = "omni"
-                    appState.aiModel = first.id
-                }
-                appState.saveSettings()
-            }
+        Button {
+            showingAgentConnections = true
+        } label: {
+            Label("Manage Agent Connections & Setup…", systemImage: "slider.horizontal.2.square")
         }
         
-        Divider()
-        
-        // ── MCP Status ──
-        let mcp = MCPServer.shared
-        Label(
-            mcp.isRunning ? "MCP Server: Running (\(mcp.requestCount) reqs)" : "MCP Server: Stopped",
-            systemImage: mcp.isRunning ? "server.rack" : "xmark.circle"
-        )
-        .font(.caption2)
-        .foregroundColor(mcp.isRunning ? .green : .secondary)
-
-        Divider()
-        Button(modelCatalog.isRefreshing ? "Refreshing models…" : "Refresh from Dotmini Cloud") {
+        Button(action: {
             Task {
-                await modelCatalog.refreshIfNeeded(force: true)
-                let normalized = modelCatalog.normalizedSelection(provider: appState.aiProvider, model: appState.aiModel)
-                appState.aiProvider = normalized.provider
-                appState.aiModel = normalized.model
-                appState.saveSettings()
+                await AIModelCatalog.shared.refreshLiveProviderModels()
+                await LocalEcosystemDiscovery.shared.refresh()
             }
+        }) {
+            Label("Rescan Local Engines & Cloud APIs", systemImage: "arrow.triangle.2.circlepath")
         }
-        .disabled(modelCatalog.isRefreshing)
+        
+        Button(action: {
+            appState.showingSettingsDialog = true
+        }) {
+            Label("AI Settings...", systemImage: "gearshape")
+        }
     }
     
     private func setModel(_ provider: String, _ model: String) {
@@ -2957,7 +3358,9 @@ enum MessageBlock: Identifiable {
     
     var id: String {
         switch self {
-        case .thought(let c, _): return "thought-\(c.hashValue)"
+        case .thought(let c, let d):
+            if d == nil { return "thought-streaming" }
+            return "thought-\(c.hashValue)"
         case .text(let c): return "text-\(c.hashValue)"
         case .code(let l, let c): return "code-\(l)-\(c.hashValue)"
         case .heading(let lv, let c): return "h\(lv)-\(c.hashValue)"
@@ -3026,6 +3429,30 @@ struct MessageContentParser {
         return blocks
     }
     
+    private static func findUnclosedThought(in text: String) -> (before: String, thought: String)? {
+        let lower = text.lowercased()
+        var openRange: Range<String.Index>? = nil
+        var tagLength = 0
+        if let r = lower.range(of: "<thought>") {
+            openRange = r
+            tagLength = "<thought>".count
+        } else if let r = lower.range(of: "<thinking>") {
+            openRange = r
+            tagLength = "<thinking>".count
+        }
+        
+        guard let r = openRange else { return nil }
+        let afterTag = text[r.upperBound...]
+        let lowerAfter = String(afterTag).lowercased()
+        if lowerAfter.contains("</thought>") || lowerAfter.contains("</thinking>") {
+            return nil // Full match handled by regex
+        }
+        
+        let before = String(text[..<r.lowerBound])
+        let thought = String(afterTag).trimmingCharacters(in: .whitespacesAndNewlines)
+        return (before: before, thought: thought)
+    }
+    
     private static func doParse(_ content: String) -> [MessageBlock] {
         let remaining = content
         
@@ -3065,13 +3492,28 @@ struct MessageContentParser {
                 
                 if lastEnd < nsContent.length {
                     let afterText = nsContent.substring(from: lastEnd)
-                    if !afterText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                    if let unclosed = findUnclosedThought(in: afterText) {
+                        if !unclosed.before.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                            parsedList.append(contentsOf: parseLatexAndCode(unclosed.before))
+                        }
+                        parsedList.append(.thought(unclosed.thought, nil))
+                    } else if !afterText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
                         parsedList.append(contentsOf: parseLatexAndCode(afterText))
                     }
                 }
                 
                 return parsedList
             }
+        }
+        
+        // Check for streaming / unclosed thought without closing tag
+        if let unclosed = findUnclosedThought(in: remaining) {
+            var parsedList: [MessageBlock] = []
+            if !unclosed.before.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                parsedList.append(contentsOf: parseLatexAndCode(unclosed.before))
+            }
+            parsedList.append(.thought(unclosed.thought, nil))
+            return parsedList
         }
         
         return parseLatexAndCode(remaining)
@@ -5366,9 +5808,20 @@ struct AntigravityThoughtBlockView: View {
     let content: String
     let durationSeconds: Int?
     
-    @State private var isExpanded: Bool = false
+    @State private var isExpanded: Bool = true
+    @State private var userToggled: Bool = false
+    @State private var isPulsing: Bool = false
+    @State private var liveElapsedSeconds: Int = 1
+    @State private var liveTimer: Timer? = nil
+    
+    private var isStreaming: Bool {
+        durationSeconds == nil
+    }
     
     private var durationText: String {
+        if isStreaming {
+            return "Thinking in real-time • \(liveElapsedSeconds)s"
+        }
         if let d = durationSeconds, d > 0 {
             return isExpanded ? "Thinking for \(d)s" : "Thought for \(d)s"
         }
@@ -5379,14 +5832,47 @@ struct AntigravityThoughtBlockView: View {
         VStack(alignment: .leading, spacing: 6) {
             // Collapsible Header
             Button(action: {
+                userToggled = true
                 withAnimation(.easeInOut(duration: 0.18)) {
                     isExpanded.toggle()
                 }
             }) {
-                HStack(spacing: 5) {
+                HStack(spacing: 6) {
+                    if isStreaming {
+                        // Pulsing sparkle icon during live streaming
+                        Image(systemName: "sparkles")
+                            .font(.system(size: 11, weight: .semibold))
+                            .foregroundColor(.accentColor)
+                            .opacity(isPulsing ? 1.0 : 0.4)
+                            .animation(.easeInOut(duration: 0.8).repeatForever(autoreverses: true), value: isPulsing)
+                    } else {
+                        Image(systemName: "brain.head.profile")
+                            .font(.system(size: 11, weight: .regular))
+                            .foregroundColor(.secondary)
+                    }
+                    
                     Text(durationText)
-                        .font(.system(size: 11.5, weight: .regular))
-                        .foregroundColor(.secondary)
+                        .font(.system(size: 11.5, weight: isStreaming ? .medium : .regular))
+                        .foregroundColor(isStreaming ? .primary : .secondary)
+                    
+                    if isStreaming {
+                        // LIVE badge
+                        HStack(spacing: 4) {
+                            Circle()
+                                .fill(Color.accentColor)
+                                .frame(width: 5, height: 5)
+                                .opacity(isPulsing ? 1.0 : 0.3)
+                                .animation(.easeInOut(duration: 0.6).repeatForever(autoreverses: true), value: isPulsing)
+                            
+                            Text("LIVE")
+                                .font(.system(size: 8.5, weight: .bold))
+                                .foregroundColor(.accentColor)
+                        }
+                        .padding(.horizontal, 5)
+                        .padding(.vertical, 2)
+                        .background(Color.accentColor.opacity(0.12))
+                        .clipShape(Capsule())
+                    }
                     
                     Image(systemName: isExpanded ? "chevron.down" : "chevron.right")
                         .font(.system(size: 8.5, weight: .semibold))
@@ -5401,33 +5887,85 @@ struct AntigravityThoughtBlockView: View {
             // Expanded Thought Body
             if isExpanded {
                 VStack(alignment: .leading, spacing: 8) {
-                    let sections = parseThoughtSections(content)
-                    ForEach(sections, id: \.id) { sec in
-                        VStack(alignment: .leading, spacing: 4) {
-                            if let title = sec.title, !title.isEmpty {
-                                Text(title)
-                                    .font(.system(size: 12, weight: .semibold))
-                                    .foregroundColor(.primary.opacity(0.9))
+                    let cleanContent = content.trimmingCharacters(in: .whitespacesAndNewlines)
+                    if cleanContent.isEmpty && isStreaming {
+                        HStack(spacing: 6) {
+                            ProgressView()
+                                .controlSize(.mini)
+                            Text("Formulating reasoning steps…")
+                                .font(.system(size: 11, design: .monospaced))
+                                .foregroundColor(.secondary)
+                        }
+                        .padding(.vertical, 4)
+                    } else {
+                        let sections = parseThoughtSections(cleanContent)
+                        ForEach(sections) { sec in
+                            VStack(alignment: .leading, spacing: 4) {
+                                if let title = sec.title, !title.isEmpty {
+                                    Text(title)
+                                        .font(.system(size: 11.5, weight: .semibold))
+                                        .foregroundColor(.primary.opacity(0.9))
+                                }
+                                
+                                Text(sec.body)
+                                    .font(.system(size: 11, design: .default))
+                                    .foregroundColor(.secondary.opacity(0.85))
+                                    .lineSpacing(3)
+                                    .fixedSize(horizontal: false, vertical: true)
                             }
-                            
-                            Text(sec.body)
-                                .font(.system(size: 11.5))
-                                .foregroundColor(.secondary.opacity(0.85))
-                                .lineSpacing(3)
-                                .fixedSize(horizontal: false, vertical: true)
                         }
                     }
                 }
-                .padding(.leading, 8)
-                .padding(.top, 2)
+                .padding(.horizontal, 10)
+                .padding(.vertical, 8)
+                .background(Color(NSColor.controlBackgroundColor).opacity(0.4))
+                .clipShape(RoundedRectangle(cornerRadius: 6, style: .continuous))
+                .overlay(
+                    HStack {
+                        Rectangle()
+                            .fill(Color.accentColor.opacity(0.35))
+                            .frame(width: 2.5)
+                        Spacer()
+                    }
+                    .clipShape(RoundedRectangle(cornerRadius: 6, style: .continuous))
+                )
                 .transition(.opacity)
             }
         }
         .padding(.vertical, 4)
+        .onAppear {
+            if isStreaming {
+                isPulsing = true
+                if !userToggled { isExpanded = true }
+                startLiveTimer()
+            } else {
+                if !userToggled { isExpanded = false }
+            }
+        }
+        .onChange(of: durationSeconds) { newDuration in
+            if newDuration != nil {
+                liveTimer?.invalidate()
+                liveTimer = nil
+                isPulsing = false
+            }
+        }
+        .onDisappear {
+            liveTimer?.invalidate()
+            liveTimer = nil
+        }
+    }
+    
+    private func startLiveTimer() {
+        liveTimer?.invalidate()
+        liveTimer = Timer.scheduledTimer(withTimeInterval: 1.0, repeats: true) { _ in
+            DispatchQueue.main.async {
+                self.liveElapsedSeconds += 1
+            }
+        }
     }
     
     private struct ThoughtSection: Identifiable {
-        let id = UUID()
+        let id: Int
         let title: String?
         let body: String
     }
@@ -5435,6 +5973,7 @@ struct AntigravityThoughtBlockView: View {
     private func parseThoughtSections(_ text: String) -> [ThoughtSection] {
         let paragraphs = text.components(separatedBy: "\n\n")
         var result: [ThoughtSection] = []
+        var sectionIndex = 0
         
         for para in paragraphs {
             let trimmed = para.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -5446,21 +5985,24 @@ struct AntigravityThoughtBlockView: View {
                 if parts.count >= 3 {
                     let title = parts[1].trimmingCharacters(in: .whitespacesAndNewlines)
                     let remainingBody = parts.dropFirst(2).joined(separator: "**").trimmingCharacters(in: .whitespacesAndNewlines)
-                    result.append(ThoughtSection(title: title, body: remainingBody.isEmpty ? trimmed : remainingBody))
+                    result.append(ThoughtSection(id: sectionIndex, title: title, body: remainingBody.isEmpty ? trimmed : remainingBody))
+                    sectionIndex += 1
                     continue
                 }
             } else if trimmed.hasPrefix("### ") || trimmed.hasPrefix("## ") || trimmed.hasPrefix("# ") {
                 let lines = trimmed.components(separatedBy: .newlines)
                 let title = lines.first?.replacingOccurrences(of: "#", with: "").trimmingCharacters(in: .whitespaces)
                 let body = lines.dropFirst().joined(separator: "\n").trimmingCharacters(in: .whitespacesAndNewlines)
-                result.append(ThoughtSection(title: title, body: body.isEmpty ? trimmed : body))
+                result.append(ThoughtSection(id: sectionIndex, title: title, body: body.isEmpty ? trimmed : body))
+                sectionIndex += 1
                 continue
             }
             
-            result.append(ThoughtSection(title: nil, body: trimmed))
+            result.append(ThoughtSection(id: sectionIndex, title: nil, body: trimmed))
+            sectionIndex += 1
         }
         
-        return result.isEmpty ? [ThoughtSection(title: nil, body: text)] : result
+        return result.isEmpty ? [ThoughtSection(id: 0, title: nil, body: text)] : result
     }
 }
 

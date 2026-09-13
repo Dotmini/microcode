@@ -64,43 +64,37 @@ struct EmbeddedDeviceDockView: View {
                             .buttonStyle(.plain)
                         }
                         
-                        // Add New Preview Tab Button (+)
-                        Button {
-                            dockService.pickAndOpenFile()
-                        } label: {
-                            Image(systemName: "plus")
-                                .font(.system(size: 10, weight: .semibold))
-                                .foregroundColor(.secondary)
-                                .padding(5)
-                                .background(Color.primary.opacity(0.06))
-                                .clipShape(RoundedRectangle(cornerRadius: 4))
-                        }
-                        .buttonStyle(.plain)
-                        .help("Add / Preview File (Image, PDF, Excel, etc.)")
                     }
                     .padding(.horizontal, 4)
                 }
                 
                 Spacer()
 
-                // Mobile / Web Tools Bar
-                if let active = dockService.activeTab {
-                    switch active.kind {
-                    case .web:
-                        EmptyView()
-                    case .ios:
-                        Text(ServeSimService.shared.statusMessage)
-                            .font(.system(size: 10))
+                // Quick action tools (clean, non-overlapping)
+                if dockService.activeTab?.kind == .iOSPhysical {
+                    // Physical iPhone Quick Refresh / Rescan
+                    Button {
+                        IOSDeviceCaptureService.shared.scanForDevices()
+                    } label: {
+                        Image(systemName: "arrow.clockwise")
+                            .font(.system(size: 11))
                             .foregroundColor(.secondary)
-                            .lineLimit(1)
-                    case .android:
-                        Text(deviceRuntime.embeddedAndroidStatus)
-                            .font(.system(size: 10))
-                            .foregroundColor(.secondary)
-                            .lineLimit(1)
-                    case .file:
-                        EmptyView()
                     }
+                    .buttonStyle(.plain)
+                    .help("Rescan for connected iPhone/iPad")
+                }
+
+                if dockService.activeTab?.kind == .androidPhysical {
+                    // Physical Android Quick Refresh / Rescan
+                    Button {
+                        Task { await AndroidStreamService.shared.scanDevices() }
+                    } label: {
+                        Image(systemName: "arrow.clockwise")
+                            .font(.system(size: 11))
+                            .foregroundColor(.secondary)
+                    }
+                    .buttonStyle(.plain)
+                    .help("Rescan for connected Android USB devices")
                 }
 
                 if deviceRuntime.embeddedDockMode != .web && (dockService.activeTab?.kind == .ios || dockService.activeTab?.kind == .android) {
@@ -196,7 +190,7 @@ struct EmbeddedDeviceDockView: View {
             
             Divider()
 
-            if deviceRuntime.showingMobileDevTools && (dockService.activeTab?.kind == .ios || dockService.activeTab?.kind == .android) {
+            if deviceRuntime.showingMobileDevTools && (dockService.activeTab?.kind == .ios || dockService.activeTab?.kind == .iOSPhysical || dockService.activeTab?.kind == .android) {
                 MobileDevCommandBarView()
                 Divider()
             }
@@ -225,6 +219,10 @@ struct EmbeddedDeviceDockView: View {
                                 deviceRuntime.showingEmbeddedAppleDock = false
                             }
                         )
+                    case .iOSPhysical:
+                        PhysicalIOSDeviceTabView()
+                    case .androidPhysical:
+                        PhysicalAndroidDeviceTabView()
                     case .android:
                         EmbeddedAndroidDeviceView(
                             runtime: deviceRuntime,
@@ -237,21 +235,18 @@ struct EmbeddedDeviceDockView: View {
                         )
                     case .file(let url):
                         filePreviewRouter(for: url, canvas: canvas)
+                    case .diff(_, let title, let oldContent, let newContent):
+                        InteractiveDiffPreviewView(title: title, oldContent: oldContent, newContent: newContent)
                     }
                 } else {
                     // Empty Drop Zone State
-                    VStack(spacing: 12) {
+                    VStack(spacing: 10) {
                         Image(systemName: "square.dashed")
-                            .font(.system(size: 36))
-                            .foregroundColor(.secondary.opacity(0.4))
+                            .font(.system(size: 32))
+                            .foregroundColor(.secondary.opacity(0.35))
                         Text("Drop a file here to preview")
-                            .font(.system(size: 12, weight: .medium))
-                            .foregroundColor(.secondary)
-                        Button("Choose File…") {
-                            dockService.pickAndOpenFile()
-                        }
-                        .font(.system(size: 11))
-                        .buttonStyle(.bordered)
+                            .font(.system(size: 11, weight: .medium))
+                            .foregroundColor(.secondary.opacity(0.8))
                     }
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
                 }
@@ -290,7 +285,11 @@ struct EmbeddedDeviceDockView: View {
             InteractivePDFPreviewView(url: url)
         case .spreadsheet:
             UniversalSpreadsheetView(url: url)
-        case .codeOrText, .quickLook:
+        case .diff:
+            InteractiveDiffFilePreviewView(url: url)
+        case .codeOrText:
+            InteractiveCodePreviewView(url: url)
+        case .quickLook:
             QuickLookDocumentHost(url: url)
         }
     }
@@ -328,8 +327,10 @@ struct DevicePreviewHeaderMenu: View {
                     deviceRuntime.showingDeviceRuntimeSheet = true
                 }
                 
-                Button("Open File in Preview Dock…") {
-                    PreviewDockService.shared.pickAndOpenFile()
+                Button("iPhone USB (Hardware)") {
+                    withAnimation(.easeInOut(duration: 0.16)) {
+                        PreviewDockService.shared.selectTab(id: "ios-physical")
+                    }
                 }
                 
                 Divider()

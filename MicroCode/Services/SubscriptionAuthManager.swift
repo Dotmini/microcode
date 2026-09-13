@@ -63,11 +63,11 @@ public enum SubscriptionProviderType: String, CaseIterable, Identifiable, Codabl
     
     public var defaultModel: String {
         switch self {
-        case .chatgpt: return "gpt-4o"
+        case .chatgpt: return "gpt-6-astra"
         case .claude: return "claude-3-7-sonnet"
-        case .gemini: return "gemini-2.5-flash"
-        case .deepseek: return "deepseek-chat"
-        case .copilot: return "gpt-4o"
+        case .gemini: return "gemini-2.5-pro"
+        case .deepseek: return "deepseek-v4-flash"
+        case .copilot: return "claude-3-7-sonnet"
         case .glm: return "glm-4-plus"
         }
     }
@@ -87,40 +87,55 @@ public enum SubscriptionProviderType: String, CaseIterable, Identifiable, Codabl
         switch self {
         case .chatgpt:
             return [
-                SubscriptionModelInfo(modelID: "o3-mini", name: "o3-mini", provider: .chatgpt, badge: "REASONING", description: "High-speed STEM, deep code and logic reasoning", aiProviderID: "openai"),
+                SubscriptionModelInfo(modelID: "gpt-6-astra", name: "GPT-6 Astra", provider: .chatgpt, badge: "FLAGSHIP", description: "OpenAI flagship next-gen multimodal reasoning & autonomous engineering", aiProviderID: "openai"),
+                SubscriptionModelInfo(modelID: "gpt-5.6-sol", name: "GPT-5.6 Sol", provider: .chatgpt, badge: "HIGH PERF", description: "Ultra high-performance full-stack coding & reasoning", aiProviderID: "openai"),
+                SubscriptionModelInfo(modelID: "gpt-5.5", name: "GPT-5.5", provider: .chatgpt, badge: "FRONTIER", description: "Next-gen frontier reasoning, architecture & coding", aiProviderID: "openai"),
+                SubscriptionModelInfo(modelID: "o3", name: "o3 Flagship", provider: .chatgpt, badge: "REASONING PRO", description: "Frontier self-verifying logic, deep math & science", aiProviderID: "openai"),
+                SubscriptionModelInfo(modelID: "o3-mini", name: "o3-mini", provider: .chatgpt, badge: "HIGH SPEED", description: "High-speed STEM, deep code and logic reasoning", aiProviderID: "openai"),
                 SubscriptionModelInfo(modelID: "o1", name: "o1 Pro", provider: .chatgpt, badge: "PRO", description: "Deep architectural planning and math reasoning", aiProviderID: "openai"),
-                SubscriptionModelInfo(modelID: "gpt-4o", name: "GPT-4o Omni", provider: .chatgpt, badge: "PLUS / PRO", description: "Omni multimodal intelligence, unlimited flat-rate", aiProviderID: "openai"),
-                SubscriptionModelInfo(modelID: "chatgpt-4o-latest", name: "ChatGPT-4o Latest", provider: .chatgpt, badge: "WEB", description: "Dynamic chatgpt.com web version", aiProviderID: "openai"),
-                SubscriptionModelInfo(modelID: "gpt-4o-mini", name: "GPT-4o mini", provider: .chatgpt, badge: "FAST", description: "Fast lightweight multimodal model", aiProviderID: "openai")
+                SubscriptionModelInfo(modelID: "gpt-4.5-preview", name: "GPT-4.5 Preview", provider: .chatgpt, badge: "CREATIVE", description: "High-precision context, creative & deep synthesis", aiProviderID: "openai"),
+                SubscriptionModelInfo(modelID: "chatgpt-4o-latest", name: "ChatGPT-4o Latest", provider: .chatgpt, badge: "DYNAMIC WEB", description: "Dynamic chatgpt.com rolling production model", aiProviderID: "openai"),
+                SubscriptionModelInfo(modelID: "gpt-4o", name: "GPT-4o (Legacy)", provider: .chatgpt, badge: "LEGACY", description: "Classic multimodal workhorse model", aiProviderID: "openai"),
+                SubscriptionModelInfo(modelID: "gpt-4o-mini", name: "GPT-4o mini", provider: .chatgpt, badge: "FAST", description: "Lightweight fast assistant", aiProviderID: "openai")
             ]
         case .claude:
             return [
+                SubscriptionModelInfo(modelID: "claude-sonnet-4-6", name: "Claude Sonnet 4.6", provider: .claude, badge: "FLAGSHIP", description: "Next-gen hybrid thinking & autonomous coding via Claude Pro", aiProviderID: "anthropic"),
+                SubscriptionModelInfo(modelID: "claude-opus-4-6-thinking", name: "Claude Opus 4.6", provider: .claude, badge: "DEEP THINK", description: "Maximum depth architectural synthesis & verification", aiProviderID: "anthropic"),
                 SubscriptionModelInfo(modelID: "claude-3-7-sonnet", name: "Claude 3.7 Sonnet", provider: .claude, badge: "HYBRID", description: "Flagship hybrid thinking & standard code execution via Claude Pro", aiProviderID: "anthropic"),
-                SubscriptionModelInfo(modelID: "claude-3-5-sonnet", name: "Claude 3.5 Sonnet", provider: .claude, badge: "PRO", description: "Industry standard coding & tool use", aiProviderID: "anthropic"),
+                SubscriptionModelInfo(modelID: "claude-3-5-sonnet", name: "Claude 3.5 Sonnet", provider: .claude, badge: "WORKHORSE", description: "Standard agentic coding & tool use", aiProviderID: "anthropic"),
                 SubscriptionModelInfo(modelID: "claude-3-5-haiku", name: "Claude 3.5 Haiku", provider: .claude, badge: "FAST", description: "High-speed lightweight agent assistant", aiProviderID: "anthropic")
             ]
         case .gemini:
             return [
+                SubscriptionModelInfo(modelID: "gemini-3.8-flash-high", name: "Gemini 3.8 Flash (High)", provider: .gemini, badge: "FLAGSHIP", description: "Google DeepMind frontier multimodal deep reasoning", aiProviderID: "gemini"),
+                SubscriptionModelInfo(modelID: "gemini-3.7-flash-high", name: "Gemini 3.7 Flash", provider: .gemini, badge: "HYBRID", description: "High-speed multimodal hybrid reasoning", aiProviderID: "gemini"),
+                SubscriptionModelInfo(modelID: "gemini-3.1-pro-high", name: "Gemini 3.1 Pro", provider: .gemini, badge: "ADVANCED PRO", description: "Google One AI Premium flagship problem solving", aiProviderID: "gemini"),
+                SubscriptionModelInfo(modelID: "gemini-2.5-pro", name: "Gemini 2.5 Pro", provider: .gemini, badge: "DEEP CONTEXT", description: "2M+ context window with native multimodal reasoning", aiProviderID: "gemini"),
                 SubscriptionModelInfo(modelID: "gemini-2.5-flash", name: "Gemini 2.5 Flash", provider: .gemini, badge: "FAST", description: "Real-time multimodal speed & live awareness", aiProviderID: "gemini"),
-                SubscriptionModelInfo(modelID: "gemini-2.5-pro", name: "Gemini 2.5 Pro", provider: .gemini, badge: "ADVANCED", description: "Google One AI flagship deep problem solving", aiProviderID: "gemini"),
                 SubscriptionModelInfo(modelID: "gemini-2.0-flash", name: "Gemini 2.0 Flash", provider: .gemini, badge: "STABLE", description: "Next-gen multimodal workhorse model", aiProviderID: "gemini")
             ]
         case .deepseek:
             return [
-                SubscriptionModelInfo(modelID: "deepseek-chat", name: "DeepSeek V3", provider: .deepseek, badge: "CHAT", description: "Flagship general coding and chat", aiProviderID: "deepseek"),
-                SubscriptionModelInfo(modelID: "deepseek-reasoner", name: "DeepSeek R1", provider: .deepseek, badge: "REASONING", description: "Deep R1 mathematical reasoning", aiProviderID: "deepseek")
+                SubscriptionModelInfo(modelID: "deepseek-v4-flash", name: "DeepSeek V4 Flash", provider: .deepseek, badge: "FLASH THINK", description: "Next-gen high-speed thinking & deep coding", aiProviderID: "deepseek"),
+                SubscriptionModelInfo(modelID: "deepseek-v4", name: "DeepSeek V4", provider: .deepseek, badge: "FLAGSHIP", description: "Next-gen autonomous coding flagship", aiProviderID: "deepseek"),
+                SubscriptionModelInfo(modelID: "deepseek-reasoner", name: "DeepSeek R1", provider: .deepseek, badge: "REASONING", description: "Deep R1 mathematical & algorithmic reasoning", aiProviderID: "deepseek"),
+                SubscriptionModelInfo(modelID: "deepseek-chat", name: "DeepSeek V3", provider: .deepseek, badge: "CHAT", description: "Flagship general coding and chat", aiProviderID: "deepseek")
             ]
         case .copilot:
             return [
-                SubscriptionModelInfo(modelID: "gpt-4o", name: "GPT-4o", provider: .copilot, badge: "COPILOT", description: "OpenAI GPT-4o via GitHub Copilot subscription", aiProviderID: "copilot"),
-                SubscriptionModelInfo(modelID: "claude-3-7-sonnet", name: "Claude 3.7 Sonnet", provider: .copilot, badge: "COPILOT", description: "Anthropic Claude 3.7 via GitHub Copilot subscription", aiProviderID: "copilot"),
-                SubscriptionModelInfo(modelID: "claude-3-5-sonnet", name: "Claude 3.5 Sonnet", provider: .copilot, badge: "COPILOT", description: "Anthropic Claude 3.5 via GitHub Copilot subscription", aiProviderID: "copilot"),
-                SubscriptionModelInfo(modelID: "o3-mini", name: "o3-mini", provider: .copilot, badge: "COPILOT", description: "o3-mini reasoning via GitHub Copilot subscription", aiProviderID: "copilot"),
-                SubscriptionModelInfo(modelID: "o1", name: "o1", provider: .copilot, badge: "COPILOT", description: "o1 reasoning via GitHub Copilot subscription", aiProviderID: "copilot")
+                SubscriptionModelInfo(modelID: "claude-3-7-sonnet", name: "Claude 3.7 Sonnet", provider: .copilot, badge: "FLAGSHIP", description: "Anthropic Claude 3.7 via GitHub Copilot subscription", aiProviderID: "copilot"),
+                SubscriptionModelInfo(modelID: "gpt-5", name: "GPT-5", provider: .copilot, badge: "FRONTIER", description: "OpenAI GPT-5 via GitHub Copilot subscription", aiProviderID: "copilot"),
+                SubscriptionModelInfo(modelID: "o3-mini", name: "o3-mini", provider: .copilot, badge: "REASONING", description: "o3-mini reasoning via GitHub Copilot subscription", aiProviderID: "copilot"),
+                SubscriptionModelInfo(modelID: "o1", name: "o1", provider: .copilot, badge: "PRO", description: "o1 reasoning via GitHub Copilot subscription", aiProviderID: "copilot"),
+                SubscriptionModelInfo(modelID: "gpt-4.5", name: "GPT-4.5", provider: .copilot, badge: "CREATIVE", description: "OpenAI GPT-4.5 via GitHub Copilot subscription", aiProviderID: "copilot"),
+                SubscriptionModelInfo(modelID: "gpt-4o", name: "GPT-4o (Legacy)", provider: .copilot, badge: "LEGACY", description: "OpenAI GPT-4o via GitHub Copilot subscription", aiProviderID: "copilot")
             ]
         case .glm:
             return [
                 SubscriptionModelInfo(modelID: "glm-4-plus", name: "GLM-4 Plus", provider: .glm, badge: "MEMBER", description: "Zhipu BigModel flagship membership", aiProviderID: "glm"),
+                SubscriptionModelInfo(modelID: "glm-4-air", name: "GLM-4 Air", provider: .glm, badge: "FAST", description: "Ultra-fast high efficiency reasoning", aiProviderID: "glm"),
+                SubscriptionModelInfo(modelID: "codegeex-4", name: "CodeGeeX-4", provider: .glm, badge: "CODE", description: "Specialized code synthesis & refactoring", aiProviderID: "glm"),
                 SubscriptionModelInfo(modelID: "glm-4-flash", name: "GLM-4 Flash", provider: .glm, badge: "FREE", description: "High-speed zero-latency response", aiProviderID: "glm")
             ]
         }

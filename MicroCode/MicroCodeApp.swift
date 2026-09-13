@@ -187,6 +187,13 @@ struct MicroCodeApp: App {
             return
         }
         
+        // Universal Agent & Ecosystem Settings Deep Link
+        if host == "ecosystem" || host == "agent-settings" || host == "agent-config" || host == "rules" || host == "mcp" {
+            let tab = queryValue(for: "tab") ?? (host == "rules" ? "rules" : (host == "mcp" ? "mcp" : "agents"))
+            NotificationCenter.default.post(name: NSNotification.Name("MicroCode.OpenAgentEcosystem"), object: tab)
+            return
+        }
+        
         // Code Execution / Open
         if host == "open" || host == "run" || host == "playground" || host.contains("snippet") {
             var rawCode = queryValue(for: "code") ?? ""
