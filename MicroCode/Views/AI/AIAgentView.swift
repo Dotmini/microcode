@@ -2618,7 +2618,7 @@ struct AIAgentView: View {
         // Section 1: 🔌 ACP (Agent Client Protocol - Local CLI)
         Section("🔌 ACP (Local CLI Agent)") {
             ForEach(LocalEcosystemDiscovery.shared.engines) { engine in
-                Menu(engine.name) {
+                Menu(engine.name + (engine.isInstalled ? "" : " (Not Installed)")) {
                     ForEach(engine.models) { m in
                         Button(action: {
                             switchToEngine(engine.id, modelId: m.id)

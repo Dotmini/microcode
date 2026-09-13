@@ -458,21 +458,7 @@ final class LocalEcosystemDiscovery: ObservableObject {
     // MARK: - Helpers
     
     private func resolveBinary(_ name: String) -> String? {
-        let home = FileManager.default.homeDirectoryForCurrentUser.path
-        let paths = [
-            "\(home)/.local/bin/\(name)",
-            "\(home)/.opencode/bin/\(name)",
-            "/opt/homebrew/bin/\(name)",
-            "/usr/local/bin/\(name)",
-            "\(home)/.cargo/bin/\(name)",
-            "/usr/bin/\(name)"
-        ]
-        for p in paths {
-            if FileManager.default.isExecutableFile(atPath: p) {
-                return p
-            }
-        }
-        return nil
+        return ACPHostService.resolveExecutablePath(name)
     }
     
     private func runCommand(executable: String, arguments: [String]) async -> String {

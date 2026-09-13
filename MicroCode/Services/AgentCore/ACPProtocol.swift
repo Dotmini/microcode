@@ -386,7 +386,12 @@ struct ClaudeCodeStreamParser {
     }
     
     private static func parseAssistantMessage(_ json: [String: Any]) -> ACPStreamEvent? {
-        guard let content = json["content"] as? [[String: Any]] else { return nil }
+        let content: [[String: Any]]? = {
+            if let c = json["content"] as? [[String: Any]] { return c }
+            if let msg = json["message"] as? [String: Any], let c = msg["content"] as? [[String: Any]] { return c }
+            return nil
+        }()
+        guard let content = content else { return nil }
         
         for block in content {
             let blockType = block["type"] as? String ?? ""
@@ -394,11 +399,11 @@ struct ClaudeCodeStreamParser {
             switch blockType {
             case "text":
                 let text = block["text"] as? String ?? ""
-                return .text(text)
+                if !text.isEmpty { return .text(text) }
                 
             case "thinking":
                 let thinking = block["thinking"] as? String ?? ""
-                return .thinking(thinking)
+                if !thinking.isEmpty { return .thinking(thinking) }
                 
             case "tool_use":
                 let toolId = block["id"] as? String ?? UUID().uuidString
