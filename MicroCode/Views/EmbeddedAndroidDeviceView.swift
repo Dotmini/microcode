@@ -9,21 +9,27 @@ import SwiftUI
 import AppKit
 
 struct EmbeddedAndroidDeviceView: View {
+    @EnvironmentObject var appState: AppState
     @ObservedObject var runtime: DeviceRuntimeService
     @ObservedObject private var streamService = AndroidStreamService.shared
-    var canvasColor: Color = Color(nsColor: .windowBackgroundColor)
+    var canvasColor: Color? = nil
     var onConfigure: (() -> Void)? = nil
     var onHide: (() -> Void)? = nil
     @State private var textToSend = ""
     @State private var showingTextInput = false
 
+    private var effectiveCanvasColor: Color {
+        if let canvasColor {
+            return canvasColor
+        }
+        return appState.appTheme.isGlass ? Color.clear : Color(nsColor: appState.appTheme.editorBackground)
+    }
+
     var body: some View {
         GeometryReader { proxy in
             ZStack {
-                // This is the same canvas that owns the rest of the dock.
-                // The real AVD screen is only the screen; Android's desktop
-                // window must not leak its black letterbox into MicroCode.
-                canvasColor
+                // Background follows our theme perfectly (black/dark/light)
+                effectiveCanvasColor
 
                 AndroidDeviceSurface(
                     image: runtime.embeddedAndroidImage,
@@ -36,7 +42,7 @@ struct EmbeddedAndroidDeviceView: View {
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity)
         }
-        .background(canvasColor)
+        .background(effectiveCanvasColor)
         .onAppear {
             if !streamService.isStreaming && runtime.embeddedAndroidImage == nil {
                 Task {

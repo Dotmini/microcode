@@ -152,8 +152,8 @@ public enum DeviceFrameAssets {
             return img
         }
         let fallbackDirs = [
-            NSHomeDirectory() + "/Library/Android/sdk/skins/Galaxy_Note20_Ultra/device_Port-Black.png",
-            NSHomeDirectory() + "/Downloads/Galaxy_Note20_Ultra/device_Port-Black.png"
+            NSHomeDirectory() + "/Library/Android/sdk/skins/Galaxy_Note20_Ultra/device_Port-Black-frame.png",
+            NSHomeDirectory() + "/Documents/SX/codetunner-native/MicroCode/Resources/samsung_note20_ultra_frame.png"
         ]
         for path in fallbackDirs {
             if FileManager.default.fileExists(atPath: path),
