@@ -357,11 +357,13 @@ struct AgenticEditorWorkspace: View {
                     // Preview Menu (Real Device & Simulator Preview)
                     Menu {
                         Button("WebApp Preview (Localhost)") {
+                            PreviewDockService.shared.selectTab(id: "web")
                             DeviceRuntimeService.shared.embeddedDockMode = .web
                             DeviceRuntimeService.shared.showingEmbeddedDeviceDock = true
                             appState.showingPreviewView = true
                         }
                         Button("iOS Simulator") {
+                            PreviewDockService.shared.selectTab(id: "ios")
                             DeviceRuntimeService.shared.embeddedDockMode = .ios
                             DeviceRuntimeService.shared.showingEmbeddedAppleDock = true
                             DeviceRuntimeService.shared.showingEmbeddedDeviceDock = true
@@ -369,6 +371,7 @@ struct AgenticEditorWorkspace: View {
                             Task { await DeviceRuntimeService.shared.startPreferredEmbeddedAppleSimulator() }
                         }
                         Button("Android Emulator") {
+                            PreviewDockService.shared.selectTab(id: "android")
                             DeviceRuntimeService.shared.embeddedDockMode = .android
                             DeviceRuntimeService.shared.showingEmbeddedAppleDock = false
                             DeviceRuntimeService.shared.showingEmbeddedDeviceDock = true
@@ -1892,16 +1895,19 @@ struct AgenticContextInspector: View {
                     Menu {
                         Section("Preview Target") {
                             Button("WebApp Preview") {
+                                PreviewDockService.shared.selectTab(id: "web")
                                 deviceRuntime.embeddedDockMode = .web
                                 deviceRuntime.showingEmbeddedDeviceDock = true
                             }
                             Button("iOS Simulator") {
+                                PreviewDockService.shared.selectTab(id: "ios")
                                 deviceRuntime.embeddedDockMode = .ios
                                 deviceRuntime.showingEmbeddedDeviceDock = true
                                 deviceRuntime.showingEmbeddedAppleDock = true
                                 Task { await deviceRuntime.startEmbeddedAppleSimulator() }
                             }
                             Button("Android Emulator") {
+                                PreviewDockService.shared.selectTab(id: "android")
                                 deviceRuntime.embeddedDockMode = .android
                                 deviceRuntime.showingEmbeddedDeviceDock = true
                                 deviceRuntime.showingEmbeddedAppleDock = false
@@ -3290,10 +3296,12 @@ struct RightPreviewPanel: View {
         if ["kt", "kts", "java", "xml"].contains(ext) || path.contains("/android/") || path.contains("/res/") {
             deviceRuntime.showingEmbeddedAppleDock = false
             deviceRuntime.showingEmbeddedDeviceDock = true
+            PreviewDockService.shared.selectTab(id: "android")
             Task { await deviceRuntime.startPreferredEmbeddedAndroid() }
         } else if ["swift", "storyboard", "xib", "plist"].contains(ext) || path.contains("/ios/") {
             deviceRuntime.showingEmbeddedAppleDock = true
             deviceRuntime.showingEmbeddedDeviceDock = true
+            PreviewDockService.shared.selectTab(id: "ios")
             Task { await deviceRuntime.startPreferredEmbeddedAppleSimulator() }
         }
     }

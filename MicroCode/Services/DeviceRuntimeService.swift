@@ -213,6 +213,8 @@ final class DeviceRuntimeService: ObservableObject {
     /// This is deliberately loaded from the AVD's configured skin rather than
     /// approximated with a SwiftUI bezel.
     @Published private(set) var embeddedAndroidFrame: NSImage?
+    /// The official front camera punch-hole cutout mask for the attached AVD.
+    @Published private(set) var embeddedAndroidMask: NSImage?
     @Published private(set) var embeddedAndroidPixelSize: CGSize = .zero
     @Published private(set) var embeddedAndroidSerial: String?
     @Published private(set) var isEmbeddedAndroidActive = false
@@ -226,7 +228,7 @@ final class DeviceRuntimeService: ObservableObject {
             switch self {
             case .web: return "globe"
             case .ios: return "iphone"
-            case .android: return "apps.iphone"
+            case .android: return "candybarphone"
             }
         }
     }
@@ -723,6 +725,17 @@ final class DeviceRuntimeService: ObservableObject {
     /// ADB is the documented, authenticated control channel; no process or RAM
     /// inspection is used.
     func startEmbeddedAndroid() async {
+        await MainActor.run {
+            self.embeddedDockMode = .android
+            self.showingEmbeddedAppleDock = false
+            self.showingEmbeddedDeviceDock = true
+            PreviewDockService.shared.selectTab(id: "android")
+            if self.embeddedAndroidFrame == nil {
+                self.embeddedAndroidFrame = DeviceFrameAssets.loadAndroidPixelProBezel()
+                self.embeddedAndroidMask = DeviceFrameAssets.loadAndroidPixelProMask()
+            }
+        }
+        
         // Ensure an Android device is selected; auto-pick booted or available Android device
         var targetDevice = selectedDevice
         if targetDevice?.platform != .android {
@@ -790,6 +803,12 @@ final class DeviceRuntimeService: ObservableObject {
     /// keyboard, gestures, and hardware controls in one local WebView. The
     /// raw IOSurface transport remains available for diagnostics only.
     func startEmbeddedAppleSimulator() async {
+        await MainActor.run {
+            self.embeddedDockMode = .ios
+            self.showingEmbeddedAppleDock = true
+            self.showingEmbeddedDeviceDock = true
+            PreviewDockService.shared.selectTab(id: "ios")
+        }
         guard let device = selectedDevice, device.isAppleSimulator else {
             statusMessage = "Choose an Apple Simulator first."
             return
@@ -838,6 +857,7 @@ final class DeviceRuntimeService: ObservableObject {
         stopAndroidInputChannel()
         embeddedAndroidImage = nil
         embeddedAndroidFrame = nil
+        embeddedAndroidMask = nil
         embeddedAndroidPixelSize = .zero
         embeddedAndroidSerial = nil
         isEmbeddedAndroidActive = false
@@ -920,18 +940,21 @@ final class DeviceRuntimeService: ObservableObject {
         embeddedAndroidSerial = serial
         isEmbeddedAndroidActive = true
         embeddedAndroidStatus = "Connecting to \(deviceName)…"
-        // `selectedDevice` can be the transient ADB serial until a refresh
-        // completes. Resolve it back to the AVD name as well, otherwise a
-        // perfectly valid `emulator-5554` connection would silently fall back
-        // to a generic rounded rectangle instead of its SDK skin.
-        embeddedAndroidFrame = officialAndroidFrame(forAVDNamed: deviceName)
-        if embeddedAndroidFrame == nil {
-            Task { [weak self] in
-                guard let self, let avdName = await androidAVDName(serial: serial),
-                      embeddedAndroidSerial == serial else { return }
-                embeddedAndroidFrame = officialAndroidFrame(forAVDNamed: avdName)
-                if embeddedAndroidFrame != nil {
-                    embeddedAndroidStatus = "Live · official \(avdName) frame"
+        
+        // Load authentic Android hardware frame & mask immediately so the device is NEVER frame-less
+        let initialSkin = resolveOfficialAndroidSkin(forAVDNamed: deviceName)
+        embeddedAndroidFrame = initialSkin.frame ?? DeviceFrameAssets.loadAndroidPixelProBezel()
+        embeddedAndroidMask = initialSkin.mask ?? DeviceFrameAssets.loadAndroidPixelProMask()
+        
+        Task { [weak self] in
+            guard let self, let avdName = await androidAVDName(serial: serial),
+                  embeddedAndroidSerial == serial else { return }
+            let resolvedSkin = resolveOfficialAndroidSkin(forAVDNamed: avdName)
+            if let frame = resolvedSkin.frame {
+                await MainActor.run {
+                    self.embeddedAndroidFrame = frame
+                    self.embeddedAndroidMask = resolvedSkin.mask ?? DeviceFrameAssets.loadAndroidPixelProMask()
+                    self.embeddedAndroidStatus = "Live · official \(avdName) frame"
                 }
             }
         }
@@ -1416,28 +1439,87 @@ final class DeviceRuntimeService: ObservableObject {
         return (true, detail, nil)
     }
 
-    /// Resolves the exact skin selected in this AVD's `config.ini`. Android
-    /// Studio ships `back.webp` as the official device chassis; using it here
-    /// preserves the manufacturer proportions, camera treatment and buttons
-    /// without inventing a second, slightly-wrong phone frame in SwiftUI.
-    private func officialAndroidFrame(forAVDNamed name: String) -> NSImage? {
+    /// Resolves the exact skin selected in this AVD's `config.ini` or matches the AVD model to installed SDK skins.
+    /// Android Studio ships `back.webp` as the official device chassis and `mask.webp` as the camera punch-hole cutout;
+    /// using them preserves manufacturer proportions, camera treatment and buttons.
+    /// If no custom skin is located, it ALWAYS falls back to the authentic Pixel 9 Pro hardware frame from DeviceFrameAssets.
+    func resolveOfficialAndroidSkin(forAVDNamed name: String) -> (frame: NSImage?, mask: NSImage?) {
         let fm = FileManager.default
         let env = ProcessInfo.processInfo.environment
-        let roots = [env["ANDROID_AVD_HOME"], NSHomeDirectory() + "/.android/avd"].compactMap { $0 }
-        let avdPath = roots.lazy.compactMap { root -> String? in
-            let metadata = URL(fileURLWithPath: root).appendingPathComponent("\(name).ini")
-            if let text = try? String(contentsOf: metadata, encoding: .utf8),
-               let path = self.iniValue("path", in: text) {
-                return path
+        let roots = [
+            env["ANDROID_AVD_HOME"],
+            NSHomeDirectory() + "/.android/avd",
+            NSHomeDirectory() + "/Library/Android/sdk/avd"
+        ].compactMap { $0 }
+
+        let sdkSkinRoots = [
+            NSHomeDirectory() + "/Library/Android/sdk/skins",
+            env["ANDROID_HOME"].map { "\($0)/skins" },
+            env["ANDROID_SDK_ROOT"].map { "\($0)/skins" }
+        ].compactMap { $0 }
+
+        // 1. Try resolving through AVD config.ini
+        for root in roots {
+            var candidateConfigURLs: [URL] = []
+            let iniPath = URL(fileURLWithPath: root).appendingPathComponent("\(name).ini")
+            if let iniText = try? String(contentsOf: iniPath, encoding: .utf8),
+               let path = self.iniValue("path", in: iniText) {
+                candidateConfigURLs.append(URL(fileURLWithPath: path).appendingPathComponent("config.ini"))
             }
-            let fallback = URL(fileURLWithPath: root).appendingPathComponent("\(name).avd").path
-            return fm.fileExists(atPath: fallback) ? fallback : nil
-        }.first
-        guard let avdPath else { return nil }
-        let configURL = URL(fileURLWithPath: avdPath).appendingPathComponent("config.ini")
-        guard let config = try? String(contentsOf: configURL, encoding: .utf8),
-              let skinPath = iniValue("skin.path", in: config) else { return nil }
-        return NSImage(contentsOf: URL(fileURLWithPath: skinPath).appendingPathComponent("back.webp"))
+            candidateConfigURLs.append(URL(fileURLWithPath: root).appendingPathComponent("\(name).avd/config.ini"))
+            candidateConfigURLs.append(URL(fileURLWithPath: root).appendingPathComponent("\(name)/config.ini"))
+
+            for configURL in candidateConfigURLs {
+                guard let config = try? String(contentsOf: configURL, encoding: .utf8) else { continue }
+                let skinName = iniValue("skin.name", in: config)
+                let skinPath = iniValue("skin.path", in: config)
+
+                // Try skin.path directly if absolute
+                if let skinPath, skinPath.hasPrefix("/"), fm.fileExists(atPath: skinPath) {
+                    let back = URL(fileURLWithPath: skinPath).appendingPathComponent("back.webp")
+                    let mask = URL(fileURLWithPath: skinPath).appendingPathComponent("mask.webp")
+                    if let frameImg = NSImage(contentsOf: back) {
+                        return (frameImg, NSImage(contentsOf: mask))
+                    }
+                }
+
+                // Try resolving skin.name or skin.path inside SDK skin roots
+                let identifiers = [skinName, skinPath?.replacingOccurrences(of: "skins/", with: "")].compactMap { $0 }
+                for id in identifiers {
+                    for sdkRoot in sdkSkinRoots {
+                        let candidateDir = URL(fileURLWithPath: sdkRoot).appendingPathComponent(id)
+                        let back = candidateDir.appendingPathComponent("back.webp")
+                        let mask = candidateDir.appendingPathComponent("mask.webp")
+                        if let frameImg = NSImage(contentsOf: back) {
+                            return (frameImg, NSImage(contentsOf: mask))
+                        }
+                    }
+                }
+            }
+        }
+
+        // 2. Try fuzzy matching AVD name to SDK skins (e.g. Pixel_9_Pro_ARM64 -> pixel_9_pro)
+        let cleanName = name.lowercased()
+            .replacingOccurrences(of: "_arm64", with: "")
+            .replacingOccurrences(of: "-arm64", with: "")
+            .replacingOccurrences(of: " ", with: "_")
+        for sdkRoot in sdkSkinRoots {
+            let candidateDir = URL(fileURLWithPath: sdkRoot).appendingPathComponent(cleanName)
+            let back = candidateDir.appendingPathComponent("back.webp")
+            let mask = candidateDir.appendingPathComponent("mask.webp")
+            if let frameImg = NSImage(contentsOf: back) {
+                return (frameImg, NSImage(contentsOf: mask))
+            }
+        }
+
+        // 3. Fallback: Always return official bundled Pixel 9 Pro frame and mask
+        let frameImg = DeviceFrameAssets.loadAndroidPixelProBezel()
+        let maskImg = DeviceFrameAssets.loadAndroidPixelProMask()
+        return (frameImg, maskImg)
+    }
+
+    func officialAndroidFrame(forAVDNamed name: String) -> NSImage? {
+        return resolveOfficialAndroidSkin(forAVDNamed: name).frame ?? DeviceFrameAssets.loadAndroidPixelProBezel()
     }
 
     /// Android Studio writes some AVD config keys as `key=value` and others
