@@ -140,4 +140,103 @@ public enum DeviceFrameAssets {
         }
         return nil
     }
+
+    private static var cachedSamsungFrameImage: NSImage?
+    private static var cachedSamsungMaskImage: NSImage?
+
+    /// Loads the authentic official Samsung Galaxy Note 20 Ultra hardware frame (1794 x 3488).
+    public static func loadSamsungGalaxyNote20UltraBezel() -> NSImage? {
+        if let cached = cachedSamsungFrameImage { return cached }
+        if let img = loadResourceImage(named: "samsung_note20_ultra_frame", fileExtension: "png") {
+            cachedSamsungFrameImage = img
+            return img
+        }
+        let fallbackDirs = [
+            NSHomeDirectory() + "/Library/Android/sdk/skins/Galaxy_Note20_Ultra/device_Port-Black.png",
+            NSHomeDirectory() + "/Downloads/Galaxy_Note20_Ultra/device_Port-Black.png"
+        ]
+        for path in fallbackDirs {
+            if FileManager.default.fileExists(atPath: path),
+               let img = NSImage(contentsOfFile: path) {
+                cachedSamsungFrameImage = img
+                return img
+            }
+        }
+        return nil
+    }
+
+    /// Loads the authentic official Samsung Galaxy Note 20 Ultra front camera punch-hole cutout mask.
+    public static func loadSamsungGalaxyNote20UltraMask() -> NSImage? {
+        if let cached = cachedSamsungMaskImage { return cached }
+        if let img = loadResourceImage(named: "samsung_note20_ultra_mask", fileExtension: "png") {
+            cachedSamsungMaskImage = img
+            return img
+        }
+        let fallbackDirs = [
+            NSHomeDirectory() + "/Library/Android/sdk/skins/Galaxy_Note20_Ultra/fore_port.png",
+            NSHomeDirectory() + "/Downloads/Galaxy_Note20_Ultra/fore_port.png"
+        ]
+        for path in fallbackDirs {
+            if FileManager.default.fileExists(atPath: path),
+               let img = NSImage(contentsOfFile: path) {
+                cachedSamsungMaskImage = img
+                return img
+            }
+        }
+        return nil
+    }
+
+    public static func loadAndroidDeviceBezel(for skin: AndroidDeviceSkin) -> NSImage? {
+        switch skin {
+        case .galaxyNote20Ultra:
+            return loadSamsungGalaxyNote20UltraBezel() ?? loadAndroidPixelProBezel()
+        case .pixel9Pro:
+            return loadAndroidPixelProBezel()
+        }
+    }
+
+    public static func loadAndroidDeviceMask(for skin: AndroidDeviceSkin) -> NSImage? {
+        switch skin {
+        case .galaxyNote20Ultra:
+            return loadSamsungGalaxyNote20UltraMask() ?? loadAndroidPixelProMask()
+        case .pixel9Pro:
+            return loadAndroidPixelProMask()
+        }
+    }
+}
+
+/// Official Android hardware skin models supported in MicroCode live preview
+public enum AndroidDeviceSkin: String, CaseIterable, Identifiable {
+    case galaxyNote20Ultra = "Samsung Galaxy Note 20 Ultra"
+    case pixel9Pro = "Google Pixel 9 Pro"
+
+    public var id: String { rawValue }
+
+    public var shortName: String {
+        switch self {
+        case .galaxyNote20Ultra: return "Note 20 Ultra"
+        case .pixel9Pro: return "Pixel 9 Pro"
+        }
+    }
+
+    public var outerSize: CGSize {
+        switch self {
+        case .galaxyNote20Ultra: return CGSize(width: 1794, height: 3488)
+        case .pixel9Pro: return CGSize(width: 1408, height: 2974)
+        }
+    }
+
+    public var displayRect: CGRect {
+        switch self {
+        case .galaxyNote20Ultra: return CGRect(x: 177, y: 190, width: 1440, height: 3088)
+        case .pixel9Pro: return CGRect(x: 60, y: 61, width: 1280, height: 2856)
+        }
+    }
+
+    public var cornerRadius: CGFloat {
+        switch self {
+        case .galaxyNote20Ultra: return 24
+        case .pixel9Pro: return 109
+        }
+    }
 }

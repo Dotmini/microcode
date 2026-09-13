@@ -208,17 +208,27 @@ final class DeviceRuntimeService: ObservableObject {
     /// A downsampled real screen capture from an Android device/AVD. The
     /// source pixel size remains separate so display scaling never alters ADB
     /// pointer coordinates.
-    @Published private(set) var embeddedAndroidImage: NSImage?
+    @Published var embeddedAndroidImage: NSImage?
     /// The official Android SDK skin asset for the currently attached AVD.
     /// This is deliberately loaded from the AVD's configured skin rather than
     /// approximated with a SwiftUI bezel.
-    @Published private(set) var embeddedAndroidFrame: NSImage?
+    @Published var embeddedAndroidFrame: NSImage?
     /// The official front camera punch-hole cutout mask for the attached AVD.
-    @Published private(set) var embeddedAndroidMask: NSImage?
-    @Published private(set) var embeddedAndroidPixelSize: CGSize = .zero
-    @Published private(set) var embeddedAndroidSerial: String?
-    @Published private(set) var isEmbeddedAndroidActive = false
-    @Published private(set) var embeddedAndroidStatus = ""
+    @Published var embeddedAndroidMask: NSImage?
+    @Published var embeddedAndroidPixelSize: CGSize = .zero
+    @Published var embeddedAndroidSerial: String?
+    @Published var isEmbeddedAndroidActive = false
+    @Published var embeddedAndroidStatus = ""
+    @Published var selectedAndroidSkin: AndroidDeviceSkin = .galaxyNote20Ultra {
+        didSet {
+            updateActiveAndroidSkin()
+        }
+    }
+
+    func updateActiveAndroidSkin() {
+        embeddedAndroidFrame = DeviceFrameAssets.loadAndroidDeviceBezel(for: selectedAndroidSkin)
+        embeddedAndroidMask = DeviceFrameAssets.loadAndroidDeviceMask(for: selectedAndroidSkin)
+    }
     enum EmbeddedDockMode: String, CaseIterable, Identifiable {
         case web = "Web"
         case ios = "iOS"
@@ -267,6 +277,7 @@ final class DeviceRuntimeService: ObservableObject {
 
     private init() {
         allowAgentDeviceControl = UserDefaults.standard.bool(forKey: Self.agentControlDefaultsKey)
+        updateActiveAndroidSkin()
     }
 
     func refresh(workspace: URL?) async {
@@ -731,8 +742,7 @@ final class DeviceRuntimeService: ObservableObject {
             self.showingEmbeddedDeviceDock = true
             PreviewDockService.shared.selectTab(id: "android")
             if self.embeddedAndroidFrame == nil {
-                self.embeddedAndroidFrame = DeviceFrameAssets.loadAndroidPixelProBezel()
-                self.embeddedAndroidMask = DeviceFrameAssets.loadAndroidPixelProMask()
+                self.updateActiveAndroidSkin()
             }
         }
         
@@ -853,11 +863,10 @@ final class DeviceRuntimeService: ObservableObject {
     }
 
     func stopEmbeddedAndroid() {
+        AndroidStreamService.shared.stopStreaming()
         stopAndroidMirrorTransport()
         stopAndroidInputChannel()
         embeddedAndroidImage = nil
-        embeddedAndroidFrame = nil
-        embeddedAndroidMask = nil
         embeddedAndroidPixelSize = .zero
         embeddedAndroidSerial = nil
         isEmbeddedAndroidActive = false
@@ -939,36 +948,39 @@ final class DeviceRuntimeService: ObservableObject {
         stopAndroidInputChannel()
         embeddedAndroidSerial = serial
         isEmbeddedAndroidActive = true
-        embeddedAndroidStatus = "Connecting to \(deviceName)…"
+        embeddedAndroidStatus = "Connecting 60 FPS GPU display to \(deviceName)…"
         
-        // Load authentic Android hardware frame & mask immediately so the device is NEVER frame-less
-        let initialSkin = resolveOfficialAndroidSkin(forAVDNamed: deviceName)
-        embeddedAndroidFrame = initialSkin.frame ?? DeviceFrameAssets.loadAndroidPixelProBezel()
-        embeddedAndroidMask = initialSkin.mask ?? DeviceFrameAssets.loadAndroidPixelProMask()
+        let lower = deviceName.lowercased()
+        if lower.contains("pixel") {
+            selectedAndroidSkin = .pixel9Pro
+        } else {
+            selectedAndroidSkin = .galaxyNote20Ultra
+        }
+        updateActiveAndroidSkin()
         
+        // 1. High-speed 60 FPS Metal GPU streaming via VideoToolbox H.264
         Task { [weak self] in
-            guard let self, let avdName = await androidAVDName(serial: serial),
-                  embeddedAndroidSerial == serial else { return }
-            let resolvedSkin = resolveOfficialAndroidSkin(forAVDNamed: avdName)
-            if let frame = resolvedSkin.frame {
+            await AndroidStreamService.shared.startStreaming(serial: serial)
+            if AndroidStreamService.shared.isStreaming {
                 await MainActor.run {
-                    self.embeddedAndroidFrame = frame
-                    self.embeddedAndroidMask = resolvedSkin.mask ?? DeviceFrameAssets.loadAndroidPixelProMask()
-                    self.embeddedAndroidStatus = "Live · official \(avdName) frame"
+                    self?.embeddedAndroidStatus = "Live (60 FPS Native GPU)"
+                }
+            } else {
+                // 2. Compatibility fallback: ADB screencap loop
+                await MainActor.run {
+                    self?.startAndroidScreencapFallback(serial: serial, deviceName: deviceName)
                 }
             }
         }
+    }
+
+    private func startAndroidScreencapFallback(serial: String, deviceName: String) {
         startAndroidInputChannel(serial: serial)
         do {
             let adb = try androidTool("adb")
             let process = Process()
             let output = Pipe()
             process.executableURL = URL(fileURLWithPath: adb)
-            // ADB screencap is a CPU PNG path, not the emulator's GPU display
-            // transport. Uncapped capture was starving the UI and making the
-            // AVD appear slow. Keep only the latest frame at a responsive
-            // preview cadence; the GPU/WebRTC transport can replace this
-            // compatibility path without changing the view or input API.
             process.arguments = ["-s", serial, "exec-out", "sh", "-c", "while true; do screencap -p; sleep 0.08; done"]
             process.standardOutput = output
             process.standardError = FileHandle.nullDevice
@@ -989,9 +1001,6 @@ final class DeviceRuntimeService: ObservableObject {
                     self.androidMirrorReadHandle?.readabilityHandler = nil
                     self.androidMirrorReadHandle = nil
                     self.androidMirrorProcess = nil
-                    // Keep the dock open with a useful state. A temporary
-                    // capture transport failure must never make Preview
-                    // disappear after the user has clicked it.
                     self.embeddedAndroidStatus = "Display stream stopped — click Preview to retry."
                 }
             }
@@ -1065,6 +1074,7 @@ final class DeviceRuntimeService: ObservableObject {
     }
 
     private func stopAndroidMirrorTransport() {
+        AndroidStreamService.shared.stopStreaming()
         androidMirrorReadHandle?.readabilityHandler = nil
         androidMirrorReadHandle?.closeFile()
         androidMirrorReadHandle = nil
@@ -1512,14 +1522,19 @@ final class DeviceRuntimeService: ObservableObject {
             }
         }
 
-        // 3. Fallback: Always return official bundled Pixel 9 Pro frame and mask
-        let frameImg = DeviceFrameAssets.loadAndroidPixelProBezel()
-        let maskImg = DeviceFrameAssets.loadAndroidPixelProMask()
+        let lower = name.lowercased()
+        if lower.contains("note") || lower.contains("samsung") || lower.contains("galaxy") {
+            return (DeviceFrameAssets.loadSamsungGalaxyNote20UltraBezel(), DeviceFrameAssets.loadSamsungGalaxyNote20UltraMask())
+        }
+
+        // 3. Fallback: Return user's selected skin frame and mask
+        let frameImg = DeviceFrameAssets.loadAndroidDeviceBezel(for: selectedAndroidSkin)
+        let maskImg = DeviceFrameAssets.loadAndroidDeviceMask(for: selectedAndroidSkin)
         return (frameImg, maskImg)
     }
 
     func officialAndroidFrame(forAVDNamed name: String) -> NSImage? {
-        return resolveOfficialAndroidSkin(forAVDNamed: name).frame ?? DeviceFrameAssets.loadAndroidPixelProBezel()
+        return resolveOfficialAndroidSkin(forAVDNamed: name).frame ?? DeviceFrameAssets.loadAndroidDeviceBezel(for: selectedAndroidSkin)
     }
 
     /// Android Studio writes some AVD config keys as `key=value` and others

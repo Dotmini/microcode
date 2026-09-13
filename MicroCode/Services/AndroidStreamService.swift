@@ -63,6 +63,8 @@ final class AndroidStreamService: ObservableObject {
     ///   - maxSize: Max dimension in pixels (0 = device native)
     func startStreaming(serial: String, adbPath: String? = nil, maxFPS: Int = 60, maxSize: Int = 1280) async {
         stopStreaming()
+        self.localPort = UInt16.random(in: 27180...27280)
+        self.controlPort = self.localPort + 1
         let resolvedAdb = adbPath ?? resolvedAdbPath ?? "adb"
         self.activeSerial = serial
         // Query model name via ADB
@@ -135,12 +137,15 @@ final class AndroidStreamService: ObservableObject {
     // MARK: - Server Deployment
     
     private func pushServer(serial: String, adbPath: String) async throws {
-        // Look for scrcpy-server.jar in bundle resources first, then fallback paths
         var serverJarPath: String?
         if let bundled = Bundle.main.path(forResource: "scrcpy-server", ofType: "jar") {
             serverJarPath = bundled
+        } else if let resURL = Bundle.main.resourceURL?.appendingPathComponent("scrcpy-server.jar"),
+                  FileManager.default.fileExists(atPath: resURL.path) {
+            serverJarPath = resURL.path
         } else {
             let candidates = [
+                "/Users/dotmini/Documents/SX/codetunner-native/MicroCode/Resources/scrcpy-server.jar",
                 "/opt/homebrew/share/scrcpy/scrcpy-server",
                 "/usr/local/share/scrcpy/scrcpy-server",
                 "\(FileManager.default.homeDirectoryForCurrentUser.path)/.local/share/scrcpy/scrcpy-server"

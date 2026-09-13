@@ -10,6 +10,7 @@ import AppKit
 
 struct EmbeddedAndroidDeviceView: View {
     @ObservedObject var runtime: DeviceRuntimeService
+    @ObservedObject private var streamService = AndroidStreamService.shared
     var canvasColor: Color = Color(nsColor: .windowBackgroundColor)
     var onConfigure: (() -> Void)? = nil
     var onHide: (() -> Void)? = nil
@@ -26,17 +27,18 @@ struct EmbeddedAndroidDeviceView: View {
 
                 AndroidDeviceSurface(
                     image: runtime.embeddedAndroidImage,
-                    officialFrame: runtime.embeddedAndroidFrame ?? DeviceFrameAssets.loadAndroidPixelProBezel(),
-                    officialMask: runtime.embeddedAndroidMask ?? DeviceFrameAssets.loadAndroidPixelProMask(),
+                    officialFrame: runtime.embeddedAndroidFrame ?? DeviceFrameAssets.loadAndroidDeviceBezel(for: runtime.selectedAndroidSkin),
+                    officialMask: runtime.embeddedAndroidMask ?? DeviceFrameAssets.loadAndroidDeviceMask(for: runtime.selectedAndroidSkin),
                     availableSize: proxy.size,
-                    runtime: runtime
+                    runtime: runtime,
+                    streamService: streamService
                 )
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity)
         }
         .background(canvasColor)
         .onAppear {
-            if runtime.embeddedAndroidImage == nil {
+            if !streamService.isStreaming && runtime.embeddedAndroidImage == nil {
                 Task {
                     await runtime.startPreferredEmbeddedAndroid()
                 }
@@ -45,23 +47,28 @@ struct EmbeddedAndroidDeviceView: View {
     }
 }
 
-/// A native device host for the *real* ADB screen capture. Its measurements
-/// match the installed Pixel 9 Pro Android skin: 1408 x 2974 outer frame with
-/// the 1280 x 2856 display inset at x:60, y:61. This keeps the result flush
-/// and device-like with the authentic hardware chassis, camera punch hole, and buttons.
+/// A native device host for the real Android display with 60 FPS Metal GPU acceleration.
+/// Measurements are dynamically adapted to the selected hardware skin (Samsung Galaxy Note 20 Ultra or Pixel 9 Pro),
+/// keeping the display flush and authentic with chassis, camera punch hole, and buttons.
 private struct AndroidDeviceSurface: View {
     let image: NSImage?
     let officialFrame: NSImage?
     let officialMask: NSImage?
     let availableSize: CGSize
     @ObservedObject var runtime: DeviceRuntimeService
+    @ObservedObject var streamService: AndroidStreamService
 
-    private let bodyWidth: CGFloat = 1408
-    private let bodyHeight: CGFloat = 2974
-    private let screenWidth: CGFloat = 1280
-    private let screenHeight: CGFloat = 2856
-    private let screenX: CGFloat = 60
-    private let screenY: CGFloat = 61
+    private var skin: AndroidDeviceSkin {
+        runtime.selectedAndroidSkin
+    }
+
+    private var bodyWidth: CGFloat { skin.outerSize.width }
+    private var bodyHeight: CGFloat { skin.outerSize.height }
+    private var screenWidth: CGFloat { skin.displayRect.width }
+    private var screenHeight: CGFloat { skin.displayRect.height }
+    private var screenX: CGFloat { skin.displayRect.origin.x }
+    private var screenY: CGFloat { skin.displayRect.origin.y }
+    private var cornerRadius: CGFloat { skin.cornerRadius }
 
     var body: some View {
         let frameAspect = bodyWidth / bodyHeight
@@ -75,15 +82,16 @@ private struct AndroidDeviceSurface: View {
             width: frameWidth * ((screenX + screenWidth / 2) / bodyWidth - 0.5),
             height: frameHeight * ((screenY + screenHeight / 2) / bodyHeight - 0.5)
         )
-        // The official Pixel 9 Pro skin declares a 109 px display radius in
-        // a 1,280 px display.
-        let screenCorner = max(displayWidth * 109 / screenWidth, 14)
+        let screenCorner = max(displayWidth * cornerRadius / screenWidth, 4)
 
         ZStack {
-            // 1. Screen Viewport (Display)
+            // 1. Screen Viewport (Display) - 60 FPS Metal GPU or fallback screencap
             ZStack {
                 Color.black
-                if let image {
+                if streamService.isStreaming {
+                    AndroidDeviceMetalSurface(androidStream: streamService)
+                        .frame(width: displayWidth, height: displayHeight)
+                } else if let image {
                     Image(nsImage: image)
                         .resizable()
                         .interpolation(.high)
@@ -142,8 +150,8 @@ private struct AndroidDeviceSurface: View {
                     .allowsHitTesting(false)
             }
 
-            // 3. AppKit Input Interaction Overlay (keyboard, mouse drag, wheel scroll)
-            if image != nil {
+            // 3. AppKit Input Interaction Overlay (active for fallback screencap)
+            if !streamService.isStreaming && image != nil {
                 AndroidDeviceInputOverlay(runtime: runtime)
                     .frame(width: displayWidth, height: displayHeight)
                     .offset(screenOffset)
@@ -151,7 +159,7 @@ private struct AndroidDeviceSurface: View {
             }
 
             // 4. Genuine Hardware Chassis & Bezel Frame (Always Real, Never Missing)
-            if let frame = officialFrame ?? DeviceFrameAssets.loadAndroidPixelProBezel() {
+            if let frame = officialFrame ?? DeviceFrameAssets.loadAndroidDeviceBezel(for: runtime.selectedAndroidSkin) {
                 Image(nsImage: frame)
                     .resizable()
                     .interpolation(.high)
