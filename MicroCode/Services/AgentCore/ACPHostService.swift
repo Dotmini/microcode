@@ -189,6 +189,15 @@ class ACPAgentSession: ObservableObject, Identifiable {
         eventContinuation = nil
     }
     
+    /// Reset session state so subsequent commands start a fresh, isolated conversation
+    func resetSession() {
+        terminateCurrentProcess()
+        sessionId = nil
+        streamingText = ""
+        events = []
+        pendingPermissions = []
+    }
+    
     /// Send a follow-up message to an ongoing AGY session via stdin
     func sendInput(_ message: String) {
         guard let pipe = stdinPipe,
@@ -229,9 +238,34 @@ class ACPAgentSession: ObservableObject, Identifiable {
         process.executableURL = URL(fileURLWithPath: executablePath)
         process.currentDirectoryURL = URL(fileURLWithPath: workspacePath)
         
-        // Build environment
+        // Build isolated environment: purge any inherited parent IDE / session tokens
         var env = ProcessInfo.processInfo.environment
+        
+        // Purge ALL parent Antigravity/AGY, Claude, OpenCode, Codex session/conversation variables
+        let keysToRemove = env.keys.filter { key in
+            key.hasPrefix("ANTIGRAVITY_") ||
+            key.hasPrefix("AGY_") ||
+            key.hasPrefix("CLAUDE_") ||
+            key.hasPrefix("OPENCODE_") ||
+            key.hasPrefix("CODEX_") ||
+            key.contains("CONVERSATION_ID") ||
+            key.contains("TRAJECTORY_ID") ||
+            key.contains("SESSION_ID") ||
+            key == "CHROME_DEVTOOLS_MCP_JS" ||
+            key == "__CFBundleIdentifier"
+        }
+        for k in keysToRemove {
+            env.removeValue(forKey: k)
+        }
+        
         env["MICROCODE_WORKSPACE"] = workspacePath
+        env["MICROCODE_ACP"] = "1"
+        
+        // If continuing an ongoing AGY session within MicroCode, inject our dedicated conversation ID
+        if config.type == .agy, let sid = self.sessionId {
+            env["ANTIGRAVITY_CONVERSATION_ID"] = sid
+        }
+        
         for (key, value) in config.environment {
             env[key] = value
         }
@@ -302,8 +336,7 @@ class ACPAgentSession: ObservableObject, Identifiable {
     private func buildAGYArgs(task: String, model: String? = nil) -> [String] {
         var args = [
             "--output-format", "stream-json",
-            "--dangerously-skip-permissions",
-            "--print", task
+            "--dangerously-skip-permissions"
         ]
         
         if let model = model, !model.isEmpty {
@@ -315,8 +348,15 @@ class ACPAgentSession: ObservableObject, Identifiable {
             args += ["--effort", "high"]
         }
         
+        // If continuing an established MicroCode ACP conversation, resume it:
+        if let sid = sessionId {
+            args += ["--conversation", sid]
+        }
+        
         // Extra user-defined arguments
         args += config.arguments
+        
+        args += ["--print", task]
         
         return args
     }
@@ -331,6 +371,11 @@ class ACPAgentSession: ObservableObject, Identifiable {
         
         if let model = model, !model.isEmpty {
             args += ["-m", model]
+        }
+        
+        // If continuing an established MicroCode ACP session, resume it:
+        if let sid = sessionId {
+            args += ["-s", sid]
         }
         
         args += [task]
@@ -636,6 +681,13 @@ class ACPHostService: ObservableObject {
         activeSession?.stop()
         for session in sessions.values {
             session.stop()
+        }
+    }
+    
+    /// Reset all active ACP agent sessions to ensure complete isolation on new chat or clear chat
+    func resetAllSessions() {
+        for session in sessions.values {
+            session.resetSession()
         }
     }
     

@@ -826,6 +826,7 @@ struct AIAgentView: View {
                             Button(role: .destructive) {
                                 agent.clearCurrentChat()
                                 attachments.removeAll()
+                                acpHost.resetAllSessions()
                             } label: { Label("Clear Chat", systemImage: "trash") }
                         } label: {
                             Text("More")
