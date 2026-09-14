@@ -234,13 +234,10 @@ final class AIModelCatalog: ObservableObject {
         if let val = UserDefaults.standard.string(forKey: directKey), !val.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
             return val.trimmingCharacters(in: .whitespacesAndNewlines)
         }
-        for suite in ["com.aipreneur.MicroCode", "com.dotmini.codetunner", "com.dotmini.microcode", "com.arsenal.codetunner"] {
+        for suite in ["com.dotmini.microcode", "com.dotmini.codetunner"] {
             if let val = UserDefaults(suiteName: suite)?.string(forKey: directKey), !val.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
                 return val.trimmingCharacters(in: .whitespacesAndNewlines)
             }
-        }
-        if provider == "gemini", let val = UserDefaults(suiteName: "com.arsenal.codetunner")?.string(forKey: "api_key_Gemini"), !val.isEmpty {
-            return val
         }
         if provider == "openai", let val = UserDefaults(suiteName: "com.dotmini.codetunner")?.string(forKey: "api_key_ChatGPT"), !val.isEmpty {
             return val

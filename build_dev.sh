@@ -96,7 +96,7 @@ cat > "$BUNDLE_NAME/Contents/Info.plist" <<EOF
     <key>CFBundleExecutable</key>
     <string>MicroCode</string>
     <key>CFBundleIdentifier</key>
-    <string>com.aipreneur.MicroCode</string>
+    <string>com.dotmini.microcode</string>
     <key>CFBundleName</key>
     <string>MicroCode</string>
     <key>CFBundleDisplayName</key>
@@ -125,7 +125,7 @@ cat > "$BUNDLE_NAME/Contents/Info.plist" <<EOF
     <array>
         <dict>
             <key>CFBundleURLName</key>
-            <string>com.aipreneur.MicroCode</string>
+            <string>com.dotmini.microcode</string>
             <key>CFBundleURLSchemes</key>
             <array>
                 <string>microcode</string>
