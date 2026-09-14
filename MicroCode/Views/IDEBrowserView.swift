@@ -85,7 +85,8 @@ struct IDEBrowserView: View {
     private var browserTabBar: some View {
         ScrollView(.horizontal, showsIndicators: false) {
             HStack(spacing: 0) {
-                ForEach(Array(appState.browserTabs.enumerated()), id: \.element.id) { idx, tab in
+                ForEach(appState.browserTabs) { tab in
+                    let isActive = (appState.browserActiveTab < appState.browserTabs.count && appState.browserTabs[appState.browserActiveTab].id == tab.id)
                     HStack(spacing: 6) {
                         if tab.isLoading {
                             ProgressView().scaleEffect(0.4).frame(width: 12, height: 12)
@@ -96,20 +97,24 @@ struct IDEBrowserView: View {
                             .font(.system(size: 10)).lineLimit(1).frame(maxWidth: 120)
                         
                         if appState.browserTabs.count > 1 {
-                            Button { closeTab(idx) } label: {
+                            Button { closeTab(id: tab.id) } label: {
                                 Image(systemName: "xmark").font(.system(size: 7))
-                            }.buttonStyle(.borderless)
+                                    .padding(3)
+                                    .contentShape(Rectangle())
+                            }
+                            .buttonStyle(.plain)
+                            .help("Close Tab")
                         }
                     }
                     .padding(.horizontal, 10).padding(.vertical, 6)
-                    .background(idx == appState.browserActiveTab ? Color.accentColor.opacity(0.12) : Color.clear)
+                    .background(isActive ? Color.accentColor.opacity(0.12) : Color.clear)
                     .overlay(alignment: .bottom) {
-                        if idx == appState.browserActiveTab {
+                        if isActive {
                             Rectangle().fill(Color.accentColor).frame(height: 2)
                         }
                     }
                     .contentShape(Rectangle())
-                    .onTapGesture { switchTab(idx) }
+                    .onTapGesture { switchTab(id: tab.id) }
                 }
                 
                 // New tab button
@@ -275,17 +280,19 @@ struct IDEBrowserView: View {
         NotificationCenter.default.post(name: .browserNavigate, object: tab.url)
     }
     
-    private func closeTab(_ index: Int) {
+    private func closeTab(id: UUID) {
         guard appState.browserTabs.count > 1 else { return }
+        guard let index = appState.browserTabs.firstIndex(where: { $0.id == id }) else { return }
         appState.browserTabs.remove(at: index)
         if appState.browserActiveTab >= appState.browserTabs.count {
-            appState.browserActiveTab = appState.browserTabs.count - 1
+            appState.browserActiveTab = max(0, appState.browserTabs.count - 1)
         }
         urlInput = currentTabURL
         NotificationCenter.default.post(name: .browserNavigate, object: currentTabURL)
     }
     
-    private func switchTab(_ index: Int) {
+    private func switchTab(id: UUID) {
+        guard let index = appState.browserTabs.firstIndex(where: { $0.id == id }) else { return }
         appState.browserActiveTab = index
         urlInput = currentTabURL
         NotificationCenter.default.post(name: .browserNavigate, object: currentTabURL)

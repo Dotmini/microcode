@@ -70,6 +70,8 @@ class AgentService: ObservableObject {
     private let memoryService = AgentMemoryService.shared
     private let tokenOptimizer = TokenOptimizer.shared
     private let agentKernel = AgentKernelClient.shared
+    let diffEngine = DiffEngine.shared
+    let debugService = DebugService.shared
     private var activeKernelRunID: String?
     var currentKernelRunID: String? { activeKernelRunID }
 
@@ -82,6 +84,7 @@ class AgentService: ObservableObject {
     private var cachedScienceProjectContext: ScienceProjectContext?
     private var scienceIndexTask: Task<Void, Never>?
     private var scienceIndexGeneration = UUID()
+    private var agentCancellables = Set<AnyCancellable>()
 
     private var chatStorageKey: String {
         activeScope == .science ? scienceChatStorageKey : editorChatStorageKey
@@ -332,16 +335,38 @@ class AgentService: ObservableObject {
                 - Tools include `web_fetch`, `cell_create`, `cell_run`, `playground_run`, `ardium_*`, `computer_use_*`, `device_*`, `adb_execute`, and more.
                 - EVERY AI Agent and SubAgent in MicroCode has full access to all MCP tools. You and your SubAgents can invoke them directly at any time.
             
-            ## Planning & Task Partitioning
-            For non-trivial or multi-step tasks, create a structured DAG plan FIRST:
-            1. Call agent_plan(action: "set") with a dependency DAG, explicit owner per node, and deterministic verification criteria.
-            2. MULTI-MODEL COMBO & STRICT OWNERSHIP:
+            ## Implementation Plans & Pre-Planning Codebase Analysis Mandate ("วิเคราะห์อย่างละเอียดก่อนทำ ห้ามมั่วเด็ดขาด")
+            When [PLAN MODE] or /plan is active, or whenever tackling non-trivial, multi-step, refactoring, or architectural tasks:
+            1. MANDATORY RESEARCH & EXPLORATION PHASE FIRST (ห้ามมั่วเด็ดขาด):
+               - BEFORE drafting or submitting any plan, you MUST explore and inspect the actual workspace codebase using read tools:
+                 * `list_directory_tree` / `file_read` / `multi_file_read`: Inspect actual project structure, configuration, data models, and entry points.
+                 * `grep_search` / `find_symbol`: Search for existing functions, symbols, interfaces, and patterns relevant to the task.
+                 * `git_status`: Check current modified files and git state.
+               - NEVER invent or guess file paths, and NEVER use generic placeholder steps (such as "Phase 1: Baseline Analysis", "1.1 Inspect files").
+               - The plan MUST be grounded in REAL existing files, REAL dependencies, and REAL code discovered during your research.
+            2. STRUCTURED IMPLEMENTATION PLAN SPECIFICATION:
+               Once research is complete, formulate a rigorous plan and submit it via `create_plan(title: ..., markdown: ...)`:
+               - Title: Clear, descriptive title reflecting the specific task (e.g. "Implementation Plan: Add SQLite Caching to Newsfeed").
+               - Summary & Problem Formulation: Concise overview of the objective and architectural strategy based on your research findings.
+               - User Review Required: Document any breaking changes, performance trade-offs, or critical decisions needing user confirmation.
+               - Open Questions: Clarifying questions regarding ambiguity or business logic.
+               - Proposed Changes: Grouped by component/module, listing every single file with explicit status tags:
+                 * `[NEW] path/to/file` — describe purpose, classes, and exported functions.
+                 * `[MODIFY] path/to/file` — describe exact methods, structs, or logic blocks being updated.
+                 * `[DELETE] path/to/file` — rationale for removal.
+               - Verification Plan: Exact terminal commands for verification:
+                 * Automated test commands (e.g. `cargo test`, `swift test`, `npm test`, `pytest`).
+                 * Build verification commands (e.g. `xcodebuild`, `cargo build`, `./build.sh`).
+                 * Manual verification steps (e.g. specific UI flow or API endpoint test).
+            3. ABSOLUTE ZERO-MUTATION MANDATE BEFORE APPROVAL:
+               - Calling `create_plan` or `agent_plan(action: "set")` automatically renders the plan in the MicroCode UI and suspends execution until the user clicks **Approve** or **Reject**.
+               - You are STRICTLY FORBIDDEN from editing files (`replace_in_file`, `file_write`, `patch_file`) or running mutating commands until the user has explicitly clicked **Approve**.
+               - If the user rejects the plan, read the feedback, analyze further, and submit an updated plan.
+            4. MULTI-MODEL COMBO & STRICT OWNERSHIP:
                - You can combine multiple models (e.g. Claude + ChatGPT, Gemini + Claude) across SubAgents via `invoke_subagent(type_name: ..., model: ...)`.
-               - NEVER duplicate work or fight over identical tasks: Each plan node must have ONE unique owner (e.g. `architect`, `frontend_engineer`, `backend_engineer`, `bug_hunter`, `main`).
-               - Only execute nodes where dependencies are verified and satisfied (`readyNodes`).
-               - Subagents only execute their designated node scope; when completed, mark verified via `agent_plan(action: "complete")`.
-            3. Execute each ready node with tool calls, then call agent_plan(action: "complete") only after verification passes.
-            4. Never mark a plan or task complete from prose alone.
+               - Each plan node must have ONE unique owner (e.g. `architect`, `frontend_engineer`, `backend_engineer`, `bug_hunter`, `main`).
+               - Execute ready nodes with tool calls, and mark complete with `agent_plan(action: "complete")` only after verification passes.
+               - Never mark a plan or task complete from prose alone.
             
             ## Workflow: Modify Code
             1. file_read → 2. replace_in_file/patch_file → 3. shell (verify) → 4. Report
@@ -454,6 +479,11 @@ class AgentService: ObservableObject {
             prompt += "\n\n## task.md\n\(compressed)"
         }
         
+        let projectMemory = ProjectMemoryService.shared.getSystemPromptAddendum()
+        if !projectMemory.isEmpty {
+            prompt += projectMemory
+        }
+        
         // Inject Active Agent Skills (Real-Time from Disk)
         let skillsSnippet = AgentSkillsStore.shared.activeSkillsPromptSnippet()
         if !skillsSnippet.isEmpty {
@@ -538,6 +568,49 @@ class AgentService: ObservableObject {
                 }
             }
         }
+        
+        // Restore active plan for current chat if present, otherwise ensure plan is clear
+        if let activeId = activeChatId,
+           let matched = chatSessions.first(where: { $0.id == activeId }),
+           let plan = matched.activePlan {
+            Task { @MainActor in
+                ImplementationPlanManager.shared.currentPlan = plan
+                ImplementationPlanManager.shared.isPlanVisible = (plan.approvalState == .pending)
+            }
+        } else {
+            Task { @MainActor in
+                ImplementationPlanManager.shared.clearPlan()
+            }
+        }
+        
+        // Sync plan updates to active chat session
+        NotificationCenter.default.addObserver(forName: NSNotification.Name("MicroCodePlanUpdated"), object: nil, queue: .main) { [weak self] notif in
+            guard let self = self, let activeId = self.activeChatId else { return }
+            if let idx = self.chatSessions.firstIndex(where: { $0.id == activeId }) {
+                let plan = notif.object as? ImplementationPlan
+                self.chatSessions[idx].activePlan = plan
+                self.saveChats()
+            }
+        }
+        
+        // Subscribe to subagent lifecycle events for activity log
+        SubAgentHarness.shared.$subagentEvents
+            .dropFirst()
+            .receive(on: DispatchQueue.main)
+            .sink { [weak self] events in
+                guard let self = self, let latest = events.last else { return }
+                switch latest.type {
+                case .invoked:
+                    self.logActivity(.info, "SubAgent ▸ \(latest.role) invoked (\(latest.typeName))")
+                case .completed:
+                    self.logActivity(.success, "SubAgent ▸ \(latest.role) completed")
+                case .errored:
+                    self.logActivity(.error, "SubAgent ▸ \(latest.role) errored: \(latest.detail ?? "unknown")")
+                case .killed:
+                    self.logActivity(.info, "SubAgent ▸ \(latest.role) killed")
+                }
+            }
+            .store(in: &agentCancellables)
     }
     
     // MARK: - Set Workspace
@@ -602,6 +675,12 @@ class AgentService: ObservableObject {
             loadAgentWorkspaceFiles(path)
             MultiPlatformRulesEngine.shared.refresh(workspaceRoot: path)
             MCPClient.shared.start(workspacePath: path)
+            ProjectMemoryService.shared.loadProjectMemory(workspace: path)
+            // Launch any external MCP servers discovered from .cursor/mcp.json etc.
+            let discovered = MultiPlatformRulesEngine.shared.discoveredMCPServers
+            if !discovered.isEmpty {
+                ExternalMCPManager.shared.syncWithDiscoveredServers(discovered)
+            }
         } else {
             agentMdContent = nil
             taskMdContent = nil
@@ -1023,7 +1102,29 @@ class AgentService: ObservableObject {
         let normalizedAI = AIModelCatalog.shared.normalizedSelection(provider: provider, model: model)
         let resolvedProvider = normalizedAI.provider
         let resolvedModel = normalizedAI.model
-        let detectedProvider = StreamableAIProvider(rawValue: resolvedProvider) ?? StreamableAIProvider.detect(from: resolvedModel)
+        var detectedProvider = StreamableAIProvider(rawValue: resolvedProvider) ?? StreamableAIProvider.detect(from: resolvedModel)
+        
+        // Safety guard: Prevent mismatched models (e.g. gpt-*, o1*, claude-*) from routing to Gemini endpoint
+        let lowerModel = resolvedModel.lowercased()
+        let isGeminiModel = lowerModel.contains("gemini") || lowerModel.contains("gemma")
+        if detectedProvider == .gemini && !isGeminiModel {
+            let activeSub = UserDefaults.standard.string(forKey: "subscriptionActiveProvider")
+            let keyMode = UserDefaults.standard.string(forKey: "aiKeyMode") ?? "cloud"
+            if keyMode == "subscription" {
+                if activeSub == "copilot" || SubscriptionAuthManager.shared.isConnected(.copilot) || resolvedProvider == "copilot" {
+                    detectedProvider = .copilot
+                } else if activeSub == "chatgpt" || SubscriptionAuthManager.shared.isConnected(.chatgpt) {
+                    detectedProvider = .openai
+                } else if activeSub == "claude" || SubscriptionAuthManager.shared.isConnected(.claude) {
+                    detectedProvider = .anthropic
+                } else {
+                    detectedProvider = StreamableAIProvider.detect(from: resolvedModel)
+                }
+            } else {
+                detectedProvider = StreamableAIProvider.detect(from: resolvedModel)
+            }
+        }
+        
         lastProvider = detectedProvider.rawValue
         lastModel = resolvedModel
         
@@ -1049,7 +1150,12 @@ class AgentService: ObservableObject {
                 model: resolvedModel,
                 tools: toolNames,
                 skills: AgentSkillsStore.shared.enabledSkillIds(),
-                mcpServers: MCPClient.shared.isConnected ? ["local"] : []
+                mcpServers: {
+                    var servers: [String] = []
+                    if MCPClient.shared.isConnected { servers.append("local") }
+                    servers.append(contentsOf: ExternalMCPManager.shared.connectedServerNames)
+                    return servers
+                }()
             )
             kernelOnline = kernel != nil
             if let kernel {
@@ -1293,6 +1399,13 @@ class AgentService: ObservableObject {
                     }
                 }
                 terminationNotice = response?.directive.reason ?? modelError
+                let userFriendlyNotice = "⚠️ \(modelError)"
+                if finalText.isEmpty {
+                    finalText = userFriendlyNotice
+                } else if !finalText.contains(modelError) {
+                    finalText += "\n\n" + userFriendlyNotice
+                }
+                updateStreamingMessage(finalText, toolResults: allToolResults)
                 break
             }
             
@@ -1360,14 +1473,14 @@ class AgentService: ObservableObject {
                     usedRuntimeLaunchFallback = true
                     logActivity(.info, "Harness fallback: launching the built app on the selected runtime")
 
-                } else if requiresNativeExecution,
+                } else if (requiresNativeExecution || containsNativeWorkCommitment(streamedText) || containsNativeWorkCommitment(finalText)),
                    !usedDeterministicActionFallback,
-                   let fallback = inferredWorkspaceAction(for: content) {
+                   let fallback = inferredWorkspaceAction(for: content.isEmpty ? (streamedText + " " + finalText) : (content + " " + streamedText + " " + finalText)) {
                     receivedToolCalls = [fallback]
                     usedDeterministicActionFallback = true
                     logActivity(.info, "Harness fallback: executing \(fallback.name) for the requested project action")
                 } else {
-                    let nativeWorkWasPromised = requiresNativeExecution || containsNativeWorkCommitment(finalText)
+                    let nativeWorkWasPromised = requiresNativeExecution || containsNativeWorkCommitment(streamedText) || containsNativeWorkCommitment(finalText)
                     let nativeWorkWasExecuted = hasNativeExecution(in: allToolResults)
                     let verificationPassed = hasDeterministicVerification(
                         in: allToolResults,
@@ -1412,42 +1525,50 @@ class AgentService: ObservableObject {
                     }
                     recentAssistantOutputs.append(streamedText)
 
-                    // If the model monologued intentions without calling tools, OR native work was promised but never executed,
-                    // provide autonomous harness follow-through attempts (strictly capped at 2 attempts per run)
+                    // If the model monologued intentions without calling tools, OR native work was promised but never executed:
+                    // 1) First attempt to autonomously execute the promised action (e.g. build/run)
+                    // 2) If not an inferred workspace action, auto-prompt the model to call the tool immediately
                     let hasUnfinishedIntent = containsUnfinishedActionIntention(streamedText)
                     if !isChatMode,
-                       (hasUnfinishedIntent || (nativeWorkWasPromised && !nativeWorkWasExecuted)),
-                       followThroughNagCount < 2,
-                       kernelRecoveryCount < 4,
-                       kernelResponse?.directive.action != "blocked" {
-                        followThroughNagCount += 1
-                        kernelRecoveryCount += 1
-                        usedFollowThroughRecovery = true
-                        logActivity(.info, "Harness follow-through: model stated intention without tool call (attempt \(followThroughNagCount)/2). Auto-prompting immediate tool execution...")
-                        if kernelResponse?.directive.action == "retry",
-                           let delay = kernelResponse?.directive.retryAfterMs {
-                            currentToolExecution = "Waiting to retry from the durable checkpoint..."
+                       (hasUnfinishedIntent || (nativeWorkWasPromised && !nativeWorkWasExecuted)) {
+                        if !usedDeterministicActionFallback,
+                           let fallback = inferredWorkspaceAction(for: streamedText + " " + finalText) {
+                            receivedToolCalls = [fallback]
+                            usedDeterministicActionFallback = true
+                            logActivity(.info, "Harness follow-through: automatically executing \(fallback.name) from model intention")
+                            // Fall through to tool execution loop
+                        } else if followThroughNagCount < 3,
+                                  kernelRecoveryCount < 6,
+                                  kernelResponse?.directive.action != "blocked" {
+                            followThroughNagCount += 1
+                            kernelRecoveryCount += 1
+                            usedFollowThroughRecovery = true
+                            logActivity(.info, "Harness follow-through: model stated intention without tool call (attempt \(followThroughNagCount)/3). Auto-prompting immediate tool execution...")
+                            if kernelResponse?.directive.action == "retry",
+                               let delay = kernelResponse?.directive.retryAfterMs {
+                                currentToolExecution = "Waiting to retry from the durable checkpoint..."
+                                agentPhase = .thinking
+                                try? await Task.sleep(nanoseconds: delay * 1_000_000)
+                            }
+                            history.append((role: "assistant", content: streamedText))
+                            let followUpPrompt: String
+                            if hasUnfinishedIntent {
+                                let snippet = String(streamedText.suffix(180)).trimmingCharacters(in: .whitespacesAndNewlines)
+                                followUpPrompt = """
+                                You stated what you intend to do ("...\(snippet)..."), but you did not call any tools.
+                                In MicroCode Agent, you must EXECUTE actions using tools, not just describe them in text.
+                                Immediately call the appropriate tool (e.g. `file_read`, `file_write`, `patch_file`, `shell`, etc.) RIGHT NOW to perform the work. Do not stop until the objective is finished.
+                                """
+                            } else {
+                                followUpPrompt = kernelResponse?.directive.suggestedPrompt ?? """
+                                Verification failed: the objective has no deterministic completion evidence. Execute the missing action now, then run the relevant build/test/diagnostic. Do not answer with another plan or progress-only message.
+                                """
+                            }
+                            history.append((role: "user", content: followUpPrompt))
+                            currentToolExecution = "Prompting tool execution follow-through..."
                             agentPhase = .thinking
-                            try? await Task.sleep(nanoseconds: delay * 1_000_000)
+                            continue
                         }
-                        history.append((role: "assistant", content: streamedText))
-                        let followUpPrompt: String
-                        if hasUnfinishedIntent {
-                            let snippet = String(streamedText.suffix(180)).trimmingCharacters(in: .whitespacesAndNewlines)
-                            followUpPrompt = """
-                            You stated what you intend to do ("...\(snippet)..."), but you did not call any tools.
-                            In MicroCode Agent, you must EXECUTE actions using tools, not just describe them in text.
-                            Immediately call the appropriate tool (e.g. `file_read`, `file_write`, `patch_file`, `shell`, etc.) RIGHT NOW to perform the work. Do not stop until the objective is finished.
-                            """
-                        } else {
-                            followUpPrompt = kernelResponse?.directive.suggestedPrompt ?? """
-                            Verification failed: the objective has no deterministic completion evidence. Execute the missing action now, then run the relevant build/test/diagnostic. Do not answer with another plan or progress-only message.
-                            """
-                        }
-                        history.append((role: "user", content: followUpPrompt))
-                        currentToolExecution = "Prompting tool execution follow-through..."
-                        agentPhase = .thinking
-                        continue
                     }
 
                     if nativeWorkWasPromised && !nativeWorkWasExecuted {
@@ -1567,13 +1688,17 @@ class AgentService: ObservableObject {
                             let deletions = max(0, oldLines.count - newLines.count)
                             
                             logActivity(.fileChange, "Modified: \(URL(fileURLWithPath: path).lastPathComponent) (+\(additions) -\(deletions))")
+                            
+                            // Create diff session for inline review
+                            let diffResult = diffEngine.computeDiff(old: old, new: newContent)
+                            
                             allChanges.append(PendingChangeModel(
                                 id: UUID().uuidString,
                                 filePath: path,
                                 description: "Modified by \(toolCall.name)",
                                 additions: additions, deletions: deletions,
-                                oldContent: String(old.suffix(5000)), newContent: String(newContent.suffix(5000)),
-                                status: .accepted
+                                oldContent: old, newContent: newContent,
+                                status: diffResult.hunks.isEmpty ? .accepted : .pending
                             ))
                             
                             // Hot-reload task/agent context if AI updated them autonomously
@@ -1721,6 +1846,13 @@ class AgentService: ObservableObject {
             UserDefaults.standard.removeObject(forKey: durableRunStorageKey)
         }
         
+        if finalText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            if let notice = terminationNotice, !notice.isEmpty {
+                finalText = "⚠️ \(notice)"
+                updateStreamingMessage(finalText, toolResults: allToolResults)
+            }
+        }
+        
         saveChats()
     }
 
@@ -1728,34 +1860,54 @@ class AgentService: ObservableObject {
         let normalized = content.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
         let continuationKeywords = [
             "ต่อ", "ทำต่อ", "ต่อไป", "ไงต่อ", "แล้วไงต่อ", "ไปต่อ", "ทำไงต่อ", "ต่อเลย", "ลุยต่อ",
-            "continue", "resume", "keep going", "go on", "next", "proceed", "keep working", "finish it", "finish"
+            "continue", "resume", "keep going", "go on", "next", "proceed", "keep working", "finish it", "finish",
+            // Operational follow-up nudges
+            "run", "run it", "run it now", "run สิ", "run เลย", "run ต่อ", "run main.m", "run app",
+            "รัน", "รันสิ", "รันเลย", "รันต่อ", "รันที", "ลองรัน", "กดรัน",
+            "build", "build it", "build สิ", "build เลย", "build ต่อ",
+            "บิลด์", "บิวด์", "คอมไพล์",
+            "test", "test it", "test สิ", "ทดสอบ", "ลองทดสอบ"
         ]
-        return continuationKeywords.contains(where: { normalized == $0 || normalized.hasPrefix($0) })
+        if continuationKeywords.contains(where: { normalized == $0 || normalized.hasPrefix($0) }) {
+            return true
+        }
+        // Handle typos like "9ต่อ" (leading digits or punctuation)
+        let cleaned = normalized.trimmingCharacters(in: CharacterSet.decimalDigits.union(.punctuationCharacters))
+        if !cleaned.isEmpty && continuationKeywords.contains(where: { cleaned == $0 || cleaned.hasPrefix($0) }) {
+            return true
+        }
+        return false
     }
 
     private func containsUnfinishedActionIntention(_ text: String) -> Bool {
         let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
-        // If the text is substantive (> 280 chars) or contains code blocks or markdown lists,
-        // it is a substantive explanation/answer, not an incomplete monologue of intentions.
-        if trimmed.count > 280 || trimmed.contains("```") {
+        if trimmed.isEmpty || trimmed.contains("```") {
             return false
         }
         let lower = trimmed.lowercased()
+        let tail = String(lower.suffix(350))
         let actionPhrases = [
             "let me read", "let me check", "let me inspect", "let me get", "let me look",
             "let me find", "let me search", "let me write", "let me create", "let me update",
             "let me delete", "let me run", "let me build", "let me execute", "let me probe",
+            "let me compile", "let me test",
             "i'll read", "i will read", "i'll check", "i will check", "i'll inspect",
             "i'll write", "i will write", "i'll create", "i will create", "i'll run", "i will run",
-            "i'll execute", "i will execute", "now i'll", "now i will",
+            "i'll execute", "i will execute", "i'll build", "i will build", "i'll test", "i will test",
+            "now i'll", "now i will",
             "i need to read", "i need to check", "i need to inspect", "i need to write",
-            "i need to get", "i need to find", "i need to run",
-            "writing the", "reading the", "executing the", "inspecting the",
+            "i need to get", "i need to find", "i need to run", "i need to build",
+            "writing the", "reading the", "executing the", "inspecting the", "building the",
             "then write", "then build", "then remove", "next step", "next, i",
             "consolidating", "consolidate",
-            "จะเริ่ม", "กำลังอ่าน", "กำลังเขียน", "ขอดึง", "ต่อไปจะ", "จะทำการ", "จะรัน"
+            "จะเริ่ม", "กำลังอ่าน", "กำลังเขียน", "ขอดึง", "ต่อไปจะ", "จะทำการ", "จะรัน", "จะ build",
+            "ขอลอง build", "ขอลองรัน", "มา build กัน", "ทำการ build"
         ]
-        return actionPhrases.contains(where: { lower.contains($0) })
+        if trimmed.count <= 280 {
+            return actionPhrases.contains { lower.contains($0) }
+        } else {
+            return actionPhrases.contains { tail.contains($0) }
+        }
     }
 
     /// Circuit breaker: detects if the model has entered an echo-chamber / repetition loop
@@ -1923,8 +2075,12 @@ class AgentService: ObservableObject {
         let commitments = [
             "will build", "will run", "will test", "building", "running", "compile now",
             "build immediately", "run immediately", "build right away",
+            "let me build", "let me run", "let me compile", "let me test", "let me execute",
+            "i'll build", "i will build", "i'll run", "i will run", "i'll test", "i will test",
+            "will execute with xcodebuild", "build with xcodebuild", "build with cargo", "build with gradle",
             "จะ build", "จะรัน", "กำลัง build", "กำลังรัน", "เริ่ม build", "เริ่มรัน",
-            "build ทันที", "รันทันที", "ตรวจโครงสร้าง + build", "ตรวจโครงสร้างและ build"
+            "build ทันที", "รันทันที", "ตรวจโครงสร้าง + build", "ตรวจโครงสร้างและ build",
+            "ขอลอง build", "ขอลองรัน", "จะทำการ build", "จะทำการรัน"
         ]
         return commitments.contains { lower.contains($0) }
     }
@@ -1953,7 +2109,8 @@ class AgentService: ObservableObject {
             let command = (result.toolParams?["command"] as? String ?? "").lowercased()
             return [
                 "simctl launch", "devicectl device process launch", "flutter run",
-                "xcrun simctl install", "gradlew installdebug", "npm run dev", "npm start"
+                "xcrun simctl install", "gradlew installdebug", "npm run dev", "npm start",
+                "xcodebuild", "cargo run", "swift run", "./"
             ].contains(where: command.contains)
         }
     }
@@ -2002,8 +2159,10 @@ class AgentService: ObservableObject {
 
     private func isTransientAgentError(_ message: String) -> Bool {
         let lower = message.lowercased()
-        if ["unauthorized", "forbidden", "invalid api key", "http 401", "http 403", "permission denied"]
-            .contains(where: lower.contains) {
+        if [
+            "unauthorized", "forbidden", "invalid api key", "http 401", "http 403", "permission denied",
+            "payment required", "http 402", "insufficient balance", "insufficient funds", "wallet", "quota exceeded"
+        ].contains(where: lower.contains) {
             return false
         }
         return [
@@ -2027,7 +2186,7 @@ class AgentService: ObservableObject {
             action = .test
         } else if lower.contains("run") || lower.contains("รัน") || lower.contains("start") {
             action = .run
-        } else if lower.contains("build") || lower.contains("compile") || lower.contains("คอมไพล์") || lower.contains("สร้าง build") {
+        } else if lower.contains("build") || lower.contains("compile") || lower.contains("คอมไพล์") || lower.contains("สร้าง build") || lower.contains("xcodebuild") {
             action = .build
         } else {
             action = nil
@@ -2039,6 +2198,29 @@ class AgentService: ObservableObject {
 
     private func runtimeLaunchAction() -> AIToolCall? {
         guard let workspace = toolBox.workspaceRoot, !workspace.isEmpty else { return nil }
+        let projectURL = URL(fileURLWithPath: workspace, isDirectory: true)
+        let projectType = ProjectManager.shared.detectProjectType(at: projectURL)
+        
+        let hasConnectedMobileDevices = !DeviceRuntimeService.shared.devices.isEmpty
+        let isMobileProject = projectType == .android || projectType == .flutter
+        
+        // If mobile project or has connected mobile simulator/device, use device_runtime
+        if isMobileProject || hasConnectedMobileDevices {
+            return AIToolCall(
+                id: UUID().uuidString,
+                name: "device_runtime",
+                arguments: ["operation": "run", "workspace": workspace]
+            )
+        }
+        
+        // For Xcode macOS projects, CLI, Swift, Rust, Node, Python, etc., use projectAction(.run) or .build
+        if let runAction = projectAction(.run) {
+            return runAction
+        }
+        if let buildAction = projectAction(.build) {
+            return buildAction
+        }
+        
         return AIToolCall(
             id: UUID().uuidString,
             name: "device_runtime",
@@ -2402,6 +2584,7 @@ class AgentService: ObservableObject {
         contextLimitReached = false
         saveChats()
         Task { @MainActor in
+            ImplementationPlanManager.shared.clearPlan()
             ACPHostService.shared.resetAllSessions()
         }
         return newChat
@@ -2435,6 +2618,12 @@ class AgentService: ObservableObject {
             AgentSkillsStore.shared.restoreSkills(skillIds)
         }
         Task { @MainActor in
+            if let plan = chat.activePlan {
+                ImplementationPlanManager.shared.currentPlan = plan
+                ImplementationPlanManager.shared.isPlanVisible = (plan.approvalState == .pending)
+            } else {
+                ImplementationPlanManager.shared.clearPlan()
+            }
             ACPHostService.shared.resetAllSessions()
         }
     }
@@ -2456,10 +2645,14 @@ class AgentService: ObservableObject {
     func clearCurrentChat() {
         if let activeChatId {
             transcriptStore.remove(chatID: activeChatId, scope: activeScope)
+            if let idx = chatSessions.firstIndex(where: { $0.id == activeChatId }) {
+                chatSessions[idx].activePlan = nil
+            }
         }
         messages.removeAll()
         saveCurrentChatMessages()
         Task { @MainActor in
+            ImplementationPlanManager.shared.clearPlan()
             ACPHostService.shared.resetAllSessions()
         }
     }
@@ -2912,6 +3105,7 @@ struct ChatSession: Identifiable, Codable {
     var messageCount: Int?
     /// Last message represented by an evicted-memory summary.
     var summaryThroughMessageID: String?
+    var activePlan: ImplementationPlan?
     var createdAt: Date
     var updatedAt: Date
     
@@ -2919,7 +3113,8 @@ struct ChatSession: Identifiable, Codable {
         name: String = "New Task",
         projectPath: String? = nil,
         projectName: String? = nil,
-        activeSkillIds: [String]? = nil
+        activeSkillIds: [String]? = nil,
+        activePlan: ImplementationPlan? = nil
     ) -> ChatSession {
         ChatSession(
             id: UUID().uuidString,
@@ -2930,6 +3125,7 @@ struct ChatSession: Identifiable, Codable {
             messages: [],
             messageCount: 0,
             summaryThroughMessageID: nil,
+            activePlan: activePlan,
             createdAt: Date(),
             updatedAt: Date()
         )
@@ -2977,7 +3173,7 @@ struct ToolResultModel {
     let error: String?
 }
 
-struct PendingChangeModel: Identifiable {
+struct PendingChangeModel: Identifiable, Equatable {
     let id: String
     let filePath: String
     let description: String
@@ -2987,7 +3183,7 @@ struct PendingChangeModel: Identifiable {
     let newContent: String
     var status: PendingChangeStatus
     
-    enum PendingChangeStatus {
+    enum PendingChangeStatus: Equatable {
         case pending, accepted, rejected
     }
 }

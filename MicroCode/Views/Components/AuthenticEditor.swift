@@ -6,6 +6,15 @@ struct AuthenticEditor: NSViewRepresentable {
     @Binding var text: String
     var language: String
     var font: NSFont = .monospacedSystemFont(ofSize: 14, weight: .regular)
+    var isDark: Bool = true
+    var themeName: String? = nil
+    
+    private var activeTheme: AppTheme {
+        if let themeName = themeName, let match = AppTheme(rawValue: themeName) {
+            return match
+        }
+        return AppState.shared?.appTheme ?? (isDark ? .dark : .light)
+    }
     
     func makeCoordinator() -> Coordinator {
         Coordinator(self)
@@ -44,12 +53,15 @@ struct AuthenticEditor: NSViewRepresentable {
         textView.isAutomaticTextReplacementEnabled = false
         textView.isAutomaticSpellingCorrectionEnabled = false
         textView.font = font
-        textView.backgroundColor = .black
-        textView.textColor = .white
-        textView.insertionPointColor = .white
+        let currentTheme = activeTheme
+        let bg = currentTheme.editorBackground
+        let fg = currentTheme.editorText
+        textView.backgroundColor = bg
+        textView.textColor = fg
+        textView.insertionPointColor = fg
         textView.selectedTextAttributes = [
-            .backgroundColor: NSColor(red: 0.15, green: 0.20, blue: 0.28, alpha: 1.0),
-            .foregroundColor: NSColor.white
+            .backgroundColor: currentTheme.selectionColor,
+            .foregroundColor: fg
         ]
         
         // Set initial text
@@ -57,9 +69,9 @@ struct AuthenticEditor: NSViewRepresentable {
         
         // Setup Line Numbers Ruler (Native ObjC++)
         let rulerView = AuthenticLineNumberRuler(scrollView: scrollView, orientation: .verticalRuler)
-        rulerView.backgroundColor = .black
-        rulerView.textColor = NSColor(white: 0.35, alpha: 1.0)
-        rulerView.separatorColor = NSColor(white: 1.0, alpha: 0.08)
+        rulerView.backgroundColor = currentTheme.editorBackground
+        rulerView.textColor = currentTheme.commentColor
+        rulerView.separatorColor = isDark ? NSColor(white: 1.0, alpha: 0.08) : NSColor(white: 0.0, alpha: 0.08)
         scrollView.verticalRulerView = rulerView
         scrollView.hasVerticalRuler = true
         scrollView.rulersVisible = true
@@ -72,21 +84,32 @@ struct AuthenticEditor: NSViewRepresentable {
         
         scrollView.documentView = textView
         
-        // Update Coordinator with the text storage to observe changes if needed
-        // but delegate textDidChange is enough for binding updates.
-        
         return scrollView
     }
     
     func updateNSView(_ nsView: NSScrollView, context: Context) {
         guard let textView = nsView.documentView as? NSTextView else { return }
         
+        let currentTheme = activeTheme
+        let bg = currentTheme.editorBackground
+        let fg = currentTheme.editorText
+        if textView.backgroundColor != bg || textView.textColor != fg {
+            textView.backgroundColor = bg
+            textView.textColor = fg
+            textView.insertionPointColor = fg
+            textView.selectedTextAttributes = [
+                .backgroundColor: currentTheme.selectionColor,
+                .foregroundColor: fg
+            ]
+            context.coordinator.highlight(textView.textStorage, language: language, textView: textView)
+        }
+        
         if textView.string != text {
             // Keep selection if possible
             let selectedRanges = textView.selectedRanges
             textView.string = text
             // Highlight again because replacing string clears attributes
-            context.coordinator.highlight(textView.textStorage, language: language)
+            context.coordinator.highlight(textView.textStorage, language: language, textView: textView)
             
             // Restore selection if valid
             if let firstRange = selectedRanges.first?.rangeValue,
@@ -97,10 +120,9 @@ struct AuthenticEditor: NSViewRepresentable {
         
         // Update Helper: Apply Theme to Ruler
         if let ruler = nsView.verticalRulerView as? AuthenticLineNumberRuler {
-            ruler.backgroundColor = .black
-            ruler.textColor = NSColor(white: 0.35, alpha: 1.0)
-            ruler.separatorColor = NSColor(white: 1.0, alpha: 0.08)
-            // Force redraw if needed
+            ruler.backgroundColor = currentTheme.editorBackground
+            ruler.textColor = currentTheme.commentColor
+            ruler.separatorColor = isDark ? NSColor(white: 1.0, alpha: 0.08) : NSColor(white: 0.0, alpha: 0.08)
             ruler.needsDisplay = true
         }
         
@@ -199,8 +221,15 @@ struct AuthenticEditor: NSViewRepresentable {
                 currentLanguage = language
             }
             
-            // Unconditionally ensure MicroCode Pro Dark (Xcode Style) theme is active
-            engine.themeManager.setActiveTheme("default-dark")
+            // Dynamically set theme based on appearance and active theme
+            var activeThemeName: String? = parent.themeName
+            if activeThemeName == nil, Thread.isMainThread {
+                activeThemeName = MainActor.assumeIsolated {
+                    AppState.shared?.appTheme.rawValue
+                }
+            }
+            let resolvedTheme = activeThemeName ?? (parent.isDark ? "dark" : "light")
+            engine.themeManager.setActiveTheme(resolvedTheme)
             
             // Use per-instance engine to avoid shared-state race conditions
             engine.setDocument(textStorage.string, language: currentLanguage)

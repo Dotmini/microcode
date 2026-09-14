@@ -5,7 +5,7 @@
 //  Provides utilities for safe conversion between NSRange (UTF-16) and
 //  Swift String indices, respecting grapheme clusters for Thai, CJK, Arabic, etc.
 //
-//  Copyright © 2026 SPU AI CLUB. All rights reserved.
+//  Copyright © 2026 Dotmini Company Limited. All rights reserved.
 //
 
 import Foundation

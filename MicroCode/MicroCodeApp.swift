@@ -2,8 +2,8 @@
 //  MicroCodeApp.swift
 //  MicroCode
 //
-//  Created by SPU AI CLUB
-//  Copyright © 2024 AIPRENEUR. All rights reserved.
+//  Created by Tirawat Nantamas
+//  Copyright © 2024 Dotmini Company Limited. All rights reserved.
 //
 //  Performance Optimized Entry Point
 //
@@ -27,6 +27,8 @@ struct MicroCodeApp: App {
         // signals and exceptions during startup are recorded too.
         CrashReporter.shared.install()
         CrashReporter.shared.breadcrumb("MicroCodeApp.init")
+        _ = AIModelCatalog.shared
+        _ = LocalEcosystemDiscovery.shared
     }
 
     var body: some Scene {
@@ -94,6 +96,11 @@ struct MicroCodeApp: App {
         
         // Start Local MCP & HTTP Daemon Bridge for Omni AI
         MCPServer.shared.startLocalHttpBridge(port: 18888)
+        
+        // Background refresh of live models & local ecosystem engines
+        Task.detached(priority: .utility) {
+            await AIModelCatalog.shared.refreshIfNeeded(force: false)
+        }
         
         // A license must be issued and signed by Dotmini's entitlement service.
         // Never manufacture mc_live_* values locally: they look valid in the UI
@@ -176,12 +183,11 @@ struct MicroCodeApp: App {
                 }
             } else if let tab = queryValue(for: "tab"), !tab.isEmpty {
                 Task { @MainActor in
-                    PreviewDockService.shared.selectTab(id: tab)
+                    appState.showPreviewInspector(tab: tab)
                 }
             } else {
                 Task { @MainActor in
-                    PreviewDockService.shared.isDockVisible = true
-                    DeviceRuntimeService.shared.showingEmbeddedDeviceDock = true
+                    appState.showPreviewInspector()
                 }
             }
             return
@@ -191,6 +197,14 @@ struct MicroCodeApp: App {
         if host == "ecosystem" || host == "agent-settings" || host == "agent-config" || host == "rules" || host == "mcp" {
             let tab = queryValue(for: "tab") ?? (host == "rules" ? "rules" : (host == "mcp" ? "mcp" : "agents"))
             NotificationCenter.default.post(name: NSNotification.Name("MicroCode.OpenAgentEcosystem"), object: tab)
+            return
+        }
+        
+        // Extension Studio Deep Link
+        if host == "extensions" || host == "extension-studio" {
+            Task { @MainActor in
+                appState.openExtensionStudio()
+            }
             return
         }
         
@@ -282,16 +296,48 @@ struct AppCommands: Commands {
         CommandGroup(replacing: .newItem) {
             Button("New File") { appState.createNewFile() }
                 .keyboardShortcut("n", modifiers: .command)
+            Button("New AI Conversation") {
+                let ws = appState.workspaceFolder?.path ?? AgentService.shared.currentWorkspace
+                _ = AgentService.shared.createNewChat(projectPath: ws)
+                appState.switchToMode(.aiAgent)
+            }
+                .keyboardShortcut("n", modifiers: [.command, .shift])
             Button("Open File...") { appState.openFile() }
                 .keyboardShortcut("o", modifiers: .command)
             Button("Open Folder...") { appState.openFolder() }
                 .keyboardShortcut("o", modifiers: [.command, .shift])
             Divider()
+            Button("Close Tab") {
+                if let cur = appState.currentFile {
+                    appState.closeFile(cur)
+                }
+            }
+            .keyboardShortcut("w", modifiers: .command)
+            .disabled(appState.currentFile == nil)
+            Button("Close Other Tabs") {
+                appState.closeOtherTabs()
+            }
+            .keyboardShortcut("w", modifiers: [.command, .option])
+            .disabled(appState.openFiles.count <= 1)
             Button("Close Workspace") { appState.closeWorkspace() }
                 .keyboardShortcut("w", modifiers: [.command, .shift])
+            Divider()
+            Button("Next Tab") {
+                appState.selectNextTab()
+            }
+            .keyboardShortcut("]", modifiers: .command)
+            Button("Previous Tab") {
+                appState.selectPreviousTab()
+            }
+            .keyboardShortcut("[", modifiers: .command)
         }
 
         CommandGroup(replacing: .help) {
+            Button("Keyboard Shortcuts...") {
+                appState.showingKeyboardShortcuts = true
+            }
+            .keyboardShortcut("/", modifiers: .command)
+            Divider()
             Button("Welcome to MicroCode") { appState.showWelcomeScreen() }
             Button("First-Launch Onboarding...") { appState.showFirstLaunchOnboarding() }
         }
@@ -303,16 +349,44 @@ struct AppCommands: Commands {
             Button("Save As...") { appState.saveFileAs() }
                 .keyboardShortcut("s", modifiers: [.command, .shift])
         }
+
+        CommandMenu("Modes") {
+            Button("Code Editor") { appState.switchToMode(.code) }
+                .keyboardShortcut("1", modifiers: .control)
+            Button("AI Agent Workspace") { appState.switchToMode(.aiAgent) }
+                .keyboardShortcut("2", modifiers: .control)
+            Button("Cell Mode (Notebook)") { appState.switchToMode(.notebook) }
+                .keyboardShortcut("3", modifiers: .control)
+            Button("Playground Mode") { appState.switchToMode(.playground) }
+                .keyboardShortcut("4", modifiers: .control)
+            Button("Science Mode") { appState.switchToMode(.science) }
+                .keyboardShortcut("5", modifiers: .control)
+            Button("IDE Web Browser") { appState.switchToMode(.browser) }
+                .keyboardShortcut("6", modifiers: .control)
+            Button("Remote Explorer (SSH)") { appState.switchToMode(.remoteX) }
+                .keyboardShortcut("7", modifiers: .control)
+            Button("Embed & IoT Studio") { appState.switchToMode(.embedded) }
+                .keyboardShortcut("8", modifiers: .control)
+            Button("API Studio") { appState.openAPIStudio() }
+                .keyboardShortcut("9", modifiers: .control)
+            Button("Extension Studio") { appState.switchToMode(.extensions) }
+                .keyboardShortcut("e", modifiers: .control)
+            Divider()
+            Button("Welcome Dashboard") { appState.showingWelcomeHome = true }
+                .keyboardShortcut("0", modifiers: .control)
+        }
         
         CommandMenu("Code") {
             Button("Run Code") { appState.runCode() }
                 .keyboardShortcut("r", modifiers: .command)
+            Button("Build Project") { appState.buildProject() }
+                .keyboardShortcut("b", modifiers: [.command, .shift])
             Button("Stop Execution") { appState.stopExecution() }
                 .keyboardShortcut(".", modifiers: .command)
                 .disabled(!appState.isExecuting)
             Divider()
             Button("Format Code") { appState.formatCode() }
-                .keyboardShortcut("i", modifiers: [.command, .option])
+                .keyboardShortcut("f", modifiers: [.command, .option])
             Button("Refactor with AI") { appState.showRefactorDialog() }
                 .keyboardShortcut("r", modifiers: [.command, .option])
             Button("Explain Code") { appState.explainCode() }
@@ -323,56 +397,46 @@ struct AppCommands: Commands {
         }
         
         CommandMenu("View") {
-            Button("Toggle Sidebar") { appState.toggleSidebar() }
-                .keyboardShortcut("b", modifiers: [.command, .option])
-            Button("Toggle Console") { appState.toggleConsole() }
-                .keyboardShortcut("j", modifiers: [.command, .option])
-            Button("Toggle Git Panel") { appState.toggleGitPanel() }
+            Button("Toggle Sidebar") {
+                withAnimation(.easeInOut(duration: 0.22)) {
+                    appState.toggleSidebar()
+                }
+            }
+                .keyboardShortcut("b", modifiers: .command)
+            Button("Toggle Preview & Inspector") {
+                withAnimation(.easeInOut(duration: 0.2)) {
+                    appState.toggleAgenticContext()
+                }
+            }
+                .keyboardShortcut("i", modifiers: .command)
+            Button("Toggle Terminal / Console") {
+                withAnimation(.easeInOut(duration: 0.2)) {
+                    appState.toggleConsole()
+                }
+            }
+                .keyboardShortcut("j", modifiers: .command)
+            Button("Toggle Git Panel") {
+                withAnimation(.easeInOut(duration: 0.2)) {
+                    appState.toggleGitPanel()
+                }
+            }
                 .keyboardShortcut("g", modifiers: [.command, .option])
-            Button("Remote Explorer (SSH)") { 
-                appState.showingWelcomeHome = false
-                appState.setEditorMode(.remoteX) 
+            Button("Toggle Device Preview Dock") {
+                withAnimation(.easeInOut(duration: 0.2)) {
+                    appState.showingPreviewView.toggle()
+                }
             }
-                .keyboardShortcut("s", modifiers: [.command, .option])
-            Button("Embed & IoT Studio") {
-                appState.showingWelcomeHome = false
-                appState.setEditorMode(.embedded)
-            }
-            Button("Code Editor") {
-                appState.showingWelcomeHome = false
-                appState.setEditorMode(.code)
-            }
-            Button("Cell Mode (Notebook)") {
-                appState.showingWelcomeHome = false
-                appState.setEditorMode(.notebook)
-            }
-            Button("Playground Mode") {
-                appState.showingWelcomeHome = false
-                appState.setEditorMode(.playground)
-            }
-            Button("API Studio") {
-                appState.openAPIStudio()
-            }
+                .keyboardShortcut("p", modifiers: [.command, .option])
 
             Divider()
-            
-            // Smart Tag Finder
-            Menu("Tag Finder") {
-                Button("#Function") { }
-                Button("#Class") { }
-                Button("#Fix") { }
-                Button("#Feature") { }
-                Button("#API") { }
-                Button("#Model") { }
-                Button("#View") { }
-                Button("#Service") { }
+
+            Button("Keyboard Shortcuts...") {
+                appState.showingKeyboardShortcuts = true
             }
-            
+            .keyboardShortcut("/", modifiers: .command)
+
             Divider()
 
-            Button("Runtime Manager") { appState.showingRuntimeManager = true }
-                .keyboardShortcut("r", modifiers: [.command, .shift])
-            Divider()
             Button("Increase Font Size") { appState.increaseFontSize() }
                 .keyboardShortcut("+", modifiers: .command)
             Button("Decrease Font Size") { appState.decreaseFontSize() }

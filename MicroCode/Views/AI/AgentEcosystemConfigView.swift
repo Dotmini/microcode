@@ -44,6 +44,20 @@ public struct AgentEcosystemConfigView: View {
     @ObservedObject var bridge = AgentContextProtocolBridge.shared
     @ObservedObject var discovery = LocalEcosystemDiscovery.shared
     @Environment(\.presentationMode) var presentationMode
+    @Environment(\.colorScheme) private var colorScheme
+
+    private var modalBackground: Color {
+        colorScheme == .dark ? Color.black : Color(nsColor: .windowBackgroundColor)
+    }
+    private var cardSurface: Color {
+        Color.primary.opacity(colorScheme == .dark ? 0.04 : 0.04)
+    }
+    private var cardBorder: Color {
+        Color.primary.opacity(colorScheme == .dark ? 0.10 : 0.12)
+    }
+    private var inputBackground: Color {
+        colorScheme == .dark ? Color.black : Color(nsColor: .controlBackgroundColor)
+    }
 
     @State private var selectedTab: EcosystemTab
     @State private var filterQuery: String = ""
@@ -93,7 +107,7 @@ public struct AgentEcosystemConfigView: View {
             }
         }
         .frame(minWidth: 760, idealWidth: 840, minHeight: 560, idealHeight: 640)
-        .background(Color.black)
+        .background(modalBackground)
         .onAppear {
             detectInstalledAgents()
             loadExistingConfigs()
@@ -107,30 +121,30 @@ public struct AgentEcosystemConfigView: View {
         HStack(spacing: 12) {
             ZStack {
                 RoundedRectangle(cornerRadius: 8, style: .continuous)
-                    .fill(Color.white.opacity(0.06))
+                    .fill(Color.primary.opacity(0.06))
                     .frame(width: 36, height: 36)
-                    .overlay(RoundedRectangle(cornerRadius: 8, style: .continuous).stroke(Color.white.opacity(0.12), lineWidth: 1))
+                    .overlay(RoundedRectangle(cornerRadius: 8, style: .continuous).stroke(cardBorder, lineWidth: 1))
                 Image(systemName: "slider.horizontal.2.square")
                     .font(.system(size: 17, weight: .medium))
-                    .foregroundColor(.white)
+                    .foregroundColor(.primary)
             }
 
             VStack(alignment: .leading, spacing: 2) {
                 HStack(spacing: 8) {
                     Text("Agent & Ecosystem Settings")
                         .font(.system(size: 15, weight: .semibold))
-                        .foregroundColor(.white)
+                        .foregroundColor(.primary)
                     Text("UNIFIED")
                         .font(.system(size: 9, weight: .bold, design: .rounded))
                         .padding(.horizontal, 6)
                         .padding(.vertical, 2)
-                        .background(Color.white.opacity(0.08))
-                        .foregroundColor(Color.white.opacity(0.7))
+                        .background(Color.primary.opacity(0.08))
+                        .foregroundColor(Color.primary.opacity(0.7))
                         .clipShape(Capsule())
                 }
                 Text("External coding agents, cross-platform rules, MCP servers, and context protocol")
                     .font(.system(size: 11))
-                    .foregroundColor(Color.white.opacity(0.6))
+                    .foregroundColor(.secondary)
             }
 
             Spacer()
@@ -151,16 +165,17 @@ public struct AgentEcosystemConfigView: View {
             } label: {
                 Image(systemName: "xmark")
                     .font(.system(size: 10, weight: .bold))
-                    .foregroundColor(Color.white.opacity(0.7))
+                    .foregroundColor(.secondary)
                     .frame(width: 22, height: 22)
-                    .background(Color.white.opacity(0.08))
+                    .background(Color.primary.opacity(0.08))
                     .clipShape(Circle())
             }
             .buttonStyle(.plain)
             .help("Close Settings")
         }
-        .padding(.horizontal, 20)
-        .padding(.vertical, 12)
+        .padding(.horizontal, 22)
+        .padding(.vertical, 16)
+        .background(modalBackground)
     }
 
     // MARK: - Tab Picker Bar
@@ -185,24 +200,24 @@ public struct AgentEcosystemConfigView: View {
                                 .font(.system(size: 9, weight: .bold))
                                 .padding(.horizontal, 5)
                                 .padding(.vertical, 1)
-                                .background(Color.white.opacity(0.15))
-                                .foregroundColor(.white)
+                                .background(Color.primary.opacity(0.12))
+                                .foregroundColor(.primary)
                                 .clipShape(Capsule())
                         } else if tab == .rules && !rulesEngine.discoveredRules.isEmpty {
                             Text("\(rulesEngine.discoveredRules.count)")
                                 .font(.system(size: 9, weight: .bold))
                                 .padding(.horizontal, 5)
                                 .padding(.vertical, 1)
-                                .background(Color.white.opacity(0.12))
-                                .foregroundColor(Color.white.opacity(0.7))
+                                .background(Color.primary.opacity(0.10))
+                                .foregroundColor(Color.primary.opacity(0.7))
                                 .clipShape(Capsule())
                         } else if tab == .mcp && !rulesEngine.discoveredMCPServers.isEmpty {
                             Text("\(rulesEngine.discoveredMCPServers.count)")
                                 .font(.system(size: 9, weight: .bold))
                                 .padding(.horizontal, 5)
                                 .padding(.vertical, 1)
-                                .background(Color.white.opacity(0.12))
-                                .foregroundColor(Color.white.opacity(0.7))
+                                .background(Color.primary.opacity(0.10))
+                                .foregroundColor(Color.primary.opacity(0.7))
                                 .clipShape(Capsule())
                         }
                     }
@@ -210,9 +225,9 @@ public struct AgentEcosystemConfigView: View {
                     .padding(.vertical, 5)
                     .background(
                         RoundedRectangle(cornerRadius: 6, style: .continuous)
-                            .fill(isSelected ? Color.white.opacity(0.14) : Color.clear)
+                            .fill(isSelected ? Color.primary.opacity(0.12) : Color.clear)
                     )
-                    .foregroundColor(isSelected ? .white : Color.white.opacity(0.5))
+                    .foregroundColor(isSelected ? .primary : .secondary)
                 }
                 .buttonStyle(.plain)
             }
@@ -220,7 +235,7 @@ public struct AgentEcosystemConfigView: View {
         }
         .padding(.horizontal, 16)
         .padding(.vertical, 6)
-        .background(Color.black)
+        .background(modalBackground)
     }
 
     // MARK: - Section 1: External Agents (ACP)
@@ -256,11 +271,11 @@ public struct AgentEcosystemConfigView: View {
                 // Authentic Agent Brand Icon
                 ZStack {
                     RoundedRectangle(cornerRadius: 6, style: .continuous)
-                        .fill(Color.white.opacity(0.04))
+                        .fill(cardSurface)
                         .frame(width: 34, height: 34)
                         .overlay(
                             RoundedRectangle(cornerRadius: 6, style: .continuous)
-                                .stroke(Color.white.opacity(0.1), lineWidth: 1)
+                                .stroke(cardBorder, lineWidth: 1)
                         )
                     AIProviderBrandIcon(provider: type.rawValue, size: 20)
                 }
@@ -270,18 +285,18 @@ public struct AgentEcosystemConfigView: View {
                     HStack(spacing: 6) {
                         Text(type.displayName)
                             .font(.system(size: 13, weight: .semibold))
-                            .foregroundColor(.white)
+                            .foregroundColor(.primary)
                         
                         if isActive {
                             Text("ACTIVE")
                                 .font(.system(size: 9, weight: .bold))
                                 .padding(.horizontal, 5)
                                 .padding(.vertical, 1)
-                                .background(Color.white.opacity(0.15))
-                                .foregroundColor(.white)
+                                .background(Color.primary.opacity(0.12))
+                                .foregroundColor(.primary)
                                 .clipShape(Capsule())
                                 .overlay(
-                                    Capsule().stroke(Color.white.opacity(0.3), lineWidth: 0.8)
+                                    Capsule().stroke(Color.primary.opacity(0.25), lineWidth: 0.8)
                                 )
                         }
                     }
@@ -289,33 +304,33 @@ public struct AgentEcosystemConfigView: View {
                     HStack(spacing: 6) {
                         if isDetected, let path = detectedPath {
                             Circle()
-                                .fill(Color.white.opacity(0.85))
+                                .fill(Color.primary.opacity(0.85))
                                 .frame(width: 6, height: 6)
                             Text(path)
                                 .font(.system(size: 10, design: .monospaced))
-                                .foregroundColor(Color.white.opacity(0.6))
+                                .foregroundColor(.secondary)
                                 .lineLimit(1)
                         } else if type == .codexEngine {
                             Circle()
-                                .fill(Color.white.opacity(0.3))
+                                .fill(Color.primary.opacity(0.3))
                                 .frame(width: 6, height: 6)
                             Text("Internal MicroCore Engine")
                                 .font(.system(size: 10))
-                                .foregroundColor(Color.white.opacity(0.6))
+                                .foregroundColor(.secondary)
                         } else if type == .custom {
                             Circle()
-                                .fill(Color.white.opacity(0.3))
+                                .fill(Color.primary.opacity(0.3))
                                 .frame(width: 6, height: 6)
                             Text("Custom binary executable")
                                 .font(.system(size: 10))
-                                .foregroundColor(Color.white.opacity(0.6))
+                                .foregroundColor(.secondary)
                         } else {
                             Circle()
-                                .fill(Color.white.opacity(0.3))
+                                .fill(Color.primary.opacity(0.3))
                                 .frame(width: 6, height: 6)
                             Text("Not detected in PATH (\(type.defaultCommand))")
                                 .font(.system(size: 10))
-                                .foregroundColor(Color.white.opacity(0.4))
+                                .foregroundColor(Color.primary.opacity(0.4))
                         }
                     }
                 }
@@ -347,13 +362,13 @@ public struct AgentEcosystemConfigView: View {
                             appState.saveSettings()
                         }
                         .font(.system(size: 11, weight: .medium))
-                        .foregroundColor(.white)
+                        .foregroundColor(.primary)
                         .padding(.horizontal, 10)
                         .padding(.vertical, 4)
-                        .background(Color.white.opacity(0.08))
+                        .background(Color.primary.opacity(0.08))
                         .overlay(
                             RoundedRectangle(cornerRadius: 6, style: .continuous)
-                                .stroke(Color.white.opacity(0.2), lineWidth: 1)
+                                .stroke(Color.primary.opacity(0.18), lineWidth: 1)
                         )
                         .clipShape(RoundedRectangle(cornerRadius: 6, style: .continuous))
                         .buttonStyle(.plain)
@@ -362,10 +377,10 @@ public struct AgentEcosystemConfigView: View {
                             connectAgent(type: type)
                         }
                         .font(.system(size: 11, weight: .semibold))
-                        .foregroundColor(.black)
+                        .foregroundColor(colorScheme == .dark ? .black : .white)
                         .padding(.horizontal, 12)
                         .padding(.vertical, 4)
-                        .background(Color.white)
+                        .background(Color.primary)
                         .clipShape(RoundedRectangle(cornerRadius: 6, style: .continuous))
                         .buttonStyle(.plain)
                     } else {
@@ -375,13 +390,13 @@ public struct AgentEcosystemConfigView: View {
                             }
                         }
                         .font(.system(size: 11, weight: .medium))
-                        .foregroundColor(.white)
+                        .foregroundColor(.primary)
                         .padding(.horizontal, 10)
                         .padding(.vertical, 4)
-                        .background(Color.white.opacity(0.08))
+                        .background(Color.primary.opacity(0.08))
                         .overlay(
                             RoundedRectangle(cornerRadius: 6, style: .continuous)
-                                .stroke(Color.white.opacity(0.18), lineWidth: 1)
+                                .stroke(Color.primary.opacity(0.18), lineWidth: 1)
                         )
                         .clipShape(RoundedRectangle(cornerRadius: 6, style: .continuous))
                         .buttonStyle(.plain)
@@ -394,7 +409,7 @@ public struct AgentEcosystemConfigView: View {
                     } label: {
                         Image(systemName: isExpanded ? "chevron.up" : "chevron.down")
                             .font(.system(size: 10, weight: .semibold))
-                            .foregroundColor(Color.white.opacity(0.6))
+                            .foregroundColor(.secondary)
                             .frame(width: 20, height: 20)
                     }
                     .buttonStyle(.plain)
@@ -406,13 +421,13 @@ public struct AgentEcosystemConfigView: View {
             // Collapsible Settings Drawer
             if isExpanded {
                 Divider()
-                    .background(Color.white.opacity(0.08))
+                    .background(Color.primary.opacity(0.08))
                 VStack(alignment: .leading, spacing: 12) {
                     // Executable Path
                     VStack(alignment: .leading, spacing: 4) {
                         Text("Executable Binary Path")
                             .font(.system(size: 11, weight: .medium))
-                            .foregroundColor(Color.white.opacity(0.7))
+                            .foregroundColor(.secondary)
                         HStack(spacing: 8) {
                             TextField(type.defaultCommand.isEmpty ? "/path/to/executable" : type.defaultCommand, text: Binding(
                                 get: { customCommand[type] ?? detectedPath ?? type.defaultCommand },
@@ -439,7 +454,7 @@ public struct AgentEcosystemConfigView: View {
                     VStack(alignment: .leading, spacing: 4) {
                         Text("Default Launch Arguments")
                             .font(.system(size: 11, weight: .medium))
-                            .foregroundColor(Color.white.opacity(0.7))
+                            .foregroundColor(.secondary)
                         TextField("e.g. --dangerously-skip-permissions --verbose", text: Binding(
                             get: { customArgs[type] ?? "" },
                             set: { customArgs[type] = $0 }
@@ -452,7 +467,7 @@ public struct AgentEcosystemConfigView: View {
                     VStack(alignment: .leading, spacing: 4) {
                         Text("Permission Policy")
                             .font(.system(size: 11, weight: .medium))
-                            .foregroundColor(Color.white.opacity(0.7))
+                            .foregroundColor(.secondary)
                         Picker("", selection: Binding(
                             get: { permissionModes[type] ?? .reviewEach },
                             set: { permissionModes[type] = $0 }
@@ -488,10 +503,10 @@ public struct AgentEcosystemConfigView: View {
                             saveAgentConfig(type: type)
                         }
                         .font(.system(size: 11, weight: .semibold))
-                        .foregroundColor(.black)
+                        .foregroundColor(colorScheme == .dark ? .black : .white)
                         .padding(.horizontal, 12)
                         .padding(.vertical, 5)
-                        .background(Color.white)
+                        .background(Color.primary)
                         .clipShape(RoundedRectangle(cornerRadius: 6, style: .continuous))
                         .buttonStyle(.plain)
                     }
@@ -501,30 +516,30 @@ public struct AgentEcosystemConfigView: View {
                         VStack(alignment: .leading, spacing: 4) {
                             Text("Output:")
                                 .font(.system(size: 10, weight: .medium))
-                                .foregroundColor(Color.white.opacity(0.7))
+                                .foregroundColor(.secondary)
                             Text(output)
                                 .font(.system(size: 10, design: .monospaced))
-                                .foregroundColor(Color.white.opacity(0.85))
+                                .foregroundColor(.primary)
                                 .padding(8)
                                 .frame(maxWidth: .infinity, alignment: .leading)
-                                .background(Color.black)
+                                .background(inputBackground)
                                 .cornerRadius(4)
                                 .overlay(
                                     RoundedRectangle(cornerRadius: 4)
-                                        .stroke(Color.white.opacity(0.12), lineWidth: 1)
+                                        .stroke(cardBorder, lineWidth: 1)
                                 )
                         }
                     }
                 }
                 .padding(14)
-                .background(Color.white.opacity(0.02))
+                .background(Color.primary.opacity(0.02))
             }
         }
-        .background(Color.white.opacity(0.03))
+        .background(cardSurface)
         .cornerRadius(8)
         .overlay(
             RoundedRectangle(cornerRadius: 8, style: .continuous)
-                .stroke(isActive ? Color.white.opacity(0.4) : Color.white.opacity(0.08), lineWidth: 1)
+                .stroke(isActive ? Color.primary.opacity(0.4) : cardBorder, lineWidth: 1)
         )
     }
 
@@ -545,10 +560,10 @@ public struct AgentEcosystemConfigView: View {
             VStack(alignment: .leading, spacing: 3) {
                 Text("Discovered Workspace Guidelines & Platform Rules")
                     .font(.system(size: 13, weight: .semibold))
-                    .foregroundColor(.white)
+                    .foregroundColor(.primary)
                 Text("Rules automatically loaded from Cursor (.cursorrules, .cursor/rules/*.mdc), Windsurf (.windsurfrules), Cline (.clinerules), Zed, Copilot, and MicroCode.")
                     .font(.system(size: 11))
-                    .foregroundColor(Color.white.opacity(0.6))
+                    .foregroundColor(.secondary)
             }
 
             // Search Bar
@@ -556,16 +571,16 @@ public struct AgentEcosystemConfigView: View {
                 HStack(spacing: 6) {
                     Image(systemName: "magnifyingglass")
                         .font(.system(size: 11))
-                        .foregroundColor(Color.white.opacity(0.5))
+                        .foregroundColor(.secondary)
                     TextField("Search rules by name, description, or content…", text: $filterQuery)
                         .textFieldStyle(.plain)
                         .font(.system(size: 11))
                 }
                 .padding(.horizontal, 8)
                 .padding(.vertical, 5)
-                .background(Color.black)
+                .background(inputBackground)
                 .cornerRadius(6)
-                .overlay(RoundedRectangle(cornerRadius: 6).stroke(Color.white.opacity(0.12), lineWidth: 1))
+                .overlay(RoundedRectangle(cornerRadius: 6).stroke(cardBorder, lineWidth: 1))
 
                 if !filterQuery.isEmpty {
                     Button("Clear") { filterQuery = "" }
@@ -578,21 +593,21 @@ public struct AgentEcosystemConfigView: View {
                 VStack(spacing: 12) {
                     Image(systemName: "doc.text.magnifyingglass")
                         .font(.system(size: 32))
-                        .foregroundColor(Color.white.opacity(0.3))
+                        .foregroundColor(Color.primary.opacity(0.3))
                     Text(filterQuery.isEmpty ? "No platform rules discovered in active workspace" : "No rules matching query")
                         .font(.system(size: 13, weight: .medium))
-                        .foregroundColor(Color.white.opacity(0.7))
+                        .foregroundColor(.primary)
                     Text("Create a `.cursorrules`, `.cursor/rules/*.mdc`, or `.microcode/agent.md` file in your workspace to provide persistent agent instructions.")
                         .font(.system(size: 11))
-                        .foregroundColor(Color.white.opacity(0.5))
+                        .foregroundColor(.secondary)
                         .multilineTextAlignment(.center)
                         .frame(maxWidth: 440)
                 }
                 .frame(maxWidth: .infinity)
                 .padding(.vertical, 36)
-                .background(Color.white.opacity(0.02))
+                .background(cardSurface)
                 .cornerRadius(8)
-                .overlay(RoundedRectangle(cornerRadius: 8).stroke(Color.white.opacity(0.06), lineWidth: 1))
+                .overlay(RoundedRectangle(cornerRadius: 8).stroke(cardBorder, lineWidth: 1))
             } else {
                 VStack(spacing: 10) {
                     ForEach(filteredRules) { rule in
@@ -605,15 +620,15 @@ public struct AgentEcosystemConfigView: View {
                 VStack(alignment: .leading, spacing: 6) {
                     Text("Ignored Patterns (.cursorignore)")
                         .font(.system(size: 11, weight: .semibold))
-                        .foregroundColor(Color.white.opacity(0.7))
+                        .foregroundColor(.primary)
                     Text(rulesEngine.ignoredPatterns.joined(separator: ", "))
                         .font(.system(size: 11, design: .monospaced))
-                        .foregroundColor(Color.white.opacity(0.6))
+                        .foregroundColor(.secondary)
                         .padding(8)
                         .frame(maxWidth: .infinity, alignment: .leading)
-                        .background(Color.black)
+                        .background(inputBackground)
                         .cornerRadius(6)
-                        .overlay(RoundedRectangle(cornerRadius: 6).stroke(Color.white.opacity(0.12), lineWidth: 1))
+                        .overlay(RoundedRectangle(cornerRadius: 6).stroke(cardBorder, lineWidth: 1))
                 }
                 .padding(.top, 8)
             }
@@ -629,18 +644,18 @@ public struct AgentEcosystemConfigView: View {
                     .font(.system(size: 9, weight: .bold, design: .monospaced))
                     .padding(.horizontal, 6)
                     .padding(.vertical, 2)
-                    .background(Color.white.opacity(0.08))
-                    .foregroundColor(Color.white.opacity(0.85))
+                    .background(Color.primary.opacity(0.08))
+                    .foregroundColor(.primary)
                     .cornerRadius(4)
 
                 VStack(alignment: .leading, spacing: 2) {
                     Text(rule.fileName)
                         .font(.system(size: 12, weight: .semibold, design: .monospaced))
-                        .foregroundColor(.white)
+                        .foregroundColor(.primary)
                     if !rule.summaryDescription.isEmpty {
                         Text(rule.summaryDescription)
                             .font(.system(size: 11))
-                            .foregroundColor(Color.white.opacity(0.6))
+                            .foregroundColor(.secondary)
                     }
                 }
 
@@ -651,8 +666,8 @@ public struct AgentEcosystemConfigView: View {
                         .font(.system(size: 10, design: .monospaced))
                         .padding(.horizontal, 6)
                         .padding(.vertical, 2)
-                        .background(Color.white.opacity(0.05))
-                        .foregroundColor(Color.white.opacity(0.7))
+                        .background(Color.primary.opacity(0.05))
+                        .foregroundColor(.secondary)
                         .cornerRadius(4)
                 }
 
@@ -663,7 +678,7 @@ public struct AgentEcosystemConfigView: View {
                 } label: {
                     Image(systemName: isExpanded ? "chevron.up" : "chevron.down")
                         .font(.system(size: 10, weight: .semibold))
-                        .foregroundColor(Color.white.opacity(0.6))
+                        .foregroundColor(.secondary)
                 }
                 .buttonStyle(.plain)
             }
@@ -671,12 +686,12 @@ public struct AgentEcosystemConfigView: View {
 
             if isExpanded {
                 Divider()
-                    .background(Color.white.opacity(0.08))
+                    .background(Color.primary.opacity(0.08))
                 VStack(alignment: .leading, spacing: 8) {
                     HStack {
                         Text("File Content:")
                             .font(.system(size: 10, weight: .medium))
-                            .foregroundColor(Color.white.opacity(0.7))
+                            .foregroundColor(.secondary)
                         Spacer()
                         Button("Copy") {
                             NSPasteboard.general.clearContents()
@@ -689,21 +704,21 @@ public struct AgentEcosystemConfigView: View {
                     ScrollView(.horizontal, showsIndicators: false) {
                         Text(rule.content)
                             .font(.system(size: 11, design: .monospaced))
-                            .foregroundColor(Color.white.opacity(0.85))
+                            .foregroundColor(.primary)
                             .padding(8)
                     }
                     .frame(maxHeight: 200)
-                    .background(Color.black)
+                    .background(inputBackground)
                     .cornerRadius(6)
-                    .overlay(RoundedRectangle(cornerRadius: 6).stroke(Color.white.opacity(0.12), lineWidth: 1))
+                    .overlay(RoundedRectangle(cornerRadius: 6).stroke(cardBorder, lineWidth: 1))
                 }
                 .padding(10)
-                .background(Color.white.opacity(0.02))
+                .background(Color.primary.opacity(0.02))
             }
         }
-        .background(Color.white.opacity(0.03))
+        .background(cardSurface)
         .cornerRadius(8)
-        .overlay(RoundedRectangle(cornerRadius: 8).stroke(Color.white.opacity(0.08), lineWidth: 1))
+        .overlay(RoundedRectangle(cornerRadius: 8).stroke(cardBorder, lineWidth: 1))
     }
 
     // MARK: - Section 3: MCP Servers
@@ -713,31 +728,31 @@ public struct AgentEcosystemConfigView: View {
             VStack(alignment: .leading, spacing: 3) {
                 Text("Model Context Protocol (MCP) Servers")
                     .font(.system(size: 13, weight: .semibold))
-                    .foregroundColor(.white)
+                    .foregroundColor(.primary)
                 Text("Universal tools and resource bridges declared in `.cursor/mcp.json` or `.mcp.json`.")
                     .font(.system(size: 11))
-                    .foregroundColor(Color.white.opacity(0.6))
+                    .foregroundColor(.secondary)
             }
 
             if rulesEngine.discoveredMCPServers.isEmpty {
                 VStack(spacing: 12) {
                     Image(systemName: "network")
                         .font(.system(size: 32))
-                        .foregroundColor(Color.white.opacity(0.3))
+                        .foregroundColor(Color.primary.opacity(0.3))
                     Text("No external MCP servers detected")
                         .font(.system(size: 13, weight: .medium))
-                        .foregroundColor(Color.white.opacity(0.7))
+                        .foregroundColor(.primary)
                     Text("Declare tools in `.cursor/mcp.json` or `.mcp.json` to auto-bind external MCP tool servers into MicroCode.")
                         .font(.system(size: 11))
-                        .foregroundColor(Color.white.opacity(0.5))
+                        .foregroundColor(.secondary)
                         .multilineTextAlignment(.center)
                         .frame(maxWidth: 440)
                 }
                 .frame(maxWidth: .infinity)
                 .padding(.vertical, 36)
-                .background(Color.white.opacity(0.02))
+                .background(cardSurface)
                 .cornerRadius(8)
-                .overlay(RoundedRectangle(cornerRadius: 8).stroke(Color.white.opacity(0.06), lineWidth: 1))
+                .overlay(RoundedRectangle(cornerRadius: 8).stroke(cardBorder, lineWidth: 1))
             } else {
                 VStack(spacing: 10) {
                     ForEach(rulesEngine.discoveredMCPServers) { server in
@@ -745,36 +760,36 @@ public struct AgentEcosystemConfigView: View {
                             HStack {
                                 Text(server.name)
                                     .font(.system(size: 12, weight: .semibold))
-                                    .foregroundColor(.white)
+                                    .foregroundColor(.primary)
                                 Spacer()
                                 Text(server.sourcePlatform)
                                     .font(.system(size: 10, design: .monospaced))
-                                    .foregroundColor(Color.white.opacity(0.6))
+                                    .foregroundColor(.secondary)
                             }
 
                             HStack(spacing: 8) {
                                 Text("Command:")
                                     .font(.system(size: 10, weight: .medium))
-                                    .foregroundColor(Color.white.opacity(0.7))
+                                    .foregroundColor(.secondary)
                                 Text("\(server.command) \(server.args.joined(separator: " "))")
                                     .font(.system(size: 10, design: .monospaced))
-                                    .foregroundColor(Color.white.opacity(0.85))
+                                    .foregroundColor(.primary)
                                     .padding(.horizontal, 6)
                                     .padding(.vertical, 2)
-                                    .background(Color.white.opacity(0.06))
+                                    .background(Color.primary.opacity(0.06))
                                     .cornerRadius(4)
                             }
 
                             if !server.env.isEmpty {
                                 Text("Environment: \(server.env.keys.joined(separator: ", "))")
                                     .font(.system(size: 10))
-                                    .foregroundColor(Color.white.opacity(0.6))
+                                    .foregroundColor(.secondary)
                             }
                         }
                         .padding(12)
-                        .background(Color.white.opacity(0.03))
+                        .background(cardSurface)
                         .cornerRadius(8)
-                        .overlay(RoundedRectangle(cornerRadius: 8).stroke(Color.white.opacity(0.08), lineWidth: 1))
+                        .overlay(RoundedRectangle(cornerRadius: 8).stroke(cardBorder, lineWidth: 1))
                     }
                 }
             }
@@ -788,10 +803,10 @@ public struct AgentEcosystemConfigView: View {
             VStack(alignment: .leading, spacing: 3) {
                 Text("OpenCode Context Protocol (@ Mentions)")
                     .font(.system(size: 13, weight: .semibold))
-                    .foregroundColor(.white)
+                    .foregroundColor(.primary)
                 Text("Type `@` in prompt to dynamically embed real-time workspace context directly into the conversation.")
                     .font(.system(size: 11))
-                    .foregroundColor(Color.white.opacity(0.6))
+                    .foregroundColor(.secondary)
             }
 
             VStack(alignment: .leading, spacing: 10) {
@@ -802,39 +817,39 @@ public struct AgentEcosystemConfigView: View {
                 mentionTableRow(tag: "@rules", desc: "Embeds active Cursor, Zed, and MicroCode project guidelines.")
             }
             .padding(12)
-            .background(Color.white.opacity(0.03))
+            .background(cardSurface)
             .cornerRadius(8)
-            .overlay(RoundedRectangle(cornerRadius: 8).stroke(Color.white.opacity(0.08), lineWidth: 1))
+            .overlay(RoundedRectangle(cornerRadius: 8).stroke(cardBorder, lineWidth: 1))
 
             // Metrics
             HStack(spacing: 12) {
                 VStack(alignment: .leading, spacing: 4) {
                     Text("Total Mentions Expanded")
                         .font(.system(size: 10, weight: .medium))
-                        .foregroundColor(Color.white.opacity(0.6))
+                        .foregroundColor(.secondary)
                     Text("\(bridge.totalMentionsExpanded)")
                         .font(.system(size: 20, weight: .bold, design: .rounded))
-                        .foregroundColor(.white)
+                        .foregroundColor(.primary)
                 }
                 .padding(12)
                 .frame(maxWidth: .infinity, alignment: .leading)
-                .background(Color.white.opacity(0.03))
+                .background(cardSurface)
                 .cornerRadius(8)
-                .overlay(RoundedRectangle(cornerRadius: 8).stroke(Color.white.opacity(0.08), lineWidth: 1))
+                .overlay(RoundedRectangle(cornerRadius: 8).stroke(cardBorder, lineWidth: 1))
 
                 VStack(alignment: .leading, spacing: 4) {
                     Text("Multi-File Diffs Applied")
                         .font(.system(size: 10, weight: .medium))
-                        .foregroundColor(Color.white.opacity(0.6))
+                        .foregroundColor(.secondary)
                     Text("\(bridge.totalDiffsApplied)")
                         .font(.system(size: 20, weight: .bold, design: .rounded))
-                        .foregroundColor(.white)
+                        .foregroundColor(.primary)
                 }
                 .padding(12)
                 .frame(maxWidth: .infinity, alignment: .leading)
-                .background(Color.white.opacity(0.03))
+                .background(cardSurface)
                 .cornerRadius(8)
-                .overlay(RoundedRectangle(cornerRadius: 8).stroke(Color.white.opacity(0.08), lineWidth: 1))
+                .overlay(RoundedRectangle(cornerRadius: 8).stroke(cardBorder, lineWidth: 1))
             }
         }
     }
@@ -845,14 +860,14 @@ public struct AgentEcosystemConfigView: View {
                 .font(.system(size: 11, weight: .bold, design: .monospaced))
                 .padding(.horizontal, 6)
                 .padding(.vertical, 2)
-                .background(Color.white.opacity(0.08))
-                .foregroundColor(.white)
+                .background(Color.primary.opacity(0.08))
+                .foregroundColor(.primary)
                 .cornerRadius(4)
                 .frame(width: 120, alignment: .leading)
 
             Text(desc)
                 .font(.system(size: 11))
-                .foregroundColor(Color.white.opacity(0.6))
+                .foregroundColor(.secondary)
         }
     }
 
@@ -865,10 +880,10 @@ public struct AgentEcosystemConfigView: View {
                 VStack(alignment: .leading, spacing: 3) {
                     Text("Discovered Local Engines & Models Hub")
                         .font(.system(size: 14, weight: .semibold))
-                        .foregroundColor(.white)
+                        .foregroundColor(.primary)
                     Text("Dynamically discovered from local tools on your machine: Google Antigravity (AGY CLI), OpenAI Codex (~/.codex), Anthropic Claude Code (~/.claude), and Zed / ZCode (~/.config/zed).")
                         .font(.system(size: 11))
-                        .foregroundColor(Color.white.opacity(0.6))
+                        .foregroundColor(.secondary)
                 }
                 Spacer()
                 Button {
@@ -897,11 +912,11 @@ public struct AgentEcosystemConfigView: View {
                     HStack(spacing: 8) {
                         ZStack {
                             RoundedRectangle(cornerRadius: 5, style: .continuous)
-                                .fill(Color.white.opacity(0.04))
+                                .fill(cardSurface)
                                 .frame(width: 24, height: 24)
                                 .overlay(
                                     RoundedRectangle(cornerRadius: 5, style: .continuous)
-                                        .stroke(Color.white.opacity(0.1), lineWidth: 1)
+                                        .stroke(cardBorder, lineWidth: 1)
                                 )
                             AIProviderBrandIcon(provider: engine.id, size: 16)
                         }
@@ -910,14 +925,14 @@ public struct AgentEcosystemConfigView: View {
                             HStack(spacing: 6) {
                                 Text(engine.name)
                                     .font(.system(size: 12, weight: .semibold))
-                                    .foregroundColor(.white)
+                                    .foregroundColor(.primary)
                                 if engine.isInstalled {
                                     Text("INSTALLED")
                                         .font(.system(size: 8, weight: .bold, design: .rounded))
                                         .padding(.horizontal, 5)
                                         .padding(.vertical, 1.5)
-                                        .background(Color.white.opacity(0.12))
-                                        .foregroundColor(.white)
+                                        .background(Color.primary.opacity(0.12))
+                                        .foregroundColor(.primary)
                                         .clipShape(Capsule())
                                 }
                                 if let active = engine.activeModel {
@@ -925,18 +940,18 @@ public struct AgentEcosystemConfigView: View {
                                         .font(.system(size: 8, weight: .medium, design: .monospaced))
                                         .padding(.horizontal, 5)
                                         .padding(.vertical, 1.5)
-                                        .background(Color.white.opacity(0.15))
-                                        .foregroundColor(.white)
+                                        .background(Color.primary.opacity(0.12))
+                                        .foregroundColor(.primary)
                                         .clipShape(Capsule())
                                         .overlay(
-                                            Capsule().stroke(Color.white.opacity(0.3), lineWidth: 0.8)
+                                            Capsule().stroke(Color.primary.opacity(0.25), lineWidth: 0.8)
                                         )
                                 }
                             }
                             if let bin = engine.binaryPath {
                                 Text(bin)
                                     .font(.system(size: 10, design: .monospaced))
-                                    .foregroundColor(Color.white.opacity(0.5))
+                                    .foregroundColor(.secondary)
                             }
                         }
 
@@ -944,7 +959,7 @@ public struct AgentEcosystemConfigView: View {
 
                         Text("\(engine.models.count) models")
                             .font(.system(size: 10, weight: .medium))
-                            .foregroundColor(Color.white.opacity(0.6))
+                            .foregroundColor(.secondary)
                     }
 
                     Divider().opacity(0.3)
@@ -957,41 +972,41 @@ public struct AgentEcosystemConfigView: View {
                                     HStack(spacing: 4) {
                                         Text(m.name)
                                             .font(.system(size: 11, weight: .semibold))
-                                            .foregroundColor(.white)
+                                            .foregroundColor(.primary)
                                             .lineLimit(1)
                                         if !m.badge.isEmpty {
                                             Text(m.badge)
                                                 .font(.system(size: 8, weight: .bold))
                                                 .padding(.horizontal, 4)
                                                 .padding(.vertical, 1)
-                                                .background(Color.white.opacity(0.08))
-                                                .foregroundColor(Color.white.opacity(0.8))
+                                                .background(Color.primary.opacity(0.08))
+                                                .foregroundColor(.primary)
                                                 .cornerRadius(3)
                                         }
                                     }
                                     Text(m.id)
                                         .font(.system(size: 9.5, design: .monospaced))
-                                        .foregroundColor(Color.white.opacity(0.5))
+                                        .foregroundColor(.secondary)
                                 }
                                 Spacer()
                             }
                             .padding(.horizontal, 8)
                             .padding(.vertical, 6)
-                            .background(Color.white.opacity(0.02))
+                            .background(Color.primary.opacity(0.02))
                             .cornerRadius(6)
                             .overlay(
                                 RoundedRectangle(cornerRadius: 6)
-                                    .stroke(Color.white.opacity(0.06), lineWidth: 1)
+                                    .stroke(cardBorder, lineWidth: 1)
                             )
                         }
                     }
                 }
                 .padding(14)
-                .background(Color.white.opacity(0.03))
+                .background(cardSurface)
                 .cornerRadius(8)
                 .overlay(
                     RoundedRectangle(cornerRadius: 8)
-                        .stroke(Color.white.opacity(0.08), lineWidth: 1)
+                        .stroke(cardBorder, lineWidth: 1)
                 )
             }
 
@@ -999,7 +1014,7 @@ public struct AgentEcosystemConfigView: View {
             VStack(alignment: .leading, spacing: 10) {
                 Text("Specialized & Cloud Runtimes")
                     .font(.system(size: 12, weight: .semibold))
-                    .foregroundColor(Color.white.opacity(0.7))
+                    .foregroundColor(.primary)
 
                 let specialized = [
                     ("glm-4-plus", "Zhipu GLM-4 Plus", "Dual-language reasoning and 128k context"),
@@ -1011,23 +1026,23 @@ public struct AgentEcosystemConfigView: View {
                 ForEach(specialized, id: \.0) { mid, name, desc in
                     HStack {
                         VStack(alignment: .leading, spacing: 1) {
-                            Text(name).font(.system(size: 11, weight: .semibold)).foregroundColor(.white)
-                            Text(desc).font(.system(size: 10)).foregroundColor(Color.white.opacity(0.5))
+                            Text(name).font(.system(size: 11, weight: .semibold)).foregroundColor(.primary)
+                            Text(desc).font(.system(size: 10)).foregroundColor(.secondary)
                         }
                         Spacer()
-                        Text(mid).font(.system(size: 10, design: .monospaced)).foregroundColor(Color.white.opacity(0.5))
+                        Text(mid).font(.system(size: 10, design: .monospaced)).foregroundColor(.secondary)
                     }
                     .padding(8)
-                    .background(Color.white.opacity(0.02))
+                    .background(Color.primary.opacity(0.02))
                     .cornerRadius(6)
                 }
             }
             .padding(14)
-            .background(Color.white.opacity(0.02))
+            .background(cardSurface)
             .cornerRadius(8)
             .overlay(
                 RoundedRectangle(cornerRadius: 8)
-                    .stroke(Color.white.opacity(0.08), lineWidth: 1)
+                    .stroke(cardBorder, lineWidth: 1)
             )
         }
     }

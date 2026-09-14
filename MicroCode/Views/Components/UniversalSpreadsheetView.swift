@@ -4,7 +4,7 @@
 //
 //  Versatile Excel and CSV Spreadsheet Viewer
 //  Dual-mode: Interactive Native Data Table Grid + Apple QuickLook Document View
-//  Copyright © 2026 AIPRENEUR. All rights reserved.
+//  Copyright © 2026 Dotmini Company Limited. All rights reserved.
 //
 
 import SwiftUI

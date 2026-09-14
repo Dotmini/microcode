@@ -6,7 +6,7 @@
 //  iPhone/iPad Frame สวยเหมือนของจริง
 //  ไม่ต้องใช้ iOS Simulator
 //
-//  SPU AI CLUB - Dotmini Software
+//  Dotmini Company Limited
 //
 
 import SwiftUI
@@ -526,25 +526,29 @@ enum DeviceModel: String, CaseIterable {
 // MARK: - Grid Background
 
 struct GridBackground: View {
+    @Environment(\.colorScheme) private var colorScheme
+    
     var body: some View {
         Canvas { context, size in
             let gridSize: CGFloat = 20
+            let isDark = colorScheme == .dark
+            let strokeColor = isDark ? Color.white.opacity(0.025) : Color.black.opacity(0.035)
             
             for x in stride(from: 0, to: size.width, by: gridSize) {
                 var path = Path()
                 path.move(to: CGPoint(x: x, y: 0))
                 path.addLine(to: CGPoint(x: x, y: size.height))
-                context.stroke(path, with: .color(.white.opacity(0.025)), lineWidth: 0.5)
+                context.stroke(path, with: .color(strokeColor), lineWidth: 0.5)
             }
             
             for y in stride(from: 0, to: size.height, by: gridSize) {
                 var path = Path()
                 path.move(to: CGPoint(x: 0, y: y))
                 path.addLine(to: CGPoint(x: size.width, y: y))
-                context.stroke(path, with: .color(.white.opacity(0.025)), lineWidth: 0.5)
+                context.stroke(path, with: .color(strokeColor), lineWidth: 0.5)
             }
         }
-        .background(Color(white: 0.05))
+        .background(colorScheme == .dark ? Color(white: 0.05) : Color(white: 0.96))
     }
 }
 

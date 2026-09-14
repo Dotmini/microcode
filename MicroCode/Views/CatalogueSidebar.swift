@@ -3,9 +3,9 @@
 //  MicroCode
 //
 //  A sidebar component for code snippets and SAS procedures
-//  Copyright © 2025 SPU AI CLUB. All rights reserved.
+//  Copyright © 2025 Dotmini Company Limited. All rights reserved.
 //
-//  Tirawat Nantamas | Dotmini Software | SPU AI CLUB
+//  Tirawat Nantamas | Dotmini Company Limited
 //
 
 import SwiftUI

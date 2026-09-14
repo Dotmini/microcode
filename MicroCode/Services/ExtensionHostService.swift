@@ -68,6 +68,29 @@ final class ExtensionHostService: ObservableObject {
         statusMessage = message
     }
 
+    func executeCommand(_ command: String, args: [Any] = []) {
+        do {
+            try startIfNeeded()
+            let id = nextRequestID
+            nextRequestID &+= 1
+            let payload: [String: Any] = [
+                "jsonrpc": "2.0",
+                "id": id,
+                "method": "command/execute",
+                "params": [
+                    "command": command,
+                    "args": args
+                ]
+            ]
+            let data = try JSONSerialization.data(withJSONObject: payload)
+            input?.write(data)
+            input?.write(Data("\n".utf8))
+            statusMessage = "Dispatched command: \(command)"
+        } catch {
+            statusMessage = "Failed to run command: \(error.localizedDescription)"
+        }
+    }
+
     private func startIfNeeded() throws {
         guard process?.isRunning != true else { return }
         guard let node = locateNode(), let host = locateCompatHost() else {
@@ -131,8 +154,14 @@ final class ExtensionHostService: ObservableObject {
     }
 
     private func locateCompatHost() -> URL? {
+        let appSupportHost = FileManager.default.homeDirectoryForCurrentUser
+            .appendingPathComponent("Library/Application Support/MicroCode/vscode-compat-host/src/index.js")
+        let devRepoHost = URL(fileURLWithPath: "/Users/dotmini/Documents/SX/codetunner-native/vscode-compat-host/src/index.js")
         let candidates = [
+            Bundle.main.resourceURL?.appendingPathComponent("vscode-compat-host/src/index.js"),
             Bundle.main.resourceURL?.appendingPathComponent("vscode-compat/index.js"),
+            appSupportHost,
+            devRepoHost,
             URL(fileURLWithPath: FileManager.default.currentDirectoryPath)
                 .appendingPathComponent("vscode-compat-host/src/index.js")
         ].compactMap { $0 }

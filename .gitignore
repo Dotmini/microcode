@@ -66,10 +66,12 @@ yarn-error.log*
 Dist/
 build/
 
-# ----- Logs -----
+# ----- Logs & Diagnostics -----
 *.log
 *.txt
 !README.txt
+!SHA256SUMS.txt
+!runpod-worker/requirements.txt
 !Welcome.rtf
 logs/
 
@@ -124,5 +126,6 @@ presentation/
 Enterprise/
 microrent-ai-proxy/
 .microcode/
+microcode-experiment/
 
 bin/

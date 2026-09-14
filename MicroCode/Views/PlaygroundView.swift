@@ -3,9 +3,9 @@
 //  MicroCode
 //
 //  Swift Playgrounds-style code playground with syntax highlighting
-//  Copyright © 2025 SPU AI CLUB. All rights reserved.
+//  Copyright © 2025 Dotmini Company Limited. All rights reserved.
 //
-//  Tirawat Nantamas | Dotmini Software | SPU AI CLUB
+//  Tirawat Nantamas | Dotmini Company Limited
 //
 
 import SwiftUI
@@ -1336,9 +1336,10 @@ struct PlaygroundView: View {
     private func previewInnerContent(hasPreview: Bool) -> some View {
         let targetWidth = selectedPreviewDevice.screenWidth
         let targetHeight = selectedPreviewDevice.screenHeight
+        let isDark = appState.appTheme.isDark
 
         ZStack {
-            Color.black
+            (isDark ? Color.black : Color(white: 0.98))
                 .ignoresSafeArea()
 
             if swiftPreviewMode == .interactive && swiftPreviewDylibPath != nil {
@@ -1364,6 +1365,7 @@ struct PlaygroundView: View {
 
                     Text("SwiftUI Live Preview")
                         .font(.headline)
+                        .foregroundColor(isDark ? .white : .primary)
 
                     Text(swiftPreviewMode == .interactive ? "Sub-second Dynamic Loading" : "High-res Image Snapshot")
                         .font(.caption)
@@ -1375,7 +1377,7 @@ struct PlaygroundView: View {
                     .buttonStyle(.borderedProminent)
                 }
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
-                .background(Color.black)
+                .background(isDark ? Color.black : Color(white: 0.98))
             }
 
             // Zero-flicker loading overlay (Only full screen progress if no preview has ever been loaded)
@@ -1763,8 +1765,7 @@ struct PlaygroundView: View {
                 "/opt/homebrew/opt/openjdk@21/bin",
                 "/opt/homebrew/opt/openjdk/bin",
                 "/Applications/Xcode.app/Contents/Developer/usr/bin",
-                "/Applications/Xcode-beta.app/Contents/Developer/usr/bin",
-                "/Volumes/MAC/Xcode-beta 2.app/Contents/Developer/usr/bin"
+                "/Applications/Xcode-beta.app/Contents/Developer/usr/bin"
             ]
             let currentPath = env["PATH"] ?? "/usr/bin:/bin:/usr/sbin:/sbin"
             env["PATH"] = (extraPaths + [currentPath]).joined(separator: ":")
@@ -1988,8 +1989,7 @@ struct PlaygroundView: View {
                     "\(home)/.cargo/bin",
                     "\(home)/.swiftly/bin",
                     "/Applications/Xcode.app/Contents/Developer/usr/bin",
-                    "/Applications/Xcode-beta.app/Contents/Developer/usr/bin",
-                    "/Volumes/MAC/Xcode-beta 2.app/Contents/Developer/usr/bin"
+                    "/Applications/Xcode-beta.app/Contents/Developer/usr/bin"
                 ]
                 let currentPath = env["PATH"] ?? "/usr/bin:/bin:/usr/sbin:/sbin"
                 env["PATH"] = (extraPaths + [currentPath]).joined(separator: ":")
@@ -3632,12 +3632,12 @@ struct iPadFrameView<Content: View>: View {
             ZStack {
                 // Display background
                 RoundedRectangle(cornerRadius: screenCornerRadius)
-                    .fill(Color.black)
+                    .fill(isDark ? Color.black : Color(white: 0.95))
                 
                 // Screen content
                 content()
                     .frame(width: screenWidth, height: screenHeight)
-                    .background(Color.black)
+                    .background(isDark ? Color.black : Color(white: 0.95))
                 
                 // iPad Status Bar (Top)
                 VStack {
@@ -3907,14 +3907,14 @@ struct DynamicSwiftUIView: NSViewRepresentable {
     func makeNSView(context: Context) -> NSView {
         let container = NSView()
         container.wantsLayer = true
-        container.layer?.backgroundColor = NSColor.black.cgColor
+        container.layer?.backgroundColor = NSColor.clear.cgColor
         loadDylib(into: container)
         return container
     }
     
     func updateNSView(_ nsView: NSView, context: Context) {
         nsView.wantsLayer = true
-        nsView.layer?.backgroundColor = NSColor.black.cgColor
+        nsView.layer?.backgroundColor = NSColor.clear.cgColor
         loadDylib(into: nsView)
     }
     

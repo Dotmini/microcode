@@ -3,7 +3,7 @@
 //  MicroCode
 //
 //  Interactive PDF Reader with Page Navigation, Zoom, and Continuous Scroll
-//  Copyright © 2026 AIPRENEUR. All rights reserved.
+//  Copyright © 2026 Dotmini Company Limited. All rights reserved.
 //
 
 import SwiftUI

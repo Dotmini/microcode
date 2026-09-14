@@ -8,7 +8,7 @@
 //  - Unified Multi-File Diff Applicator (Zed & Cursor search/replace blocks)
 //  - Deep editor context streaming
 //
-//  Copyright © 2025 SPU AI CLUB — Dotmini Software
+//  Copyright © 2025 Dotmini Company Limited
 //
 
 import Foundation

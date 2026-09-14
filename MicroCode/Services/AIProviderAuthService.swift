@@ -6,7 +6,7 @@
 //  Supports: OpenAI, Anthropic (Claude), DeepSeek, Gemini, Grok, Codex
 //  Secure Keychain storage with connection validation
 //
-//  Copyright © 2025 SPU AI CLUB — Dotmini Software
+//  Copyright © 2025 Dotmini Company Limited
 //
 
 import Foundation

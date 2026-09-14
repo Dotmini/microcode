@@ -5,7 +5,7 @@
 //  Floating AI Design Chat Panel — Claude Design Style
 //  Type a prompt, AI generates the UI layout directly on canvas.
 //
-//  Copyright © 2025 SPU AI CLUB. All rights reserved.
+//  Copyright © 2025 Dotmini Company Limited. All rights reserved.
 //
 
 import SwiftUI

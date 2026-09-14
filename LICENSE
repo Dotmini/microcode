@@ -1,32 +1,33 @@
 ================================================================================
-                  MICROCODE PUBLIC LICENSE (MPL) v1.0
-         ใบอนุญาตสาธารณะไมโครโค้ด (MPL) ฉบับที่ 1.0
+          ELASTIC LICENSE v2 (ELv2) & BUSINESS SOURCE LICENSE
+               ใบอนุญาต Elastic License v2 และเงื่อนไข BSL
 
-                    Copyright (c) 2024-2026
-                Tirawat Nantamas (ถิรวัฒน์ นันตมาศ)
-                       Dotmini Software
-                     All rights reserved.
+                     Copyright (c) 2024-2026
+                 Tirawat Nantamas (ถิรวัฒน์ นันตมาศ)
+              Dotmini Company Limited (บริษัท ดอทมินิ จำกัด)
+                      All rights reserved.
 ================================================================================
 
 PREAMBLE (คำนำ)
 
-This license governs the use, modification, and distribution of the MicroCode
-software (the "Software"). The Software is made available as open-source for
-the purpose of transparency, education, and community development. However,
-commercial exploitation of the Software requires a separate commercial
-agreement as detailed in Section 3.
+This software and its source code are the exclusive proprietary intellectual
+property of Dotmini Company Limited. The Software is made available as
+source-available under the Elastic License v2 (ELv2) for personal learning,
+educational evaluation, and transparency. Commercial exploitation, selling,
+packaging into commercial products, rebranding, or white-labeling is strictly
+prohibited without an explicit written license from Dotmini Company Limited.
 
-ใบอนุญาตนี้กำกับดูแลการใช้งาน การดัดแปลง และการเผยแพร่ซอฟต์แวร์ MicroCode
-("ซอฟต์แวร์") ซอฟต์แวร์นี้เผยแพร่เป็นโอเพนซอร์สเพื่อวัตถุประสงค์ด้าน
-ความโปร่งใส การศึกษา และการพัฒนาชุมชน อย่างไรก็ตาม การนำซอฟต์แวร์ไปใช้
-ในเชิงพาณิชย์จำเป็นต้องมีสัญญาเชิงพาณิชย์แยกต่างหากตามที่ระบุในหมวดที่ 3
+ซอฟต์แวร์และซอร์สโค้ดทั้งหมดถือเป็นทรัพย์สินทางปัญญาของ บริษัท ดอทมินิ จำกัด แต่เพียงผู้เดียว
+เผยแพร่ภายใต้สัญญาอนุญาต Elastic License v2 (ELv2) เพื่อการเรียนรู้ส่วนบุคคลและวิจัย
+ห้ามนำไปพัฒนาต่อยอดเชิงพาณิชย์ ห้ามนำไปขายหรือทำเป็นผลิตภัณฑ์ และห้าม ReBrand
+ในทุกกรณีโดยเด็ดขาด เว้นแต่จะได้รับความยินยอมเป็นลายลักษณ์อักษรจาก บริษัท ดอทมินิ จำกัด
 
 ================================================================================
 
 SECTION 1 — DEFINITIONS (หมวดที่ 1 — นิยาม)
 
-1.1 "Licensor" (ผู้อนุญาต) means Tirawat Nantamas and/or Dotmini Software,
-    the original author and copyright holder of the Software.
+1.1 "Licensor" (ผู้อนุญาต) means Tirawat Nantamas and/or Dotmini Company Limited
+    (บริษัท ดอทมินิ จำกัด), the exclusive copyright holder and owner of the Software.
 
 1.2 "Licensee" (ผู้ได้รับอนุญาต) means any individual, organization, or
     entity that obtains a copy of the Software.

@@ -125,15 +125,25 @@ struct WebBrowserView: NSViewRepresentable {
         // Handle URL changes dynamically
         if let targetURL = url, targetURL != context.coordinator.lastLoadedURL {
             context.coordinator.lastLoadedURL = targetURL
-            webView.load(URLRequest(url: targetURL))
+            loadURL(targetURL, in: webView)
         }
     }
     
     private func loadContent(in webView: WKWebView) {
         if let url = url {
-            webView.load(URLRequest(url: url))
+            loadURL(url, in: webView)
         } else if let html = htmlContent {
             webView.loadHTMLString(html, baseURL: nil)
+        }
+    }
+    
+    private func loadURL(_ targetURL: URL, in webView: WKWebView) {
+        if targetURL.isFileURL {
+            // Allow read access to root so all parent/sibling workspace assets (CSS, JS, images, fonts) load cleanly
+            let readAccessDir = URL(fileURLWithPath: "/")
+            webView.loadFileURL(targetURL, allowingReadAccessTo: readAccessDir)
+        } else {
+            webView.load(URLRequest(url: targetURL))
         }
     }
     
@@ -173,6 +183,14 @@ struct WebBrowserView: NSViewRepresentable {
                 self.parent.isLoading = false
             }
             print("WebEngine Error: \(error.localizedDescription)")
+        }
+        
+        // Provisional Navigation Failed (e.g. server down or connection refused)
+        func webView(_ webView: WKWebView, didFailProvisionalNavigation navigation: WKNavigation!, withError error: Error) {
+            DispatchQueue.main.async {
+                self.parent.isLoading = false
+            }
+            print("WebEngine Provisional Navigation Error: \(error.localizedDescription)")
         }
     }
 }

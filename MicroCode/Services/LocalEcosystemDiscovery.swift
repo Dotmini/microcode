@@ -58,9 +58,6 @@ final class LocalEcosystemDiscovery: ObservableObject {
     
     private init() {
         loadCachedEngines()
-        Task {
-            await refresh()
-        }
     }
     
     func models(for engineId: String) -> [AIModelDefinition] {
@@ -73,8 +70,10 @@ final class LocalEcosystemDiscovery: ObservableObject {
     
     func refresh() async {
         guard !isScanning else { return }
-        isScanning = true
-        defer { isScanning = false }
+        await MainActor.run { isScanning = true }
+        defer {
+            Task { @MainActor in self.isScanning = false }
+        }
         
         var discovered: [EcosystemEngineInfo] = []
         
@@ -98,11 +97,11 @@ final class LocalEcosystemDiscovery: ObservableObject {
         let zedEngine = discoverZed()
         discovered.append(zedEngine)
         
-        self.engines = discovered
-        self.lastScanDate = Date()
-        
-        // Sync discovered models into AIModelCatalog
-        AIModelCatalog.shared.integrateEcosystemEngines(discovered)
+        await MainActor.run {
+            self.engines = discovered
+            self.lastScanDate = Date()
+            AIModelCatalog.shared.integrateEcosystemEngines(discovered)
+        }
     }
     
     // MARK: - 1. Antigravity (AGY) Discovery
@@ -525,6 +524,21 @@ final class LocalEcosystemDiscovery: ObservableObject {
         return output
     }
     
+    private func resolveBinaryFast(_ name: String) -> String? {
+        let home = FileManager.default.homeDirectoryForCurrentUser.path
+        let checkPaths = [
+            "\(home)/.local/bin/\(name)",
+            "\(home)/.opencode/bin/\(name)",
+            "/opt/homebrew/bin/\(name)",
+            "/usr/local/bin/\(name)",
+            "\(home)/.cargo/bin/\(name)",
+            "\(home)/.bun/bin/\(name)",
+            "\(home)/.npm-global/bin/\(name)",
+            "/usr/bin/\(name)"
+        ]
+        return checkPaths.first(where: { FileManager.default.isExecutableFile(atPath: $0) })
+    }
+    
     private func loadCachedEngines() {
         // Initial quick fallback so UI renders instantly
         self.engines = [
@@ -532,8 +546,8 @@ final class LocalEcosystemDiscovery: ObservableObject {
                 id: "agy",
                 name: "Google Antigravity (AGY)",
                 icon: "sparkles",
-                binaryPath: resolveBinary("agy"),
-                isInstalled: resolveBinary("agy") != nil,
+                binaryPath: resolveBinaryFast("agy"),
+                isInstalled: resolveBinaryFast("agy") != nil,
                 isAuthenticated: true,
                 activeModel: "gemini-3.8-flash-high",
                 models: [
@@ -558,8 +572,8 @@ final class LocalEcosystemDiscovery: ObservableObject {
                 id: "opencode",
                 name: "OpenCode",
                 icon: "laptopcomputer",
-                binaryPath: resolveBinary("opencode"),
-                isInstalled: resolveBinary("opencode") != nil,
+                binaryPath: resolveBinaryFast("opencode"),
+                isInstalled: resolveBinaryFast("opencode") != nil,
                 isAuthenticated: false,
                 activeModel: "opencode/nemotron-3.5-lightning-free",
                 models: [
@@ -574,8 +588,8 @@ final class LocalEcosystemDiscovery: ObservableObject {
                 id: "codex",
                 name: "OpenAI Codex",
                 icon: "terminal.fill",
-                binaryPath: resolveBinary("codex"),
-                isInstalled: resolveBinary("codex") != nil,
+                binaryPath: resolveBinaryFast("codex"),
+                isInstalled: resolveBinaryFast("codex") != nil,
                 isAuthenticated: false,
                 activeModel: "gpt-6-astra",
                 models: [
@@ -591,8 +605,8 @@ final class LocalEcosystemDiscovery: ObservableObject {
                 id: "claude_code",
                 name: "Anthropic Claude Code",
                 icon: "command.square.fill",
-                binaryPath: resolveBinary("claude"),
-                isInstalled: resolveBinary("claude") != nil,
+                binaryPath: resolveBinaryFast("claude"),
+                isInstalled: resolveBinaryFast("claude") != nil,
                 isAuthenticated: true,
                 activeModel: "haiku",
                 models: [
@@ -607,8 +621,8 @@ final class LocalEcosystemDiscovery: ObservableObject {
                 id: "zed",
                 name: "Zed / ZCode Assistant",
                 icon: "chevron.left.forwardslash.chevron.right",
-                binaryPath: resolveBinary("zed"),
-                isInstalled: true,
+                binaryPath: resolveBinaryFast("zed"),
+                isInstalled: resolveBinaryFast("zed") != nil,
                 isAuthenticated: true,
                 activeModel: "deepseek-v4-flash",
                 models: [

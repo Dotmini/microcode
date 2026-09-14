@@ -5,7 +5,7 @@
 //  Enhanced with: Multi-notebook support, editable names, data file browser,
 //  uniform cell colors, and auto-height code blocks
 //
-//  Created by SPU AI CLUB
+//  Created by Tirawat Nantamas
 //  Copyright © 2025 Dotmini Software. All rights reserved.
 //
 

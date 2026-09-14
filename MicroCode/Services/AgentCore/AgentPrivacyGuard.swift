@@ -6,7 +6,7 @@
 //  Strictly enforces that no API keys, auth tokens, passwords, private keys,
 //  or sensitive credentials are persisted in `.microcode/` files or workspace rules.
 //
-//  Copyright © 2025 SPU AI CLUB — Dotmini Software
+//  Copyright © 2025 Dotmini Company Limited
 //
 
 import Foundation

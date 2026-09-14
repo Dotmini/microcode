@@ -3,7 +3,7 @@
 //  MicroCode
 //
 //  AI Model Training - Apple Minimal Design
-//  Created by SPU AI CLUB
+//  Created by Tirawat Nantamas
 //  Copyright © 2025 Dotmini Software. All rights reserved.
 //
 

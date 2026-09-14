@@ -278,16 +278,15 @@ Now that you're up and running, explore these features:
 ## 🆘 Getting Help
 
 - **Documentation**: See [README.md](README.md) for full documentation
+- **Build Guide**: See [BUILDING.md](BUILDING.md) for detailed build options
 - **Issues**: Report bugs on GitHub
-- **Email**: contact@aipreneur.club
-- **Community**: Join our Discord (coming soon)
 
 ## 🎉 You're All Set!
 
-Congratulations! You're ready to use CodeTunner. 
+Congratulations! You're ready to use MicroCode. 
 
 Happy coding! 🚀
 
 ---
 
-**Made with ❤️ by SPU AI CLUB**
+**Made with ❤️ by Dotmini Company Limited**

@@ -3,7 +3,7 @@
 //! Handles Messages API and Anthropic's specific SSE format
 //! Supports: Claude Sonnet 4, Claude 3.5 Sonnet/Haiku/Opus
 //!
-//! Copyright © 2025 SPU AI CLUB — Dotmini Software
+//! Copyright © 2024-2026 Dotmini Company Limited
 
 use super::{ChatMessage, LlmError, LlmProvider, McpContext};
 use async_trait::async_trait;

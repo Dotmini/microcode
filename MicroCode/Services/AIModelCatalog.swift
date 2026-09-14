@@ -24,6 +24,10 @@ struct AIModelDefinition: Identifiable, Codable, Hashable {
         self.inputPricePerMillion = inputPricePerMillion
         self.outputPricePerMillion = outputPricePerMillion
     }
+
+    var fullDisplayName: String {
+        AIModelCatalog.formatFullDisplayName(provider: provider, modelId: id, modelName: name)
+    }
 }
 
 struct AIProviderDefinition: Identifiable, Codable, Hashable {
@@ -53,9 +57,6 @@ final class AIModelCatalog: ObservableObject {
     private init() {
         providers = Self.fallbackProviders
         loadCachedCatalog()
-        Task {
-            await refreshIfNeeded(force: true)
-        }
     }
 
     func provider(_ id: String) -> AIProviderDefinition? {
@@ -458,7 +459,39 @@ final class AIModelCatalog: ObservableObject {
         return result
     }
 
-    public static func formatModelName(_ id: String) -> String {
+    nonisolated public static func friendlyProviderName(_ provider: String) -> String {
+        switch provider.lowercased() {
+        case "agy", "antigravity": return "Antigravity"
+        case "gemini", "google": return "Google Gemini"
+        case "openai": return "OpenAI"
+        case "claude_code", "claude": return "Claude Code"
+        case "anthropic": return "Anthropic"
+        case "opencode": return "OpenCode"
+        case "codex": return "Codex"
+        case "zed": return "Zed"
+        case "aider": return "Aider"
+        case "omni": return "Dotmini Cloud"
+        case "deepseek": return "DeepSeek"
+        case "qwen": return "Qwen"
+        case "grok": return "xAI Grok"
+        case "glm": return "GLM"
+        case "copilot": return "GitHub Copilot"
+        case "local": return "Local LLM"
+        default: return provider.isEmpty ? "AI" : provider.capitalized
+        }
+    }
+
+    nonisolated public static func formatFullDisplayName(provider: String?, modelId: String, modelName: String? = nil) -> String {
+        let provId: String = {
+            if let p = provider, !p.isEmpty { return p }
+            return inferProvider(modelId)
+        }()
+        let prov = friendlyProviderName(provId)
+        let model = modelName ?? formatModelName(modelId)
+        return "\(prov) : \(model)"
+    }
+
+    nonisolated public static func formatModelName(_ id: String) -> String {
         let clean = id.replacingOccurrences(of: "models/", with: "")
         if clean == "gemini-2.5-pro" { return "Gemini 2.5 Pro" }
         if clean == "gemini-2.5-flash" { return "Gemini 2.5 Flash" }
@@ -488,11 +521,17 @@ final class AIModelCatalog: ObservableObject {
         if clean == "codegeex-4" { return "CodeGeeX-4 (Code Specialist)" }
         if clean == "glm-4v-plus" { return "GLM-4V Plus (Multimodal)" }
 
+        if clean == "auto" { return "Copilot Auto" }
         if clean == "gpt-6-astra" { return "GPT-6-Astra" }
         if clean == "gpt-5.6-sol" { return "GPT-5.6-Sol" }
         if clean == "gpt-5.6-terra" { return "GPT-5.6-Terra" }
         if clean == "gpt-5.6-luna" { return "GPT-5.6-Luna" }
         if clean == "gpt-5.5" { return "GPT-5.5" }
+        if clean == "gpt-5.4" { return "GPT-5.4" }
+        if clean == "gpt-5.3-codex" { return "GPT-5.3 Codex" }
+        if clean == "claude-sonnet-5" { return "Claude Sonnet 5" }
+        if clean == "claude-opus-5" { return "Claude Opus 5" }
+        if clean == "claude-opus-4-8" { return "Claude Opus 4.8" }
         if clean == "gemini-3.8-flash-high" { return "Gemini 3.8 Flash (High)" }
         if clean == "gemini-3.8-flash-medium" { return "Gemini 3.8 Flash (Medium)" }
         if clean == "gemini-3.8-flash-low" { return "Gemini 3.8 Flash (Low)" }
@@ -518,7 +557,7 @@ final class AIModelCatalog: ObservableObject {
             .replacingOccurrences(of: "Tts", with: "TTS")
     }
 
-    private static func inferProvider(_ model: String, ownedBy: String? = nil) -> String {
+    nonisolated private static func inferProvider(_ model: String, ownedBy: String? = nil) -> String {
         if let owner = ownedBy?.lowercased() {
             if owner.contains("deepseek") { return "deepseek" }
             if owner.contains("gemini") { return "gemini" }
@@ -627,6 +666,25 @@ final class AIModelCatalog: ObservableObject {
             AIModelDefinition(id: "chatgpt-4o-latest", name: "ChatGPT-4o Latest", provider: "openai", badge: "DYNAMIC WEB"),
             AIModelDefinition(id: "gpt-4o", name: "GPT-4o (Legacy Omni)", provider: "openai", badge: "LEGACY"),
             AIModelDefinition(id: "gpt-4o-mini", name: "GPT-4o mini (High Speed)", provider: "openai", badge: "FAST")
+        ]),
+        AIProviderDefinition(id: "copilot", name: "GitHub Copilot", icon: "github", endpoint: "api.githubcopilot.com", models: [
+            AIModelDefinition(id: "auto", name: "Copilot Auto", provider: "copilot", badge: "AUTO"),
+            AIModelDefinition(id: "gpt-5.6-sol", name: "GPT-5.6 Sol (Autonomous)", provider: "copilot", badge: "HIGH PERF"),
+            AIModelDefinition(id: "gpt-5.6-terra", name: "GPT-5.6 Terra", provider: "copilot", badge: "BALANCED"),
+            AIModelDefinition(id: "gpt-5.6-luna", name: "GPT-5.6 Luna", provider: "copilot", badge: "FAST"),
+            AIModelDefinition(id: "claude-sonnet-5", name: "Claude Sonnet 5", provider: "copilot", badge: "FRONTIER"),
+            AIModelDefinition(id: "claude-sonnet-4-6", name: "Claude Sonnet 4.6 (Thinking)", provider: "copilot", badge: "FLAGSHIP"),
+            AIModelDefinition(id: "gpt-6-astra", name: "GPT-6 Astra", provider: "copilot", badge: "FLAGSHIP"),
+            AIModelDefinition(id: "gpt-5.5", name: "GPT-5.5 (Frontier)", provider: "copilot", badge: "FRONTIER"),
+            AIModelDefinition(id: "gpt-5.4", name: "GPT-5.4", provider: "copilot", badge: "STABLE"),
+            AIModelDefinition(id: "gpt-5.3-codex", name: "GPT-5.3 Codex", provider: "copilot", badge: "CODEX"),
+            AIModelDefinition(id: "claude-opus-5", name: "Claude Opus 5", provider: "copilot", badge: "PRO+"),
+            AIModelDefinition(id: "claude-opus-4-8", name: "Claude Opus 4.8", provider: "copilot", badge: "FAST OPUS"),
+            AIModelDefinition(id: "claude-3-7-sonnet", name: "Claude 3.7 Sonnet (Hybrid)", provider: "copilot", badge: "HYBRID"),
+            AIModelDefinition(id: "claude-3-5-sonnet", name: "Claude 3.5 Sonnet", provider: "copilot", badge: "WORKHORSE"),
+            AIModelDefinition(id: "o3-mini", name: "o3-mini (Reasoning)", provider: "copilot", badge: "REASONING"),
+            AIModelDefinition(id: "o1", name: "o1 (Reasoning Pro)", provider: "copilot", badge: "PRO"),
+            AIModelDefinition(id: "gpt-4o", name: "GPT-4o (Legacy)", provider: "copilot", badge: "LEGACY")
         ]),
         AIProviderDefinition(id: "gemini", name: "Google Gemini", icon: "sparkles", endpoint: "generativelanguage.googleapis.com", models: [
             AIModelDefinition(id: "gemini-3.8-flash-high", name: "Gemini 3.8 Flash (High)", provider: "gemini", badge: "HIGH REASONING"),

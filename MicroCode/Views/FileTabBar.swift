@@ -2,7 +2,7 @@
 //  FileTabBar.swift
 //  MicroCode
 //
-//  Created by SPU AI CLUB
+//  Created by Tirawat Nantamas
 //  Copyright © 2025 Dotmini Software. All rights reserved.
 //
 
@@ -33,13 +33,11 @@ struct FileTabBar: View {
     }
     
     private func selectFile(_ file: CodeFile) {
-        appState.currentFile = file
+        appState.selectFile(file)
     }
     
     private func closeFile(_ file: CodeFile) {
-        if let index = appState.openFiles.firstIndex(where: { $0.id == file.id }) {
-            appState.closeFile(at: index)
-        }
+        appState.closeFile(file)
     }
 }
 
@@ -64,7 +62,7 @@ struct FileTab: View {
                 .lineLimit(1)
             
             // Unsaved indicator
-           if file.isUnsaved {
+            if file.isUnsaved {
                 Circle()
                     .fill(Color.orange)
                     .frame(width: 6, height: 6)
@@ -76,16 +74,20 @@ struct FileTab: View {
                     Image(systemName: "xmark")
                         .font(.system(size: 9, weight: .medium))
                         .foregroundColor(.secondary)
+                        .padding(3)
+                        .contentShape(Rectangle())
                 }
                 .buttonStyle(.plain)
                 .frame(width: 16, height: 16)
+                .help("Close Tab (⌘W)")
             }
         }
-        .padding(.horizontal, 12)
-        .padding(.vertical, 8)
+        .padding(.horizontal, 10)
+        .padding(.vertical, 7)
         .background(isActive ? Color(nsColor: .textBackgroundColor) : (isHovering ? Color(nsColor: .controlBackgroundColor).opacity(0.5) : Color.clear))
-        .onHover { isHovering = $0 }
+        .contentShape(Rectangle())
         .onTapGesture(perform: onSelect)
+        .onHover { isHovering = $0 }
     }
     
     private func fileIcon(for language: String) -> String {

@@ -1,82 +1,116 @@
 "use strict";
-var __createBinding = (this && this.__createBinding) || (Object.create ? (function(o, m, k, k2) {
-    if (k2 === undefined) k2 = k;
-    var desc = Object.getOwnPropertyDescriptor(m, k);
-    if (!desc || ("get" in desc ? !m.__esModule : desc.writable || desc.configurable)) {
-      desc = { enumerable: true, get: function() { return m[k]; } };
-    }
-    Object.defineProperty(o, k2, desc);
-}) : (function(o, m, k, k2) {
-    if (k2 === undefined) k2 = k;
-    o[k2] = m[k];
-}));
-var __setModuleDefault = (this && this.__setModuleDefault) || (Object.create ? (function(o, v) {
-    Object.defineProperty(o, "default", { enumerable: true, value: v });
-}) : function(o, v) {
-    o["default"] = v;
-});
-var __importStar = (this && this.__importStar) || (function () {
-    var ownKeys = function(o) {
-        ownKeys = Object.getOwnPropertyNames || function (o) {
-            var ar = [];
-            for (var k in o) if (Object.prototype.hasOwnProperty.call(o, k)) ar[ar.length] = k;
-            return ar;
-        };
-        return ownKeys(o);
-    };
-    return function (mod) {
-        if (mod && mod.__esModule) return mod;
-        var result = {};
-        if (mod != null) for (var k = ownKeys(mod), i = 0; i < k.length; i++) if (k[i] !== "default") __createBinding(result, mod, k[i]);
-        __setModuleDefault(result, mod);
-        return result;
-    };
-})();
 Object.defineProperty(exports, "__esModule", { value: true });
-const readline = __importStar(require("readline"));
+const readline = require("readline");
 const api_1 = require("./api");
+const Module = require("module");
+
+// Hook Node.js require('vscode')
+const originalRequire = Module.prototype.require;
+Module.prototype.require = function(request) {
+    if (request === 'vscode') {
+        return api_1.microcodeShim;
+    }
+    return originalRequire.apply(this, arguments);
+};
+
+// Also polyfill global vscode
+global.vscode = api_1.microcodeShim;
+
 const rl = readline.createInterface({
     input: process.stdin,
     output: process.stdout,
     terminal: false
 });
-// Polyfill global vscode
-global.vscode = api_1.microcodeShim;
+
 console.error("MicroCode Compat Host Started");
+
 rl.on('line', (line) => {
-    if (!line.trim())
-        return;
+    if (!line.trim()) return;
     try {
         const msg = JSON.parse(line);
         handleMessage(msg);
-    }
-    catch (e) {
+    } catch (e) {
         console.error("Failed to parse message:", e);
     }
 });
-function handleMessage(msg) {
+
+async function handleMessage(msg) {
     if (msg.method === 'ext/load') {
-        const { path } = msg.params;
+        const { id, path, root } = msg.params;
         try {
-            console.error(`Loading extension at: ${path}`);
-            // Dynamic require to activate extension
-            // In a real implementation this would read package.json and call "activate"
-            const extension = require(path);
-            if (extension.activate) {
-                // Mock context
-                const context = { subscriptions: [] };
-                extension.activate(context);
-                sendResponse(msg.id, { status: 'activated' });
+            console.error(`Loading extension [${id}] at: ${path}`);
+            let extension;
+            try {
+                extension = require(path);
+            } catch (loadErr) {
+                if (path && path.endsWith('.json')) {
+                    sendResponse(msg.id, { status: 'activated', type: 'theme', file: path });
+                    return;
+                }
+                try {
+                    extension = await import(path);
+                } catch (importErr) {
+                    throw loadErr;
+                }
             }
-            else {
-                sendError(msg.id, -32000, "No activate function found");
+
+            if (extension && typeof extension.activate === 'function') {
+                const fs = require('fs');
+                const nodePath = require('path');
+                let pkgJson = {};
+                try {
+                    const p = nodePath.join(root || '', 'package.json');
+                    if (fs.existsSync(p)) pkgJson = JSON.parse(fs.readFileSync(p, 'utf8'));
+                } catch (e) {}
+
+                const context = {
+                    subscriptions: [],
+                    workspaceState: { get: () => undefined, update: () => Promise.resolve() },
+                    globalState: { get: () => undefined, update: () => Promise.resolve(), setKeysForSync: () => {} },
+                    extensionUri: api_1.microcodeShim.Uri.file(root || ''),
+                    extensionPath: root || '',
+                    extensionMode: 1,
+                    extension: {
+                        id,
+                        extensionUri: api_1.microcodeShim.Uri.file(root || ''),
+                        extensionPath: root || '',
+                        isActive: true,
+                        packageJSON: pkgJson,
+                        exports: {}
+                    },
+                    asAbsolutePath: (relPath) => (root ? root + '/' + relPath : relPath)
+                };
+                try {
+                    const result = extension.activate(context);
+                    if (result && typeof result.then === 'function') {
+                        result.then(
+                            () => sendResponse(msg.id, { status: 'activated', async: true }),
+                            (err) => sendResponse(msg.id, { status: 'activated', warning: err && err.message })
+                        );
+                    } else {
+                        sendResponse(msg.id, { status: 'activated' });
+                    }
+                } catch (actErr) {
+                    console.error(`Activation notice for ${id}:`, actErr.message);
+                    sendResponse(msg.id, { status: 'activated', warning: actErr.message });
+                }
+            } else {
+                sendResponse(msg.id, { status: 'activated', declarative: true });
             }
-        }
-        catch (e) {
+        } catch (e) {
+            console.error(`Error loading ${id}:`, e.message);
             sendError(msg.id, -32000, `Failed to load: ${e.message}`);
         }
+    } else if (msg.method === 'command/execute') {
+        const { command, args } = msg.params || {};
+        api_1.microcodeShim.commands.executeCommand(command, ...(args || []))
+            .then(
+                (res) => sendResponse(msg.id, { status: 'success', command, result: res }),
+                (err) => sendError(msg.id, -32001, err ? err.message : 'Command execution failed')
+            );
     }
 }
+
 function sendResponse(id, result) {
     console.log(JSON.stringify({
         jsonrpc: "2.0",
@@ -84,6 +118,7 @@ function sendResponse(id, result) {
         result
     }));
 }
+
 function sendError(id, code, message) {
     console.log(JSON.stringify({
         jsonrpc: "2.0",
@@ -91,4 +126,3 @@ function sendError(id, code, message) {
         error: { code, message }
     }));
 }
-//# sourceMappingURL=index.js.map

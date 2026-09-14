@@ -10,7 +10,7 @@
 //  - Invalid entries are lazily recomputed
 //  - Dirty tracking enables minimal work
 //
-//  Copyright © 2025 SPU AI CLUB. All rights reserved.
+//  Copyright © 2025 Dotmini Company Limited. All rights reserved.
 //
 
 import Foundation

@@ -3,7 +3,7 @@
 //! JSON-RPC 2.0 client over stdio to communicate with MCP servers
 //! Supports: resources/read, tools/call, context injection
 //!
-//! Copyright © 2025 SPU AI CLUB — Dotmini Software
+//! Copyright © 2024-2026 Dotmini Company Limited
 
 pub mod mcp_client;
 pub mod gateway;

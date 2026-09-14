@@ -2,8 +2,8 @@
 //  BackendService.swift
 //  MicroCode
 //
-//  Created by SPU AI CLUB
-//  Copyright © 2024 AIPRENEUR. All rights reserved.
+//  Created by Tirawat Nantamas
+//  Copyright © 2024 Dotmini Company Limited. All rights reserved.
 //
 
 import Combine
@@ -1252,12 +1252,12 @@ struct PendingChange: Codable {
 struct ExecutionPlan: Codable {
     let id: String
     let description: String
-    let steps: [PlanStep]
+    let steps: [BackendPlanStep]
     let current_step: Int
     let status: String
 }
 
-struct PlanStep: Codable, Identifiable {
+struct BackendPlanStep: Codable, Identifiable {
     let id: String
     let description: String
     let tool: String

@@ -124,12 +124,23 @@ public enum SubscriptionProviderType: String, CaseIterable, Identifiable, Codabl
             ]
         case .copilot:
             return [
-                SubscriptionModelInfo(modelID: "claude-3-7-sonnet", name: "Claude 3.7 Sonnet", provider: .copilot, badge: "FLAGSHIP", description: "Anthropic Claude 3.7 via GitHub Copilot subscription", aiProviderID: "copilot"),
-                SubscriptionModelInfo(modelID: "gpt-5", name: "GPT-5", provider: .copilot, badge: "FRONTIER", description: "OpenAI GPT-5 via GitHub Copilot subscription", aiProviderID: "copilot"),
-                SubscriptionModelInfo(modelID: "o3-mini", name: "o3-mini", provider: .copilot, badge: "REASONING", description: "o3-mini reasoning via GitHub Copilot subscription", aiProviderID: "copilot"),
-                SubscriptionModelInfo(modelID: "o1", name: "o1", provider: .copilot, badge: "PRO", description: "o1 reasoning via GitHub Copilot subscription", aiProviderID: "copilot"),
-                SubscriptionModelInfo(modelID: "gpt-4.5", name: "GPT-4.5", provider: .copilot, badge: "CREATIVE", description: "OpenAI GPT-4.5 via GitHub Copilot subscription", aiProviderID: "copilot"),
-                SubscriptionModelInfo(modelID: "gpt-4o", name: "GPT-4o (Legacy)", provider: .copilot, badge: "LEGACY", description: "OpenAI GPT-4o via GitHub Copilot subscription", aiProviderID: "copilot")
+                SubscriptionModelInfo(modelID: "auto", name: "Copilot Auto", provider: .copilot, badge: "AUTO", description: "GitHub Copilot dynamic model routing", aiProviderID: "copilot"),
+                SubscriptionModelInfo(modelID: "gpt-5.6-sol", name: "GPT-5.6 Sol", provider: .copilot, badge: "HIGH PERF", description: "Ultra high-performance full-stack coding & reasoning", aiProviderID: "copilot"),
+                SubscriptionModelInfo(modelID: "gpt-5.6-terra", name: "GPT-5.6 Terra", provider: .copilot, badge: "BALANCED", description: "Balanced reasoning and code generation via Copilot", aiProviderID: "copilot"),
+                SubscriptionModelInfo(modelID: "gpt-5.6-luna", name: "GPT-5.6 Luna", provider: .copilot, badge: "FAST", description: "High speed low-latency assistant via Copilot", aiProviderID: "copilot"),
+                SubscriptionModelInfo(modelID: "claude-sonnet-5", name: "Claude Sonnet 5", provider: .copilot, badge: "FRONTIER", description: "Anthropic Claude Sonnet 5 via GitHub Copilot subscription", aiProviderID: "copilot"),
+                SubscriptionModelInfo(modelID: "claude-sonnet-4-6", name: "Claude Sonnet 4.6", provider: .copilot, badge: "FLAGSHIP", description: "Hybrid thinking & autonomous coding via Copilot", aiProviderID: "copilot"),
+                SubscriptionModelInfo(modelID: "gpt-6-astra", name: "GPT-6 Astra", provider: .copilot, badge: "FLAGSHIP", description: "OpenAI flagship next-gen reasoning via Copilot (Pro+)", aiProviderID: "copilot"),
+                SubscriptionModelInfo(modelID: "gpt-5.5", name: "GPT-5.5", provider: .copilot, badge: "FRONTIER", description: "Frontier reasoning & architecture via Copilot (Pro+)", aiProviderID: "copilot"),
+                SubscriptionModelInfo(modelID: "gpt-5.4", name: "GPT-5.4", provider: .copilot, badge: "STABLE", description: "Reliable deep logic and codebase synthesis via Copilot", aiProviderID: "copilot"),
+                SubscriptionModelInfo(modelID: "gpt-5.3-codex", name: "GPT-5.3 Codex", provider: .copilot, badge: "CODEX", description: "Optimized autonomous programming & tool execution", aiProviderID: "copilot"),
+                SubscriptionModelInfo(modelID: "claude-opus-5", name: "Claude Opus 5", provider: .copilot, badge: "PRO+", description: "Maximum depth architectural synthesis & verification", aiProviderID: "copilot"),
+                SubscriptionModelInfo(modelID: "claude-opus-4-8", name: "Claude Opus 4.8", provider: .copilot, badge: "FAST OPUS", description: "High-speed Opus synthesis via Copilot", aiProviderID: "copilot"),
+                SubscriptionModelInfo(modelID: "claude-3-7-sonnet", name: "Claude 3.7 Sonnet", provider: .copilot, badge: "HYBRID", description: "Anthropic Claude 3.7 hybrid thinking via GitHub Copilot", aiProviderID: "copilot"),
+                SubscriptionModelInfo(modelID: "claude-3-5-sonnet", name: "Claude 3.5 Sonnet", provider: .copilot, badge: "WORKHORSE", description: "Standard agentic coding & tool use via Copilot", aiProviderID: "copilot"),
+                SubscriptionModelInfo(modelID: "o3-mini", name: "o3-mini", provider: .copilot, badge: "REASONING", description: "o3-mini STEM and math reasoning via Copilot", aiProviderID: "copilot"),
+                SubscriptionModelInfo(modelID: "o1", name: "o1", provider: .copilot, badge: "PRO", description: "Deep architectural reasoning via Copilot", aiProviderID: "copilot"),
+                SubscriptionModelInfo(modelID: "gpt-4o", name: "GPT-4o (Legacy)", provider: .copilot, badge: "LEGACY", description: "Classic multimodal workhorse model via Copilot", aiProviderID: "copilot")
             ]
         case .glm:
             return [
@@ -546,14 +557,20 @@ public class SubscriptionAuthManager: ObservableObject {
         
         let cleanToken = githubToken.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !cleanToken.isEmpty else {
-            throw NSError(domain: "Copilot", code: 401, userInfo: [NSLocalizedDescriptionKey: "GitHub token is empty."])
+            throw NSError(domain: "Copilot", code: 401, userInfo: [NSLocalizedDescriptionKey: "GitHub token is empty. Connect your GitHub Copilot subscription in Settings."])
+        }
+        
+        // If the token is already a Copilot session token, return directly
+        if cleanToken.contains(";") || cleanToken.contains("tid=") || cleanToken.contains("exp=") {
+            return cleanToken.replacingOccurrences(of: "Bearer ", with: "")
         }
         
         var req = URLRequest(url: URL(string: "https://api.github.com/copilot_internal/v2/token")!)
-        req.setValue("token \(cleanToken)", forHTTPHeaderField: "Authorization")
-        req.setValue("vscode/1.95.0", forHTTPHeaderField: "Editor-Version")
-        req.setValue("copilot-chat/0.22.4", forHTTPHeaderField: "Editor-Plugin-Version")
-        req.setValue("GitHubCopilot/1.155.0", forHTTPHeaderField: "User-Agent")
+        let authPrefix = cleanToken.hasPrefix("gh") ? "token " : "Bearer "
+        req.setValue("\(authPrefix)\(cleanToken)", forHTTPHeaderField: "Authorization")
+        req.setValue("vscode/1.96.2", forHTTPHeaderField: "Editor-Version")
+        req.setValue("copilot-chat/0.24.0", forHTTPHeaderField: "Editor-Plugin-Version")
+        req.setValue("GitHubCopilot/1.250.0", forHTTPHeaderField: "User-Agent")
         req.setValue("application/json", forHTTPHeaderField: "Accept")
         req.timeoutInterval = 10
         
@@ -562,7 +579,7 @@ public class SubscriptionAuthManager: ObservableObject {
             throw NSError(domain: "Copilot", code: 500, userInfo: [NSLocalizedDescriptionKey: "Invalid response from GitHub Copilot auth."])
         }
         guard http.statusCode == 200 else {
-            throw NSError(domain: "Copilot", code: http.statusCode, userInfo: [NSLocalizedDescriptionKey: "GitHub Copilot token exchange failed (HTTP \(http.statusCode)). Ensure your GitHub account has an active Copilot subscription."])
+            throw NSError(domain: "Copilot", code: http.statusCode, userInfo: [NSLocalizedDescriptionKey: "GitHub Copilot token exchange failed (HTTP \(http.statusCode)). Please verify that your GitHub account has an active Copilot subscription (Copilot Pro/Business/Enterprise)."])
         }
         
         guard let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
@@ -579,6 +596,96 @@ public class SubscriptionAuthManager: ObservableObject {
         copilotLock.unlock()
         
         return sessionToken
+    }
+    
+    // MARK: - Copilot Device Flow (Official VS Code Copilot OAuth)
+    public func startCopilotDeviceFlow(
+        onUserCode: @escaping (String, URL) -> Void,
+        onSuccess: @escaping (SubscriptionAccount) -> Void,
+        onError: @escaping (String) -> Void
+    ) {
+        Task {
+            do {
+                let clientId = "01ab8ac9400c4e429b23" // Official GitHub Copilot Client ID
+                var req = URLRequest(url: URL(string: "https://github.com/login/device/code")!)
+                req.httpMethod = "POST"
+                req.setValue("application/json", forHTTPHeaderField: "Accept")
+                req.setValue("application/x-www-form-urlencoded", forHTTPHeaderField: "Content-Type")
+                let body = "client_id=\(clientId)&scope=read:user"
+                req.httpBody = body.data(using: .utf8)
+                
+                let (data, resp) = try await URLSession.shared.data(for: req)
+                guard let http = resp as? HTTPURLResponse, http.statusCode == 200,
+                      let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+                      let deviceCode = json["device_code"] as? String,
+                      let userCode = json["user_code"] as? String,
+                      let verifyUrlStr = json["verification_uri"] as? String,
+                      let verifyUrl = URL(string: verifyUrlStr) else {
+                    await MainActor.run { onError("Failed to request device authorization code from GitHub.") }
+                    return
+                }
+                
+                let interval = (json["interval"] as? Double) ?? 5.0
+                let expiresIn = (json["expires_in"] as? Double) ?? 900.0
+                
+                // Copy user code to clipboard automatically
+                await MainActor.run {
+                    NSPasteboard.general.clearContents()
+                    NSPasteboard.general.setString(userCode, forType: .string)
+                    onUserCode(userCode, verifyUrl)
+                }
+                
+                // Poll for completion
+                let startTime = Date()
+                while Date().timeIntervalSince(startTime) < expiresIn {
+                    try? await Task.sleep(nanoseconds: UInt64(interval * 1_000_000_000))
+                    
+                    var pollReq = URLRequest(url: URL(string: "https://github.com/login/oauth/access_token")!)
+                    pollReq.httpMethod = "POST"
+                    pollReq.setValue("application/json", forHTTPHeaderField: "Accept")
+                    pollReq.setValue("application/x-www-form-urlencoded", forHTTPHeaderField: "Content-Type")
+                    let pollBody = "client_id=\(clientId)&device_code=\(deviceCode)&grant_type=urn:ietf:params:oauth:grant-type:device_code"
+                    pollReq.httpBody = pollBody.data(using: .utf8)
+                    
+                    if let (pollData, pollResp) = try? await URLSession.shared.data(for: pollReq),
+                       let pollHttp = pollResp as? HTTPURLResponse, pollHttp.statusCode == 200,
+                       let pollJson = try? JSONSerialization.jsonObject(with: pollData) as? [String: Any] {
+                        
+                        if let error = pollJson["error"] as? String {
+                            if error == "authorization_pending" {
+                                continue
+                            } else if error == "slow_down" {
+                                try? await Task.sleep(nanoseconds: 5_000_000_000)
+                                continue
+                            } else {
+                                await MainActor.run { onError("GitHub authorization error: \(error)") }
+                                return
+                            }
+                        }
+                        
+                        if let accessToken = pollJson["access_token"] as? String, !accessToken.isEmpty {
+                            let account = SubscriptionAccount(
+                                provider: .copilot,
+                                emailOrUser: "GitHub Copilot Active",
+                                sessionToken: accessToken,
+                                isValid: true,
+                                source: "GitHub Device Auth"
+                            )
+                            await MainActor.run {
+                                self.accounts[.copilot] = account
+                                self.persistAccounts()
+                                onSuccess(account)
+                            }
+                            return
+                        }
+                    }
+                }
+                
+                await MainActor.run { onError("GitHub authorization timed out. Please try again.") }
+            } catch {
+                await MainActor.run { onError(error.localizedDescription) }
+            }
+        }
     }
     
     public func clearAllAccounts() {

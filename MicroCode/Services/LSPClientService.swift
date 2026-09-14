@@ -5,7 +5,7 @@
 //  Generic LSP client that can connect to any language server.
 //  Supports: rust-analyzer, pyright, sourcekit-lsp, gopls, clangd
 //
-//  Copyright © 2025 SPU AI CLUB. All rights reserved.
+//  Copyright © 2025 Dotmini Company Limited. All rights reserved.
 //
 
 import Foundation

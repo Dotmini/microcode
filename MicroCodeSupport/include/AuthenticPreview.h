@@ -2,8 +2,8 @@
 //  AuthenticPreview.h
 //  CodeTunner
 //
-//  Created by SPU AI CLUB
-//  Copyright © 2026 AIPRENEUR. All rights reserved.
+//  Created by Tirawat Nantamas
+//  Copyright © 2026 Dotmini Company Limited. All rights reserved.
 //
 
 #import <Cocoa/Cocoa.h>

@@ -2,8 +2,8 @@
 //  AuthenticFileTree.swift
 //  MicroCode
 //
-//  Created by SPU AI CLUB
-//  Copyright © 2026 AIPRENEUR. All rights reserved.
+//  Created by Tirawat Nantamas
+//  Copyright © 2026 Dotmini Company Limited. All rights reserved.
 //
 
 import SwiftUI
@@ -69,6 +69,7 @@ struct AuthenticFileTree: NSViewRepresentable {
         outlineView.target = context.coordinator
         outlineView.doubleAction = #selector(Coordinator.onDoubleClick)
         
+        context.coordinator.outlineView = outlineView
         scrollView.documentView = outlineView
         return scrollView
     }
@@ -114,9 +115,22 @@ struct AuthenticFileTree: NSViewRepresentable {
         var parent: AuthenticFileTree
         var rootItems: [FileNodeWrapper] = []
         var lastRevision: UInt64?
+        weak var outlineView: NSOutlineView?
         
         init(_ parent: AuthenticFileTree) {
             self.parent = parent
+            super.init()
+            NotificationCenter.default.addObserver(self, selector: #selector(onIconThemeChanged), name: NSNotification.Name("MicroCodeIconThemeChanged"), object: nil)
+        }
+        
+        deinit {
+            NotificationCenter.default.removeObserver(self)
+        }
+        
+        @objc func onIconThemeChanged() {
+            DispatchQueue.main.async { [weak self] in
+                self?.outlineView?.reloadData()
+            }
         }
         
         func updateRootItems(_ items: [FileNodeWrapper]) {
@@ -236,9 +250,15 @@ struct AuthenticFileTree: NSViewRepresentable {
             }
             
             // Configure
-            let iconName = fileIconName(for: wrapper.node.name, isDirectory: wrapper.node.isDirectory)
-            view?.imageView?.image = NSImage(systemSymbolName: iconName, accessibilityDescription: nil)
-            view?.imageView?.contentTintColor = iconColor(for: wrapper.node.name, isDirectory: wrapper.node.isDirectory)
+            let isExpanded = outlineView.isItemExpanded(item)
+            if let extIcon = ExtensionManager.shared.iconImage(for: wrapper.node.name, isDirectory: wrapper.node.isDirectory, isExpanded: isExpanded) {
+                view?.imageView?.image = extIcon
+                view?.imageView?.contentTintColor = nil
+            } else {
+                let iconName = fileIconName(for: wrapper.node.name, isDirectory: wrapper.node.isDirectory)
+                view?.imageView?.image = NSImage(systemSymbolName: iconName, accessibilityDescription: nil)
+                view?.imageView?.contentTintColor = iconColor(for: wrapper.node.name, isDirectory: wrapper.node.isDirectory)
+            }
             view?.textField?.stringValue = wrapper.node.name
             
             return view

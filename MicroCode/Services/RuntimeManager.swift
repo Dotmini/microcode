@@ -3,7 +3,7 @@
 //  MicroCode
 //
 //  Manages runtime detection and on-demand downloads
-//  Copyright © 2025 SPU AI CLUB. All rights reserved.
+//  Copyright © 2025 Dotmini Company Limited. All rights reserved.
 //
 
 import SwiftUI

@@ -26,42 +26,46 @@ struct EmbeddedDeviceDockView: View {
                     HStack(spacing: 4) {
                         ForEach(dockService.openTabs) { tab in
                             let isActive = (dockService.activeTabId == tab.id)
-                            Button {
-                                withAnimation(.easeInOut(duration: 0.15)) {
-                                    dockService.selectTab(id: tab.id)
-                                }
-                            } label: {
-                                HStack(spacing: 5) {
-                                    Image(systemName: tab.icon)
-                                        .font(.system(size: 10))
-                                    Text(tab.title)
-                                        .font(.system(size: 11, weight: isActive ? .semibold : .medium))
-                                        .lineLimit(1)
-                                    
-                                    if tab.isClosable {
-                                        Button {
-                                            withAnimation(.easeInOut(duration: 0.15)) {
-                                                dockService.closeTab(id: tab.id)
-                                            }
-                                        } label: {
-                                            Image(systemName: "xmark")
-                                                .font(.system(size: 8, weight: .bold))
-                                                .foregroundColor(.secondary)
-                                                .padding(2)
-                                        }
-                                        .buttonStyle(.plain)
-                                        .help("Close tab")
+                            HStack(spacing: 4) {
+                                Button {
+                                    withAnimation(.easeInOut(duration: 0.15)) {
+                                        dockService.selectTab(id: tab.id)
                                     }
+                                } label: {
+                                    HStack(spacing: 4) {
+                                        Image(systemName: tab.icon)
+                                            .font(.system(size: 10))
+                                        Text(tab.title)
+                                            .font(.system(size: 11, weight: isActive ? .semibold : .medium))
+                                            .lineLimit(1)
+                                    }
+                                    .contentShape(Rectangle())
                                 }
-                                .padding(.horizontal, 8)
-                                .padding(.vertical, 4)
-                                .background(
-                                    RoundedRectangle(cornerRadius: 5, style: .continuous)
-                                        .fill(isActive ? Color.primary.opacity(0.12) : Color.clear)
-                                )
-                                .foregroundColor(isActive ? .primary : .secondary)
+                                .buttonStyle(.plain)
+
+                                if tab.isClosable {
+                                    Button {
+                                        withAnimation(.easeInOut(duration: 0.15)) {
+                                            dockService.closeTab(id: tab.id)
+                                        }
+                                    } label: {
+                                        Image(systemName: "xmark")
+                                            .font(.system(size: 8, weight: .bold))
+                                            .foregroundColor(.secondary)
+                                            .padding(3)
+                                            .contentShape(Rectangle())
+                                    }
+                                    .buttonStyle(.plain)
+                                    .help("Close tab")
+                                }
                             }
-                            .buttonStyle(.plain)
+                            .padding(.horizontal, 7)
+                            .padding(.vertical, 4)
+                            .background(
+                                RoundedRectangle(cornerRadius: 5, style: .continuous)
+                                    .fill(isActive ? Color.primary.opacity(0.12) : Color.clear)
+                            )
+                            .foregroundColor(isActive ? .primary : .secondary)
                         }
                         
                     }
@@ -198,9 +202,7 @@ struct EmbeddedDeviceDockView: View {
                 // Standard macOS Human Interface Close Button [✕] at top-right
                 Button {
                     withAnimation(.easeInOut(duration: 0.16)) {
-                        deviceRuntime.showingEmbeddedDeviceDock = false
-                        dockService.isDockVisible = false
-                        appState.showingPreviewView = false
+                        appState.hidePreviewInspector()
                         if deviceRuntime.embeddedDockMode == .ios {
                             Task { await ServeSimService.shared.stop() }
                         }
@@ -252,7 +254,7 @@ struct EmbeddedDeviceDockView: View {
                             }
                         )
                     case .iOSPhysical:
-                        PhysicalIOSDeviceTabView()
+                        PhysicalIOSDeviceTabView(canvasColor: canvas)
                     case .androidPhysical:
                         PhysicalAndroidDeviceTabView()
                     case .android:

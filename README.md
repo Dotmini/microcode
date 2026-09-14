@@ -1,24 +1,24 @@
 ## Support the Project
 
-MicroCode is built and maintained solo. If this project saves you time or inspires your work, consider supporting continued development.
+MicroCode is built and maintained by Dotmini Company Limited. If this project saves you time or inspires your work, consider supporting continued development.
 
-### 🇹🇭 PromptPay / Bank Transfer
+### PromptPay / Bank Transfer
 
 | | |
 |---|---|
-| **Bank** | Krungthai Bank (กรุงไทย) |
+| **Bank** | Krungthai Bank (ธนาคารกรุงไทย) |
 | **Account** | 460-0-70494-0 |
 | **Name** | นายถิรวัฒน์ นันตมาศ |
 
-> 📎 PromptPay QR — *coming soon*
+> PromptPay QR available upon request.
 
-### 💖 GitHub Sponsors
+### GitHub Sponsors
 
-If you prefer recurring support or want to appear in the sponsors list:
+If you prefer recurring support or wish to appear in the official sponsors list:
 
 [![Sponsor on GitHub](https://img.shields.io/badge/Sponsor-GitHub_Sponsors-EA4AAA?style=flat-square&logo=github-sponsors&logoColor=white)](https://github.com/sponsors/Dotmini)
 
-Every contribution — small or large — directly funds development time, Apple Developer certificates, and infrastructure.
+Every contribution directly funds engineering time, Apple Developer infrastructure, and GPU compute resources.
 
 ---
 
@@ -39,13 +39,14 @@ Every contribution — small or large — directly funds development time, Apple
   <img src="https://img.shields.io/badge/Swift-5.9-F05138?style=flat-square&logo=swift&logoColor=white" />
   <img src="https://img.shields.io/badge/Rust-1.75+-DEA584?style=flat-square&logo=rust&logoColor=white" />
   <img src="https://img.shields.io/badge/Metal-GPU_Accelerated-8E8E93?style=flat-square&logo=apple&logoColor=white" />
-  <img src="https://img.shields.io/badge/License-MPL_v1.0-blue?style=flat-square" />
+  <img src="https://img.shields.io/badge/License-Elastic_License_2.0-blue?style=flat-square" />
   <img src="https://img.shields.io/github/actions/workflow/status/Dotmini/microcode/ci.yml?style=flat-square&logo=githubactions&logoColor=white&label=CI/CD" alt="Build Status" />
   <img src="https://img.shields.io/github/v/release/Dotmini/microcode?style=flat-square&color=green" />
 </p>
 
 <p align="center">
-  <a href="https://github.com/Dotmini/microcode/releases/latest"><strong>⬇️ Download Latest Release</strong></a> ·
+  <a href="https://github.com/Dotmini/microcode/releases/latest"><strong>Download Latest Release</strong></a> ·
+  <a href="#operational-modes"><strong>Operational Modes</strong></a> ·
   <a href="#features"><strong>Features</strong></a> ·
   <a href="#architecture"><strong>Architecture</strong></a> ·
   <a href="#getting-started"><strong>Getting Started</strong></a>
@@ -69,83 +70,226 @@ We built a **fully native macOS IDE from scratch** using SwiftUI, Rust, and Meta
 
 ---
 
-## Features
+## Operational Modes & Competitive Advantages
 
-### 🧠 AI Agent — Production Grade
-Multi-provider AI agent with tool-use capabilities, not just autocomplete.
+MicroCode features a multi-modal workspace architecture where each mode is engineered from the ground up for a specific software engineering discipline. Unlike traditional IDEs and Electron-based wrappers, MicroCode executes every mode natively on Apple Silicon using Metal, Swift, and Rust.
 
-- **7 providers** — Gemini, OpenAI, Claude, DeepSeek, Grok, Qwen, GLM
-- **Agentic tools** — Read, write, edit, search code, run commands, git operations
-- **Streaming responses** — Real-time token streaming with diff preview
-- **Workspace-aware** — Full project context via RAG semantic search (Candle ML)
-- **Sandboxed execution** — Timeout, output limits, path-restricted operations
+### Comparative Architectural Analysis
 
-### ⚡ Editor — Zero-Latency
-- **30+ languages** — Tree-sitter powered syntax highlighting
-- **Debounced highlighting** — Only processes visible range, not the entire file
-- **Hex color preview** — Inline color swatches in CSS/Swift/Rust
-- **Native text engine** — NSTextView + custom layout, not a web canvas
+| Operational Mode | Primary Functionality | MicroCode Architectural Implementation | Legacy Competitors (VS Code, Cursor, Windsurf, Xcode, JetBrains) |
+|:---|:---|:---|:---|
+| **Code Editor** | Primary editing & multi-language development | 100% native AppKit `NSTextView` backed by an Objective-C++ gap buffer and Metal GPU font rasterizer. Sub-second cold startup, <80 MB RAM. | Electron webviews (400–1200 MB RAM idle). Canvas-emulated font rendering prone to JavaScript garbage collection frame drops. |
+| **Autonomous AI Agent** | Multi-file refactoring, planning & self-healing | Enforces formal Implementation Plans before touching code. Interactive `⌘↵` tool approval gate. 7 native Tier-1 LLM connections. | Unpredictable file overwrites, blind shell command execution, vendor lock-in with middleman token markups. |
+| **Embedded Device Dock** | Mobile & desktop simulation directly in-editor | Low-latency WebSocket H.264 iOS stream (`serve-sim`) and ADB Android mirror (`scrcpy-server`) with 120 FPS Metal device shaders. | External detached emulator windows (Xcode/Android Studio) that cause desktop clutter; non-existent in VS Code/Cursor without laggy webview plugins. |
+| **Database Studio** | SQL queries, schema explorer & tabular viewer | Native C and Rust database drivers for PostgreSQL, MySQL, and SQLite. Zero-latency pagination directly in-process. | Heavy Electron plugins (SQLTools) or separate memory-heavy Java applications (DataGrip/DBeaver) taking 1 GB+ RAM. |
+| **API Client Studio** | REST & GraphQL request designer and inspector | Native Swift networking engine with environment presets, token injection, and instant formatted JSON/XML inspectors. | Developers must run separate heavy Electron applications (Postman/Insomnia) consuming 800 MB+ RAM. |
+| **Notebook & Cell Mode** | Polyglot exploratory computing & step execution | Native multi-runtime engine (Swift, Rust, Python, Ardium) with sub-millisecond dispatch and direct stdio pipe capture. | Jupyter / VS Code Notebooks with fragile Python kernel connections, sluggish web widgets, and connection dropouts. |
+| **Playground Mode** | In-memory scratchpad & instant REPL | Memory-backed scratchpad with live AST evaluation and execution profiling without creating disposable disk files. | Xcode Playgrounds frequently stall or crash; VS Code lacks native scratchpad without saving files to disk. |
+| **Remote Explorer (Remote X)** | Headless cloud server & container development | Direct POSIX SSH/SFTP over secure Unix sockets with zero daemon installation required on remote target. | VS Code Remote installs a heavy proprietary Node.js server daemon (`vscode-server`) that triggers firewall and RAM issues. |
+| **Embed & IoT Studio** | Hardware development & firmware flashing | Native serial port monitor, real-time baud switching, and direct hardware register observation for ESP32/STM32/Pico. | Fragmented between Arduino IDE, Java-based tools, or complex CLI command configurations. |
+| **Science Mode** | Computational research & bioinformatics | Specialized pipelines for biological data visualization, structure models, and vector mathematics. | Requires switching across external web dashboards and disparate CLI scientific tools. |
+| **Extension Studio** | Extension management & ecosystem customization | Native Open VSX registry integration with an isolated Node.js VS Code compatibility runner; zero Electron overhead. | VS Code proprietary marketplace vendor lock-in and heavy background runtime consumption. |
+| **Ardium Toolchain** | Next-gen system programming with Ardium v2.3 | Official native compiler runner, Tree-sitter AST queries, RAII `@owned` ownership linting, and CoreUI live rendering. | Non-existent in third-party IDEs. MicroCode is the flagship workstation for the Ardium programming language. |
 
-### 🖥️ Integrated Terminal
-- Full PTY terminal with ANSI color support
-- Multiple sessions with tab management
-- Direct workspace integration
+---
 
-### 🔧 Developer Workflow
-- **Git integration** — Status, diff, commit, branch switching
-- **Project scaffolding** — Create Rust, Swift, Node.js, Python, Web projects
-- **WASM extensions** — Sandboxed extension system (Wasmtime)
-- **Build system** — Integrated build & run for multiple languages
+### Detailed Operational Mode Breakdown
 
-### 🎨 Design Language
-- **Dark-first UI** — Precision-crafted dark theme with glassmorphism
-- **Metal-powered effects** — GPU-rendered backgrounds and animations
-- **Native macOS** — Respects system appearance, keyboard shortcuts, trackpad gestures
+#### 1. Code Editor Mode (`.code`)
+- **Purpose**: Engineered for daily high-velocity coding across 30+ languages (Swift, Rust, C/C++, TypeScript, Python, Go, Ardium, and more).
+- **Why It Outperforms Competitors**:
+  - Eliminates Electron entirely. While VS Code, Cursor, and Windsurf render text within Chromium DOM elements or WebGL canvas layers—triggering micro-stutters during rapid cursor navigation and high battery consumption—MicroCode executes directly against macOS CoreText and Metal.
+  - File buffer mutations operate on an optimized Objective-C++ text gap buffer, ensuring zero latency even when opening multi-megabyte source files.
+
+#### 2. Autonomous AI Agent Mode (`.aiAgent`)
+- **Purpose**: Autonomous end-to-end task execution, large refactors, test synthesis, and self-directed debugging.
+- **Why It Outperforms Competitors**:
+  - Competitor agent tools (Cursor Composer, Windsurf Cascade) frequently apply speculative multi-file edits prematurely or execute arbitrary terminal commands without deterministic checks.
+  - MicroCode enforces **Formal Implementation Plans**: the agent first reasons through the problem, maps dependencies via the AST RepoMap, and presents a phased plan. Destructive tool invocations (file overwrites, command executions, git operations) are halted at the **`⌘↵` Tool Approval Barrier** until explicitly confirmed by the developer.
+  - Direct connection to 7 leading AI providers (Google Gemini 3.1/2.5, Anthropic Claude Opus 4.7/Sonnet 4, OpenAI GPT-5/o3, DeepSeek V4, xAI Grok, Alibaba Qwen, Zhipu GLM) with zero third-party proxy markup or latency penalties.
+
+#### 3. Embedded Device Dock Mode (`EmbeddedDeviceDockView`)
+- **Purpose**: Unified mobile and desktop application simulation, interactive touch testing, and viewport inspection directly within an editor tab.
+- **Why It Outperforms Competitors**:
+  - Eliminates the cognitive disruption of managing separate simulator windows. Xcode and Android Studio require external window management that obscures code editor workspaces.
+  - MicroCode streams iOS Simulator video frames directly into an editor pane using low-latency WebSocket H.264 via an embedded `serve-sim` daemon, while physical Android devices and emulators mirror over ADB via `scrcpy-server`.
+  - Custom Metal shaders render hardware device bezels, glass reflections, and Dynamic Island cutouts at a locked 120 FPS on Apple ProMotion displays.
+
+#### 4. Database Studio Mode (`.database`)
+- **Purpose**: Complete SQL workspace for developers managing application data, executing queries, and inspecting relational schemas.
+- **Why It Outperforms Competitors**:
+  - Replaces third-party database tools (e.g. TablePlus, DBeaver) and unstable VS Code extensions.
+  - Compiled native drivers connect directly to PostgreSQL, MySQL, and SQLite instances. Query execution outputs directly into a high-performance native AppKit data grid with instant pagination and schema autocompletion.
+
+#### 5. API Client Studio Mode (`.apiClient`)
+- **Purpose**: Comprehensive workbench for designing, testing, and debugging REST and GraphQL APIs.
+- **Why It Outperforms Competitors**:
+  - Developers no longer need to run heavy Electron clients like Postman or Insomnia (which consume upwards of 800 MB RAM).
+  - Offers native environment variable interpolation, authentication token injection (Bearer, OAuth2, API Key), request history persistence, and color-coded JSON/XML tree rendering built directly into the IDE core.
+
+#### 6. Interactive Notebook & Cell Mode (`.notebook`)
+- **Purpose**: Granular, cell-by-cell code execution for data exploration, algorithm verification, and documentation.
+- **Why It Outperforms Competitors**:
+  - Traditional Jupyter notebooks suffer from bloated web interfaces, fragile Python kernel socket drops, and difficulty tracking state.
+  - MicroCode provides polyglot cell execution (Swift, Rust, Python, Ardium) running on native Unix processes with real-time output capture and native graphical rendering.
+
+#### 7. Interactive Playground Mode (`.playground`)
+- **Purpose**: Instant zero-setup REPL scratchpad for testing algorithms and language syntax.
+- **Why It Outperforms Competitors**:
+  - Xcode Playgrounds are notorious for compilation deadlocks and simulator crashes. VS Code requires creating manual scratch files on disk.
+  - MicroCode runs a memory-backed execution harness with real-time AST tokenization and execution profiling, leaving zero artifact clutter in your repository.
+
+#### 8. Remote Explorer Mode (`.remoteX`)
+- **Purpose**: Seamless remote development on cloud VMs, bare-metal servers, and containerized environments.
+- **Why It Outperforms Competitors**:
+  - VS Code Remote SSH downloads a massive Node.js runtime onto the remote host, causing failures on restricted infrastructure or non-standard Linux distros.
+  - MicroCode uses standard, secure POSIX SSH and SFTP protocols over native Unix sockets without requiring remote daemon installation.
+
+#### 9. Embed & IoT Studio Mode (`.embedded`)
+- **Purpose**: Hardware programming, micro-controller firmware deployment, and serial monitoring.
+- **Why It Outperforms Competitors**:
+  - Replaces clunky, disjointed CLI tooling with an integrated high-throughput serial terminal, real-time baud rate adjustment, and hardware flashing workflows for ESP32, STM32, Arduino, and Raspberry Pi.
+
+#### 10. Science Mode (`.science`)
+- **Purpose**: Deep computational workflows, bioinformatics pipeline orchestration, and genomic/chemical data analysis.
+- **Why It Outperforms Competitors**:
+  - Direct integration with computational biology databases and structure search tools without leaving the editor.
+
+#### 11. Extension Studio Mode (`.extensions`)
+- **Purpose**: Extension discovery, installation, and lifecycle management powered by Open VSX.
+- **Why It Outperforms Competitors**:
+  - Protects developer freedom by utilizing the open, vendor-neutral Open VSX marketplace rather than Microsoft's proprietary marketplace.
+  - Emulates VS Code extension APIs via an isolated Node.js compatibility layer (`vscode-compat-host`) without running Electron.
+
+#### 12. Native Ardium Toolchain Mode
+- **Purpose**: Flagship development environment for the Ardium programming language (v2.3) developed by Dotmini Company Limited.
+- **Why It Outperforms Competitors**:
+  - Offers the world's only native IDE integration for Ardium, featuring Tree-sitter syntax highlighting, CoreUI declarative UI inspection, RAII `@owned` ownership analysis, and integrated compiler diagnostics.
+
+---
+
+## Core Engineering Specifications
+
+MicroCode combines low-level macOS engineering with modern autonomous AI architectures:
+
+### 1. Autonomous AI Agent and Implementation Planning Engine
+MicroCode is a fully autonomous AI workstation with human-in-the-loop safety controls:
+- **Formal Implementation Planning**: Before writing or altering code, the AI generates a structured, multi-phase plan detailing target files, architectural risks, and verification steps.
+- **`⌘↵` Interactive Approval Gate**: High-risk tool calls (writing files, executing shell scripts, running git commands) pause at an interactive safety barrier requiring explicit developer approval.
+- **Autonomous Multi-Agent Loop**: Capable of self-directed exploration, executing multi-turn tool cycles, diagnosing build errors, and self-correcting without intervention.
+- **Sub-Agent Delegation**: Spawn specialized sub-agents running concurrently (e.g. `research` for codebase indexing, `flutter_a11y_agent` for accessibility audits, or isolated `self` workers).
+- **Slash Commands**: Built-in developer shortcuts such as `/goal` (exhaustive execution), `/schedule` (timed background monitors), `/browser` (web scraping & docs), `/grill-me` (design interviews), and `/boost` (deep reasoning).
+- **AST RepoMap & On-Device Memory**: Tree-sitter semantic symbol graphs and Candle ML vector embeddings give the agent continuous, deep context of your entire project topology.
+- **Bi-Directional LSP Bridge**: The agent directly queries Language Server Protocols to inspect compiler diagnostics, type definitions, and real-time syntax errors.
+
+### 2. SuperTab Predictive Autocomplete and Inline Diff Engine
+A next-generation editing experience powered by speculative multi-token decoding:
+- **SuperTab Speculative Predictions**: Analyzes real-time cursor trajectory, AST scope, and import graph to suggest complete multi-line statements and function blocks ahead of keystrokes.
+- **Interactive Inline Diff Engine**: Visual chunk-based diff reviewer with syntax-aware highlight blending and one-click chunk accept/reject (`⌥↵`).
+- **Smart Refactor & Unit Test Synthesis**: Context-menu code actions that transform legacy syntax, optimize algorithms, or synthesize exhaustive test suites directly in-place.
+
+### 3. Embedded Device Dock and Hardware Simulation Hub
+Test mobile and desktop applications without leaving your code editor:
+- **iOS Simulator Live Stream**: Ultra-low latency H.264 video streaming over WebSockets directly into an editor tab via embedded `serve-sim` capture daemon.
+- **Android Physical & Emulator Mirroring**: High-performance ADB screen mirroring via custom `scrcpy-server` streaming pipeline with full touch, scroll, and keyboard forwarding.
+- **Photorealistic Metal 120 FPS Shaders**: Custom Metal shader pipeline rendering hardware device bezels, dynamic glass reflections, and simulated Dynamic Island / camera punch-holes at 120 Hz on ProMotion displays.
+
+### 4. Open VSX Marketplace and Extension Compatibility Host
+Extensibility without Electron's memory bloat:
+- **Open VSX Marketplace Integration**: Search, download, install, and manage extensions directly from the open-source Open VSX registry.
+- **VS Code Extension Compatibility Host**: Integrated Node.js runtime (`vscode-compat-host`) emulating VS Code extension APIs for syntax grammars, themes, and snippets.
+- **Model Context Protocol (MCP)**: Full client/server MCP manager allowing MicroCode to interface with any external MCP server for live data, database querying, or cloud APIs.
+- **Sandboxed WASM Plugins**: Embedded Wasmtime engine executing lightweight WebAssembly plugins with strict CPU/memory quotas and zero unauthorized disk access.
+
+### 5. Native Developer Studios (Database, API, CI/CD, Notebooks)
+Everything you need to build, test, and ship in one unified native workspace:
+- **Database Studio**: Full SQL workbench supporting PostgreSQL, MySQL, and SQLite. Inspect schemas, browse table records, and execute queries with instant tabular results.
+- **API Client Studio**: Native REST and GraphQL testing client with environment presets, auth token injectors, variable interpolation, and formatted JSON/XML payloads.
+- **CI/CD Pipeline Viewer**: Direct GitHub Actions integration to track workflow runs, inspect step logs, and re-trigger jobs without context-switching to a browser.
+- **Interactive Playground & Cell Notebooks**: REPL scratchpad supporting instant code execution across Swift, Rust, Python, and Ardium with rich visual outputs.
+
+### 6. Real-Time CRDT Collaboration and Voice Dictation
+Designed for modern distributed engineering teams:
+- **P2P CRDT Collaboration Engine**: Conflict-Free Replicated Data Types enabling real-time multi-user document editing with live remote cursor presence and zero merge conflicts.
+- **Voice Coding & Dictation**: Apple Speech-powered low-latency dictation and voice commands allowing hands-free code navigation and refactoring.
+
+### 7. Native Ardium Language Toolchain (v2.3)
+Full first-class IDE support for the Ardium programming language:
+- **Full Syntax & AST Grammar**: Native Tree-sitter parser with syntax highlighting, CoreUI declarative UI syntax, and RAII `@owned` ownership tracking.
+- **Compiler Diagnostics & Runner**: In-editor diagnostic linting, playground evaluation, and live execution via `ArdiumRunner`.
+
+### 8. Dotmini Cloud GPU Dispatch and Sovereign AI
+High-performance compute offloading when local hardware isn't enough:
+- **Cloud GPU Remote Dispatch**: One-click compute offloading to remote NVIDIA A100/H100 clusters for heavy training, fine-tuning, and batch inference.
+- **Dotmini Omni Sovereign Models**: Native local support for Dotmini Omni O1X Lite (0.8B) and Omni O1X Pro (3B MoE) for privacy-preserving offline inference.
+
+### 9. Native High-Performance macOS Core Architecture
+- **Pure Swift + SwiftUI + AppKit**: Built specifically for macOS 13+ (Ventura, Sonoma, Sequoia). Zero web engine overhead.
+- **Metal GPU Text Pipeline**: Smooth 120 FPS kinetic scrolling, sub-second cold boot, and less than 80 MB idle RAM consumption.
+- **Full PTY Terminal**: Native virtual terminal with ANSI 24-bit TrueColor, zsh/bash integration, and split panes.
 
 ---
 
 ## Architecture
 
 ```
-┌─────────────────────────────────────────────────────────────┐
-│                    MicroCode.app                             │
-│                                                             │
-│  ┌──────────────────┐  ┌──────────────────────────────────┐ │
-│  │   SwiftUI + AppKit │  │   Objective-C++ Core              │ │
-│  │                    │  │   • Syntax Engine                 │ │
-│  │   • Editor View    │  │   • Text Pipeline                 │ │
-│  │   • AI Agent Panel │  │   • Performance Primitives        │ │
-│  │   • File Browser   │  │                                   │ │
-│  │   • Terminal       │  └──────────────────────────────────┘ │
-│  │   • Settings       │                                      │
-│  └────────┬───────────┘                                      │
-│           │ HTTP + SSE                                        │
-│  ┌────────▼───────────────────────────────────────────────┐  │
-│  │              Rust Backend (Axum + Tokio)                │  │
-│  │                                                         │  │
-│  │   ┌─────────┐ ┌──────────┐ ┌──────────┐ ┌───────────┐ │  │
-│  │   │ AI      │ │ Agent    │ │ Git      │ │ Extension │ │  │
-│  │   │ Engine  │ │ Runtime  │ │ Manager  │ │ Host      │ │  │
-│  │   └─────────┘ └──────────┘ └──────────┘ └───────────┘ │  │
-│  │   ┌─────────┐ ┌──────────┐ ┌──────────┐ ┌───────────┐ │  │
-│  │   │ RAG     │ │ Terminal │ │ Indexer  │ │ Kernel    │ │  │
-│  │   │ Search  │ │ Manager  │ │ (T-S)   │ │ Safety    │ │  │
-│  │   └─────────┘ └──────────┘ └──────────┘ └───────────┘ │  │
-│  └─────────────────────────────────────────────────────────┘  │
-└─────────────────────────────────────────────────────────────┘
+┌─────────────────────────────────────────────────────────────────────────────────┐
+│                                MicroCode.app                                    │
+│                                                                                 │
+│  ┌─────────────────────────┐  ┌───────────────────────┐  ┌────────────────────┐ │
+│  │   SwiftUI + AppKit UI   │  │  Metal Shader Engine  │  │ Objective-C++ Core │ │
+│  │                         │  │                       │  │                    │ │
+│  │ • Code Editor Tabs      │  │ • 120 FPS Device Dock │  │ • Text Buffer      │ │
+│  │ • AI Planning Workboard │  │ • GPU Text Rendering  │  │ • Token Layout     │ │
+│  │ • Developer Studios     │  │ • Liquid Glass UI     │  │ • Memory Primitives│ │
+│  │   (DB, API, CI/CD, Cell)│  │                       │  │                    │ │
+│  └────────────┬────────────┘  └───────────┬───────────┘  └─────────┬──────────┘ │
+│               │                           │                        │            │
+│               └───────────────────────────┼────────────────────────┘            │
+│                                           │ C ABI / Unix Socket / HTTP          │
+│  ┌────────────────────────────────────────▼──────────────────────────────────┐  │
+│  │                         Rust Backend (Axum + Tokio)                       │  │
+│  │                                                                           │  │
+│  │  ┌───────────────────────┐ ┌──────────────────────┐ ┌───────────────────┐  │  │
+│  │  │ AI Multi-Provider     │ │ Autonomous Agent     │ │ Tree-sitter       │  │  │
+│  │  │ (Gemini, Claude, GPT) │ │ & Planning Engine    │ │ Indexer & RepoMap │  │  │
+│  │  └───────────────────────┘ └──────────────────────┘ └───────────────────┘  │  │
+│  │  ┌───────────────────────┐ ┌──────────────────────┐ ┌───────────────────┐  │  │
+│  │  │ MCP Client / Server   │ │ CRDT Realtime Sync   │ │ Candle ML RAG     │  │  │
+│  │  │ Protocol Manager      │ │ Engine (P2P Collab)  │ │ Vector Store      │  │  │
+│  │  └───────────────────────┘ └──────────────────────┘ └───────────────────┘  │  │
+│  │  ┌───────────────────────┐ ┌──────────────────────┐ ┌───────────────────┐  │  │
+│  │  │ Git Engine            │ │ PTY Terminal Harness │ │ Wasmtime Sandbox  │  │  │
+│  │  │ & Sandbox Boundary    │ │ (ANSI TrueColor)     │ │ Extension Host    │  │  │
+│  │  └───────────────────────┘ └──────────────────────┘ └───────────────────┘  │  │
+│  └────────────────────────────────────────┬──────────────────────────────────┘  │
+│                                           │                                     │
+│  ┌────────────────────────────────────────┴──────────────────────────────────┐  │
+│  │                        External Subsystem Integration                     │  │
+│  │                                                                           │  │
+│  │ • Embedded Device Stream: scrcpy-server (Android ADB) / serve-sim (iOS)   │  │
+│  │ • Open VSX & Node.js VS Code Extension Compat Host                        │  │
+│  │ • Native Ardium v2.3 Compiler & Playground Runner                         │  │
+│  │ • Dotmini Cloud GPU Cluster Dispatch (A100/H100)                          │  │
+│  └───────────────────────────────────────────────────────────────────────────┘  │
+└─────────────────────────────────────────────────────────────────────────────────┘
 ```
 
 ### Tech Stack
 
-| Layer | Technology | Purpose |
-|-------|-----------|---------|
-| **Frontend** | SwiftUI + AppKit | Native macOS UI |
-| **Rendering** | Metal | GPU-accelerated effects |
-| **Core** | Objective-C++ | Performance-critical text ops |
-| **Backend** | Rust (Axum/Tokio) | Async services, AI, Git |
-| **Parsing** | Tree-sitter | Multi-language syntax |
-| **ML** | Candle | On-device embeddings for RAG |
-| **Extensions** | Wasmtime | Sandboxed WASM plugins |
+| Subsystem | Technology | Responsibility |
+|:----------|:-----------|:---------------|
+| **UI & Windowing** | SwiftUI + AppKit | Declarative macOS UI, native windowing, trackpad gestures |
+| **GPU Rendering** | Metal Shaders | 120 FPS device frame shaders, GPU-accelerated text & animations |
+| **Core Text Buffer** | Objective-C++ & C ABI | Memory-efficient text gap buffer and high-performance primitives |
+| **Backend Core** | Rust (Axum + Tokio) | Async microservices, multi-provider AI streaming, Git, process harness |
+| **Syntax & AST** | Tree-sitter | Real-time AST parsing for 30+ languages, symbol indexing & RepoMap |
+| **Semantic Intelligence** | Candle ML | On-device vector embeddings and local RAG code search |
+| **Extension Runtime** | Open VSX + Node.js + Wasmtime | Marketplace registry, VS Code API compatibility, and WASM sandboxing |
+| **AI Tool Protocol** | Model Context Protocol (MCP) | Client & server support for Anthropic MCP tools & resources |
+| **Device Simulation** | ADB / scrcpy + serve-sim | Hardware-accelerated screen mirroring for Android & iOS Simulator |
+| **Realtime Sync** | CRDT Engine | Decentralized, conflict-free collaborative editing and presence |
+| **Native Toolchains** | Swift, Rust, Ardium v2.3 | Multi-language compilation, diagnostics, and interactive playground |
 
 ---
 
@@ -166,24 +310,31 @@ Download the latest `.dmg` or `.pkg` from [**Releases**](https://github.com/Dotm
 
 ### Build from Source
 
+For detailed instructions and prerequisites, see [**BUILDING.md**](BUILDING.md).
+
 ```bash
-# Clone
+# Clone the repository
 git clone https://github.com/Dotmini/microcode.git
 cd microcode
 
-# Quick dev build (current arch, debug)
-./build_distribution.sh --dev
+# 1. Standard full build (Rust backend + Swift frontend -> MicroCode.app)
+./build.sh
 
-# Full release build (universal binary + DMG + PKG)
+# 2. Fast development build with auto-deployment to ~/Applications
+./build_dev.sh
+
+# 3. Distribution release (universal binary + DMG + PKG)
 ./build_distribution.sh
 ```
 
-### Build Options
+### Common Build Flags (`build.sh`)
 
 ```bash
-./build_distribution.sh --dev          # Fast debug build, current arch only
-./build_distribution.sh --version 1.1  # Set version
-./build_distribution.sh --sign         # Sign & notarize after build
+./build.sh --debug          # Build with debug symbols
+./build.sh --frontend-only  # Recompile Swift app only (uses existing Rust libs)
+./build.sh --backend-only   # Recompile Rust backend and FFI only
+./build.sh --clean          # Clean build artifacts before compiling
+./build.sh --external-ssd   # Offload caches & artifacts to external SSD
 ```
 
 ---
@@ -192,25 +343,27 @@ cd microcode
 
 ```
 microcode/
-├── CodeTunner/              # Swift sources (SwiftUI + AppKit)
-│   ├── Views/               # UI components
-│   ├── Services/            # AI client, agent service
-│   ├── SyntaxEngine/        # Highlighting engine
-│   └── Models/              # Data models, app state
-├── CodeTunnerSupport/       # Objective-C++ core modules
-├── backend/                 # Rust backend server
+├── MicroCode/               # Swift sources (SwiftUI + AppKit)
+│   ├── Views/               # UI components (Editor, AI Workboard, Studios, Device Dock, Git)
+│   ├── Services/            # AI agent loop, SuperTab, CRDT, LSP bridge, Device streaming
+│   ├── SyntaxEngine/        # Syntax highlighting and theme engine
+│   └── Models/              # AppState, ImplementationPlan, tool approval gates, config
+├── MicroCodeSupport/        # Objective-C++ core and text buffer bridge
+├── MicroCodeKernel/         # Native AppKit/Metal text kernel
+├── MicrocodeCoreSupport/    # Rust FFI headers and C ABI bridge
+├── backend/                 # Rust backend server (Axum + Tokio)
 │   └── src/
-│       ├── ai.rs            # Multi-provider AI engine
-│       ├── agent.rs         # AI agent with tool-use
-│       ├── indexer.rs       # Tree-sitter file indexer
-│       └── main.rs          # Axum HTTP server
-├── microcode_core/          # Rust shared core library
-├── extension-host/          # WASM extension runtime
-├── vscode-compat-host/      # VS Code extension compatibility
+│       ├── ai.rs            # Multi-provider AI engine (Gemini, Claude, GPT, DeepSeek, etc.)
+│       ├── agent.rs         # Autonomous AI agent loop with tool approval gate
+│       ├── indexer.rs       # Tree-sitter file indexer & symbol search
+│       └── main.rs          # Axum HTTP API & WebSocket server
+├── microcode_core/          # Rust shared core library (libmicrocode_core.a)
+├── extension-host/          # Sandboxed WASM extension runtime
+├── vscode-compat-host/      # VS Code extension compatibility layer
+├── Vendor/                  # Pre-compiled simulator & device capture utilities (serve-sim, scrcpy)
+├── tools/                   # Developer utilities, migration & scratch tests
 └── .github/workflows/       # CI/CD (build, sign, release)
 ```
-
-> **Note**: The `CodeTunner` folder name is historical. The product name is **MicroCode**.
 
 ---
 
@@ -256,65 +409,46 @@ We welcome contributions! Please:
 
 <table>
   <tr>
-    <td align="center"><strong>Tirawat Nantamas</strong><br/><em>Founder & Lead Architect</em><br/>Dotmini Software</td>
+    <td align="center">
+      <strong>Tirawat Nantamas (ถิรวัฒน์ นันตมาศ)</strong><br/>
+      <em>Founder & CEO</em><br/>
+      Dotmini Company Limited (บริษัท ดอทมินิ จำกัด)
+    </td>
   </tr>
 </table>
 
-**Academic Partnership**: SPU AI Club — Sripatum University (มหาวิทยาลัยศรีปทุม)
+---
+
+## Intellectual Property & License (ทรัพย์สินทางปัญญาและข้อกำหนดการใช้งาน)
+
+> ### ข้อกำหนดทางกฎหมายและสิทธิ์ในทรัพย์สินทางปัญญา (Legal Notice)
+> ซอฟต์แวร์ ซอร์สโค้ด สถาปัตยกรรม และองค์ประกอบทั้งหมดของ **MicroCode** เป็น **ทรัพย์สินทางปัญญาของ บริษัท ดอทมินิ จำกัด (Dotmini Company Limited) แต่เพียงผู้เดียวเท่านั้น**
+
+โปรเจกต์นี้เปิดให้เข้าถึงซอร์สโค้ด (Source-Available) ภายใต้สัญญาอนุญาต **Elastic License v2 (ELv2)** และเงื่อนไข Business Source License (BSL) โดยมีข้อกำหนดห้ามอย่างเด็ดขาดดังต่อไปนี้:
+
+1. **ห้ามนำไปพัฒนาต่อเพื่อการค้า (No Commercial Fork / Continuation)**: ไม่อนุญาตให้นำซอร์สโค้ดไปพัฒนาต่อยอด ดัดแปลงเพื่อแยกทำเวอร์ชันใหม่ หรือทำเป็นโปรดักต์เชิงพาณิชย์โดยไม่ได้รับอนุญาตเป็นลายลักษณ์อักษรจาก บริษัท ดอทมินิ จำกัด
+2. **ห้ามนำไปขาย หรือนำไปทำ Product เด็ดขาด (No Commercial Sale / Packaging)**: ห้ามนำซอร์สโค้ด, ไบนารี, ส่วนประกอบ หรืออนุพันธ์ของซอฟต์แวร์นี้ไปจำหน่าย จำหน่ายต่อ ทำแพ็กเกจขาย หรือนำไปให้บริการเชิงพาณิชย์ (เช่น Cloud/Managed Service หรือ SaaS) โดยเด็ดขาด
+3. **ห้ามนำไป ReBrand ขายทุกกรณี (Strictly Prohibited from Rebranding / White-labeling)**: ห้ามทำการเปลี่ยนชื่อ เปลี่ยนตราสัญลักษณ์ ลบเครดิต ปลอมแปลง หรือทำ White-label เพื่อนำไปแจกจ่ายหรือแสวงหาผลประโยชน์ทางการค้าในทุกกรณี
+
+### การใช้งานที่อนุญาต (Permitted Use)
+- **การศึกษา ค้นคว้า และเรียนรู้ส่วนบุคคล (Personal Learning & Educational Use)**: สามารถดาวน์โหลดและศึกษาโค้ดเพื่อการวิจัย เรียนรู้ และตรวจสอบความโปร่งใสของระบบได้
+- **การประเมินผลภายใน (Internal Evaluation)**: สามารถทดลองรันเพื่อทดสอบการทำงานภายในองค์กรแบบ Non-production ได้
 
 ---
 
-## License
+### Jurisdiction & Governing Law (เขตอำนาจศาลและกฎหมายที่ใช้บังคับ)
 
-**MicroCode Public License (MPL) v1.0** — See [`LICENSE`](LICENSE) for full terms.
+ข้อกำหนดและสัญญาอนุญาตนี้อยู่ภายใต้บังคับแห่ง **กฎหมายไทย (Thai Law)**:
+- พระราชบัญญัติลิขสิทธิ์ พ.ศ. 2537 และที่แก้ไขเพิ่มเติม
+- ประมวลกฎหมายแพ่งและพาณิชย์
+- พระราชบัญญัติความลับทางการค้า พ.ศ. 2545
 
-This is a **source-available** license designed to protect the creator's rights while fostering open-source collaboration:
-
-| Use Case | Allowed? | Cost |
-|----------|----------|------|
-| 🏠 **Personal / Hobby** | ✅ Free | $0 |
-| 🎓 **Education / Research** | ✅ Free | $0 |
-| 🤝 **Open Source Contributions** | ✅ Free | $0 |
-| 🔍 **Evaluation** (≤ 90 days) | ✅ Free | $0 |
-| 🏢 **Commercial** (Small Biz ≤ ฿10M) | ⚠️ Requires CLA | **0.5% Revenue Share** |
-| 🏬 **Commercial** (Medium ≤ ฿100M) | ⚠️ Requires CLA | **$2,999 / Year (Flat-rate)** |
-| 🏛️ **Commercial** (Enterprise > ฿100M) | ⚠️ Requires CLA | **Contact Sales for Custom License** |
-
-### Commercial License Agreement (CLA)
-
-If you intend to use MicroCode or any derivative work for **commercial purposes** (SaaS, product integration, consulting, etc.), you **must** sign a Commercial License Agreement with the Licensor before deployment:
-
-1. **Contact** → [Dotmini Software](https://github.com/Dotmini) via GitHub
-2. **Negotiate** → Revenue tier + specific terms
-3. **Sign CLA** → Bilateral agreement with quarterly reporting
-4. **Deploy** → Use commercially with full legal protection
-
-> **⚠️ Using MicroCode commercially without a CLA is a violation of copyright law** under the Copyright Act B.E. 2537 (Thailand) and applicable international treaties.
-
-### Jurisdiction
-
-This license is governed by **Thai law** (กฎหมายไทย), including:
-- Copyright Act B.E. 2537 (พ.ร.บ. ลิขสิทธิ์)
-- Civil and Commercial Code (ประมวลกฎหมายแพ่งและพาณิชย์)
-- Trade Secrets Act B.E. 2545 (พ.ร.บ. ความลับทางการค้า)
-
-Disputes are resolved in the courts of **Bangkok, Thailand**.
-
----
-
-## Credits
-
-<table>
-  <tr>
-    <td align="center"><strong>Tirawat Nantamas (ถิรวัฒน์ นันตมาศ)</strong><br/><em>Founder & CEO</em><br/>Dotmini Software</td>
-  </tr>
-</table>
-
-**Academic Partnership**: SPU AI Club — Sripatum University (มหาวิทยาลัยศรีปทุม)
+ข้อพิพาทใดๆ ให้ระงับโดยศาลทรัพย์สินทางปัญญาและการค้าระหว่างประเทศกลาง ณ **กรุงเทพมหานคร ประเทศไทย**
 
 ---
 
 <p align="center">
-  <sub>Built with ❤️ in Thailand 🇹🇭</sub><br/>
-  <sub>Copyright © 2024-2026 Tirawat Nantamas — Dotmini Software</sub>
+  <sub>Developed by Dotmini Company Limited</sub><br/>
+  <sub>Copyright © 2024-2026 Tirawat Nantamas — Dotmini Company Limited (บริษัท ดอทมินิ จำกัด). All rights reserved.</sub>
 </p>
+

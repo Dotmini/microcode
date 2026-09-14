@@ -27,6 +27,8 @@ struct WebSubscriptionLoginSheet: View {
     @State private var isSuccess: Bool = false
     @State private var autoDismissCountdown: Int = 2
     @State private var forceScanTrigger: (() -> Void)? = nil
+    @State private var copilotUserCode: String? = nil
+    @State private var copilotErrorMessage: String? = nil
     
     var body: some View {
         VStack(spacing: 0) {
@@ -104,9 +106,13 @@ struct WebSubscriptionLoginSheet: View {
                     .controlSize(.small)
                 } else {
                     Button(action: {
-                        isScanning = true
-                        statusMessage = "Scanning session & connecting..."
-                        forceScanTrigger?()
+                        if provider == .copilot {
+                            startCopilotFlow()
+                        } else {
+                            isScanning = true
+                            statusMessage = "Scanning session & connecting..."
+                            forceScanTrigger?()
+                        }
                     }) {
                         HStack(spacing: 4) {
                             if isScanning {
@@ -116,7 +122,7 @@ struct WebSubscriptionLoginSheet: View {
                                 Image(systemName: "link.badge.plus")
                                     .font(.system(size: 11))
                             }
-                            Text("Connect Account")
+                            Text(provider == .copilot ? "Request Code" : "Connect Account")
                                 .font(.system(size: 12, weight: .medium))
                         }
                     }
@@ -130,6 +136,47 @@ struct WebSubscriptionLoginSheet: View {
             
             Divider()
             
+            // Copilot Device Code Prompt Banner
+            if provider == .copilot, let code = copilotUserCode, !code.isEmpty {
+                HStack(spacing: 12) {
+                    Image(systemName: "key.fill")
+                        .font(.system(size: 14))
+                        .foregroundColor(.accentColor)
+                    
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text("GITHUB COPILOT VERIFICATION CODE")
+                            .font(.system(size: 9, weight: .bold))
+                            .foregroundColor(.secondary)
+                        
+                        Text(code)
+                            .font(.system(size: 18, weight: .bold, design: .monospaced))
+                            .foregroundColor(.primary)
+                    }
+                    
+                    Spacer()
+                    
+                    Button(action: {
+                        NSPasteboard.general.clearContents()
+                        NSPasteboard.general.setString(code, forType: .string)
+                        statusMessage = "Code \(code) copied! Paste into GitHub below."
+                    }) {
+                        Label("Copy Code", systemImage: "doc.on.doc")
+                            .font(.system(size: 11, weight: .medium))
+                    }
+                    .buttonStyle(.bordered)
+                    .controlSize(.small)
+                    
+                    Text("Paste code into GitHub below & Click 'Continue'")
+                        .font(.system(size: 11))
+                        .foregroundColor(.secondary)
+                }
+                .padding(.horizontal, 16)
+                .padding(.vertical, 8)
+                .background(Color.accentColor.opacity(0.08))
+                
+                Divider()
+            }
+            
             // WebKit WebView Container
             ZStack {
                 SubscriptionWKWebViewRepresentable(
@@ -139,6 +186,7 @@ struct WebSubscriptionLoginSheet: View {
                     pageTitle: $pageTitle,
                     currentURL: $currentURL,
                     canGoBack: $canGoBack,
+                    copilotUserCode: $copilotUserCode,
                     onTokenDetected: { token, user in
                         handleTokenDetected(token: token, user: user)
                     },
@@ -213,6 +261,35 @@ struct WebSubscriptionLoginSheet: View {
             .background(Color(nsColor: .windowBackgroundColor).opacity(0.85))
         }
         .frame(minWidth: 720, idealWidth: 840, maxWidth: 960, minHeight: 640, idealHeight: 740, maxHeight: 860)
+        .onAppear {
+            if provider == .copilot {
+                startCopilotFlow()
+            }
+        }
+    }
+    
+    private func startCopilotFlow() {
+        guard !isSuccess else { return }
+        isScanning = true
+        statusMessage = "Requesting device code from GitHub..."
+        SubscriptionAuthManager.shared.startCopilotDeviceFlow(
+            onUserCode: { code, verifyUrl in
+                self.copilotUserCode = code
+                self.statusMessage = "Code \(code) copied to clipboard! Authorize below."
+                self.isScanning = false
+                if let wv = self.webView {
+                    wv.load(URLRequest(url: verifyUrl))
+                }
+            },
+            onSuccess: { account in
+                handleTokenDetected(token: account.sessionToken, user: account.emailOrUser)
+            },
+            onError: { err in
+                self.isScanning = false
+                self.copilotErrorMessage = err
+                self.statusMessage = "GitHub Copilot: \(err)"
+            }
+        )
     }
     
     private func handleTokenDetected(token: String, user: String?) {
@@ -254,6 +331,7 @@ private struct SubscriptionWKWebViewRepresentable: NSViewRepresentable {
     @Binding var pageTitle: String
     @Binding var currentURL: URL?
     @Binding var canGoBack: Bool
+    @Binding var copilotUserCode: String?
     let onTokenDetected: (String, String?) -> Void
     let bindScanTrigger: (@escaping () -> Void) -> Void
     
@@ -419,13 +497,8 @@ private struct SubscriptionWKWebViewRepresentable: NSViewRepresentable {
                     }
                     
                 case .copilot:
-                    if let cookie = cookies.first(where: { ($0.name == "user_session" || $0.name == "dotcom_user") && !$0.value.isEmpty }) {
-                        self.isFound = true
-                        DispatchQueue.main.async {
-                            self.parent.onTokenDetected(cookie.value, "GitHub Copilot User")
-                        }
-                        return
-                    }
+                    // Handled exclusively by GitHub Device Flow to obtain official OAuth token (client 01ab8ac9400c4e429b23)
+                    break
                     
                 case .glm:
                     if let cookie = cookies.first(where: { $0.name == "token" && !$0.value.isEmpty }) {
@@ -562,6 +635,21 @@ private struct SubscriptionWKWebViewRepresentable: NSViewRepresentable {
                 self.parent.pageTitle = webView.title ?? ""
                 self.parent.currentURL = webView.url
                 self.parent.canGoBack = webView.canGoBack
+            }
+            if self.parent.provider == .copilot,
+               let code = self.parent.copilotUserCode, !code.isEmpty,
+               let url = webView.url, url.absoluteString.contains("github.com/login/device") {
+                let js = """
+                (function() {
+                    const input = document.getElementById('user_code') || document.querySelector('input[name="user_code"]');
+                    if (input && !input.value) {
+                        input.value = '\(code)';
+                        input.dispatchEvent(new Event('input', { bubbles: true }));
+                        input.dispatchEvent(new Event('change', { bubbles: true }));
+                    }
+                })();
+                """
+                webView.evaluateJavaScript(js, completionHandler: nil)
             }
             scanAll(webView: webView)
         }

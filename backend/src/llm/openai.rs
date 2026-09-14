@@ -2,7 +2,7 @@
 //!
 //! Handles /v1/chat/completions for GPT-4o, Codex, o-series
 //!
-//! Copyright © 2025 SPU AI CLUB — Dotmini Software
+//! Copyright © 2024-2026 Dotmini Company Limited
 
 use super::{ChatMessage, LlmError, LlmProvider, McpContext};
 use async_trait::async_trait;

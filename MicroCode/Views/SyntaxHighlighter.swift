@@ -3,7 +3,7 @@
 //  MicroCode
 //
 //  Swift Playgrounds-style syntax highlighting
-//  Copyright © 2025 SPU AI CLUB. All rights reserved.
+//  Copyright © 2025 Dotmini Company Limited. All rights reserved.
 //
 
 import SwiftUI

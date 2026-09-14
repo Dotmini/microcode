@@ -367,12 +367,11 @@ cargo build --release
 
 ## 📝 License
 
-MIT License - See LICENSE file for details
+Elastic License v2 (ELv2) & BSL - See LICENSE and README.md for details
 
 ---
 
-**Version**: 2.0.0  
-**Last Updated**: December 2024  
-**Maintained by**: SPU AI CLUB  
+**Version**: 2.0.1  
+**Maintained by**: Dotmini Company Limited (Tirawat Nantamas)  
 
-Made with ❤️ and ☕
+Made with ❤️ by Dotmini Company Limited

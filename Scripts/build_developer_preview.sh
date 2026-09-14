@@ -2,7 +2,21 @@
 set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-APP_PATH="${APP_PATH:-/Volumes/MicroCodeBuild/apps/MicroCode.app}"
+if [ -z "${APP_PATH:-}" ]; then
+  if [ -d "$ROOT_DIR/build/apps/MicroCode.app" ]; then
+    APP_PATH="$ROOT_DIR/build/apps/MicroCode.app"
+  elif [ -d "$ROOT_DIR/.build/apps/MicroCode.app" ]; then
+    APP_PATH="$ROOT_DIR/.build/apps/MicroCode.app"
+  elif [ -d "$ROOT_DIR/MicroCode.app" ]; then
+    APP_PATH="$ROOT_DIR/MicroCode.app"
+  elif [ -d "$HOME/Applications/MicroCode.app" ]; then
+    APP_PATH="$HOME/Applications/MicroCode.app"
+  elif [ -d "/Volumes/MicroCodeBuild/apps/MicroCode.app" ]; then
+    APP_PATH="/Volumes/MicroCodeBuild/apps/MicroCode.app"
+  else
+    APP_PATH="$ROOT_DIR/build/apps/MicroCode.app"
+  fi
+fi
 OUTPUT_DIR="${OUTPUT_DIR:-$ROOT_DIR/Dist/DeveloperPreview}"
 RESOURCES_DIR="$ROOT_DIR/Installer/DeveloperPreview"
 APP_NAME="MicroCode"
@@ -45,7 +59,7 @@ assert_no_embedded_secrets
 VERSION="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$APP_PATH/Contents/Info.plist")"
 BUILD="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleVersion' "$APP_PATH/Contents/Info.plist")"
 RELEASE_NAME="$APP_NAME-$VERSION-DeveloperPreview"
-WORK_DIR="$(mktemp -d /tmp/microcode-preview.XXXXXX)"
+WORK_DIR="$(mktemp -d "${TMPDIR:-/tmp}/microcode-preview.XXXXXX")"
 trap 'rm -rf "$WORK_DIR"' EXIT
 
 mkdir -p "$OUTPUT_DIR/packages" "$OUTPUT_DIR/dmg"
@@ -81,6 +95,11 @@ cp "$OUTPUT_DIR/$RELEASE_NAME.pkg" "$DMG_STAGE/Install $APP_NAME Developer Previ
 cp "$RESOURCES_DIR/ReadMe.html" "$DMG_STAGE/Read Me.html"
 ln -s /Applications "$DMG_STAGE/Applications"
 hdiutil create -volname "$APP_NAME Developer Preview" -srcfolder "$DMG_STAGE" -ov -format UDZO "$OUTPUT_DIR/$RELEASE_NAME.dmg" >/dev/null
+
+if security find-identity -v -p codesigning | grep -q "Apple Development: business@dotmini.net (A58QB9B355)"; then
+  echo "Signing DMG with Apple Development certificate..."
+  codesign --force --sign "Apple Development: business@dotmini.net (A58QB9B355)" "$OUTPUT_DIR/$RELEASE_NAME.dmg"
+fi
 
 codesign --verify --deep --strict --verbose=2 "$APP_PATH"
 pkgutil --check-signature "$OUTPUT_DIR/$RELEASE_NAME.pkg" || true

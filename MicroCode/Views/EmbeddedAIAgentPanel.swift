@@ -5,7 +5,7 @@
 //  Dedicated Hardware & Firmware AI Agent for Embedded Studio
 //  Context-aware: understands Target Board, Serial Ports, FreeRTOS, ESP-IDF, Pinouts, and Compiler Logs
 //
-//  Created by SPU AI CLUB - Dotmini Software
+//  Created by Dotmini Company Limited
 //  Monochrome Minimalist Black & White Xcode Pro Style
 //
 
@@ -161,6 +161,14 @@ struct EmbeddedAIAgentPanel: View {
     @State private var attachHardwareContext: Bool = true
     @FocusState private var isInputFocused: Bool
     
+    private var isDark: Bool { appState.appTheme.isDark }
+    private var panelBg: Color { isDark ? Color.black : Color(white: 0.98) }
+    private var headerBg: Color { isDark ? Color(white: 0.05) : Color(white: 0.93) }
+    private var stripBg: Color { isDark ? Color(white: 0.03) : Color(white: 0.95) }
+    private var cardBg: Color { isDark ? Color.white.opacity(0.04) : Color.black.opacity(0.04) }
+    private var cardBorderColor: Color { isDark ? Color.white.opacity(0.10) : Color.black.opacity(0.10) }
+    private var dividerLineColor: Color { isDark ? Color.white.opacity(0.08) : Color.black.opacity(0.08) }
+    
     // Dynamic suggestions based on current hardware and compilation state
     private var suggestions: [EmbeddedAISuggestion] {
         var list: [EmbeddedAISuggestion] = []
@@ -216,26 +224,26 @@ struct EmbeddedAIAgentPanel: View {
             // Header Bar
             panelHeader
             
-            Rectangle().fill(Color.white.opacity(0.08)).frame(height: 1)
+            Rectangle().fill(dividerLineColor).frame(height: 1)
             
             // Live Hardware Context Strip
             hardwareContextStrip
             
-            Rectangle().fill(Color.white.opacity(0.06)).frame(height: 1)
+            Rectangle().fill(dividerLineColor).frame(height: 1)
             
             // Notification pill (e.g. "Sketch Replaced!")
             if let notice = viewModel.lastAppliedNotice {
                 HStack(spacing: 6) {
                     Image(systemName: "checkmark.circle.fill")
-                        .foregroundColor(.white)
+                        .foregroundColor(isDark ? .white : .black)
                     Text(notice)
                         .font(.system(size: 9.5, weight: .bold, design: .monospaced))
-                        .foregroundColor(.white)
+                        .foregroundColor(isDark ? .white : .black)
                     Spacer()
                 }
                 .padding(.horizontal, 12)
                 .padding(.vertical, 6)
-                .background(Color.white.opacity(0.12))
+                .background(isDark ? Color.white.opacity(0.12) : Color.black.opacity(0.08))
                 .transition(.opacity)
             }
             
@@ -252,6 +260,7 @@ struct EmbeddedAIAgentPanel: View {
                                 EmbeddedAIMessageRow(
                                     message: msg,
                                     isLoading: viewModel.isLoading,
+                                    isDark: isDark,
                                     onReplaceSketch: { code in
                                         editorSourceCode = code
                                         envManager.analyzeIncludes(code: code)
@@ -276,7 +285,7 @@ struct EmbeddedAIAgentPanel: View {
                                     .frame(width: 14, height: 14)
                                 Text(viewModel.currentStatus.isEmpty ? "Generating embedded solution..." : viewModel.currentStatus)
                                     .font(.system(size: 10.5, design: .monospaced))
-                                    .foregroundColor(Color(white: 0.7))
+                                    .foregroundColor(isDark ? Color(white: 0.7) : Color(white: 0.3))
                                 Spacer()
                             }
                             .padding(.horizontal, 14)
@@ -312,13 +321,13 @@ struct EmbeddedAIAgentPanel: View {
             // Quick Suggestion Chips (horizontal scroll - only show when conversation has started)
             if !viewModel.messages.isEmpty {
                 quickSuggestionsBar
-                Rectangle().fill(Color.white.opacity(0.08)).frame(height: 1)
+                Rectangle().fill(dividerLineColor).frame(height: 1)
             }
             
             // Prompt Input Bar
             promptInputBar
         }
-        .background(Color.black)
+        .background(panelBg)
     }
     
     // MARK: - Header
@@ -327,11 +336,18 @@ struct EmbeddedAIAgentPanel: View {
         HStack(spacing: 8) {
             Image(systemName: "brain.head.profile.fill")
                 .font(.system(size: 12))
-                .foregroundColor(.white)
+                .foregroundColor(isDark ? .white : .black)
             
             Text("EMBEDDED AI AGENT")
                 .font(.system(size: 10, weight: .bold, design: .monospaced))
-                .foregroundColor(.white)
+                .foregroundColor(isDark ? .white : .black)
+            
+            if ProjectMemoryService.shared.isLoaded {
+                Circle()
+                    .fill(Color.green)
+                    .frame(width: 6, height: 6)
+                    .help("Project Memory Loaded")
+            }
             
             Spacer()
             
@@ -347,7 +363,7 @@ struct EmbeddedAIAgentPanel: View {
             }) {
                 Image(systemName: "trash")
                     .font(.system(size: 10))
-                    .foregroundColor(Color(white: 0.5))
+                    .foregroundColor(isDark ? Color(white: 0.5) : Color(white: 0.5))
                     .frame(width: 20, height: 20)
             }
             .buttonStyle(.plain)
@@ -361,7 +377,7 @@ struct EmbeddedAIAgentPanel: View {
             }) {
                 Image(systemName: "xmark")
                     .font(.system(size: 10, weight: .bold))
-                    .foregroundColor(Color(white: 0.6))
+                    .foregroundColor(isDark ? Color(white: 0.6) : Color(white: 0.4))
                     .frame(width: 20, height: 20)
             }
             .buttonStyle(.plain)
@@ -369,7 +385,7 @@ struct EmbeddedAIAgentPanel: View {
         }
         .padding(.horizontal, 12)
         .padding(.vertical, 8)
-        .background(Color(white: 0.05))
+        .background(headerBg)
     }
     
     private var modelSelectorMenu: some View {
@@ -440,16 +456,17 @@ struct EmbeddedAIAgentPanel: View {
             HStack(spacing: 4) {
                 Text(shortModelName(currentModelName).uppercased())
                     .font(.system(size: 8, weight: .bold, design: .monospaced))
-                    .foregroundColor(Color(white: 0.8))
+                    .foregroundColor(isDark ? Color(white: 0.8) : Color(white: 0.2))
                     .lineLimit(1)
                 Image(systemName: "chevron.down")
                     .font(.system(size: 7, weight: .semibold))
-                    .foregroundColor(Color(white: 0.5))
+                    .foregroundColor(isDark ? Color(white: 0.5) : Color(white: 0.5))
             }
             .padding(.horizontal, 6)
             .padding(.vertical, 3)
-            .background(Color.white.opacity(0.08))
+            .background(cardBg)
             .cornerRadius(4)
+            .overlay(RoundedRectangle(cornerRadius: 4).stroke(cardBorderColor, lineWidth: 1))
         }
         .menuStyle(.borderlessButton)
         .help("Switch AI Model")
@@ -501,7 +518,7 @@ struct EmbeddedAIAgentPanel: View {
             .padding(.horizontal, 12)
             .padding(.vertical, 6)
         }
-        .background(Color(white: 0.03))
+        .background(stripBg)
     }
     
     private func contextPill(icon: String, text: String, highlight: Bool) -> some View {
@@ -514,10 +531,10 @@ struct EmbeddedAIAgentPanel: View {
         }
         .padding(.horizontal, 6)
         .padding(.vertical, 3)
-        .background(highlight ? Color.white.opacity(0.12) : Color.white.opacity(0.05))
-        .foregroundColor(highlight ? .white : Color(white: 0.7))
+        .background(highlight ? (isDark ? Color.white.opacity(0.12) : Color.black.opacity(0.1)) : cardBg)
+        .foregroundColor(highlight ? (isDark ? .white : .black) : (isDark ? Color(white: 0.7) : Color(white: 0.3)))
         .cornerRadius(3)
-        .overlay(RoundedRectangle(cornerRadius: 3).stroke(Color.white.opacity(highlight ? 0.25 : 0.08), lineWidth: 1))
+        .overlay(RoundedRectangle(cornerRadius: 3).stroke(cardBorderColor, lineWidth: 1))
     }
     
     // MARK: - Empty State View
@@ -528,21 +545,21 @@ struct EmbeddedAIAgentPanel: View {
             
             ZStack {
                 Circle()
-                    .fill(Color.white.opacity(0.04))
+                    .fill(cardBg)
                     .frame(width: 54, height: 54)
                 Image(systemName: "brain.head.profile.fill")
                     .font(.system(size: 26))
-                    .foregroundColor(Color(white: 0.7))
+                    .foregroundColor(isDark ? Color(white: 0.7) : Color(white: 0.3))
             }
             
             VStack(spacing: 4) {
                 Text("Embedded Systems Copilot")
                     .font(.system(size: 12, weight: .bold, design: .monospaced))
-                    .foregroundColor(.white)
+                    .foregroundColor(isDark ? .white : .black)
                 
                 Text("Specialized firmware, FreeRTOS, and peripheral engineering for \(selectedBoard.rawValue)")
                     .font(.system(size: 9.5, design: .monospaced))
-                    .foregroundColor(Color(white: 0.5))
+                    .foregroundColor(isDark ? Color(white: 0.5) : Color(white: 0.5))
                     .multilineTextAlignment(.center)
                     .padding(.horizontal, 16)
             }
@@ -550,7 +567,7 @@ struct EmbeddedAIAgentPanel: View {
             VStack(alignment: .leading, spacing: 6) {
                 Text("POPULAR TASKS:")
                     .font(.system(size: 8, weight: .bold, design: .monospaced))
-                    .foregroundColor(Color(white: 0.4))
+                    .foregroundColor(isDark ? Color(white: 0.4) : Color(white: 0.5))
                 
                 ForEach(suggestions.prefix(4)) { sug in
                     Button(action: {
@@ -559,20 +576,20 @@ struct EmbeddedAIAgentPanel: View {
                         HStack(spacing: 6) {
                             Image(systemName: sug.icon)
                                 .font(.system(size: 9))
-                                .foregroundColor(.white)
+                                .foregroundColor(isDark ? .white : .black)
                             Text(sug.text)
                                 .font(.system(size: 9.5, design: .monospaced))
-                                .foregroundColor(Color(white: 0.85))
+                                .foregroundColor(isDark ? Color(white: 0.85) : Color(white: 0.15))
                             Spacer()
                             Image(systemName: "arrow.up.right")
                                 .font(.system(size: 8))
-                                .foregroundColor(Color(white: 0.4))
+                                .foregroundColor(isDark ? Color(white: 0.4) : Color(white: 0.5))
                         }
                         .padding(.horizontal, 10)
                         .padding(.vertical, 7)
-                        .background(Color.white.opacity(0.04))
+                        .background(cardBg)
                         .cornerRadius(4)
-                        .overlay(RoundedRectangle(cornerRadius: 4).stroke(Color.white.opacity(0.08), lineWidth: 1))
+                        .overlay(RoundedRectangle(cornerRadius: 4).stroke(cardBorderColor, lineWidth: 1))
                     }
                     .buttonStyle(.plain)
                 }
@@ -595,15 +612,16 @@ struct EmbeddedAIAgentPanel: View {
                         HStack(spacing: 4) {
                             Image(systemName: sug.icon)
                                 .font(.system(size: 8))
+                                .foregroundColor(isDark ? .white : .black)
                             Text(sug.text)
                                 .font(.system(size: 8.5, weight: .medium, design: .monospaced))
                         }
                         .padding(.horizontal, 8)
                         .padding(.vertical, 4)
-                        .background(Color.white.opacity(0.06))
-                        .foregroundColor(Color(white: 0.85))
+                        .background(cardBg)
+                        .foregroundColor(isDark ? Color(white: 0.85) : Color(white: 0.15))
                         .cornerRadius(3)
-                        .overlay(RoundedRectangle(cornerRadius: 3).stroke(Color.white.opacity(0.12), lineWidth: 1))
+                        .overlay(RoundedRectangle(cornerRadius: 3).stroke(cardBorderColor, lineWidth: 1))
                     }
                     .buttonStyle(.plain)
                 }
@@ -611,7 +629,7 @@ struct EmbeddedAIAgentPanel: View {
             .padding(.horizontal, 12)
             .padding(.vertical, 6)
         }
-        .background(Color(white: 0.03))
+        .background(stripBg)
     }
     
     // MARK: - Prompt Input Bar
@@ -625,7 +643,7 @@ struct EmbeddedAIAgentPanel: View {
                     TextField("Ask Embedded Copilot (e.g. debug register, decode crash)...", text: $inputText, axis: .vertical)
                         .textFieldStyle(.plain)
                         .font(.system(size: 11.5, design: .monospaced))
-                        .foregroundColor(.white)
+                        .foregroundColor(isDark ? .white : .black)
                         .lineLimit(1...5)
                         .focused($isInputFocused)
                         .padding(.horizontal, 8)
@@ -639,7 +657,7 @@ struct EmbeddedAIAgentPanel: View {
                     TextField("Ask Embedded Copilot (e.g. debug register, decode crash)...", text: $inputText)
                         .textFieldStyle(.plain)
                         .font(.system(size: 11.5, design: .monospaced))
-                        .foregroundColor(.white)
+                        .foregroundColor(isDark ? .white : .black)
                         .focused($isInputFocused)
                         .padding(.horizontal, 8)
                         .padding(.top, 8)
@@ -659,7 +677,7 @@ struct EmbeddedAIAgentPanel: View {
                         HStack(spacing: 4) {
                             Image(systemName: attachHardwareContext ? "checkmark.circle.fill" : "circle")
                                 .font(.system(size: 8))
-                                .foregroundColor(attachHardwareContext ? .white : Color(white: 0.4))
+                                .foregroundColor(attachHardwareContext ? (isDark ? .white : .black) : (isDark ? Color(white: 0.4) : Color(white: 0.5)))
                             
                             Image(systemName: "paperclip")
                                 .font(.system(size: 8))
@@ -667,14 +685,14 @@ struct EmbeddedAIAgentPanel: View {
                             Text("Attach Context")
                                 .font(.system(size: 8.5, weight: .medium, design: .monospaced))
                         }
-                        .foregroundColor(attachHardwareContext ? .white : Color(white: 0.5))
+                        .foregroundColor(attachHardwareContext ? (isDark ? .white : .black) : (isDark ? Color(white: 0.5) : Color(white: 0.5)))
                         .padding(.horizontal, 6)
                         .padding(.vertical, 3)
-                        .background(attachHardwareContext ? Color.white.opacity(0.12) : Color.white.opacity(0.04))
+                        .background(attachHardwareContext ? (isDark ? Color.white.opacity(0.12) : Color.black.opacity(0.08)) : cardBg)
                         .cornerRadius(3)
                         .overlay(
                             RoundedRectangle(cornerRadius: 3)
-                                .stroke(Color.white.opacity(attachHardwareContext ? 0.25 : 0.08), lineWidth: 1)
+                                .stroke(cardBorderColor, lineWidth: 1)
                         )
                     }
                     .buttonStyle(.plain)
@@ -685,7 +703,7 @@ struct EmbeddedAIAgentPanel: View {
                     // Keyboard hint
                     Text("↵ Send")
                         .font(.system(size: 8, weight: .medium, design: .monospaced))
-                        .foregroundColor(Color(white: 0.3))
+                        .foregroundColor(isDark ? Color(white: 0.3) : Color(white: 0.6))
                     
                     // Send / Stop Button
                     if viewModel.isLoading {
@@ -715,11 +733,11 @@ struct EmbeddedAIAgentPanel: View {
                         }) {
                             ZStack {
                                 Circle()
-                                    .fill(hasText ? Color.white : Color.white.opacity(0.1))
+                                    .fill(hasText ? (isDark ? Color.white : Color.black) : (isDark ? Color.white.opacity(0.1) : Color.black.opacity(0.1)))
                                     .frame(width: 22, height: 22)
                                 Image(systemName: "arrow.up")
                                     .font(.system(size: 10, weight: .bold))
-                                    .foregroundColor(hasText ? .black : Color(white: 0.35))
+                                    .foregroundColor(hasText ? (isDark ? .black : .white) : (isDark ? Color(white: 0.35) : Color(white: 0.6)))
                             }
                         }
                         .buttonStyle(.plain)
@@ -730,16 +748,16 @@ struct EmbeddedAIAgentPanel: View {
                 .padding(.horizontal, 8)
                 .padding(.bottom, 6)
             }
-            .background(Color(white: 0.07))
+            .background(isDark ? Color(white: 0.07) : Color.white)
             .cornerRadius(6)
             .overlay(
                 RoundedRectangle(cornerRadius: 6)
-                    .stroke(isInputFocused ? Color.white.opacity(0.35) : Color.white.opacity(0.12), lineWidth: 1)
+                    .stroke(isInputFocused ? (isDark ? Color.white.opacity(0.35) : Color.black.opacity(0.35)) : cardBorderColor, lineWidth: 1)
             )
             .padding(.horizontal, 10)
             .padding(.vertical, 8)
         }
-        .background(Color(white: 0.04))
+        .background(stripBg)
     }
     
     // MARK: - Actions
@@ -837,6 +855,7 @@ struct EmbeddedAIAgentPanel: View {
 struct EmbeddedAIMessageRow: View {
     let message: EmbeddedAIMessage
     var isLoading: Bool = false
+    var isDark: Bool = true
     let onReplaceSketch: (String) -> Void
     let onAppendSketch: (String) -> Void
     
@@ -846,22 +865,22 @@ struct EmbeddedAIMessageRow: View {
                 Spacer(minLength: 30)
                 Text(message.content)
                     .font(.system(size: 11, design: .monospaced))
-                    .foregroundColor(.white)
+                    .foregroundColor(isDark ? .white : .black)
                     .padding(.horizontal, 10)
                     .padding(.vertical, 8)
-                    .background(Color.white.opacity(0.14))
+                    .background(isDark ? Color.white.opacity(0.14) : Color.black.opacity(0.08))
                     .cornerRadius(6)
-                    .overlay(RoundedRectangle(cornerRadius: 6).stroke(Color.white.opacity(0.2), lineWidth: 1))
+                    .overlay(RoundedRectangle(cornerRadius: 6).stroke(isDark ? Color.white.opacity(0.2) : Color.black.opacity(0.15), lineWidth: 1))
             }
         } else {
             VStack(alignment: .leading, spacing: 8) {
                 HStack(spacing: 5) {
                     Image(systemName: "brain.head.profile.fill")
                         .font(.system(size: 10))
-                        .foregroundColor(.white)
+                        .foregroundColor(isDark ? .white : .black)
                     Text("EMBEDDED COPILOT")
                         .font(.system(size: 8.5, weight: .bold, design: .monospaced))
-                        .foregroundColor(Color(white: 0.6))
+                        .foregroundColor(isDark ? Color(white: 0.6) : Color(white: 0.4))
                     Spacer()
                 }
                 
@@ -873,17 +892,17 @@ struct EmbeddedAIMessageRow: View {
                                 .frame(width: 14, height: 14)
                             Text("Synthesizing hardware architecture & firmware...")
                                 .font(.system(size: 10.5, design: .monospaced))
-                                .foregroundColor(Color(white: 0.6))
+                                .foregroundColor(isDark ? Color(white: 0.6) : Color(white: 0.4))
                         }
                         .padding(.vertical, 4)
                     } else {
                         HStack(spacing: 6) {
                             Image(systemName: "exclamationmark.triangle")
                                 .font(.system(size: 11))
-                                .foregroundColor(Color(white: 0.6))
+                                .foregroundColor(isDark ? Color(white: 0.6) : Color(white: 0.4))
                             Text("No response received from AI model.")
                                 .font(.system(size: 10.5, design: .monospaced))
-                                .foregroundColor(Color(white: 0.6))
+                                .foregroundColor(isDark ? Color(white: 0.6) : Color(white: 0.4))
                         }
                         .padding(.vertical, 4)
                     }
@@ -892,7 +911,7 @@ struct EmbeddedAIMessageRow: View {
                     if blocks.isEmpty {
                         Text(message.content)
                             .font(.system(size: 11, design: .monospaced))
-                            .foregroundColor(Color(white: 0.9))
+                            .foregroundColor(isDark ? Color(white: 0.9) : Color(white: 0.1))
                             .textSelection(.enabled)
                     } else {
                         ForEach(blocks) { block in
@@ -903,36 +922,37 @@ struct EmbeddedAIMessageRow: View {
                                 if !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
                                     Text(text)
                                         .font(.system(size: 11, design: .monospaced))
-                                        .foregroundColor(Color(white: 0.9))
+                                        .foregroundColor(isDark ? Color(white: 0.9) : Color(white: 0.1))
                                         .textSelection(.enabled)
                                 }
                             case .code(let lang, let code):
                                 EmbeddedAICodeBlockView(
                                     language: lang,
                                     code: code,
+                                    isDark: isDark,
                                     onReplace: { onReplaceSketch(code) },
                                     onAppend: { onAppendSketch(code) }
                                 )
                             case .heading(let level, let content):
                                 Text(content)
                                     .font(.system(size: level <= 2 ? 12 : 11, weight: .bold, design: .monospaced))
-                                    .foregroundColor(.white)
+                                    .foregroundColor(isDark ? .white : .black)
                             case .list(let items, _):
                                 VStack(alignment: .leading, spacing: 3) {
                                     ForEach(items, id: \.self) { item in
                                         HStack(alignment: .top, spacing: 5) {
                                             Text("•")
-                                                .foregroundColor(Color(white: 0.5))
+                                                .foregroundColor(isDark ? Color(white: 0.5) : Color(white: 0.5))
                                             Text(item)
                                                 .font(.system(size: 10.5, design: .monospaced))
-                                                .foregroundColor(Color(white: 0.85))
+                                                .foregroundColor(isDark ? Color(white: 0.85) : Color(white: 0.15))
                                         }
                                     }
                                 }
                             default:
                                 Text(message.content)
                                     .font(.system(size: 11, design: .monospaced))
-                                    .foregroundColor(Color(white: 0.9))
+                                    .foregroundColor(isDark ? Color(white: 0.9) : Color(white: 0.1))
                                     .textSelection(.enabled)
                             }
                         }
@@ -940,9 +960,9 @@ struct EmbeddedAIMessageRow: View {
                 }
             }
             .padding(10)
-            .background(Color.white.opacity(0.04))
+            .background(isDark ? Color.white.opacity(0.04) : Color.black.opacity(0.03))
             .cornerRadius(6)
-            .overlay(RoundedRectangle(cornerRadius: 6).stroke(Color.white.opacity(0.08), lineWidth: 1))
+            .overlay(RoundedRectangle(cornerRadius: 6).stroke(isDark ? Color.white.opacity(0.08) : Color.black.opacity(0.08), lineWidth: 1))
         }
     }
 }
@@ -952,6 +972,7 @@ struct EmbeddedAIMessageRow: View {
 struct EmbeddedAICodeBlockView: View {
     let language: String
     let code: String
+    var isDark: Bool = true
     let onReplace: () -> Void
     let onAppend: () -> Void
     
@@ -965,10 +986,10 @@ struct EmbeddedAICodeBlockView: View {
             HStack(spacing: 6) {
                 Text(language.isEmpty ? "C++" : language.uppercased())
                     .font(.system(size: 8, weight: .bold, design: .monospaced))
-                    .foregroundColor(Color(white: 0.6))
+                    .foregroundColor(isDark ? Color(white: 0.6) : Color(white: 0.4))
                     .padding(.horizontal, 5)
                     .padding(.vertical, 2)
-                    .background(Color.white.opacity(0.08))
+                    .background(isDark ? Color.white.opacity(0.08) : Color.black.opacity(0.05))
                     .cornerRadius(2)
                 
                 Spacer()
@@ -987,8 +1008,8 @@ struct EmbeddedAICodeBlockView: View {
                     }
                     .padding(.horizontal, 6)
                     .padding(.vertical, 3)
-                    .background(isReplaced ? Color.white : Color.white.opacity(0.12))
-                    .foregroundColor(isReplaced ? .black : .white)
+                    .background(isReplaced ? (isDark ? Color.white : Color.black) : (isDark ? Color.white.opacity(0.12) : Color.black.opacity(0.08)))
+                    .foregroundColor(isReplaced ? (isDark ? .black : .white) : (isDark ? .white : .black))
                     .cornerRadius(3)
                 }
                 .buttonStyle(.plain)
@@ -1008,8 +1029,8 @@ struct EmbeddedAICodeBlockView: View {
                     }
                     .padding(.horizontal, 6)
                     .padding(.vertical, 3)
-                    .background(Color.white.opacity(0.06))
-                    .foregroundColor(Color(white: 0.8))
+                    .background(isDark ? Color.white.opacity(0.06) : Color.black.opacity(0.05))
+                    .foregroundColor(isDark ? Color(white: 0.8) : Color(white: 0.2))
                     .cornerRadius(3)
                 }
                 .buttonStyle(.plain)
@@ -1024,7 +1045,7 @@ struct EmbeddedAICodeBlockView: View {
                 }) {
                     Image(systemName: isCopied ? "checkmark" : "doc.on.doc")
                         .font(.system(size: 9))
-                        .foregroundColor(isCopied ? .white : Color(white: 0.5))
+                        .foregroundColor(isCopied ? (isDark ? .white : .black) : (isDark ? Color(white: 0.5) : Color(white: 0.5)))
                         .frame(width: 20, height: 20)
                 }
                 .buttonStyle(.plain)
@@ -1032,21 +1053,21 @@ struct EmbeddedAICodeBlockView: View {
             }
             .padding(.horizontal, 8)
             .padding(.vertical, 5)
-            .background(Color.white.opacity(0.06))
+            .background(isDark ? Color.white.opacity(0.06) : Color.black.opacity(0.04))
             
-            Rectangle().fill(Color.white.opacity(0.08)).frame(height: 1)
+            Rectangle().fill(isDark ? Color.white.opacity(0.08) : Color.black.opacity(0.08)).frame(height: 1)
             
             // Code text
             ScrollView(.horizontal, showsIndicators: false) {
                 Text(code)
                     .font(.system(size: 10.5, design: .monospaced))
-                    .foregroundColor(Color(white: 0.95))
+                    .foregroundColor(isDark ? Color(white: 0.95) : Color(white: 0.1))
                     .textSelection(.enabled)
                     .padding(8)
             }
         }
-        .background(Color.black)
+        .background(isDark ? Color.black : Color(white: 0.95))
         .cornerRadius(4)
-        .overlay(RoundedRectangle(cornerRadius: 4).stroke(Color.white.opacity(0.15), lineWidth: 1))
+        .overlay(RoundedRectangle(cornerRadius: 4).stroke(isDark ? Color.white.opacity(0.15) : Color.black.opacity(0.15), lineWidth: 1))
     }
 }

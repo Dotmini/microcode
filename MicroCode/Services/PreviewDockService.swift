@@ -5,7 +5,7 @@
 //  Universal Multi-Purpose Right-Hand Preview Dock Service
 //  Manages multi-tab preview sessions for Web, Simulators, Images, PDFs, Spreadsheets, and arbitrary files.
 //
-//  Copyright © 2026 AIPRENEUR. All rights reserved.
+//  Copyright © 2026 Dotmini Company Limited. All rights reserved.
 //
 
 import Foundation
@@ -77,17 +77,14 @@ public final class PreviewDockService: ObservableObject {
     
     // Quick comment dispatched from Image region selection into Agent Chat
     @Published public var pendingRegionComment: String? = nil
-    
     private init() {
-        // Default standard runtime tabs
+        // Default standard runtime tabs - Web preview first, followed by iOS and Android
         openTabs = [
-            PreviewDockTabItem(id: "android", title: "Android Emu", icon: "candybarphone", kind: .android, isClosable: false, url: nil),
-            PreviewDockTabItem(id: "android-physical", title: "Android USB", icon: "cable.connector", kind: .androidPhysical, isClosable: false, url: nil),
-            PreviewDockTabItem(id: "ios", title: "iOS Sim", icon: "iphone", kind: .ios, isClosable: false, url: nil),
-            PreviewDockTabItem(id: "ios-physical", title: "iPhone USB", icon: "cable.connector", kind: .iOSPhysical, isClosable: false, url: nil),
-            PreviewDockTabItem(id: "web", title: "Web", icon: "globe", kind: .web, isClosable: false, url: nil)
+            PreviewDockTabItem(id: "web", title: "WebApp Preview", icon: "globe", kind: .web, isClosable: true, url: nil),
+            PreviewDockTabItem(id: "ios", title: "iOS Sim", icon: "iphone", kind: .ios, isClosable: true, url: nil),
+            PreviewDockTabItem(id: "android", title: "Android Emu", icon: "candybarphone", kind: .android, isClosable: true, url: nil)
         ]
-        activeTabId = "android"
+        activeTabId = "web"
     }
     
     public var activeTab: PreviewDockTabItem? {
@@ -95,11 +92,37 @@ public final class PreviewDockService: ObservableObject {
     }
     
     public func selectTab(id: String) {
-        if openTabs.contains(where: { $0.id == id }) {
-            activeTabId = id
-            isDockVisible = true
-            DeviceRuntimeService.shared.showingEmbeddedDeviceDock = true
-            syncWithDeviceRuntime()
+        if !openTabs.contains(where: { $0.id == id }) {
+            // Re-open standard known tabs if they were previously closed
+            switch id {
+            case "android":
+                openTabs.append(PreviewDockTabItem(id: "android", title: "Android Emu", icon: "candybarphone", kind: .android, isClosable: true, url: nil))
+            case "ios":
+                openTabs.append(PreviewDockTabItem(id: "ios", title: "iOS Sim", icon: "iphone", kind: .ios, isClosable: true, url: nil))
+            case "web":
+                openTabs.append(PreviewDockTabItem(id: "web", title: "Web", icon: "globe", kind: .web, isClosable: true, url: nil))
+            case "ios-physical":
+                openTabs.append(PreviewDockTabItem(id: "ios-physical", title: "iPhone (USB)", icon: "iphone", kind: .iOSPhysical, isClosable: true, url: nil))
+            case "android-physical":
+                openTabs.append(PreviewDockTabItem(id: "android-physical", title: "Android (USB)", icon: "candybarphone", kind: .androidPhysical, isClosable: true, url: nil))
+            default:
+                break
+            }
+        }
+
+        guard openTabs.contains(where: { $0.id == id }) else { return }
+        activeTabId = id
+        isDockVisible = true
+        DeviceRuntimeService.shared.showingEmbeddedDeviceDock = true
+        syncWithDeviceRuntime()
+        if id == "android" {
+            Task { @MainActor in
+                await DeviceRuntimeService.shared.startPreferredEmbeddedAndroid()
+            }
+        } else if id == "ios" {
+            Task { @MainActor in
+                await DeviceRuntimeService.shared.startPreferredEmbeddedAppleSimulator()
+            }
         }
     }
     
@@ -229,6 +252,12 @@ public final class PreviewDockService: ObservableObject {
         let wasActive = (activeTabId == id)
         openTabs.remove(at: index)
         
+        if openTabs.isEmpty {
+            isDockVisible = false
+            DeviceRuntimeService.shared.showingEmbeddedDeviceDock = false
+            return
+        }
+        
         if wasActive {
             if index < openTabs.count {
                 activeTabId = openTabs[index].id
@@ -267,17 +296,23 @@ public final class PreviewDockService: ObservableObject {
         case .web:
             DeviceRuntimeService.shared.embeddedDockMode = .web
             DeviceRuntimeService.shared.showingEmbeddedAppleDock = false
+            DeviceRuntimeService.shared.stopEmbeddedAndroid()
+            AppleSimulatorCaptureService.shared.stop()
         case .ios:
             DeviceRuntimeService.shared.embeddedDockMode = .ios
             DeviceRuntimeService.shared.showingEmbeddedAppleDock = true
+            DeviceRuntimeService.shared.stopEmbeddedAndroid()
         case .iOSPhysical:
             DeviceRuntimeService.shared.embeddedDockMode = .ios
             DeviceRuntimeService.shared.showingEmbeddedAppleDock = false
+            DeviceRuntimeService.shared.stopEmbeddedAndroid()
         case .android, .androidPhysical:
             DeviceRuntimeService.shared.embeddedDockMode = .android
             DeviceRuntimeService.shared.showingEmbeddedAppleDock = false
+            AppleSimulatorCaptureService.shared.stop()
         case .file, .diff:
-            break
+            DeviceRuntimeService.shared.stopEmbeddedAndroid()
+            AppleSimulatorCaptureService.shared.stop()
         }
     }
 }

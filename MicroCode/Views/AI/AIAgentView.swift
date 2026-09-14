@@ -53,8 +53,21 @@ struct AIAgentView: View {
     @ObservedObject private var teamIntegrations = TeamIntegrationService.shared
     @ObservedObject private var deviceRuntime = DeviceRuntimeService.shared
     @ObservedObject private var previewDock = PreviewDockService.shared
+    @ObservedObject private var voiceCoding = VoiceCodingService.shared
     @State private var collapsedProjectsInChatSidebar: Set<String> = []
     @FocusState private var isInputFocused: Bool
+    
+    // MARK: - AI Enhancement State
+    @StateObject private var slashCommandService = SlashCommandService.shared
+    @StateObject private var contextProviderService = ContextProviderService.shared
+    @ObservedObject private var toolApprovalManager = ToolApprovalManager.shared
+    @ObservedObject private var planManager = ImplementationPlanManager.shared
+    @State private var showSlashSuggestions = false
+    @State private var slashSelectedIndex: Int = 0
+    @State private var showContextSuggestions = false
+    @State private var contextSearchPrefix = ""
+    @State private var showRawMarkdownPlan = false
+    @State private var isPlanFullscreen = false
     
     private var selectedSubAgentDisplayName: String {
         switch selectedSubAgentType {
@@ -203,39 +216,55 @@ struct AIAgentView: View {
             case .aider: engineId = "aider"
             case .custom: engineId = "custom"
             }
+            let providerName = activeAgentShortName(for: activeAgent)
             let engineModels = LocalEcosystemDiscovery.shared.models(for: engineId)
-            if let matched = engineModels.first(where: { $0.id == appState.aiModel }) {
-                return matched.name
-            }
-            if let modelDef = AIModelCatalog.shared.model(id: appState.aiModel) {
-                return modelDef.name
-            }
-            if let defaultModel = engineModels.first {
-                return defaultModel.name
-            }
-            return appState.aiModel.isEmpty ? activeAgent.name : AIModelCatalog.formatModelName(appState.aiModel)
+            let modelName: String = {
+                if let matched = engineModels.first(where: { $0.id == appState.aiModel }) {
+                    return matched.name
+                }
+                if let modelDef = AIModelCatalog.shared.model(id: appState.aiModel) {
+                    return modelDef.name
+                }
+                if let defaultModel = engineModels.first {
+                    return defaultModel.name
+                }
+                return appState.aiModel.isEmpty ? activeAgent.name : AIModelCatalog.formatModelName(appState.aiModel)
+            }()
+            return "\(providerName) : \(modelName)"
         }
         
         if currentKeyMode == "subscription" {
             let activeSub = UserDefaults.standard.string(forKey: "subscriptionActiveProvider")
             let provType = activeSub.flatMap { SubscriptionProviderType(rawValue: $0) }
-            if let info = SubscriptionAuthManager.shared.findModel(id: appState.aiModel, provider: provType) {
-                return info.name
-            }
-            if let info = SubscriptionAuthManager.shared.findModel(id: appState.aiModel) {
-                return info.name
-            }
-            return appState.aiModel.isEmpty ? "Select Model" : AIModelCatalog.formatModelName(appState.aiModel)
+            let (provName, modelName): (String, String) = {
+                if let info = SubscriptionAuthManager.shared.findModel(id: appState.aiModel, provider: provType) {
+                    let pName = provType?.displayName.components(separatedBy: " ").first ?? "Subscription"
+                    return (pName, info.name)
+                }
+                if let info = SubscriptionAuthManager.shared.findModel(id: appState.aiModel) {
+                    return (info.provider.displayName.components(separatedBy: " ").first ?? "Subscription", info.name)
+                }
+                let fallbackModel = appState.aiModel.isEmpty ? "Default Model" : AIModelCatalog.formatModelName(appState.aiModel)
+                return ("Subscription", fallbackModel)
+            }()
+            return "\(provName) : \(modelName)"
         } else if currentKeyMode == "direct" || currentExecutionMode == .byok {
-            if let modelDef = AIModelCatalog.shared.model(id: appState.aiModel) {
-                return modelDef.name
-            }
-            return appState.aiModel.isEmpty ? "Gemini 3.7 Flash" : AIModelCatalog.formatModelName(appState.aiModel)
+            let providerName = AIModelCatalog.friendlyProviderName(appState.aiProvider)
+            let modelName: String = {
+                if let modelDef = AIModelCatalog.shared.model(id: appState.aiModel) {
+                    return modelDef.name
+                }
+                return appState.aiModel.isEmpty ? "Gemini 3.7 Flash" : AIModelCatalog.formatModelName(appState.aiModel)
+            }()
+            return "\(providerName) : \(modelName)"
         } else {
-            if let modelDef = AIModelCatalog.shared.model(id: appState.aiModel) {
-                return modelDef.name
-            }
-            return appState.aiModel.isEmpty ? "Omni O1X Pro" : AIModelCatalog.formatModelName(appState.aiModel)
+            let modelName: String = {
+                if let modelDef = AIModelCatalog.shared.model(id: appState.aiModel) {
+                    return modelDef.name
+                }
+                return appState.aiModel.isEmpty ? "Omni O1X Pro" : AIModelCatalog.formatModelName(appState.aiModel)
+            }()
+            return "Dotmini Cloud : \(modelName)"
         }
     }
     
@@ -243,6 +272,17 @@ struct AIAgentView: View {
     private let borderColor = Color.white.opacity(0.1)
     private var paneColor: Color { Color(nsColor: appState.appTheme.panelBackground) }
     private let accentColor = Color.accentColor
+    
+    // Theme Harmonization
+    private var workspaceBg: Color {
+        appState.appTheme.isGlass ? Color.clear : Color(nsColor: appState.appTheme.workspaceBackground)
+    }
+    private var panelBg: Color {
+        appState.appTheme.isGlass ? Color.clear : Color(nsColor: appState.appTheme.panelBackground)
+    }
+    private var elevatedBg: Color {
+        Color(nsColor: appState.appTheme.elevatedBackground)
+    }
     
     var body: some View {
         HStack(spacing: 0) {
@@ -261,10 +301,7 @@ struct AIAgentView: View {
                 Divider().background(borderColor)
                 
                 // 2. Main Content Area
-                if isPlanMode {
-                    // Implementation Plan View
-                    planView
-                } else if isTaskMode {
+                if isTaskMode {
                     // Task.md / Agent.md Editor
                     taskEditorView
                 } else if isWalkthroughMode {
@@ -281,82 +318,63 @@ struct AIAgentView: View {
                     AgentCellModeView()
                         .environmentObject(appState)
                         .transition(.opacity)
+                } else if isPlanFullscreen && (isPlanMode || planManager.isPlanVisible) {
+                    // Fullscreen Implementation Plan
+                    planView
                 } else {
-                    // Normal Chat Mode
-                    if agent.messages.isEmpty && !agent.isLoading {
-                        // Centered Empty State (Matching media_1787685889495.png)
+                    // Chat & Plan Side-by-Side Split View
+                    HStack(spacing: 0) {
+                        // Left Pane: Chat Workspace (Fluid)
                         VStack(spacing: 0) {
-                            Spacer()
-                            
-                            VStack(alignment: .leading, spacing: 8) {
-                                // Project Workspace Pill Selector
-                                Button(action: {
-                                    if sessionScope == .editor { showProjectDropdown.toggle() }
-                                }) {
-                                    HStack(spacing: 5) {
-                                        Image(systemName: "folder")
-                                            .font(.system(size: 11))
-                                            .foregroundColor(.secondary)
-                                        Text(currentProjectName)
-                                            .font(.system(size: 12, weight: .medium))
-                                            .foregroundColor(.primary.opacity(0.85))
-                                        Image(systemName: "chevron.down")
-                                            .font(.system(size: 8, weight: .semibold))
-                                            .foregroundColor(.secondary.opacity(0.7))
+                            if agent.messages.isEmpty && !agent.isLoading && planManager.currentPlan == nil && !isPlanMode && !planManager.isPlanVisible {
+                                // Centered Empty State (Matching media_1787685889495.png)
+                                centeredEmptyStateView
+                            } else {
+                                // Active Chat Mode (Messages on top, Input docked cleanly at bottom)
+                                VStack(spacing: 0) {
+                                    // Chat Scroll
+                                    AgentChatStage(
+                                        messages: agent.messages,
+                                        isLoading: agent.isLoading,
+                                        domain: agent.domain,
+                                        currentToolExecution: agent.currentToolExecution,
+                                        onApplyChange: { change in applyChange(change) },
+                                        onRejectChange: { change in rejectChange(change) },
+                                        onSuggestionTap: { suggestion in inputText = suggestion; sendMessage() },
+                                        onViewPlan: {
+                                            withAnimation(.easeInOut(duration: 0.2)) {
+                                                planManager.isPlanVisible.toggle()
+                                                if planManager.isPlanVisible && planManager.currentPlan == nil, let ws = appState.workspaceFolder?.path {
+                                                    planManager.loadFromTaskMarkdown(workspacePath: ws)
+                                                }
+                                            }
+                                        }
+                                    )
+                                    .environmentObject(appState)
+                                    
+                                    // Suggested Action (after completion)
+                                    if let suggestion = agent.suggestedAction {
+                                        suggestedActionBar(suggestion)
                                     }
-                                    .padding(.horizontal, 8)
-                                    .padding(.vertical, 4)
-                                    .background(Color.primary.opacity(0.04))
-                                    .cornerRadius(6)
+                                    
+                                    // Context Limit Banner (warn user and prompt for new conversation)
+                                    if agent.contextLimitReached {
+                                        contextLimitBanner
+                                    }
+                                    
+                                    // Input Container (Docked at bottom)
+                                    inputArea
                                 }
-                                .buttonStyle(.plain)
-                                .disabled(sessionScope == .science)
-                                .popover(isPresented: $showProjectDropdown, arrowEdge: .top) {
-                                    ProjectWorkspaceSelectorMenu(isPresented: $showProjectDropdown)
-                                        .environmentObject(appState)
-                                }
-                                .padding(.leading, 2)
-                                
-                                // Clean Floating Input Box
-                                inputCardView
                             }
-                            // The composer is deliberately wider than a
-                            // single response, but it must remain a fluid
-                            // surface: grow on a roomy window and shrink with
-                            // the active split (preview / inspector) without
-                            // ever overflowing it.
-                            .frame(maxWidth: 880)
-                            .padding(.horizontal, 20)
-                            
-                            Spacer()
                         }
-                        .frame(maxWidth: .infinity, maxHeight: .infinity)
-                    } else {
-                        // Active Chat Mode (Messages on top, Input docked cleanly at bottom)
-                        VStack(spacing: 0) {
-                            // Chat Scroll
-                            AgentChatStage(
-                                messages: agent.messages,
-                                isLoading: agent.isLoading,
-                                domain: agent.domain,
-                                currentToolExecution: agent.currentToolExecution,
-                                onApplyChange: { change in applyChange(change) },
-                                onRejectChange: { change in rejectChange(change) },
-                                onSuggestionTap: { suggestion in inputText = suggestion; sendMessage() }
-                            )
-                            
-                            // Suggested Action (after completion)
-                            if let suggestion = agent.suggestedAction {
-                                suggestedActionBar(suggestion)
-                            }
-                            
-                            // Context Limit Banner (warn user and prompt for new conversation)
-                            if agent.contextLimitReached {
-                                contextLimitBanner
-                            }
-                            
-                            // Input Container (Docked at bottom)
-                            inputArea
+                        .frame(minWidth: 380)
+                        
+                        // Right Pane: Implementation Plan Side Panel (Side-by-Side Split View)
+                        if isPlanMode || planManager.isPlanVisible {
+                            Divider().background(borderColor)
+                            planSidePanelView
+                                .frame(minWidth: 380, idealWidth: 480, maxWidth: 640)
+                                .transition(.move(edge: .trailing).combined(with: .opacity))
                         }
                     }
                 }
@@ -422,6 +440,7 @@ struct AIAgentView: View {
         }
         .sheet(isPresented: $showingAgentEcosystem) {
             AgentEcosystemConfigView(initialTab: agentEcosystemTab)
+                .environmentObject(appState)
         }
         .onReceive(NotificationCenter.default.publisher(for: NSNotification.Name("MicroCode.OpenAgentConnections"))) { _ in
             showingAgentConnections = true
@@ -435,6 +454,16 @@ struct AIAgentView: View {
                 else { agentEcosystemTab = .agents }
             }
             showingAgentEcosystem = true
+        }
+        .onReceive(NotificationCenter.default.publisher(for: .voiceCodingInput)) { notification in
+            if let text = notification.userInfo?["text"] as? String, !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                if inputText.isEmpty {
+                    inputText = text
+                } else {
+                    inputText += " " + text
+                }
+                isInputFocused = true
+            }
         }
         .onReceive(NotificationCenter.default.publisher(for: .agentProcessQueueItem)) { notification in
             let targetScope: AgentSessionScope = agent.domain == .science ? .science : .editor
@@ -450,6 +479,53 @@ struct AIAgentView: View {
                 isInputFocused = true
             }
         }
+    }
+
+    // MARK: - Centered Empty State View
+    private var centeredEmptyStateView: some View {
+        VStack(spacing: 0) {
+            Spacer()
+            
+            VStack(alignment: .leading, spacing: 8) {
+                // Project Workspace Pill Selector
+                Button(action: {
+                    if sessionScope == .editor { showProjectDropdown.toggle() }
+                }) {
+                    HStack(spacing: 5) {
+                        Image(systemName: "folder")
+                            .font(.system(size: 11))
+                            .foregroundColor(.secondary)
+                        Text(currentProjectName)
+                            .font(.system(size: 12, weight: .medium))
+                            .foregroundColor(.primary.opacity(0.85))
+                        Image(systemName: "chevron.down")
+                            .font(.system(size: 8, weight: .semibold))
+                            .foregroundColor(.secondary.opacity(0.7))
+                    }
+                    .padding(.horizontal, 8)
+                    .padding(.vertical, 4)
+                    .background(Color.primary.opacity(0.04))
+                    .cornerRadius(6)
+                }
+                .buttonStyle(.plain)
+                .disabled(sessionScope == .science)
+                .popover(isPresented: $showProjectDropdown, arrowEdge: .top) {
+                    ProjectWorkspaceSelectorMenu(isPresented: $showProjectDropdown)
+                        .environmentObject(appState)
+                }
+                .padding(.leading, 2)
+                
+                activeAgentStatusHUD
+                
+                // Clean Floating Input Box
+                inputCardView
+            }
+            .frame(maxWidth: 880)
+            .padding(.horizontal, 20)
+            
+            Spacer()
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
     }
 
     /// Xcode-style device area: the actual Android AVD stays in the right-hand
@@ -469,7 +545,11 @@ struct AIAgentView: View {
                     .font(.system(size: 10, weight: .bold))
                     .foregroundColor(.secondary)
                 Spacer()
-                Button(action: { _ = agent.createNewChat(projectPath: agent.currentWorkspace ?? scopedWorkspacePath) }) {
+                Button(action: {
+                    isPlanMode = false
+                    planManager.clearPlan()
+                    _ = agent.createNewChat(projectPath: agent.currentWorkspace ?? scopedWorkspacePath)
+                }) {
                     Text("New")
                         .font(.system(size: 10))
                         .foregroundColor(.secondary)
@@ -572,24 +652,46 @@ struct AIAgentView: View {
                     // Sidebar Toggle
                     if allowsChatSidebar {
                         Button(action: { agent.showChatSidebar.toggle() }) {
-                            Text("History")
-                                .font(.system(size: 10, weight: agent.showChatSidebar ? .semibold : .regular))
-                                .foregroundColor(agent.showChatSidebar ? .primary : .secondary)
-                                .frame(height: 26)
+                            HStack(spacing: 4) {
+                                Image(systemName: "sidebar.left")
+                                    .font(.system(size: 10))
+                                Text("History")
+                                    .font(.system(size: 11, weight: agent.showChatSidebar ? .semibold : .medium))
+                            }
+                            .foregroundColor(agent.showChatSidebar ? .primary : .secondary)
+                            .padding(.horizontal, 7)
+                            .padding(.vertical, 3.5)
+                            .background(agent.showChatSidebar ? Color.primary.opacity(0.09) : Color.clear)
+                            .cornerRadius(5)
                         }
                         .buttonStyle(.plain)
                         .help("Chat History")
                     }
                     
                     // New Chat
-                    Button(action: { _ = agent.createNewChat(projectPath: agent.currentWorkspace ?? scopedWorkspacePath) }) {
-                        Text("New")
-                            .font(.system(size: 10))
-                            .foregroundColor(.secondary)
-                            .frame(height: 26)
+                    Button(action: {
+                        isPlanMode = false
+                        planManager.clearPlan()
+                        _ = agent.createNewChat(projectPath: agent.currentWorkspace ?? scopedWorkspacePath)
+                    }) {
+                        HStack(spacing: 4) {
+                            Image(systemName: "plus")
+                                .font(.system(size: 9.5, weight: .bold))
+                            Text("New Chat")
+                                .font(.system(size: 11, weight: .medium))
+                        }
+                        .foregroundColor(.primary)
+                        .padding(.horizontal, 8)
+                        .padding(.vertical, 4)
+                        .background(Color.primary.opacity(0.07))
+                        .overlay(
+                            RoundedRectangle(cornerRadius: 6)
+                                .stroke(Color.primary.opacity(0.14), lineWidth: 0.8)
+                        )
+                        .cornerRadius(6)
                     }
                     .buttonStyle(.plain)
-                    .help("New Chat")
+                    .help("Create New Chat (⌘N)")
 
                     if sessionScope == .editor { Menu {
                         Button { showingTeamTasks = true } label: {
@@ -633,36 +735,39 @@ struct AIAgentView: View {
                             Section("Live Multi-Platform Preview") {
                                 Button("WebApp Preview (Localhost)") {
                                     withAnimation(.easeInOut(duration: 0.16)) {
-                                        previewDock.selectTab(id: "web")
+                                        appState.showPreviewInspector(tab: "web")
                                     }
                                 }
                                 Button("iOS Simulator Preview") {
                                     withAnimation(.easeInOut(duration: 0.16)) {
-                                        previewDock.selectTab(id: "ios")
+                                        appState.showPreviewInspector(tab: "ios")
                                         Task { await deviceRuntime.startEmbeddedAppleSimulator() }
                                     }
                                 }
                                 Button("Android Emulator Preview") {
                                     withAnimation(.easeInOut(duration: 0.16)) {
-                                        previewDock.selectTab(id: "android")
+                                        appState.showPreviewInspector(tab: "android")
                                         Task { await deviceRuntime.startPreferredEmbeddedAndroid() }
                                     }
                                 }
                                 Button("iPhone USB (Hardware)") {
                                     withAnimation(.easeInOut(duration: 0.16)) {
-                                        previewDock.selectTab(id: "ios-physical")
+                                        appState.showPreviewInspector(tab: "ios-physical")
                                     }
                                 }
                                 Button("Android USB (Hardware)") {
                                     withAnimation(.easeInOut(duration: 0.16)) {
-                                        previewDock.selectTab(id: "android-physical")
+                                        appState.showPreviewInspector(tab: "android-physical")
                                     }
                                 }
-                                Button(previewDock.isDockVisible || deviceRuntime.showingEmbeddedDeviceDock ? "Hide Preview Dock" : "Show Preview Dock") {
+                                Button(previewDock.isDockVisible || deviceRuntime.showingEmbeddedDeviceDock || (appState.agenticContextVisible && appState.selectedInspectorTab == .preview) ? "Hide Preview Dock" : "Show Preview Dock") {
                                     withAnimation(.easeInOut(duration: 0.16)) {
-                                        let newState = !(previewDock.isDockVisible || deviceRuntime.showingEmbeddedDeviceDock)
-                                        previewDock.isDockVisible = newState
-                                        deviceRuntime.showingEmbeddedDeviceDock = newState
+                                        let isShowing = previewDock.isDockVisible || deviceRuntime.showingEmbeddedDeviceDock || (appState.agenticContextVisible && appState.selectedInspectorTab == .preview)
+                                         if isShowing {
+                                             appState.hidePreviewInspector()
+                                         } else {
+                                             appState.showPreviewInspector()
+                                         }
                                     }
                                 }
                             }
@@ -744,23 +849,45 @@ struct AIAgentView: View {
                     // Mode Tabs — responsive: icon-only when compact
                     ScrollView(.horizontal, showsIndicators: false) {
                         HStack(spacing: 1) {
-                            modePill("Chat", isActive: !isPaperMode && !isCellMode && !isPlanMode && !isTaskMode && !isWalkthroughMode, compact: isCompact) {
-                                isPaperMode = false; isCellMode = false; isPlanMode = false; isTaskMode = false; isWalkthroughMode = false
+                            modePill("Chat", isActive: !isPaperMode && !isCellMode && !isTaskMode && !isWalkthroughMode && !isPlanFullscreen, compact: isCompact) {
+                                withAnimation(.easeInOut(duration: 0.2)) {
+                                    isPaperMode = false
+                                    isCellMode = false
+                                    isTaskMode = false
+                                    isWalkthroughMode = false
+                                    isPlanFullscreen = false
+                                }
                             }
-                            modePill("Plan", isActive: isPlanMode, compact: isCompact) {
-                                isPlanMode = true; isPaperMode = false; isCellMode = false; isTaskMode = false; isWalkthroughMode = false
+                            modePill("Plan", isActive: isPlanMode || planManager.isPlanVisible, compact: isCompact) {
+                                withAnimation(.easeInOut(duration: 0.2)) {
+                                    if isPlanMode || planManager.isPlanVisible {
+                                        isPlanMode = false
+                                        planManager.isPlanVisible = false
+                                        isPlanFullscreen = false
+                                    } else {
+                                        isPlanMode = true
+                                        planManager.isPlanVisible = true
+                                        isPaperMode = false
+                                        isCellMode = false
+                                        isTaskMode = false
+                                        isWalkthroughMode = false
+                                        if planManager.currentPlan == nil, let ws = appState.workspaceFolder?.path {
+                                            planManager.loadFromTaskMarkdown(workspacePath: ws)
+                                        }
+                                    }
+                                }
                             }
                             modePill("Task", isActive: isTaskMode, compact: isCompact) {
-                                isTaskMode = true; isPlanMode = false; isPaperMode = false; isCellMode = false; isWalkthroughMode = false
+                                isTaskMode = true; isPlanMode = false; planManager.isPlanVisible = false; isPaperMode = false; isCellMode = false; isWalkthroughMode = false
                             }
                             modePill("Walkthrough", isActive: isWalkthroughMode, compact: isCompact) {
-                                isWalkthroughMode = true; isPlanMode = false; isPaperMode = false; isCellMode = false; isTaskMode = false
+                                isWalkthroughMode = true; isPlanMode = false; planManager.isPlanVisible = false; isPaperMode = false; isCellMode = false; isTaskMode = false
                             }
                             modePill("Report", isActive: isPaperMode, compact: isCompact) {
-                                isPaperMode = true; isCellMode = false; isPlanMode = false; isTaskMode = false; isWalkthroughMode = false
+                                isPaperMode = true; isCellMode = false; isPlanMode = false; planManager.isPlanVisible = false; isTaskMode = false; isWalkthroughMode = false
                             }
                             modePill("Cells", isActive: isCellMode, compact: isCompact) {
-                                isCellMode = true; isPaperMode = false; isPlanMode = false; isTaskMode = false; isWalkthroughMode = false
+                                isCellMode = true; isPaperMode = false; isPlanMode = false; planManager.isPlanVisible = false; isTaskMode = false; isWalkthroughMode = false
                             }
                         }
                         .padding(2)
@@ -904,6 +1031,9 @@ struct AIAgentView: View {
             deviceRuntime.embeddedDockMode = .android
             deviceRuntime.showingEmbeddedDeviceDock = true
             deviceRuntime.showingEmbeddedAppleDock = false
+            await MainActor.run {
+                appState.showPreviewInspector(tab: "android")
+            }
             await deviceRuntime.startEmbeddedAndroid()
             return
         }
@@ -912,6 +1042,9 @@ struct AIAgentView: View {
             deviceRuntime.embeddedDockMode = .ios
             deviceRuntime.showingEmbeddedDeviceDock = true
             deviceRuntime.showingEmbeddedAppleDock = true
+            await MainActor.run {
+                appState.showPreviewInspector(tab: "ios")
+            }
             await deviceRuntime.startEmbeddedAppleSimulator()
             return
         }
@@ -920,8 +1053,15 @@ struct AIAgentView: View {
     
     private func modePill(_ label: String, isActive: Bool, compact: Bool = false, action: @escaping () -> Void) -> some View {
         Button(action: { withAnimation(.easeInOut(duration: 0.2)) { action() } }) {
-            Text(compact ? String(label.prefix(1)) : label)
-                .font(.system(size: 10, weight: isActive ? .semibold : .regular))
+            HStack(spacing: 4) {
+                Text(compact ? String(label.prefix(1)) : label)
+                    .font(.system(size: 10, weight: isActive ? .semibold : .regular))
+                if label == "Plan", planManager.currentPlan?.approvalState == .pending {
+                    Circle()
+                        .fill(Color.orange)
+                        .frame(width: 5, height: 5)
+                }
+            }
             .foregroundColor(isActive ? .primary : .secondary)
             .padding(.horizontal, compact ? 7 : 8)
             .padding(.vertical, 4)
@@ -932,100 +1072,634 @@ struct AIAgentView: View {
         .help(label)
     }
     
-    // MARK: - Implementation Plan View
+    // MARK: - Implementation Plan Workspace View
+    
+    private var planSidePanelView: some View {
+        VStack(spacing: 0) {
+            planSidePanelHeader
+            
+            Divider().background(borderColor)
+            
+            if let plan = planManager.currentPlan {
+                if showRawMarkdownPlan {
+                    planRawMarkdownView(plan: plan)
+                } else {
+                    planStructuredView(plan: plan)
+                }
+            } else {
+                planEmptyStateView
+            }
+        }
+        .background(workspaceBg)
+    }
     
     private var planView: some View {
-        ScrollView {
-            VStack(alignment: .leading, spacing: 16) {
-                // Header
-                HStack(spacing: 10) {
-                    VStack(alignment: .leading, spacing: 2) {
-                        Text("Implementation Plan")
-                            .font(.system(size: 16, weight: .semibold))
-                        Text("AI-generated execution steps for the current task")
-                            .font(.system(size: 11))
-                            .foregroundColor(.secondary)
-                    }
-                    Spacer()
-                }
-                .padding(.horizontal, 16)
-                .padding(.top, 16)
+        planSidePanelView
+    }
+    
+    private var planSidePanelHeader: some View {
+        HStack(spacing: 8) {
+            HStack(spacing: 6) {
+                Image(systemName: "list.bullet.clipboard.fill")
+                    .font(.system(size: 13))
+                    .foregroundColor(.accentColor)
                 
-                // Plan steps (extracted from agent activity log)
-                let planSteps = extractPlanSteps()
-                if planSteps.isEmpty {
-                    VStack(spacing: 12) {
-                        Spacer().frame(height: 60)
-                        Text("No plan generated yet")
-                            .font(.system(size: 13))
-                            .foregroundColor(.secondary)
-                        Text("Ask the AI to create a plan or start a task")
-                            .font(.system(size: 11))
-                            .foregroundColor(.secondary.opacity(0.6))
-                        Spacer()
+                Text("Implementation Plan")
+                    .font(.system(size: 12.5, weight: .bold))
+                    .foregroundColor(.primary)
+                
+                if let plan = planManager.currentPlan {
+                    approvalBadge(for: plan.approvalState)
+                }
+            }
+            
+            Spacer()
+            
+            if let plan = planManager.currentPlan {
+                Button(action: {
+                    withAnimation(.easeInOut(duration: 0.15)) {
+                        showRawMarkdownPlan.toggle()
                     }
-                    .frame(maxWidth: .infinity)
-                } else {
-                    VStack(alignment: .leading, spacing: 6) {
-                        ForEach(planSteps) { step in
-                            HStack(alignment: .top, spacing: 10) {
-                                Text(String(format: "%02d", step.id + 1))
+                }) {
+                    HStack(spacing: 3) {
+                        Image(systemName: showRawMarkdownPlan ? "list.bullet" : "chevron.left.forwardslash.chevron.right")
+                            .font(.system(size: 9.5))
+                        Text(showRawMarkdownPlan ? "Structured" : "Markdown")
+                            .font(.system(size: 10, weight: .medium))
+                    }
+                    .padding(.horizontal, 6)
+                    .padding(.vertical, 3.5)
+                    .background(Color.primary.opacity(0.06))
+                    .cornerRadius(4)
+                }
+                .buttonStyle(.plain)
+                .help(showRawMarkdownPlan ? "Switch to interactive structured plan" : "Switch to raw markdown")
+                
+                Button(action: {
+                    NSPasteboard.general.clearContents()
+                    NSPasteboard.general.setString(plan.rawMarkdown.isEmpty ? plan.summary : plan.rawMarkdown, forType: .string)
+                }) {
+                    Image(systemName: "doc.on.doc")
+                        .font(.system(size: 10))
+                        .foregroundColor(.secondary)
+                        .padding(4)
+                        .background(Color.primary.opacity(0.04))
+                        .cornerRadius(4)
+                }
+                .buttonStyle(.plain)
+                .help("Copy full implementation plan")
+            }
+            
+            Button(action: {
+                if let ws = appState.workspaceFolder?.path {
+                    let loaded = planManager.loadFromTaskMarkdown(workspacePath: ws)
+                    if !loaded {
+                        agent.messages.append(AgentMessageModel(
+                            id: UUID().uuidString, role: .assistant,
+                            content: "⚠️ No `.microcode/task.md` found in current workspace. Type `/plan <task>` to generate an Implementation Plan.",
+                            toolResults: [], pendingChanges: [], timestamp: Date()
+                        ))
+                    }
+                }
+            }) {
+                Image(systemName: "arrow.clockwise")
+                    .font(.system(size: 10))
+                    .foregroundColor(.secondary)
+                    .padding(4)
+                    .background(Color.primary.opacity(0.04))
+                    .cornerRadius(4)
+            }
+            .buttonStyle(.plain)
+            .help("Reload plan from .microcode/task.md")
+            
+            Button(action: {
+                withAnimation(.easeInOut(duration: 0.18)) {
+                    isPlanFullscreen.toggle()
+                }
+            }) {
+                Image(systemName: isPlanFullscreen ? "rectangle.split.2x1" : "arrow.up.left.and.arrow.down.right")
+                    .font(.system(size: 10))
+                    .foregroundColor(.secondary)
+                    .padding(4)
+                    .background(Color.primary.opacity(0.04))
+                    .cornerRadius(4)
+            }
+            .buttonStyle(.plain)
+            .help(isPlanFullscreen ? "Exit Fullscreen (Restore Split View)" : "Expand Plan to Fullscreen")
+            
+            Button(action: {
+                withAnimation(.easeInOut(duration: 0.18)) {
+                    isPlanMode = false
+                    planManager.isPlanVisible = false
+                    isPlanFullscreen = false
+                }
+            }) {
+                Image(systemName: "xmark")
+                    .font(.system(size: 9.5, weight: .bold))
+                    .foregroundColor(.secondary)
+                    .padding(4)
+                    .background(Color.primary.opacity(0.04))
+                    .cornerRadius(4)
+            }
+            .buttonStyle(.plain)
+            .help("Close Plan Side Panel")
+        }
+        .padding(.horizontal, 12)
+        .padding(.vertical, 8)
+        .background(panelBg)
+    }
+    
+    private func approvalBadge(for state: PlanApprovalState) -> some View {
+        HStack(spacing: 5) {
+            Circle()
+                .fill(state == .approved ? Color.green.opacity(0.85) : (state == .rejected ? Color.red.opacity(0.85) : Color.orange.opacity(0.85)))
+                .frame(width: 5, height: 5)
+            Text(state.displayName)
+                .font(.system(size: 9.5, weight: .medium))
+                .foregroundColor(.secondary)
+        }
+        .padding(.horizontal, 6)
+        .padding(.vertical, 2.5)
+        .background(Color.primary.opacity(0.04))
+        .cornerRadius(4)
+        .overlay(
+            RoundedRectangle(cornerRadius: 4)
+                .stroke(Color.primary.opacity(0.06), lineWidth: 0.5)
+        )
+    }
+    
+    private func planStructuredView(plan: ImplementationPlan) -> some View {
+        ScrollView {
+            VStack(alignment: .leading, spacing: 18) {
+                if plan.approvalState == .pending {
+                    approvalActionCard(plan: plan)
+                } else if plan.approvalState == .approved {
+                    approvedStatusCard(plan: plan)
+                } else if plan.approvalState == .rejected {
+                    rejectedStatusCard(plan: plan)
+                }
+                
+                VStack(alignment: .leading, spacing: 6) {
+                    Text(plan.title)
+                        .font(.system(size: 16, weight: .bold))
+                        .foregroundColor(.primary)
+                    
+                    if !plan.summary.isEmpty {
+                        Text(plan.summary)
+                            .font(.system(size: 12))
+                            .foregroundColor(.secondary)
+                            .lineSpacing(3)
+                    }
+                    
+                    HStack(spacing: 12) {
+                        HStack(spacing: 4) {
+                            Image(systemName: "calendar")
+                                .font(.system(size: 10))
+                            Text(plan.createdAt, style: .date)
+                                .font(.system(size: 10, design: .monospaced))
+                        }
+                        .foregroundColor(.secondary)
+                        
+                        HStack(spacing: 4) {
+                            Image(systemName: "clock")
+                                .font(.system(size: 10))
+                            Text(plan.createdAt, style: .time)
+                                .font(.system(size: 10, design: .monospaced))
+                        }
+                        .foregroundColor(.secondary)
+                        
+                        if plan.totalSteps > 0 {
+                            HStack(spacing: 4) {
+                                Image(systemName: "checklist")
+                                    .font(.system(size: 10))
+                                Text("\(plan.completedSteps)/\(plan.totalSteps) steps completed (\(Int(plan.progress * 100))%)")
                                     .font(.system(size: 10, weight: .medium, design: .monospaced))
-                                    .foregroundColor(.secondary)
-                                    .frame(width: 24, alignment: .leading)
-                                
-                                VStack(alignment: .leading, spacing: 2) {
-                                    Text(step.title)
-                                        .font(.system(size: 12, weight: .medium))
-                                        .foregroundColor(step.isDone ? .secondary : .primary)
-                                        .strikethrough(step.isDone)
-                                    if !step.detail.isEmpty {
-                                        Text(step.detail)
-                                            .font(.system(size: 10))
-                                            .foregroundColor(.secondary)
-                                    }
-                                }
-                                
-                                Spacer()
                             }
-                            .padding(.horizontal, 16)
-                            .padding(.vertical, 6)
-                            .background(step.isDone ? Color.primary.opacity(0.025) : Color.clear)
+                            .foregroundColor(plan.progress >= 1.0 ? .green : .accentColor)
                         }
                     }
+                    .padding(.top, 4)
+                }
+                .padding(.horizontal, 16)
+                
+                if plan.totalSteps > 0 {
+                    GeometryReader { geo in
+                        ZStack(alignment: .leading) {
+                            RoundedRectangle(cornerRadius: 3)
+                                .fill(Color.primary.opacity(0.08))
+                                .frame(height: 6)
+                            
+                            RoundedRectangle(cornerRadius: 3)
+                                .fill(plan.progress >= 1.0 ? Color.green : Color.accentColor)
+                                .frame(width: max(4, geo.size.width * CGFloat(plan.progress)), height: 6)
+                        }
+                    }
+                    .frame(height: 6)
+                    .padding(.horizontal, 16)
+                }
+                
+                if !plan.openQuestions.isEmpty {
+                    VStack(alignment: .leading, spacing: 8) {
+                        HStack(spacing: 6) {
+                            Image(systemName: "questionmark.circle.fill")
+                                .font(.system(size: 12, weight: .bold))
+                                .foregroundColor(.orange)
+                            Text("Open Questions & Decisions")
+                                .font(.system(size: 12, weight: .bold))
+                                .foregroundColor(.primary)
+                        }
+                        
+                        VStack(alignment: .leading, spacing: 6) {
+                            ForEach(Array(plan.openQuestions.enumerated()), id: \.offset) { _, question in
+                                HStack(alignment: .top, spacing: 8) {
+                                    Text("•")
+                                        .foregroundColor(.orange)
+                                        .font(.system(size: 12, weight: .bold))
+                                    Text(question)
+                                        .font(.system(size: 11.5))
+                                        .foregroundColor(.primary.opacity(0.9))
+                                }
+                            }
+                        }
+                        .padding(.leading, 6)
+                    }
+                    .padding(12)
+                    .background(Color.orange.opacity(0.07))
+                    .cornerRadius(8)
+                    .overlay(
+                        RoundedRectangle(cornerRadius: 8)
+                            .stroke(Color.orange.opacity(0.25), lineWidth: 1)
+                    )
+                    .padding(.horizontal, 16)
+                }
+                
+                VStack(alignment: .leading, spacing: 14) {
+                    HStack {
+                        Text("Proposed Changes")
+                            .font(.system(size: 13, weight: .bold))
+                            .foregroundColor(.primary)
+                        Spacer()
+                        Text("\(plan.sections.count) sections • \(plan.totalSteps) steps")
+                            .font(.system(size: 10.5, design: .monospaced))
+                            .foregroundColor(.secondary)
+                    }
+                    .padding(.horizontal, 16)
+                    
+                    ForEach(plan.sections) { section in
+                        VStack(alignment: .leading, spacing: 8) {
+                            HStack {
+                                Text(section.title)
+                                    .font(.system(size: 12, weight: .semibold))
+                                    .foregroundColor(.primary)
+                                Spacer()
+                                Text("\(section.steps.count) steps")
+                                    .font(.system(size: 10, design: .monospaced))
+                                    .foregroundColor(.secondary)
+                            }
+                            .padding(.horizontal, 12)
+                            .padding(.vertical, 6)
+                            .background(Color.primary.opacity(0.035))
+                            .cornerRadius(5)
+                            
+                            VStack(spacing: 4) {
+                                ForEach(section.steps) { step in
+                                    planStepRow(sectionId: section.id, step: step)
+                                }
+                            }
+                        }
+                        .padding(.horizontal, 16)
+                    }
+                }
+                
+                if !plan.verificationSteps.isEmpty {
+                    VStack(alignment: .leading, spacing: 8) {
+                        HStack(spacing: 6) {
+                            Image(systemName: "checkmark.shield.fill")
+                                .font(.system(size: 12, weight: .bold))
+                                .foregroundColor(.accentColor)
+                            Text("Verification Plan")
+                                .font(.system(size: 12, weight: .bold))
+                                .foregroundColor(.primary)
+                        }
+                        .padding(.horizontal, 16)
+                        
+                        VStack(alignment: .leading, spacing: 6) {
+                            ForEach(Array(plan.verificationSteps.enumerated()), id: \.offset) { idx, vStep in
+                                HStack(alignment: .top, spacing: 8) {
+                                    Text("\(idx + 1).")
+                                        .font(.system(size: 10, weight: .medium, design: .monospaced))
+                                        .foregroundColor(.secondary)
+                                        .frame(width: 20, alignment: .trailing)
+                                    
+                                    Text(vStep)
+                                        .font(.system(size: 11.5))
+                                        .foregroundColor(.primary.opacity(0.9))
+                                }
+                                .padding(.vertical, 2)
+                            }
+                        }
+                        .padding(12)
+                        .background(Color.primary.opacity(0.025))
+                        .cornerRadius(8)
+                        .overlay(
+                            RoundedRectangle(cornerRadius: 8)
+                                .stroke(Color.primary.opacity(0.08), lineWidth: 1)
+                        )
+                        .padding(.horizontal, 16)
+                    }
+                }
+                
+                Spacer().frame(height: 32)
+            }
+            .padding(.vertical, 16)
+        }
+        .background(workspaceBg)
+    }
+    
+    private func approvalActionCard(plan: ImplementationPlan) -> some View {
+        VStack(alignment: .leading, spacing: 8) {
+            HStack(spacing: 6) {
+                Image(systemName: "doc.badge.gearshape")
+                    .font(.system(size: 11, weight: .medium))
+                    .foregroundColor(.secondary)
+                
+                Text("Plan Review Required")
+                    .font(.system(size: 11.5, weight: .semibold))
+                    .foregroundColor(.primary)
+                
+                Spacer()
+                
+                HStack(spacing: 4) {
+                    Circle()
+                        .fill(Color.orange.opacity(0.85))
+                        .frame(width: 5, height: 5)
+                    Text("Awaiting Review")
+                        .font(.system(size: 9.5))
+                        .foregroundColor(.secondary)
                 }
             }
-        }
-        .background(Color(nsColor: .controlBackgroundColor).opacity(0.3))
-    }
-    
-    private struct PlanStep: Identifiable {
-        let id: Int  // Stable identity based on insertion order
-        let title: String
-        let detail: String
-        let isDone: Bool
-    }
-    
-    private func extractPlanSteps() -> [PlanStep] {
-        // Extract plan steps from agent activity log
-        var steps: [PlanStep] = []
-        for (i, activity) in agent.activityLog.enumerated() {
-            switch activity.type {
-            case .fileChange:
-                steps.append(PlanStep(id: i, title: "File Change", detail: activity.message, isDone: true))
-            case .tool:
-                steps.append(PlanStep(id: i, title: "Tool Execution", detail: activity.message, isDone: true))
-            case .thinking:
-                steps.append(PlanStep(id: i, title: "Analysis", detail: activity.message, isDone: true))
-            case .success:
-                steps.append(PlanStep(id: i, title: "Completed", detail: activity.message, isDone: true))
-            case .error:
-                steps.append(PlanStep(id: i, title: "Error", detail: activity.message, isDone: false))
-            default:
-                break
+            
+            Text("The AI agent is paused awaiting authorization before making code modifications.")
+                .font(.system(size: 10.5))
+                .foregroundColor(.secondary)
+                .lineLimit(2)
+            
+            HStack(spacing: 8) {
+                Button(action: {
+                    planManager.reject()
+                }) {
+                    Text("Reject")
+                        .font(.system(size: 10.5, weight: .medium))
+                        .foregroundColor(.secondary)
+                        .padding(.horizontal, 10)
+                        .padding(.vertical, 4)
+                        .background(Color.primary.opacity(0.04))
+                        .cornerRadius(4)
+                }
+                .buttonStyle(.plain)
+                
+                Spacer()
+                
+                Button(action: {
+                    planManager.approve()
+                }) {
+                    HStack(spacing: 5) {
+                        Image(systemName: "checkmark")
+                            .font(.system(size: 9, weight: .bold))
+                        Text("Approve Plan & Proceed")
+                            .font(.system(size: 10.5, weight: .medium))
+                        Text("⌘↵")
+                            .font(.system(size: 9, design: .monospaced))
+                            .foregroundColor(.secondary)
+                    }
+                    .foregroundColor(.primary)
+                    .padding(.horizontal, 12)
+                    .padding(.vertical, 4)
+                    .background(Color.primary.opacity(0.1))
+                    .cornerRadius(4)
+                    .overlay(
+                        RoundedRectangle(cornerRadius: 4)
+                            .stroke(Color.primary.opacity(0.12), lineWidth: 0.5)
+                    )
+                }
+                .buttonStyle(.plain)
+                .keyboardShortcut(.return, modifiers: [.command])
             }
         }
-        return steps
+        .padding(.horizontal, 12)
+        .padding(.vertical, 8)
+        .background(elevatedBg)
+        .cornerRadius(6)
+        .overlay(
+            RoundedRectangle(cornerRadius: 6)
+                .stroke(Color.primary.opacity(0.08), lineWidth: 0.5)
+        )
+        .padding(.horizontal, 16)
+    }
+    
+    private func approvedStatusCard(plan: ImplementationPlan) -> some View {
+        HStack(spacing: 6) {
+            Image(systemName: "checkmark.circle.fill")
+                .font(.system(size: 10.5))
+                .foregroundColor(.green.opacity(0.85))
+            
+            Text("Plan Approved & In Execution — Changes authorized")
+                .font(.system(size: 10.5, weight: .medium))
+                .foregroundColor(.secondary)
+            
+            Spacer()
+        }
+        .padding(.horizontal, 10)
+        .padding(.vertical, 6)
+        .background(elevatedBg)
+        .cornerRadius(6)
+        .overlay(
+            RoundedRectangle(cornerRadius: 6)
+                .stroke(Color.primary.opacity(0.06), lineWidth: 0.5)
+        )
+        .padding(.horizontal, 16)
+    }
+    
+    private func rejectedStatusCard(plan: ImplementationPlan) -> some View {
+        HStack(spacing: 6) {
+            Image(systemName: "xmark.circle.fill")
+                .font(.system(size: 10.5))
+                .foregroundColor(.secondary)
+            
+            Text("Plan Rejected — No files modified")
+                .font(.system(size: 10.5, weight: .medium))
+                .foregroundColor(.secondary)
+            
+            Spacer()
+        }
+        .padding(.horizontal, 10)
+        .padding(.vertical, 6)
+        .background(elevatedBg)
+        .cornerRadius(6)
+        .overlay(
+            RoundedRectangle(cornerRadius: 6)
+                .stroke(Color.primary.opacity(0.06), lineWidth: 0.5)
+        )
+        .padding(.horizontal, 16)
+    }
+    
+    private func planStepRow(sectionId: String, step: PlanStep) -> some View {
+        HStack(alignment: .top, spacing: 10) {
+            Button(action: {
+                let nextStatus: PlanStepStatus = (step.status == .completed) ? .pending : .completed
+                planManager.updateStepStatus(sectionId: sectionId, stepId: step.id, status: nextStatus)
+            }) {
+                Image(systemName: step.status.statusIcon)
+                    .font(.system(size: 12))
+                    .foregroundColor(step.status.statusColor)
+                    .frame(width: 18, height: 18)
+            }
+            .buttonStyle(.plain)
+            .help("Click to mark as \(step.status == .completed ? "pending" : "completed")")
+            
+            if let action = step.action {
+                Text("[\(action)]")
+                    .font(.system(size: 9.5, weight: .bold, design: .monospaced))
+                    .foregroundColor(action == "NEW" ? .green : (action == "DELETE" ? .red : .accentColor))
+                    .padding(.horizontal, 4)
+                    .padding(.vertical, 1.5)
+                    .background(
+                        (action == "NEW" ? Color.green : (action == "DELETE" ? Color.red : Color.accentColor)).opacity(0.1)
+                    )
+                    .cornerRadius(3)
+            }
+            
+            VStack(alignment: .leading, spacing: 2) {
+                Text(step.description)
+                    .font(.system(size: 11.5, weight: step.status == .completed ? .regular : .medium))
+                    .foregroundColor(step.status == .completed ? .secondary : .primary)
+                    .strikethrough(step.status == .completed)
+                
+                if let detail = step.detail, !detail.isEmpty {
+                    Text(detail)
+                        .font(.system(size: 10))
+                        .foregroundColor(.secondary)
+                }
+                
+                if let fileLink = step.fileLink, !fileLink.isEmpty {
+                    Button(action: {
+                        let cleanPath = fileLink.replacingOccurrences(of: "file://", with: "")
+                        let targetURL: URL
+                        if cleanPath.hasPrefix("/") {
+                            targetURL = URL(fileURLWithPath: cleanPath)
+                        } else if let ws = appState.workspaceFolder {
+                            targetURL = ws.appendingPathComponent(cleanPath)
+                        } else {
+                            targetURL = URL(fileURLWithPath: cleanPath)
+                        }
+                        Task {
+                            await appState.loadFile(url: targetURL)
+                        }
+                    }) {
+                        HStack(spacing: 3) {
+                            Image(systemName: "arrow.up.right.square")
+                                .font(.system(size: 9))
+                            Text(fileLink.replacingOccurrences(of: "file://", with: ""))
+                                .font(.system(size: 10, design: .monospaced))
+                                .underline()
+                        }
+                        .foregroundColor(.accentColor)
+                    }
+                    .buttonStyle(.plain)
+                    .padding(.top, 2)
+                }
+            }
+            
+            Spacer()
+        }
+        .padding(.horizontal, 10)
+        .padding(.vertical, 6)
+        .background(step.status == .completed ? Color.primary.opacity(0.02) : Color.clear)
+        .cornerRadius(5)
+    }
+    
+    private func planRawMarkdownView(plan: ImplementationPlan) -> some View {
+        ScrollView {
+            VStack(alignment: .leading, spacing: 10) {
+                Text(plan.rawMarkdown.isEmpty ? "# \(plan.title)\n\n\(plan.summary)" : plan.rawMarkdown)
+                    .font(.system(size: 11.5, design: .monospaced))
+                    .foregroundColor(.primary.opacity(0.9))
+                    .textSelection(.enabled)
+                    .padding(16)
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+        }
+        .background(workspaceBg)
+    }
+    
+    private var planEmptyStateView: some View {
+        VStack(spacing: 16) {
+            Spacer().frame(height: 60)
+            
+            Image(systemName: "list.bullet.clipboard")
+                .font(.system(size: 38))
+                .foregroundColor(.secondary.opacity(0.5))
+            
+            VStack(spacing: 6) {
+                Text("No Implementation Plan Active")
+                    .font(.system(size: 15, weight: .bold))
+                    .foregroundColor(.primary)
+                
+                Text("Implementation Plans ensure architectural rigor and prevent accidental codebase changes without user approval.")
+                    .font(.system(size: 11.5))
+                    .foregroundColor(.secondary)
+                    .multilineTextAlignment(.center)
+                    .frame(maxWidth: 420)
+            }
+            
+            HStack(spacing: 10) {
+                Button(action: {
+                    if let ws = appState.workspaceFolder?.path {
+                        let loaded = planManager.loadFromTaskMarkdown(workspacePath: ws)
+                        if !loaded {
+                            inputText = "/plan "
+                            isPlanMode = false
+                        }
+                    } else {
+                        inputText = "/plan "
+                        isPlanMode = false
+                    }
+                }) {
+                    HStack(spacing: 6) {
+                        Image(systemName: "doc.badge.plus")
+                        Text("Load from .microcode/task.md")
+                    }
+                    .font(.system(size: 11.5, weight: .medium))
+                    .padding(.horizontal, 14)
+                    .padding(.vertical, 7)
+                    .background(Color.primary.opacity(0.06))
+                    .cornerRadius(6)
+                }
+                .buttonStyle(.plain)
+                
+                Button(action: {
+                    inputText = "/plan Create implementation plan for the current task"
+                    isPlanMode = false
+                }) {
+                    HStack(spacing: 6) {
+                        Image(systemName: "sparkles")
+                        Text("Draft Plan with AI (/plan)")
+                    }
+                    .font(.system(size: 11.5, weight: .bold))
+                    .foregroundColor(.white)
+                    .padding(.horizontal, 16)
+                    .padding(.vertical, 7)
+                    .background(Color.accentColor)
+                    .cornerRadius(6)
+                }
+                .buttonStyle(.plain)
+            }
+            .padding(.top, 8)
+            
+            Spacer()
+        }
+        .frame(maxWidth: .infinity)
+        .padding(.horizontal, 24)
     }
     
     // MARK: - Task Editor & Autonomous Task Runner
@@ -1172,7 +1846,7 @@ struct AIAgentView: View {
             }
             .padding(.horizontal, 12)
             .padding(.vertical, 6)
-            .background(Color(nsColor: .controlBackgroundColor).opacity(0.5))
+            .background(panelBg)
             
             Divider().opacity(0.3)
             
@@ -1271,23 +1945,23 @@ struct AIAgentView: View {
                             .padding(14)
                         }
                     }
-                    .background(Color(nsColor: .textBackgroundColor).opacity(0.15))
+                    .background(workspaceBg)
                 } else {
                     TextEditor(text: $taskMdText)
                         .font(.system(size: 12, design: .monospaced))
                         .scrollContentBackground(.hidden)
-                        .background(Color(nsColor: .textBackgroundColor).opacity(0.3))
+                        .background(workspaceBg)
                 }
             } else if activeTaskTab == 1 {
                 TextEditor(text: $agentMdText)
                     .font(.system(size: 12, design: .monospaced))
                     .scrollContentBackground(.hidden)
-                    .background(Color(nsColor: .textBackgroundColor).opacity(0.3))
+                    .background(workspaceBg)
             } else {
                 TextEditor(text: $walkthroughMdText)
                     .font(.system(size: 12, design: .monospaced))
                     .scrollContentBackground(.hidden)
-                    .background(Color(nsColor: .textBackgroundColor).opacity(0.3))
+                    .background(workspaceBg)
             }
         }
         .onAppear { loadTaskFiles() }
@@ -1354,7 +2028,7 @@ struct AIAgentView: View {
                             .textSelection(.enabled)
                             .padding(18)
                             .frame(maxWidth: .infinity, alignment: .leading)
-                            .background(Color(nsColor: .controlBackgroundColor).opacity(0.4))
+                            .background(panelBg)
                             .cornerRadius(8)
                             .overlay(
                                 RoundedRectangle(cornerRadius: 8)
@@ -1366,7 +2040,7 @@ struct AIAgentView: View {
                 }
             }
         }
-        .background(Color(nsColor: .controlBackgroundColor).opacity(0.2))
+        .background(workspaceBg)
         .onAppear { loadTaskFiles() }
     }
     
@@ -1477,8 +2151,35 @@ struct AIAgentView: View {
                     .padding(.horizontal, 4)
                     .padding(.top, 4)
                     .onSubmit {
+                        // If slash suggestions are showing and user presses Enter, select the highlighted command
+                        if showSlashSuggestions && !slashCommandService.suggestions.isEmpty {
+                            let cmd = slashCommandService.suggestions[min(slashSelectedIndex, slashCommandService.suggestions.count - 1)]
+                            inputText = "/\(cmd.rawValue) "
+                            showSlashSuggestions = false
+                            slashSelectedIndex = 0
+                            return
+                        }
                         if !NSEvent.modifierFlags.contains(.shift) && !inputText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
                             sendMessage()
+                        }
+                    }
+                    .onChange(of: inputText) { newValue in
+                        // Slash Commands: detect /prefix
+                        slashCommandService.updateSuggestions(for: newValue)
+                        showSlashSuggestions = slashCommandService.isShowingSuggestions
+                        if !showSlashSuggestions { slashSelectedIndex = 0 }
+                        
+                        // @ Context Provider: detect @prefix
+                        if let atIdx = newValue.lastIndex(of: "@") {
+                            let afterAt = String(newValue[newValue.index(after: atIdx)...])
+                            if !afterAt.contains(" ") && (atIdx == newValue.startIndex || newValue[newValue.index(before: atIdx)] == " ") {
+                                showContextSuggestions = true
+                                contextSearchPrefix = afterAt
+                            } else {
+                                showContextSuggestions = false
+                            }
+                        } else {
+                            showContextSuggestions = false
                         }
                     }
             } else {
@@ -1528,6 +2229,7 @@ struct AIAgentView: View {
                         selectedType: $selectedSubAgentType,
                         isPresented: $showSubAgentDropdown
                     )
+                    .environmentObject(appState)
                 }
             }
             .padding(.horizontal, 4)
@@ -1552,31 +2254,19 @@ struct AIAgentView: View {
     @ViewBuilder
     private var activeAgentStatusHUD: some View {
         if agent.isLoading || agent.isProcessingQueue {
-            HStack(spacing: 6) {
+            HStack(spacing: 8) {
                 ProgressView()
                     .controlSize(.mini)
 
-                Text(agent.agentPhase.displayText)
-                    .font(.system(size: 11, weight: .medium))
+                Text(agent.agentPhase == .thinking ? "Thinking..." : agent.agentPhase.displayText)
+                    .font(.system(size: 11.5, weight: .medium, design: .monospaced))
                     .foregroundColor(.secondary)
                     .lineLimit(1)
 
-                Spacer(minLength: 0)
-
-                Button(action: {
-                    agent.stopGeneration()
-                    acpHost.stopActiveAgent()
-                }) {
-                    Image(systemName: "stop.fill")
-                        .font(.system(size: 9, weight: .semibold))
-                        .foregroundColor(.red.opacity(0.9))
-                        .padding(4)
-                }
-                .buttonStyle(.plain)
-                .help("Stop active AI task")
+                Spacer(minLength: 8)
             }
-            .padding(.horizontal, 16)
-            .padding(.top, 5)
+            .padding(.horizontal, 4)
+            .padding(.bottom, 6)
             .transition(.opacity.combined(with: .move(edge: .bottom)))
         }
     }
@@ -1633,43 +2323,94 @@ struct AIAgentView: View {
                 .buttonStyle(.plain)
                 .help("Clear all queued messages")
             }
-            .padding(.horizontal, 16)
-            .padding(.vertical, 4)
-            .padding(.top, 4)
+            .padding(.horizontal, 4)
+            .padding(.bottom, 6)
             .transition(.opacity.combined(with: .move(edge: .bottom)))
         }
     }
     
     private var inputArea: some View {
-        VStack(spacing: 0) {
-            // One unobtrusive activity line; execution details stay in the
-            // transcript and continue running in the background.
-            activeAgentStatusHUD
+        HStack(spacing: 0) {
+            Spacer(minLength: 14)
             
-            // Queue Indicator Bar
-            queueIndicatorBar
-            
-            // Attachment Pills
-            if !attachments.isEmpty {
-                attachmentsBar
-            }
-            
-            // Keep the composer visually aligned with the reading column.
-            // The two flexible spacers leave a small gutter on narrow splits,
-            // then centre the card and cap it at a comfortable desktop width.
-            // Therefore opening Preview/Inspector changes its width instantly
-            // instead of leaving a fixed, overly-wide input surface behind.
-            HStack(spacing: 0) {
-                Spacer(minLength: 14)
+            VStack(spacing: 0) {
+                // One unobtrusive activity line; execution details stay in the
+                // transcript and continue running in the background.
+                activeAgentStatusHUD
+                
+                // Queue Indicator Bar
+                queueIndicatorBar
+                
+                // Tool Approval Overlay
+                if toolApprovalManager.pendingRequest != nil {
+                    ToolApprovalView(manager: toolApprovalManager)
+                        .transition(.move(edge: .bottom).combined(with: .opacity))
+                        .padding(.bottom, 4)
+                }
+                
+                // Attachment Pills
+                if !attachments.isEmpty {
+                    attachmentsBar
+                }
+                
+                // Attached Context Badges (from @ mentions)
+                if !contextProviderService.attachedContexts.isEmpty {
+                    attachedContextsBar
+                }
+                
+                // Slash Command Suggestions (above input)
+                if showSlashSuggestions && !slashCommandService.suggestions.isEmpty {
+                    SlashCommandSuggestionView(
+                        suggestions: slashCommandService.suggestions,
+                        selectedIndex: slashSelectedIndex,
+                        onSelect: { command in
+                            inputText = "/\(command.rawValue) "
+                            showSlashSuggestions = false
+                            slashSelectedIndex = 0
+                        }
+                    )
+                    .environmentObject(appState)
+                    .transition(.opacity)
+                    .padding(.bottom, 4)
+                }
+                
+                // Context Provider Suggestions (above input when @ typed)
+                if showContextSuggestions {
+                    ContextProviderSuggestionView(
+                        suggestions: contextProviderService.getSuggestions(for: contextSearchPrefix),
+                        onSelect: { provider in
+                            // Remove the @prefix from input and attach context
+                            if let atIdx = inputText.lastIndex(of: "@") {
+                                inputText = String(inputText[inputText.startIndex..<atIdx])
+                            }
+                            showContextSuggestions = false
+                            contextSearchPrefix = ""
+                            // For file/folder providers, the actual attachment happens via the provider
+                            contextProviderService.selectProvider(provider)
+                        },
+                        selectedIndex: .constant(0)
+                    )
+                    .transition(.opacity)
+                    .padding(.bottom, 4)
+                }
+                
+                // Keep the composer visually aligned with the reading column.
+                // The two flexible spacers leave a small gutter on narrow splits,
+                // then centre the card and cap it at a comfortable desktop width.
+                // Therefore opening Preview/Inspector changes its width instantly
+                // instead of leaving a fixed, overly-wide input surface behind.
                 inputCardView
-                    .frame(maxWidth: 880, alignment: .leading)
-                Spacer(minLength: 14)
+                    .frame(maxWidth: .infinity, alignment: .leading)
             }
-            .padding(.vertical, 8)
+            .frame(maxWidth: 880)
+            
+            Spacer(minLength: 14)
         }
+        .padding(.vertical, 8)
         .background(Color.clear)
     }
-     private var attachmentsBar: some View {
+    
+    private var attachmentsBar: some View {
         ScrollView(.horizontal, showsIndicators: false) {
             HStack(spacing: 8) {
                 ForEach(attachments) { file in
@@ -1678,8 +2419,36 @@ struct AIAgentView: View {
                     })
                 }
             }
-            .padding(.horizontal, 14)
-            .padding(.top, 6)
+            .padding(.horizontal, 4)
+            .padding(.bottom, 6)
+        }
+    }
+    
+    private var attachedContextsBar: some View {
+        ScrollView(.horizontal, showsIndicators: false) {
+            HStack(spacing: 6) {
+                ForEach(contextProviderService.attachedContexts) { ctx in
+                    HStack(spacing: 4) {
+                        Image(systemName: ctx.provider.icon)
+                            .font(.system(size: 10))
+                        Text(ctx.title)
+                            .font(.system(size: 11))
+                            .lineLimit(1)
+                        Button(action: { contextProviderService.removeContext(ctx) }) {
+                            Image(systemName: "xmark")
+                                .font(.system(size: 8, weight: .bold))
+                        }
+                        .buttonStyle(.plain)
+                    }
+                    .padding(.horizontal, 8)
+                    .padding(.vertical, 4)
+                    .background(Color.accentColor.opacity(0.15))
+                    .foregroundColor(.accentColor)
+                    .cornerRadius(6)
+                }
+            }
+            .padding(.horizontal, 4)
+            .padding(.bottom, 4)
         }
     }
     
@@ -1704,9 +2473,37 @@ struct AIAgentView: View {
             
             Spacer()
             
+            voiceInputButton
+            
             sendOrStopButton
         }
         .padding(.top, 2)
+    }
+    
+    private var voiceInputButton: some View {
+        Button(action: {
+            Task {
+                await voiceCoding.toggleListening()
+            }
+        }) {
+            ZStack {
+                Circle()
+                    .fill(voiceCoding.state == .listening ? Color.red.opacity(0.18) : Color.primary.opacity(0.05))
+                    .frame(width: 26, height: 26)
+                
+                if voiceCoding.state == .listening {
+                    Circle()
+                        .stroke(Color.red.opacity(0.6), lineWidth: 1.2)
+                        .frame(width: 26, height: 26)
+                }
+                
+                Image(systemName: voiceCoding.state == .listening ? "mic.fill" : "mic")
+                    .font(.system(size: 12, weight: .medium))
+                    .foregroundColor(voiceCoding.state == .listening ? .red : .secondary)
+            }
+        }
+        .buttonStyle(.plain)
+        .help(voiceCoding.state == .listening ? "Stop voice recording" : "Voice Input (Speak to AI)")
     }
     
     private var plusActionMenu: some View {
@@ -2051,11 +2848,70 @@ struct AIAgentView: View {
     
     private func sendMessage() {
         guard !inputText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || !attachments.isEmpty else { return }
-        let userText = inputText
+        var userText = inputText
         let currentAttachments = attachments
+        
+        // Dismiss any open suggestions
+        showSlashSuggestions = false
+        showContextSuggestions = false
         
         inputText = ""
         attachments = []
+        
+        // Handle Slash Commands
+        if userText.starts(with: "/") {
+            if let parsed = slashCommandService.parseInput(userText) {
+                switch parsed.command {
+                case .clear:
+                    agent.clearCurrentChat()
+                    return
+                case .compact:
+                    // Keep only the last 10 messages to save context
+                    if agent.messages.count > 10 {
+                        let keep = Array(agent.messages.suffix(10))
+                        agent.messages = keep
+                    }
+                    let compactMsg = AgentMessageModel(
+                        id: UUID().uuidString, role: .assistant,
+                        content: "💡 Chat compacted — kept last \(min(agent.messages.count, 10)) messages.",
+                        toolResults: [], pendingChanges: [], timestamp: Date()
+                    )
+                    agent.messages.append(compactMsg)
+                    return
+                case .help:
+                    if let helpText = slashCommandService.executeCommand(.help, argument: "") {
+                        let helpMsg = AgentMessageModel(
+                            id: UUID().uuidString, role: .assistant,
+                            content: helpText,
+                            toolResults: [], pendingChanges: [], timestamp: Date()
+                        )
+                        agent.messages.append(helpMsg)
+                    }
+                    return
+                case .model:
+                    // Model switching placeholder — show current info
+                    let modelMsg = AgentMessageModel(
+                        id: UUID().uuidString, role: .assistant,
+                        content: "🤖 Model selection is available in the settings panel. Use the model picker above the chat input.",
+                        toolResults: [], pendingChanges: [], timestamp: Date()
+                    )
+                    agent.messages.append(modelMsg)
+                    return
+                default:
+                    // Transform slash command into a prompt
+                    if let promptPrefix = slashCommandService.executeCommand(parsed.command, argument: parsed.argument) {
+                        userText = promptPrefix
+                    }
+                }
+            }
+        }
+        
+        // Inject @ Context Provider content
+        let contextPrompt = contextProviderService.buildContextPrompt()
+        if !contextPrompt.isEmpty {
+            userText = userText + "\n\n" + contextPrompt
+            contextProviderService.clearAll()
+        }
         
         // If AI is busy, queue the message
         if agent.isLoading || agent.isProcessingQueue {
@@ -2181,7 +3037,8 @@ struct AIAgentView: View {
             
             Task { @MainActor in
                 let stream = session.eventStream
-                session.start(task: userText, workspacePath: workspace, model: chosenModel)
+                let mentionContext = await AgentContextProtocolBridge.shared.expandMentions(prompt: userText, workspaceRoot: workspace)
+                session.start(task: mentionContext.expandedPrompt, workspacePath: workspace, model: chosenModel)
                 
                 var accumulatedThinking = ""
                 var accumulatedText = ""
@@ -2401,7 +3258,6 @@ struct AIAgentView: View {
     // MARK: - Apply / Reject Pending Changes
     
     private func applyChange(_ change: PendingChangeModel) {
-        // Write the new content to the file
         do {
             let url = URL(fileURLWithPath: change.filePath)
             
@@ -2411,13 +3267,22 @@ struct AIAgentView: View {
                 withIntermediateDirectories: true
             )
             
-            try change.newContent.write(to: url, atomically: true, encoding: .utf8)
+            if !change.newContent.isEmpty {
+                try change.newContent.write(to: url, atomically: true, encoding: .utf8)
+            }
             
             // Update status in agent messages
             updateChangeStatus(change, newStatus: .accepted)
             
-            // Reload file in editor if it's currently open
-            if let currentFile = appState.currentFile, currentFile.path == change.filePath {
+            // Update status in AgentService pending changes
+            agent.applyChange(change.id)
+            
+            // Immediate reload of the file from disk into open editor tabs
+            appState.reloadFileFromDisk(path: change.filePath)
+            
+            // If file is not open, open it so user sees the change
+            let standardizedPath = url.standardizedFileURL.path
+            if !appState.openFiles.contains(where: { $0.path == standardizedPath }) {
                 Task { @MainActor in
                     await appState.loadFile(url: url)
                 }
@@ -2430,8 +3295,18 @@ struct AIAgentView: View {
     }
     
     private func rejectChange(_ change: PendingChangeModel) {
-        updateChangeStatus(change, newStatus: .rejected)
-        print("❌ Rejected change to \(change.filePath)")
+        do {
+            if !change.oldContent.isEmpty {
+                let url = URL(fileURLWithPath: change.filePath)
+                try change.oldContent.write(to: url, atomically: true, encoding: .utf8)
+                appState.reloadFileFromDisk(path: change.filePath)
+            }
+            updateChangeStatus(change, newStatus: .rejected)
+            agent.rejectChange(change.id)
+            print("❌ Rejected change to \(change.filePath)")
+        } catch {
+            print("❌ Failed to revert change: \(error)")
+        }
     }
     
     private func updateChangeStatus(_ change: PendingChangeModel, newStatus: PendingChangeModel.PendingChangeStatus) {
@@ -2585,7 +3460,7 @@ struct AIAgentView: View {
             )
         }
         .menuStyle(.borderlessButton)
-        .frame(maxWidth: 220)
+        .frame(maxWidth: 320)
         .help("Select Mode & AI Model (ACP, Dotmini Cloud, BYOK, Subscription)")
     }
     
@@ -2616,8 +3491,97 @@ struct AIAgentView: View {
     
     @ViewBuilder
     private var modelMenuContent: some View {
-        // Section 1: 🔌 ACP (Agent Client Protocol - Local CLI)
-        Section("🔌 ACP (Local CLI Agent)") {
+        // MARK: - 1. ✨ Subscription (OAuth Accounts)
+        Menu {
+            let providersToShow: [SubscriptionProviderType] = {
+                let connected = SubscriptionAuthManager.shared.connectedProviders()
+                return connected.isEmpty ? SubscriptionProviderType.allCases : connected
+            }()
+            
+            ForEach(providersToShow) { prov in
+                let isConnected = SubscriptionAuthManager.shared.isConnected(prov)
+                Menu("\(prov.displayName)\(isConnected ? " (Active)" : "")") {
+                    ForEach(prov.modelInfos) { subModel in
+                        Button(action: {
+                            switchToNativeMode(mode: "subscription")
+                            appState.aiProvider = subModel.aiProviderID
+                            appState.aiModel = subModel.modelID
+                            SubscriptionAuthManager.shared.activeProvider = subModel.provider
+                            UserDefaults.standard.set(subModel.provider.rawValue, forKey: "subscriptionActiveProvider")
+                            UserDefaults.standard.set("subscription", forKey: "aiKeyMode")
+                            appState.saveSettings()
+                        }) {
+                            HStack {
+                                Text(subModel.name)
+                                if currentExecutionMode == .subscription && appState.aiModel == subModel.modelID {
+                                    Image(systemName: "checkmark")
+                                }
+                            }
+                        }
+                    }
+                    if !isConnected {
+                        Divider()
+                        Button("Connect \(prov.displayName) in Settings...") {
+                            appState.showingSettingsDialog = true
+                        }
+                    }
+                }
+            }
+            
+            Divider()
+            Button(action: { appState.showingSettingsDialog = true }) {
+                Label("Manage Subscriptions in Settings...", systemImage: "gearshape")
+            }
+        } label: {
+            HStack {
+                Label("Subscription (ChatGPT, Claude, Gemini)", systemImage: "sparkles")
+                if currentExecutionMode == .subscription {
+                    Spacer()
+                    Image(systemName: "checkmark")
+                }
+            }
+        }
+        
+        // MARK: - 2. 🔑 BYOK (Bring Your Own Key)
+        Menu {
+            let byokProviders = AIModelCatalog.shared.providers.filter { !["omni", "agy", "codex", "claude_code", "zed"].contains($0.id) }
+            ForEach(byokProviders) { prov in
+                let hasKey = hasActiveKey(prov.id)
+                Menu("\(prov.name)\(hasKey ? "" : " (No Key)")") {
+                    ForEach(prov.models) { m in
+                        Button(action: {
+                            switchToNativeMode(mode: "direct")
+                            setModel(prov.id, m.id)
+                        }) {
+                            HStack {
+                                Text(m.name)
+                                if !m.badge.isEmpty { Text("(\(m.badge))") }
+                                if currentExecutionMode == .byok && appState.aiProvider == prov.id && appState.aiModel == m.id {
+                                    Image(systemName: "checkmark")
+                                }
+                            }
+                        }
+                    }
+                    if !hasKey {
+                        Divider()
+                        Button("Set \(prov.name) API Key in Settings...") {
+                            appState.showingSettingsDialog = true
+                        }
+                    }
+                }
+            }
+        } label: {
+            HStack {
+                Label("BYOK (Direct API Key)", systemImage: "key.fill")
+                if currentExecutionMode == .byok {
+                    Spacer()
+                    Image(systemName: "checkmark")
+                }
+            }
+        }
+        
+        // MARK: - 3. 🔌 ACP (Local CLI Agent)
+        Menu {
             ForEach(LocalEcosystemDiscovery.shared.engines) { engine in
                 Menu(engine.name + (engine.isInstalled ? "" : " (Not Installed)")) {
                     ForEach(engine.models) { m in
@@ -2635,74 +3599,34 @@ struct AIAgentView: View {
                     }
                 }
             }
+        } label: {
+            HStack {
+                Label("ACP (Local CLI Agents)", systemImage: "terminal.fill")
+                if currentExecutionMode == .acp {
+                    Spacer()
+                    Image(systemName: "checkmark")
+                }
+            }
         }
         
-        Divider()
-        
-        // Section 2: ☁️ Dotmini Cloud (Sovereign AI)
-        Section("☁️ Dotmini Cloud (Sovereign AI)") {
+        // MARK: - 4. ☁️ Dotmini Cloud (Sovereign AI)
+        Menu {
             if let omni = AIModelCatalog.shared.provider("omni") {
-                ForEach(omni.models) { m in
-                    Button(action: {
-                        switchToNativeMode(mode: "cloud")
-                        setModel("omni", m.id)
-                    }) {
-                        HStack {
-                            Text(m.name)
-                            if currentExecutionMode == .cloud && appState.aiModel == m.id {
-                                Image(systemName: "checkmark")
-                            }
-                        }
-                    }
+                // Group 1: 🌟 Flagship & Deep Reasoning
+                let reasoningModels = omni.models.filter {
+                    let id = $0.id.lowercased()
+                    return id.contains("astra") || id.contains("sonnet-4-6") || id.contains("3.8-flash") || id.contains("reasoner") || id.contains("o3") || id.contains("o1") || id.contains("5.6-sol")
                 }
-            }
-        }
-        
-        Divider()
-        
-        // Section 3: 🔑 BYOK (Bring Your Own Key)
-        Section("🔑 BYOK (Bring Your Own Key)") {
-            let byokProviders = AIModelCatalog.shared.providers.filter { !["omni", "agy", "codex", "claude_code", "zed"].contains($0.id) }
-            ForEach(byokProviders) { prov in
-                let hasKey = hasActiveKey(prov.id)
-                Menu("\(prov.name)\(hasKey ? "" : " (No Key)")") {
-                    ForEach(prov.models) { m in
-                        Button(action: {
-                            switchToNativeMode(mode: "direct")
-                            setModel(prov.id, m.id)
-                        }) {
-                            HStack {
-                                Text(m.name)
-                                if currentExecutionMode == .byok && appState.aiProvider == prov.id && appState.aiModel == m.id {
-                                    Image(systemName: "checkmark")
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-        }
-        
-        Divider()
-        
-        // Section 4: ✨ Subscription (OAuth Accounts)
-        Section("✨ Subscription (ChatGPT / Claude / Gemini / Copilot)") {
-            if SubscriptionAuthManager.shared.hasAnyConnected {
-                ForEach(SubscriptionAuthManager.shared.connectedProviders()) { prov in
-                    Menu(prov.displayName) {
-                        ForEach(prov.modelInfos) { subModel in
+                if !reasoningModels.isEmpty {
+                    Menu("🌟 Flagship & Deep Reasoning") {
+                        ForEach(reasoningModels) { m in
                             Button(action: {
-                                switchToNativeMode(mode: "subscription")
-                                appState.aiProvider = subModel.aiProviderID
-                                appState.aiModel = subModel.modelID
-                                SubscriptionAuthManager.shared.activeProvider = subModel.provider
-                                UserDefaults.standard.set(subModel.provider.rawValue, forKey: "subscriptionActiveProvider")
-                                UserDefaults.standard.set("subscription", forKey: "aiKeyMode")
-                                appState.saveSettings()
+                                switchToNativeMode(mode: "cloud")
+                                setModel("omni", m.id)
                             }) {
                                 HStack {
-                                    Text(subModel.name)
-                                    if currentExecutionMode == .subscription && appState.aiModel == subModel.modelID {
+                                    Text(m.name)
+                                    if currentExecutionMode == .cloud && appState.aiModel == m.id {
                                         Image(systemName: "checkmark")
                                     }
                                 }
@@ -2710,9 +3634,134 @@ struct AIAgentView: View {
                         }
                     }
                 }
-            } else {
-                Button(action: { appState.showingSettingsDialog = true }) {
-                    Label("Connect Subscription in Settings...", systemImage: "plus.circle")
+                
+                // Group 2: 🟣 Google Gemini
+                let geminiModels = omni.models.filter { $0.id.lowercased().contains("gemini") && !reasoningModels.contains($0) }
+                if !geminiModels.isEmpty {
+                    Menu("Google Gemini") {
+                        ForEach(geminiModels) { m in
+                            Button(action: {
+                                switchToNativeMode(mode: "cloud")
+                                setModel("omni", m.id)
+                            }) {
+                                HStack {
+                                    Text(m.name)
+                                    if currentExecutionMode == .cloud && appState.aiModel == m.id {
+                                        Image(systemName: "checkmark")
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+                
+                // Group 3: 🟠 Anthropic Claude
+                let claudeModels = omni.models.filter { $0.id.lowercased().contains("claude") && !reasoningModels.contains($0) }
+                if !claudeModels.isEmpty {
+                    Menu("Anthropic Claude") {
+                        ForEach(claudeModels) { m in
+                            Button(action: {
+                                switchToNativeMode(mode: "cloud")
+                                setModel("omni", m.id)
+                            }) {
+                                HStack {
+                                    Text(m.name)
+                                    if currentExecutionMode == .cloud && appState.aiModel == m.id {
+                                        Image(systemName: "checkmark")
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+                
+                // Group 4: 🟢 OpenAI
+                let openAIModels = omni.models.filter { ($0.id.lowercased().contains("gpt") || $0.id.lowercased().contains("o3") || $0.id.lowercased().contains("o1")) && !reasoningModels.contains($0) }
+                if !openAIModels.isEmpty {
+                    Menu("OpenAI") {
+                        ForEach(openAIModels) { m in
+                            Button(action: {
+                                switchToNativeMode(mode: "cloud")
+                                setModel("omni", m.id)
+                            }) {
+                                HStack {
+                                    Text(m.name)
+                                    if currentExecutionMode == .cloud && appState.aiModel == m.id {
+                                        Image(systemName: "checkmark")
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+                
+                // Group 5: 🔵 DeepSeek
+                let deepseekModels = omni.models.filter { $0.id.lowercased().contains("deepseek") && !reasoningModels.contains($0) }
+                if !deepseekModels.isEmpty {
+                    Menu("DeepSeek") {
+                        ForEach(deepseekModels) { m in
+                            Button(action: {
+                                switchToNativeMode(mode: "cloud")
+                                setModel("omni", m.id)
+                            }) {
+                                HStack {
+                                    Text(m.name)
+                                    if currentExecutionMode == .cloud && appState.aiModel == m.id {
+                                        Image(systemName: "checkmark")
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+                
+                // Group 6: 🇹🇭 Thai AI & Open Source
+                let openSourceModels = omni.models.filter {
+                    let id = $0.id.lowercased()
+                    return id.contains("typhoon") || id.contains("qwen") || id.contains("llama") || id.contains("codegeex") || id.contains("glm")
+                }
+                if !openSourceModels.isEmpty {
+                    Menu("Thai AI & Open Source") {
+                        ForEach(openSourceModels) { m in
+                            Button(action: {
+                                switchToNativeMode(mode: "cloud")
+                                setModel("omni", m.id)
+                            }) {
+                                HStack {
+                                    Text(m.name)
+                                    if currentExecutionMode == .cloud && appState.aiModel == m.id {
+                                        Image(systemName: "checkmark")
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+                
+                // Group 7: All Models Flat Submenu
+                Divider()
+                Menu("All Cloud Models (\(omni.models.count))") {
+                    ForEach(omni.models) { m in
+                        Button(action: {
+                            switchToNativeMode(mode: "cloud")
+                            setModel("omni", m.id)
+                        }) {
+                            HStack {
+                                Text(m.name)
+                                if currentExecutionMode == .cloud && appState.aiModel == m.id {
+                                    Image(systemName: "checkmark")
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        } label: {
+            HStack {
+                Label("Dotmini Cloud (Sovereign AI)", systemImage: "cloud.fill")
+                if currentExecutionMode == .cloud {
+                    Spacer()
+                    Image(systemName: "checkmark")
                 }
             }
         }
@@ -3788,7 +4837,22 @@ struct MessageContentParser {
 
 // MARK: - Chat Stage
 
+private struct ChatScrollBottomVisibleKey: PreferenceKey {
+    static var defaultValue: CGFloat = 0
+    static func reduce(value: inout CGFloat, nextValue: () -> CGFloat) {
+        value = nextValue()
+    }
+}
+
+private struct ChatScrollViewHeightKey: PreferenceKey {
+    static var defaultValue: CGFloat = 0
+    static func reduce(value: inout CGFloat, nextValue: () -> CGFloat) {
+        value = nextValue()
+    }
+}
+
 struct AgentChatStage: View {
+    @EnvironmentObject var appState: AppState
     let messages: [AgentMessageModel]
     let isLoading: Bool
     var domain: AgentDomain = .software
@@ -3796,98 +4860,189 @@ struct AgentChatStage: View {
     var onApplyChange: ((PendingChangeModel) -> Void)? = nil
     var onRejectChange: ((PendingChangeModel) -> Void)? = nil
     var onSuggestionTap: ((String) -> Void)? = nil
+    var onViewPlan: (() -> Void)? = nil
+    
+    @ObservedObject private var planManager = ImplementationPlanManager.shared
+    @State private var userScrolledUp: Bool = false
+    @State private var scrollViewportHeight: CGFloat = 0
     
     var body: some View {
         ScrollViewReader { proxy in
-            ScrollView {
-                LazyVStack(spacing: 0) {
-                    if messages.isEmpty && !isLoading {
-                        VStack(spacing: 20) {
-                            Spacer().frame(height: 40)
-                            
-                            VStack(spacing: 6) {
-                                Text(domain == .science ? "Science Agent" : "AI Agent")
-                                    .font(.system(size: 16, weight: .semibold))
-                                    .foregroundColor(.primary.opacity(0.8))
+            ZStack(alignment: .bottom) {
+                ScrollView {
+                    VStack(spacing: 0) {
+                        if messages.isEmpty && !isLoading {
+                            VStack(spacing: 20) {
+                                Spacer().frame(height: 40)
                                 
-                                Text(domain == .science ? "Analyze evidence, structures, data, and scientific literature" : "Ask anything, write code, debug, or explore ideas")
-                                    .font(.system(size: 12))
-                                    .foregroundColor(.secondary)
-                                    .multilineTextAlignment(.center)
-                            }
-                            
-                            // Quick suggestions
-                            VStack(spacing: 8) {
-                                ForEach(domain == .science ? [
-                                    "Analyze the scientific evidence in this project",
-                                    "Compare wild-type and mutant structures",
-                                    "Validate the AlphaFold workflow and confidence",
-                                    "Draft a LaTeX research report from project evidence"
-                                ] : [
-                                    "Explain this code",
-                                    "Find bugs in my project",
-                                    "Refactor for performance",
-                                    "Write unit tests"
-                                ], id: \.self) { suggestion in
-                                    Button(action: {
-                                        onSuggestionTap?(suggestion)
-                                    }) {
-                                        HStack {
-                                            Text(suggestion)
-                                                .font(.system(size: 11))
-                                                .foregroundColor(.primary.opacity(0.7))
-                                            Spacer()
-                                        }
-                                        .padding(.horizontal, 14)
-                                        .padding(.vertical, 10)
-                                        .background(Color.primary.opacity(0.035))
-                                        .cornerRadius(5)
-                                        .overlay(
-                                            RoundedRectangle(cornerRadius: 5)
-                                                .stroke(Color.secondary.opacity(0.14), lineWidth: 1)
-                                        )
-                                    }
-                                    .buttonStyle(.plain)
+                                VStack(spacing: 6) {
+                                    Text(domain == .science ? "Science Agent" : "AI Agent")
+                                        .font(.system(size: 16, weight: .semibold))
+                                        .foregroundColor(.primary.opacity(0.8))
+                                    
+                                    Text(domain == .science ? "Analyze evidence, structures, data, and scientific literature" : "Ask anything, write code, debug, or explore ideas")
+                                        .font(.system(size: 12))
+                                        .foregroundColor(.secondary)
+                                        .multilineTextAlignment(.center)
                                 }
+                                
+                                // Quick suggestions
+                                VStack(spacing: 8) {
+                                    ForEach(domain == .science ? [
+                                        "Analyze the scientific evidence in this project",
+                                        "Compare wild-type and mutant structures",
+                                        "Validate the AlphaFold workflow and confidence",
+                                        "Draft a LaTeX research report from project evidence"
+                                    ] : [
+                                        "Explain this code",
+                                        "Find bugs in my project",
+                                        "Refactor for performance",
+                                        "Write unit tests"
+                                    ], id: \.self) { suggestion in
+                                        Button(action: {
+                                            onSuggestionTap?(suggestion)
+                                        }) {
+                                            HStack {
+                                                Text(suggestion)
+                                                    .font(.system(size: 11))
+                                                    .foregroundColor(.primary.opacity(0.7))
+                                                Spacer()
+                                            }
+                                            .padding(.horizontal, 14)
+                                            .padding(.vertical, 10)
+                                            .background(Color.primary.opacity(0.035))
+                                            .cornerRadius(5)
+                                            .overlay(
+                                                RoundedRectangle(cornerRadius: 5)
+                                                    .stroke(Color.secondary.opacity(0.14), lineWidth: 1)
+                                            )
+                                        }
+                                        .buttonStyle(.plain)
+                                    }
+                                }
+                                // Keep the first-turn actions in the same compact
+                                // reading column as a real conversation instead of
+                                // stretching controls from edge to edge.
+                                .frame(maxWidth: 720)
+                                .frame(maxWidth: .infinity)
+                                .padding(.horizontal, 24)
+                                .padding(.top, 8)
+                                
+                                Spacer()
                             }
-                            // Keep the first-turn actions in the same compact
-                            // reading column as a real conversation instead of
-                            // stretching controls from edge to edge.
-                            .frame(maxWidth: 720)
-                            .frame(maxWidth: .infinity)
-                            .padding(.horizontal, 24)
-                            .padding(.top, 8)
+                        } else {
+                            if AgentService.shared.hasEarlierMessages {
+                                Button("Load earlier messages") {
+                                    AgentService.shared.loadEarlierMessages()
+                                }
+                                .buttonStyle(.borderless)
+                                .font(.system(size: 11, weight: .medium))
+                                .foregroundColor(.secondary)
+                                .padding(.vertical, 12)
+                            }
+                            ForEach(messages) { message in
+                                RichMessageRow(message: message, onApplyChange: onApplyChange, onRejectChange: onRejectChange)
+                                    .equatable()
+                                    .id(message.id)
+                            }
                             
-                            Spacer()
-                        }
-                    } else {
-                        if AgentService.shared.hasEarlierMessages {
-                            Button("Load earlier messages") {
-                                AgentService.shared.loadEarlierMessages()
+                            // Inline plan approval card (Persists throughout plan lifecycle)
+                            if let _ = planManager.currentPlan, !messages.isEmpty {
+                                PlanApprovalInlineCard(
+                                    planManager: planManager,
+                                    onViewPlan: onViewPlan
+                                )
+                                .environmentObject(appState)
+                                .padding(.horizontal, 16)
+                                .padding(.vertical, 8)
                             }
-                            .buttonStyle(.borderless)
-                            .font(.system(size: 11, weight: .medium))
-                            .foregroundColor(.secondary)
-                            .padding(.vertical, 12)
-                        }
-                        ForEach(messages) { message in
-                            RichMessageRow(message: message, onApplyChange: onApplyChange, onRejectChange: onRejectChange)
-                                .equatable()
-                                .id(message.id)
+                            
+                            // Reliable Bottom Anchor
+                            GeometryReader { geo in
+                                Color.clear
+                                    .preference(key: ChatScrollBottomVisibleKey.self, value: geo.frame(in: .named("ChatScrollSpace")).maxY)
+                            }
+                            .frame(height: 1)
+                            .id("BOTTOM_CHAT_ANCHOR")
                         }
                     }
-                    
+                    .padding(.bottom, 16)
                 }
-                .padding(.bottom, 16)
-            }
-            // Loading an older page increases the count but keeps the final ID
-            // unchanged. Tracking that ID prevents a history load from jumping
-            // the viewport back to the newest message.
-            .onChange(of: messages.last?.id) { lastId in
-                if let lastId {
-                    withAnimation(.easeOut(duration: 0.12)) {
-                        proxy.scrollTo(lastId, anchor: .bottom)
+                .coordinateSpace(name: "ChatScrollSpace")
+                .background(
+                    GeometryReader { geo in
+                        Color.clear
+                            .preference(key: ChatScrollViewHeightKey.self, value: geo.size.height)
                     }
+                )
+                .onPreferenceChange(ChatScrollViewHeightKey.self) { h in
+                    scrollViewportHeight = h
+                }
+                .onPreferenceChange(ChatScrollBottomVisibleKey.self) { bottomY in
+                    guard scrollViewportHeight > 0 else { return }
+                    // bottomY is the bottom coordinate relative to viewport top
+                    let distanceBelow = bottomY - scrollViewportHeight
+                    if distanceBelow > 100 {
+                        // User scrolled up away from bottom
+                        if !userScrolledUp {
+                            userScrolledUp = true
+                        }
+                    } else if distanceBelow <= 35 {
+                        // User is near bottom
+                        if userScrolledUp {
+                            userScrolledUp = false
+                        }
+                    }
+                }
+                
+                // Floating "Scroll to latest" button when user scrolls up
+                if userScrolledUp && !messages.isEmpty {
+                    Button(action: {
+                        userScrolledUp = false
+                        withAnimation(.easeOut(duration: 0.15)) {
+                            proxy.scrollTo("BOTTOM_CHAT_ANCHOR", anchor: .bottom)
+                        }
+                    }) {
+                        HStack(spacing: 5) {
+                            Image(systemName: "arrow.down")
+                                .font(.system(size: 9.5, weight: .bold))
+                            Text("Latest messages")
+                                .font(.system(size: 11, weight: .medium))
+                        }
+                        .foregroundColor(.primary)
+                        .padding(.horizontal, 10)
+                        .padding(.vertical, 5)
+                        .background(Color(nsColor: appState.appTheme.elevatedBackground))
+                        .cornerRadius(14)
+                        .shadow(color: Color.black.opacity(0.18), radius: 4, x: 0, y: 2)
+                        .overlay(
+                            RoundedRectangle(cornerRadius: 14)
+                                .stroke(Color.primary.opacity(0.15), lineWidth: 1)
+                        )
+                    }
+                    .buttonStyle(.plain)
+                    .padding(.bottom, 12)
+                    .transition(.opacity.combined(with: .scale(scale: 0.9)))
+                }
+            }
+            .onChange(of: messages.count) { _ in
+                userScrolledUp = false
+                proxy.scrollTo("BOTTOM_CHAT_ANCHOR", anchor: .bottom)
+            }
+            .onChange(of: isLoading) { loading in
+                if loading {
+                    userScrolledUp = false
+                    proxy.scrollTo("BOTTOM_CHAT_ANCHOR", anchor: .bottom)
+                }
+            }
+            .onChange(of: messages.last?.content) { _ in
+                if !userScrolledUp {
+                    proxy.scrollTo("BOTTOM_CHAT_ANCHOR", anchor: .bottom)
+                }
+            }
+            .onAppear {
+                if !messages.isEmpty {
+                    proxy.scrollTo("BOTTOM_CHAT_ANCHOR", anchor: .bottom)
                 }
             }
         }
@@ -4304,7 +5459,7 @@ struct RichMessageRow: View, Equatable {
         return lhs.message.id == rhs.message.id &&
                lhs.message.content == rhs.message.content &&
                lhs.message.toolResults.count == rhs.message.toolResults.count &&
-               lhs.message.pendingChanges.count == rhs.message.pendingChanges.count &&
+               lhs.message.pendingChanges == rhs.message.pendingChanges &&
                lhs.message.role == rhs.message.role
     }
     
@@ -4361,13 +5516,32 @@ struct RichMessageRow: View, Equatable {
     
     private var aiCellContent: some View {
         let blocks = MessageContentParser.parse(message.content)
+        let harness = SubAgentHarness.shared
+        let planMgr = ImplementationPlanManager.shared
         return VStack(alignment: .leading, spacing: 14) {
             ForEach(blocks) { block in
                 aiBlockView(block)
             }
             
+            // Immediate active progress indicator while agent is connecting/thinking and no content yet
+            if blocks.isEmpty && message.toolResults.isEmpty && AgentService.shared.isLoading && AgentService.shared.messages.last?.id == message.id {
+                HStack(spacing: 8) {
+                    ProgressView()
+                        .controlSize(.small)
+                    Text(AgentService.shared.currentToolExecution ?? "Agent is preparing response...")
+                        .font(.system(size: 12, weight: .medium, design: .monospaced))
+                        .foregroundColor(.secondary)
+                }
+                .padding(.vertical, 6)
+            }
+            
             if !message.toolResults.isEmpty {
                 ToolExecutionStepsView(results: message.toolResults)
+            }
+            
+            // SubAgent activity cluster (shown on the latest assistant message only)
+            if !harness.activeSubagents.isEmpty {
+                SubAgentClusterView(subagents: harness.activeSubagents)
             }
             
             if !message.pendingChanges.isEmpty {
@@ -4423,19 +5597,23 @@ struct RichMessageRow: View, Equatable {
 
 // MARK: - Pending Change Card (Modern Antigravity / Cursor Diff View)
 
+private struct DiffCardWidthKey: PreferenceKey {
+    static var defaultValue: CGFloat = 0
+    static func reduce(value: inout CGFloat, nextValue: () -> CGFloat) {
+        let next = nextValue()
+        if next > 0 { value = next }
+    }
+}
+
 private struct PendingChangeCard: View, Equatable {
     let change: PendingChangeModel
     var onApply: ((PendingChangeModel) -> Void)?
     var onReject: ((PendingChangeModel) -> Void)?
     @State private var showDiff = true  // Auto-expand diff
+    @State private var cardWidth: CGFloat = 0
     
     static func == (lhs: PendingChangeCard, rhs: PendingChangeCard) -> Bool {
-        return lhs.change.id == rhs.change.id &&
-               lhs.change.status == rhs.change.status &&
-               lhs.change.additions == rhs.change.additions &&
-               lhs.change.deletions == rhs.change.deletions &&
-               lhs.change.oldContent == rhs.change.oldContent &&
-               lhs.change.newContent == rhs.change.newContent
+        return lhs.change == rhs.change
     }
     
     var body: some View {
@@ -4463,6 +5641,17 @@ private struct PendingChangeCard: View, Equatable {
                     lineWidth: 1
                 )
         )
+        .background(
+            GeometryReader { geo in
+                Color.clear
+                    .preference(key: DiffCardWidthKey.self, value: geo.size.width)
+            }
+        )
+        .onPreferenceChange(DiffCardWidthKey.self) { w in
+            if w > 0 && abs(cardWidth - w) > 0.5 {
+                cardWidth = w
+            }
+        }
     }
     
     private var changeCardHeader: some View {
@@ -4574,6 +5763,16 @@ private struct PendingChangeCard: View, Equatable {
             new: change.newContent
         )
         
+        let maxTextWidth = lines.reduce(CGFloat(0)) { currentMax, line in
+            let textWidth = (line.text as NSString).size(
+                withAttributes: [.font: NSFont.monospacedSystemFont(ofSize: 11, weight: .regular)]
+            ).width
+            return max(currentMax, textWidth)
+        }
+        let gutterWidth: CGFloat = 95.5 // 2.5 accent + 36 oldNum + 38 newNum + 1 sep + 18 prefix
+        let minContentWidth = gutterWidth + maxTextWidth + 32
+        let effectiveWidth = max(cardWidth, minContentWidth)
+        
         return VStack(spacing: 0) {
             Divider().opacity(0.4)
             
@@ -4617,15 +5816,17 @@ private struct PendingChangeCard: View, Equatable {
                                 .foregroundColor(diffLine.textColor)
                                 .lineLimit(1)
                             
-                            Spacer(minLength: 24)
+                            Spacer(minLength: 0)
                         }
                         .frame(height: 18)
-                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .frame(width: effectiveWidth > 0 ? effectiveWidth : nil, alignment: .leading)
                         .background(diffLine.bgColor)
                     }
                 }
+                .frame(width: effectiveWidth > 0 ? effectiveWidth : nil, alignment: .leading)
                 .padding(.vertical, 2)
             }
+            .frame(maxWidth: .infinity, alignment: .leading)
             .background(Color(nsColor: .textBackgroundColor).opacity(0.6))
         }
     }
@@ -6436,7 +7637,7 @@ struct ProjectWorkspaceSelectorMenu: View {
             .padding(.bottom, 6)
         }
         .frame(width: 250)
-        .background(Color(nsColor: .windowBackgroundColor))
+        .background(Color(nsColor: appState.appTheme.panelBackground))
     }
     
     private func selectProject(_ path: String) {
@@ -6477,6 +7678,7 @@ struct ProjectWorkspaceSelectorMenu: View {
 // MARK: - SubAgent Selector & Deployment Dropdown Menu
 
 struct SubAgentSelectorMenu: View {
+    @EnvironmentObject var appState: AppState
     @Binding var selectedType: String
     @Binding var isPresented: Bool
     @ObservedObject private var harness = SubAgentHarness.shared
@@ -6585,7 +7787,7 @@ struct SubAgentSelectorMenu: View {
             .background(Color.primary.opacity(0.02))
         }
         .frame(width: 300)
-        .background(Color(nsColor: .windowBackgroundColor))
+        .background(Color(nsColor: appState.appTheme.panelBackground))
     }
     
     @ViewBuilder

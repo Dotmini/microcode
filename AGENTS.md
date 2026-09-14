@@ -1,98 +1,105 @@
-# Codex Development Guide for CodeTuner
+# Agent Development Guide for MicroCode
 
 ## Project Overview
-CodeTuner is a native macOS code editor with an AI-powered backend. The project consists of:
-- **Frontend**: SwiftUI-based macOS application
-- **Backend**: Rust-based web server providing AI integration and code execution capabilities
+MicroCode is a native macOS code editor and AI agent workstation with an integrated backend. The project consists of:
+- **Frontend**: Native macOS application written in Swift (SwiftUI + AppKit) with Metal-accelerated rendering and SwiftPM integration.
+- **Backend**: Rust server (Axum + Tokio) and FFI static library providing multi-provider AI integration, autonomous agent tool calling, and Tree-sitter indexing.
 
 ## Key Architecture Points
 
-### Frontend (Swift/SwiftUI)
-- Located in `CodeTuner/` directory
-- Uses SwiftUI for declarative UI
-- Native macOS UI with dark/light mode support
+### Frontend (Swift/SwiftUI + AppKit)
+- Located in `MicroCode/` directory
+- Uses SwiftUI for declarative UI and AppKit for native high-performance text view
+- Objective-C++ bridging layers in `MicroCodeSupport/` and `MicroCodeKernel/`
 - Multi-tab interface for editing files
-- Real-time console output
+- Autonomous AI loop, interactive implementation plans, and terminal harness
 - Git integration UI
 
 ### Backend (Rust)
-- Located in `backend/` directory
-- Uses Axum web framework
-- Provides REST API endpoints
-- Integrates with multiple AI providers (Gemini, OpenAI, Codex)
-- Handles code execution in isolated environments
+- Located in `backend/` and `microcode_core/` directories
+- Uses Axum web framework and C ABI static libraries
+- Provides REST API and WebSocket endpoints
+- Integrates with multiple AI providers (Gemini, Claude, OpenAI, DeepSeek, Grok, Qwen, GLM)
+- Handles autonomous agent tool execution in workspace-sandboxed environments
 - Git operations support
 
 ## Development Commands
 
 ### Building the Project
 ```bash
-# Build both frontend and backend
+# Build both Rust backend and Swift frontend into MicroCode.app
 ./build.sh
 
-# Or build separately
-cd backend && cargo build --release
-# Build frontend in Xcode
+# Fast incremental build and deployment to ~/Applications/MicroCode.app
+./build_dev.sh
+
+# Build frontend only (if Rust static libraries are already built)
+./build.sh --frontend-only
+
+# Build backend only
+./build.sh --backend-only
 ```
 
 ### Running the Application
 ```bash
-# Start backend server (port 3000)
-cd backend && cargo run
-
-# Run frontend from Xcode
-# Set backend URL in environment: API_URL=http://localhost:3000
+# Run the built application
+open /Applications/MicroCode.app
+# Or if built to default build root:
+open .codetuner-build/apps/MicroCode.app
 ```
 
 ## Key Files and Their Locations
 
 ### Configuration
 - `backend/.env` - Environment variables for API keys and settings
-- `CodeTuner/Config.swift` - Frontend configuration
+- `MicroCode/Config.swift` - Frontend configuration
 
 ### Core Models
 - `backend/src/models.rs` - Backend data structures
-- `CodeTuner/Models/AppState.swift` - Frontend state management
+- `MicroCode/Models/AppState.swift` - Frontend state management
+- `MicroCode/Models/ImplementationPlanModels.swift` - Plan, approval, and execution tracking
 
-### API Endpoints
+### API Endpoints & Agent Engine
 - `backend/src/main.rs` - Main routing and server setup
+- `backend/src/agent.rs` - AI agent with autonomous tool execution
+- `backend/src/ai.rs` - Multi-provider AI streaming integrations
 - `backend/src/git.rs` - Git operations
 - `backend/src/runner.rs` - Code execution
-- `backend/src/ai.rs` - AI provider integrations
 
 ### UI Components
-- `CodeTuner/Views/ContentView.swift` - Main UI view
-- `CodeTuner/Views/CodeEditorView.swift` - Code editing interface
-- `CodeTuner/Views/GitView.swift` - Git operations UI
+- `MicroCode/Views/ContentView.swift` - Main UI layout
+- `MicroCode/Views/Editor/CodeEditorView.swift` - Code editing interface
+- `MicroCode/Views/AI/AgentPlanningView.swift` - Interactive plan & tool approval interface
+- `MicroCode/Views/Git/GitView.swift` - Git operations UI
 
 ## Environment Setup
 1. Copy `backend/.env.example` to `backend/.env`
-2. Add your API keys for Gemini, OpenAI, or Codex
-3. Install Rust dependencies with `cargo build`
-4. Open `CodeTuner.xcodeproj` in Xcode
-5. Run backend server, then frontend application
+2. Add your API keys for Gemini, OpenAI, Claude, or local Ollama
+3. Install Rust toolchain: `curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh`
+4. Ensure Xcode command line tools are installed: `xcode-select --install`
+5. Run `./build.sh` to compile both backend and frontend
 
 ## Common Development Tasks
 
 ### Adding a New AI Provider
 1. Update `backend/src/ai.rs` with new provider implementation
 2. Add provider enum variant in `backend/src/models.rs`
-3. Update UI in `CodeTuner/Views/AIView.swift`
+3. Update UI in `MicroCode/Views/Settings/AIProviderSettingsView.swift`
 
 ### Adding Support for a New Language
-1. Add syntax highlighting rules in `backend/src/code/highlighter.rs`
+1. Add syntax highlighting rules in `MicroCode/SyntaxEngine/`
 2. Update code runner in `backend/src/runner.rs`
 3. Add language icon to frontend resources
 
 ### Adding New Git Operations
 1. Implement backend logic in `backend/src/git.rs`
 2. Add API endpoints in `backend/src/main.rs`
-3. Create UI components in `CodeTuner/Views/GitView.swift`
+3. Create UI components in `MicroCode/Views/Git/`
 
 ## Testing
 - Backend tests: `cd backend && cargo test`
-- Frontend tests: Run through Xcode Test Navigator
-- Integration tests: Test frontend against running backend
+- Frontend tests: `swift test`
+- Integration tests: Test frontend against running backend via `./build_dev.sh`
 
 ## Common Issues
 - Backend not starting: Check if port 3000 is available

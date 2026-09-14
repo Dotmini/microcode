@@ -5,7 +5,7 @@
 //  Complete Hot Reload Client for Xcode-like Live Preview
 //  Communicates with the Rust backend hot_reload engine
 //
-//  SPU AI CLUB - Dotmini Software
+//  Dotmini Company Limited
 //
 
 import SwiftUI

@@ -2,7 +2,7 @@
 //  EmbeddedToolsView.swift
 //  MicroCode
 //
-//  Created by SPU AI CLUB - Dotmini Software
+//  Created by Dotmini Company Limited
 //
 
 import SwiftUI

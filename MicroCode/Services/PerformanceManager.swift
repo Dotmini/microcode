@@ -3,7 +3,7 @@
 //  MicroCode
 //
 //  QoS Thread Management for Apple Silicon P-Core/E-Core optimization
-//  Copyright © 2025 SPU AI CLUB. All rights reserved.
+//  Copyright © 2025 Dotmini Company Limited. All rights reserved.
 //
 
 import Foundation
