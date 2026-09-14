@@ -171,6 +171,15 @@ else
     echo "   Dev build will use system-installed Node.js/Go/Python via PATH"
 fi
 
+# 7. Code Sign Bundle
+echo "🔐 Signing Bundle..."
+xattr -cr "$BUNDLE_NAME"
+if security find-identity -v -p codesigning | grep -q "Apple Development: business@dotmini.net (A58QB9B355)"; then
+    codesign --force --deep --sign "Apple Development: business@dotmini.net (A58QB9B355)" "$BUNDLE_NAME"
+else
+    codesign --force --deep --sign - "$BUNDLE_NAME"
+fi
+
 # Show final size
 echo ""
 echo "📊 Dev Bundle Size: $(du -sh "$BUNDLE_NAME" | cut -f1)"
