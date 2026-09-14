@@ -44,7 +44,8 @@ struct EmbeddedAndroidDeviceView: View {
         }
         .background(effectiveCanvasColor)
         .onAppear {
-            if !streamService.isStreaming && runtime.embeddedAndroidImage == nil {
+            if (!streamService.isStreaming && runtime.embeddedAndroidImage == nil) ||
+               (streamService.isStreaming && !streamService.hasReceivedFirstFrame && streamService.latestPixelBuffer == nil) {
                 Task {
                     await runtime.startPreferredEmbeddedAndroid()
                 }
@@ -94,7 +95,7 @@ private struct AndroidDeviceSurface: View {
             // 1. Screen Viewport (Display) - 60 FPS Metal GPU or fallback screencap
             ZStack {
                 Color.black
-                if streamService.isStreaming {
+                if streamService.isStreaming && (streamService.hasReceivedFirstFrame || streamService.latestPixelBuffer != nil) {
                     AndroidDeviceMetalSurface(androidStream: streamService)
                         .frame(width: displayWidth, height: displayHeight)
                 } else if let image {
@@ -102,11 +103,28 @@ private struct AndroidDeviceSurface: View {
                         .resizable()
                         .interpolation(.high)
                         .frame(width: displayWidth, height: displayHeight)
+                } else if streamService.isStreaming {
+                    AndroidDeviceMetalSurface(androidStream: streamService)
+                        .frame(width: displayWidth, height: displayHeight)
                 } else {
                     VStack(spacing: 12) {
-                        ProgressView()
-                            .controlSize(.regular)
-                        Text(runtime.embeddedAndroidStatus.isEmpty ? "Connecting to Android Emulator…" : runtime.embeddedAndroidStatus)
+                        let status = runtime.embeddedAndroidStatus
+                        let isError = status.contains("stopped") ||
+                                      status.contains("offline") ||
+                                      status.contains("failed") ||
+                                      status.contains("No Android") ||
+                                      status.contains("unresponsive") ||
+                                      status.contains("unavailable")
+                        if isError {
+                            Image(systemName: "exclamationmark.triangle.fill")
+                                .font(.system(size: 26))
+                                .foregroundColor(.orange)
+                        } else {
+                            ProgressView()
+                                .controlSize(.regular)
+                        }
+                        
+                        Text(status.isEmpty ? "Connecting to Android Emulator…" : status)
                             .font(.system(size: 11, weight: .medium))
                             .foregroundColor(.white.opacity(0.85))
                             .multilineTextAlignment(.center)

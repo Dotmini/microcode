@@ -5,7 +5,7 @@
 //  Extracts UI tree from SwiftUI views for element selection
 //  Maps preview elements back to source code locations
 //
-//  SPU AI CLUB - Dotmini Software
+//  Dotmini Company Limited
 //
 
 import SwiftUI

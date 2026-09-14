@@ -10,7 +10,7 @@
 //  - Hides complexity of lexer, cache, and theme coordination
 //  - Thread-safe for use from UI and background threads
 //
-//  Copyright © 2025 SPU AI CLUB. All rights reserved.
+//  Copyright © 2025 Dotmini Company Limited. All rights reserved.
 //
 
 import Foundation
@@ -660,7 +660,7 @@ public final class SyntaxHighlightingEngine: @unchecked Sendable {
                 self.applyTokens(tokens, to: textStorage, fontSize: fontSize, font: font)
             }
         } else {
-            DispatchQueue.main.sync {
+            DispatchQueue.main.async {
                 MainActor.assumeIsolated {
                     self.applyTokens(tokens, to: textStorage, fontSize: fontSize, font: font)
                 }

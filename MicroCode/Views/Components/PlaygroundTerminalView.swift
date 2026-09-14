@@ -2,8 +2,8 @@
 //  PlaygroundTerminalView.swift
 //  MicroCode
 //
-//  Created by SPU AI CLUB on 2026-01-19.
-//  Copyright © 2026 SPU AI CLUB. All rights reserved.
+//  Created by Tirawat Nantamas on 2026-01-19.
+//  Copyright © 2026 Dotmini Company Limited. All rights reserved.
 //
 
 import SwiftUI

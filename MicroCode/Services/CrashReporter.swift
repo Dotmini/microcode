@@ -11,7 +11,7 @@
 //  reporter captures a real symbolicated backtrace + a breadcrumb trail to
 //  files under ~/Library/Logs/MicroCode so we can see exactly why it crashed.
 //
-//  Copyright © 2026 SPU AI CLUB. All rights reserved.
+//  Copyright © 2026 Dotmini Company Limited. All rights reserved.
 //
 
 import Foundation

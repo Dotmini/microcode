@@ -211,10 +211,28 @@ struct AndroidDeviceMetalSurface: NSViewRepresentable {
 
     func makeNSView(context: Context) -> DeviceMetalNSView {
         let view = DeviceMetalNSView()
+        if let latest = androidStream.latestPixelBuffer {
+            view.renderFrame(latest)
+        }
         androidStream.onDecodedFrame = { [weak view] pixelBuffer in
             DispatchQueue.main.async {
                 view?.renderFrame(pixelBuffer)
             }
+        }
+        view.onInput = { [weak androidStream] normX, normY, eventType in
+            guard let androidStream else { return }
+            let res = androidStream.deviceResolution
+            let w = Int(res.width > 0 ? res.width : 1080)
+            let h = Int(res.height > 0 ? res.height : 2400)
+            let px = max(0, min(w, Int(normX * CGFloat(w))))
+            let py = max(0, min(h, Int(normY * CGFloat(h))))
+            let action: Int
+            switch eventType {
+            case .down: action = 0
+            case .up: action = 1
+            case .move: action = 2
+            }
+            androidStream.sendTouch(action: action, x: px, y: py, width: w, height: h)
         }
         view.onTap = { [weak androidStream] normX, normY in
             guard let androidStream else { return }
@@ -269,7 +287,11 @@ struct AndroidDeviceMetalSurface: NSViewRepresentable {
         return view
     }
 
-    func updateNSView(_ nsView: DeviceMetalNSView, context: Context) {}
+    func updateNSView(_ nsView: DeviceMetalNSView, context: Context) {
+        if let latest = androidStream.latestPixelBuffer {
+            nsView.renderFrame(latest)
+        }
+    }
 }
 
 struct IOSDeviceMetalSurface: NSViewRepresentable {
@@ -490,17 +512,12 @@ struct PhysicalIPhoneFrameView<Content: View>: View {
 struct PhysicalIOSDeviceTabView: View {
     @ObservedObject private var capture = IOSDeviceCaptureService.shared
     @ObservedObject private var control = IOSDeviceControlService.shared
-    @State private var showingURLSheet = false
-    @State private var urlInput = ""
-    @State private var showingClipSheet = false
-    @State private var clipInput = ""
-    @State private var showingTextSheet = false
-    @State private var textInput = ""
+    var canvasColor: Color? = nil
 
     var body: some View {
         VStack(spacing: 0) {
             ZStack {
-                Color(nsColor: .controlBackgroundColor)
+                canvasColor ?? Color.clear
 
                 switch capture.state {
                 case .streaming:
@@ -621,212 +638,14 @@ struct PhysicalIOSDeviceTabView: View {
                                         .buttonStyle(.plain)
                                     }
                                 }
-                                .padding(.horizontal, 16)
+                                .padding(.top, 8)
                             }
                         }
-                        .frame(maxWidth: .infinity, maxHeight: .infinity)
+                        .padding(.horizontal, 20)
                     }
                 }
             }
-
-            // MARK: - Direct IDE Control Toolbar for Physical iOS
-            Divider()
-            HStack(spacing: 5) {
-                    // Home
-                    Button {
-                        control.goHome()
-                    } label: {
-                        HStack(spacing: 3) {
-                            Image(systemName: "circle.circle")
-                                .font(.system(size: 11))
-                            Text("Home")
-                                .font(.system(size: 11, weight: .medium))
-                        }
-                    }
-                    .buttonStyle(.bordered)
-                    .controlSize(.small)
-                    .help("Return to iPhone Home Screen (Cmd+1)")
-
-                    // App Switcher
-                    Button {
-                        control.openAppSwitcher()
-                    } label: {
-                        Image(systemName: "square.split.2x1")
-                            .font(.system(size: 11))
-                    }
-                    .buttonStyle(.bordered)
-                    .controlSize(.small)
-                    .help("App Switcher / Multitasking (Cmd+2)")
-
-                    // Spotlight Search
-                    Button {
-                        control.openSpotlight()
-                    } label: {
-                        Image(systemName: "magnifyingglass")
-                            .font(.system(size: 11))
-                    }
-                    .buttonStyle(.bordered)
-                    .controlSize(.small)
-                    .help("Search / Spotlight (Cmd+3)")
-
-                    // Lock / Wake
-                    Button {
-                        control.lockOrWake()
-                    } label: {
-                        Image(systemName: "lock")
-                            .font(.system(size: 11))
-                    }
-                    .buttonStyle(.bordered)
-                    .controlSize(.small)
-                    .help("Lock or Wake iPhone")
-
-                    Divider().frame(height: 14)
-
-                    // Type Text directly into iPhone
-                    Button {
-                        showingTextSheet.toggle()
-                    } label: {
-                        HStack(spacing: 3) {
-                            Image(systemName: "keyboard")
-                                .font(.system(size: 11))
-                            Text("Type")
-                                .font(.system(size: 11, weight: .medium))
-                        }
-                    }
-                    .buttonStyle(.bordered)
-                    .controlSize(.small)
-                    .help("Type text directly into focused field on iPhone")
-                    .popover(isPresented: $showingTextSheet, arrowEdge: .top) {
-                        HStack(spacing: 6) {
-                            TextField("Type text to send to iPhone...", text: $textInput)
-                                .textFieldStyle(.roundedBorder)
-                                .frame(width: 220)
-                                .onSubmit {
-                                    control.sendText(textInput)
-                                    textInput = ""
-                                    showingTextSheet = false
-                                }
-                            Button("Send") {
-                                control.sendText(textInput)
-                                textInput = ""
-                                showingTextSheet = false
-                            }
-                            .buttonStyle(.borderedProminent)
-                            .controlSize(.small)
-                        }
-                        .padding(10)
-                    }
-
-                    // Push Mac Clipboard to iPhone
-                    Button {
-                        clipInput = NSPasteboard.general.string(forType: .string) ?? ""
-                        showingClipSheet.toggle()
-                    } label: {
-                        HStack(spacing: 3) {
-                            Image(systemName: "doc.on.clipboard")
-                                .font(.system(size: 11))
-                            Text("Clip")
-                                .font(.system(size: 11, weight: .medium))
-                        }
-                    }
-                    .buttonStyle(.bordered)
-                    .controlSize(.small)
-                    .help("Push Mac text/clipboard to iPhone")
-                    .popover(isPresented: $showingClipSheet, arrowEdge: .top) {
-                        VStack(alignment: .leading, spacing: 8) {
-                            Text("Push to iPhone Clipboard")
-                                .font(.system(size: 11, weight: .semibold))
-                            TextField("Enter text to paste on iPhone", text: $clipInput)
-                                .textFieldStyle(.roundedBorder)
-                                .frame(width: 220)
-                            HStack {
-                                Spacer()
-                                Button("Push") {
-                                    control.pushClipboard(clipInput)
-                                    showingClipSheet = false
-                                }
-                                .buttonStyle(.borderedProminent)
-                                .controlSize(.small)
-                            }
-                        }
-                        .padding(10)
-                    }
-
-                    // Open URL / Deep Link
-                    Button {
-                        showingURLSheet.toggle()
-                    } label: {
-                        Image(systemName: "safari")
-                            .font(.system(size: 11))
-                    }
-                    .buttonStyle(.bordered)
-                    .controlSize(.small)
-                    .help("Open URL on iPhone in Safari")
-                    .popover(isPresented: $showingURLSheet, arrowEdge: .top) {
-                        VStack(alignment: .leading, spacing: 8) {
-                            Text("Launch URL on iPhone")
-                                .font(.system(size: 11, weight: .semibold))
-                            TextField("https://...", text: $urlInput)
-                                .textFieldStyle(.roundedBorder)
-                                .frame(width: 240)
-                            HStack {
-                                Spacer()
-                                Button("Open") {
-                                    control.openURL(urlInput)
-                                    showingURLSheet = false
-                                }
-                                .buttonStyle(.borderedProminent)
-                                .controlSize(.small)
-                            }
-                        }
-                        .padding(10)
-                    }
-
-                    Spacer()
-
-                    if !control.lastActionStatus.isEmpty {
-                        Text(control.lastActionStatus)
-                            .font(.system(size: 10, weight: .medium))
-                            .foregroundColor(.secondary)
-                            .padding(.horizontal, 6)
-                            .padding(.vertical, 2)
-                            .background(Color.primary.opacity(0.06))
-                            .clipShape(Capsule())
-                    }
-
-                    // Dock Native Window Alongside MicroCode IDE
-                    Button {
-                        control.dockMirroringWindow()
-                    } label: {
-                        HStack(spacing: 3) {
-                            Image(systemName: "sidebar.right")
-                                .font(.system(size: 10))
-                            Text("Dock")
-                                .font(.system(size: 10, weight: .medium))
-                        }
-                    }
-                    .buttonStyle(.bordered)
-                    .controlSize(.small)
-                    .help("Dock Apple iPhone Mirroring window right beside MicroCode IDE")
-
-                    // Native Interactive Control Mode (ScreenContinuity)
-                    Button {
-                        control.launchNativeInteractiveControl()
-                    } label: {
-                        HStack(spacing: 4) {
-                            Image(systemName: "cursorarrow.rays")
-                                .font(.system(size: 10, weight: .bold))
-                            Text("Interactive Mode")
-                                .font(.system(size: 11, weight: .semibold))
-                        }
-                    }
-                    .buttonStyle(.borderedProminent)
-                    .controlSize(.small)
-                    .help("Direct hardware control with mouse gestures & physical Mac keyboard")
-                }
-                .padding(.horizontal, 8)
-                .padding(.vertical, 6)
-                .background(Color(nsColor: .windowBackgroundColor))
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
         }
         .onAppear {
             capture.startMonitoring()

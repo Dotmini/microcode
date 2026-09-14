@@ -284,11 +284,14 @@ struct ACPNDJSONParser {
         var results: [[String: Any]] = []
         for line in components.dropLast() {
             let trimmed = line.trimmingCharacters(in: .whitespacesAndNewlines)
-            guard !trimmed.isEmpty,
-                  let jsonData = trimmed.data(using: .utf8),
-                  let json = try? JSONSerialization.jsonObject(with: jsonData) as? [String: Any]
-            else { continue }
-            results.append(json)
+            guard !trimmed.isEmpty else { continue }
+            if let jsonData = trimmed.data(using: .utf8),
+               let json = try? JSONSerialization.jsonObject(with: jsonData) as? [String: Any] {
+                results.append(json)
+            } else {
+                // Plain-text line fallback so stdout from non-JSON CLI agents (or errors) is never dropped
+                results.append(["type": "text", "text": trimmed + "\n", "_raw": true])
+            }
         }
         return results
     }
@@ -346,6 +349,10 @@ struct ClaudeCodeStreamParser {
                 tokensUsed: nil,
                 model: nil
             ))
+            
+        case "text":
+            let text = json["text"] as? String ?? ""
+            return text.isEmpty ? nil : .text(text)
             
         default:
             return nil

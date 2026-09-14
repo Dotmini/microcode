@@ -12,6 +12,7 @@ public final class SubAgentHarness: ObservableObject {
     @Published public private(set) var activeSubagents: [SubAgentInstance] = []
     @Published public private(set) var recentLogs: [String] = []
     @Published public var showSubAgentMonitor: Bool = false
+    @Published private(set) var subagentEvents: [SubAgentEvent] = []
     
     // Background execution tasks keyed by SubAgent ID
     private var runningTasks: [String: Task<Void, Never>] = [:]
@@ -73,6 +74,13 @@ public final class SubAgentHarness: ObservableObject {
                 description: "Controls and interacts with real Android devices, Android Emulators, and iOS Simulators via ADB and simctl to perform automated testing, UI walkthroughs, gesture actions, and app debugging.",
                 systemPrompt: "You are an expert Mobile QA and Automation Engineer. Control real Android phones, emulators, and iOS simulators using `device_runtime` (tap, swipe, type, keyevent, screenshot, app launch/install, adb_shell). Verify every step visually or through device logs.",
                 allowedTools: ["device_runtime", "file_read", "file_write", "replace_in_file", "patch_file", "shell", "inspect_image", "extract_pdf", "get_diagnostics", "mcp"]
+            ),
+            SubAgentDefinition(
+                name: "autonomous_loop",
+                role: "Autonomous Build-Test-Fix Agent",
+                description: "Runs iterative build→test→analyze→fix loops autonomously until all tests pass or max iterations reached.",
+                systemPrompt: "You are an Autonomous Build-Test-Fix Agent. Run build and test commands, analyze failures, generate surgical code fixes, and iterate until all tests pass. Report progress after each iteration.",
+                allowedTools: ["file_read", "file_write", "replace_in_file", "patch_file", "multi_file_read", "grep_search", "find_symbol", "shell", "mcp"]
             )
         ]
         
@@ -123,7 +131,7 @@ public final class SubAgentHarness: ObservableObject {
             allowedTools: []
         )
         
-        var instance = SubAgentInstance(
+        let instance = SubAgentInstance(
             typeName: typeName,
             role: role,
             taskPrompt: prompt,
@@ -134,6 +142,7 @@ public final class SubAgentHarness: ObservableObject {
         activeSubagents.append(instance)
         subagentInboxes[instance.id] = []
         log("[SPAWN] SubAgent #\(instance.id.prefix(6)) [\(role)] for prompt: \(prompt.prefix(40))...")
+        emitEvent(.invoked, instanceId: instance.id, role: role, typeName: typeName, detail: prompt.prefix(80).description)
         
         // Launch autonomous background task
         let instanceId = instance.id
@@ -394,6 +403,7 @@ public final class SubAgentHarness: ObservableObject {
                     continue
                 }
                 updateSubagentState(instanceId: instanceId, state: .errored, detail: response?.directive.reason ?? error.localizedDescription)
+                emitEvent(.errored, instanceId: instanceId, role: definition.role, typeName: definition.name, detail: response?.directive.reason ?? error.localizedDescription)
                 runningTasks.removeValue(forKey: instanceId)
                 return
             }
@@ -410,6 +420,7 @@ public final class SubAgentHarness: ObservableObject {
             snapshot.currentToolExecution = nil
             activeSubagents[idx] = snapshot
             log("[DONE] SubAgent #\(instanceId.prefix(6)) [\(definition.role)] completed successfully.")
+            emitEvent(.completed, instanceId: instanceId, role: definition.role, typeName: definition.name, detail: String(finalSummary.prefix(80)))
         }
         runningTasks.removeValue(forKey: instanceId)
     }
@@ -495,6 +506,7 @@ public final class SubAgentHarness: ObservableObject {
             snapshot.currentToolExecution = nil
             activeSubagents[idx] = snapshot
             log("[KILLED] Terminated SubAgent #\(id.prefix(6))")
+            emitEvent(.killed, instanceId: id, role: snapshot.role, typeName: snapshot.typeName, detail: nil)
         }
     }
     
@@ -536,6 +548,14 @@ public final class SubAgentHarness: ObservableObject {
         recentLogs.append("[\(Date().formatted(date: .omitted, time: .standard))] \(msg)")
         if recentLogs.count > 100 {
             recentLogs.removeFirst()
+        }
+    }
+    
+    private func emitEvent(_ type: SubAgentEvent.EventType, instanceId: String, role: String, typeName: String, detail: String? = nil) {
+        let event = SubAgentEvent(type: type, subagentId: instanceId, role: role, typeName: typeName, detail: detail)
+        subagentEvents.append(event)
+        if subagentEvents.count > 200 {
+            subagentEvents.removeFirst(50)
         }
     }
 }

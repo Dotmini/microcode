@@ -18,26 +18,48 @@ while [[ $# -gt 0 ]]; do
 done
 
 # 1. Build Swift (assuming Rust is built or handled separately/before)
-# We assume Rust lib is at backend/target/debug/libmicrocode_embedded.a
-echo "🏗️ Building Swift frontend on External SSD..."
-export TMPDIR="${TMPDIR:-/Volumes/MicroCodeBuild/tmp}"
+echo "🏗️ Building Swift frontend..."
+export TMPDIR="${TMPDIR:-/tmp}"
 mkdir -p "$TMPDIR"
 
+# Collect potential Rust library directories
+RUST_LINK_FLAGS=()
+for libdir in \
+    "backend/target/debug" \
+    "backend/target/release" \
+    ".build/cargo-target/debug" \
+    ".build/cargo-target/release" \
+    "build/cargo-target/debug" \
+    "build/cargo-target/release" \
+    "${CODETUNER_BUILD_ROOT:-}/cargo-target/release" \
+    "${CODETUNER_BUILD_ROOT:-}/cargo-target/debug" \
+    "/Volumes/MicroCodeBuild/cargo-target/release" \
+    "/Volumes/MicroCodeBuild/cargo-target/debug" \
+    "microcode_core/target/release" \
+    "microcode_core/target/debug" \
+    "microcode_core/target/aarch64-apple-darwin/release" \
+    "MicrocodeCoreSupport"
+do
+    if [ -n "$libdir" ] && [ -d "$libdir" ]; then
+        RUST_LINK_FLAGS+=("-Xlinker" "-L$libdir")
+    fi
+done
+
 swift build -c debug \
-    -Xlinker -Lbackend/target/debug -Xlinker -L/Volumes/MicroCodeBuild/cargo-target/release -Xlinker -L/Volumes/MicroCodeBuild/cargo-target/debug -Xlinker -lmicrocode_embedded \
-    -Xlinker -Lmicrocode_core/target/release \
-    -Xlinker -Lmicrocode_core/target/aarch64-apple-darwin/release -Xlinker -lmicrocode_core \
+    "${RUST_LINK_FLAGS[@]}" \
+    -Xlinker -lmicrocode_embedded \
+    -Xlinker -lmicrocode_core \
     -Xlinker -framework -Xlinker SystemConfiguration \
     -Xlinker -framework -Xlinker Security \
     -Xlinker -framework -Xlinker CoreFoundation \
     -Xlinker -headerpad_max_install_names
 
-# 2. Create Bundle on External SSD
-EXTERNAL_BUNDLE="/Volumes/MicroCodeBuild/apps/MicroCode.app"
-mkdir -p "/Volumes/MicroCodeBuild/apps"
-rm -rf "$EXTERNAL_BUNDLE"
-BUNDLE_NAME="$EXTERNAL_BUNDLE"
-echo "📦 Creating Bundle on External SSD: $BUNDLE_NAME"
+# 2. Create Bundle
+DEFAULT_APP_DIR="$HOME/Applications"
+mkdir -p "$DEFAULT_APP_DIR"
+BUNDLE_NAME="${CODETUNER_APP_DEST:-$DEFAULT_APP_DIR/MicroCode.app}"
+rm -rf "$BUNDLE_NAME"
+echo "📦 Creating Bundle: $BUNDLE_NAME"
 mkdir -p "$BUNDLE_NAME/Contents/MacOS"
 mkdir -p "$BUNDLE_NAME/Contents/Resources"
 
@@ -99,6 +121,17 @@ cat > "$BUNDLE_NAME/Contents/Info.plist" <<EOF
     <string>MicroCode requires microphone access for audio preview.</string>
     <key>NSCameraUseContinuityCameraDeviceType</key>
     <true/>
+    <key>CFBundleURLTypes</key>
+    <array>
+        <dict>
+            <key>CFBundleURLName</key>
+            <string>com.aipreneur.MicroCode</string>
+            <key>CFBundleURLSchemes</key>
+            <array>
+                <string>microcode</string>
+            </array>
+        </dict>
+    </array>
 </dict>
 </plist>
 EOF

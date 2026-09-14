@@ -5,7 +5,7 @@
 //  Professional line number gutter for NSTextView
 //  Uses NSRulerView for native macOS integration
 //
-//  Copyright © 2025 SPU AI CLUB — Dotmini Software
+//  Copyright © 2025 Dotmini Company Limited
 //
 
 import AppKit

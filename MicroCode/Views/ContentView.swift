@@ -2,8 +2,8 @@
 //  ContentView.swift
 //  MicroCode
 //
-//  Created by SPU AI CLUB
-//  Copyright © 2024 AIPRENEUR. All rights reserved.
+//  Created by Tirawat Nantamas
+//  Copyright © 2024 Dotmini Company Limited. All rights reserved.
 //
 
 import SwiftUI
@@ -23,6 +23,7 @@ struct ContentView: View {
             .modifier(PrimarySheetsModifier(appState: appState))
             .modifier(SecondarySheetsModifier(appState: appState))
             .modifier(StudioSheetsModifier(appState: appState))
+            .modifier(GlobalKeyboardShortcutsModifier(appState: appState))
             .alert("MicroCode", isPresented: .constant(appState.alertMessage != nil)) {
                 Button("OK") { appState.alertMessage = nil }
             } message: {
@@ -61,6 +62,15 @@ struct ContentView: View {
         .background(
             Button("") { appState.toggleEditorMode(.browser) }
                 .keyboardShortcut("b", modifiers: [.command, .shift])
+                .hidden()
+        )
+        .background(
+            Button("") {
+                withAnimation(.easeInOut(duration: 0.22)) {
+                    appState.toggleSidebar()
+                }
+            }
+                .keyboardShortcut("b", modifiers: .command)
                 .hidden()
         )
         .overlay(
@@ -142,10 +152,96 @@ enum AgenticWorkspaceSurface: String {
     case editor
 }
 
+struct SidebarResizeSplitter: View {
+    @Binding var width: Double
+    @State private var isHovering = false
+    @State private var isDragging = false
+    @State private var dragStartWidth: Double = 270
+
+    var body: some View {
+        ZStack {
+            Rectangle()
+                .fill(isHovering || isDragging ? Color.accentColor : Color.primary.opacity(0.08))
+                .frame(width: isHovering || isDragging ? 2.5 : 1)
+            Color.clear
+                .frame(width: 8)
+                .contentShape(Rectangle())
+        }
+        .frame(width: 4)
+        .zIndex(10)
+        .onHover { hovering in
+            isHovering = hovering
+            if hovering {
+                NSCursor.resizeLeftRight.push()
+            } else if !isDragging {
+                NSCursor.pop()
+            }
+        }
+        .gesture(
+            DragGesture(minimumDistance: 1, coordinateSpace: .global)
+                .onChanged { val in
+                    if !isDragging {
+                        isDragging = true
+                        dragStartWidth = width
+                    }
+                    let newW = dragStartWidth + Double(val.translation.width)
+                    width = max(200, min(550, newW))
+                }
+                .onEnded { _ in
+                    isDragging = false
+                    if !isHovering {
+                        NSCursor.pop()
+                    }
+                }
+        )
+    }
+}
+
+struct WorkspaceSidebarToggleButton: View {
+    @EnvironmentObject var appState: AppState
+    @State private var isHovered: Bool = false
+
+    var body: some View {
+        Button(action: {
+            withAnimation(.easeInOut(duration: 0.22)) {
+                appState.toggleSidebar()
+            }
+        }) {
+            Image(systemName: "sidebar.left")
+                .font(.system(size: 13, weight: .medium))
+                .foregroundColor(isHovered ? .primary : (appState.sidebarVisible ? .primary.opacity(0.8) : .secondary))
+                .frame(width: 28, height: 26)
+                .background(
+                    RoundedRectangle(cornerRadius: 6)
+                        .fill(isHovered ? Color.primary.opacity(0.1) : (appState.sidebarVisible ? Color.clear : Color.primary.opacity(0.08)))
+                )
+                .overlay(
+                    RoundedRectangle(cornerRadius: 6)
+                        .stroke(isHovered ? Color.primary.opacity(0.18) : (appState.sidebarVisible ? Color.clear : Color.primary.opacity(0.12)), lineWidth: 1)
+                )
+                .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .onHover { hovering in
+            isHovered = hovering
+        }
+        .help(appState.sidebarVisible ? "Hide Sidebar (⌘B)" : "Show Sidebar (⌘B)")
+    }
+}
+
 struct AgenticEditorWorkspace: View {
     @EnvironmentObject var appState: AppState
     @StateObject private var agent = AgentService.shared
     @State private var surface: AgenticWorkspaceSurface = .agent
+    @AppStorage("microcode_agentic_sidebar_width") private var sidebarWidth: Double = 270
+
+    private var targetSidebarWidth: CGFloat {
+        CGFloat(max(200, min(550, sidebarWidth)))
+    }
+
+    private var effectiveSidebarWidth: CGFloat {
+        appState.sidebarVisible ? (targetSidebarWidth + 4) : 0
+    }
 
     var body: some View {
         Group {
@@ -158,22 +254,33 @@ struct AgenticEditorWorkspace: View {
                             : AnyView(Color(nsColor: appState.appTheme.workspaceBackground))
                     )
             } else {
-                CompatHSplitView {
-                    if appState.sidebarVisible {
-                        if surface == .editor {
-                            XcodeEditorSidebar(surface: $surface)
-                                .frame(minWidth: 240, idealWidth: 270, maxWidth: 340)
-                                .transition(.move(edge: .leading).combined(with: .opacity))
-                        } else {
-                            AgenticWorkspaceSidebar(surface: $surface)
-                                .frame(minWidth: 240, idealWidth: 270, maxWidth: 340)
-                                .transition(.move(edge: .leading).combined(with: .opacity))
+                HStack(spacing: 0) {
+                    // Collapsible Left Sidebar & Splitter Container
+                    HStack(spacing: 0) {
+                        Group {
+                            if surface == .editor {
+                                XcodeEditorSidebar(surface: $surface)
+                            } else {
+                                AgenticWorkspaceSidebar(surface: $surface)
+                            }
                         }
+                        .frame(width: targetSidebarWidth)
+
+                        SidebarResizeSplitter(width: $sidebarWidth)
+                            .opacity(appState.sidebarVisible ? 1 : 0)
                     }
+                    .frame(width: effectiveSidebarWidth, alignment: .trailing)
+                    .clipped()
+                    .opacity(appState.sidebarVisible ? 1 : 0)
+                    .allowsHitTesting(appState.sidebarVisible)
+                    .accessibilityHidden(!appState.sidebarVisible)
+                    .background(appState.appTheme.isGlass ? Color.clear : Color(nsColor: appState.appTheme.panelBackground))
 
                     VStack(spacing: 0) {
                         workspaceHeader
-                        Divider()
+                        Rectangle()
+                            .fill(Color.primary.opacity(0.08))
+                            .frame(height: 1)
 
                         if surface == .agent {
                             AIAgentView(allowsChatSidebar: false)
@@ -182,14 +289,17 @@ struct AgenticEditorWorkspace: View {
                             activeEditorSurface
                         }
                     }
-                    .frame(minWidth: 480)
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
 
                     if appState.agenticContextVisible {
                         AgenticContextInspector(surface: $surface)
-                            .frame(minWidth: 260, idealWidth: 340, maxWidth: 520)
-                            .transition(.move(edge: .trailing).combined(with: .opacity))
+                            .transition(.asymmetric(
+                                insertion: .move(edge: .trailing).combined(with: .opacity),
+                                removal: .move(edge: .trailing).combined(with: .opacity)
+                            ))
                     }
                 }
+                .animation(.easeInOut(duration: 0.22), value: appState.sidebarVisible)
                 .background(appState.appTheme.isGlass ? Color.clear : Color(nsColor: appState.appTheme.workspaceBackground))
             }
         }
@@ -197,12 +307,20 @@ struct AgenticEditorWorkspace: View {
             if let workspace = appState.workspaceFolder {
                 agent.setWorkspace(workspace.path)
             }
+            if appState.editorMode != .aiAgent {
+                surface = .editor
+            }
         }
         .onChange(of: appState.editorMode) { newMode in
             if newMode == .aiAgent {
                 surface = .agent
             } else {
                 surface = .editor
+            }
+        }
+        .onReceive(NotificationCenter.default.publisher(for: NSNotification.Name("MicroCodeEditorModeChanged"))) { notif in
+            if let mode = notif.object as? EditorMode {
+                surface = (mode == .aiAgent) ? .agent : .editor
             }
         }
     }
@@ -235,6 +353,9 @@ struct AgenticEditorWorkspace: View {
             APIClientView()
                 .environmentObject(appState)
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
+        case .extensions:
+            ExtensionStudioView()
+                .environmentObject(appState)
         default:
             EditorArea()
                 .environmentObject(appState)
@@ -257,24 +378,8 @@ struct AgenticEditorWorkspace: View {
 
     private var workspaceHeader: some View {
         HStack(spacing: 8) {
-            // Traffic lights clearance when sidebar is collapsed
-            if !appState.sidebarVisible {
-                Spacer().frame(width: 68)
-            }
-
             // Sidebar Toggle
-            Button(action: {
-                withAnimation(.easeInOut(duration: 0.18)) {
-                    appState.toggleSidebar()
-                }
-            }) {
-                Image(systemName: "sidebar.left")
-                    .font(.system(size: 13))
-                    .foregroundColor(.secondary)
-            }
-            .buttonStyle(.plain)
-            .fixedSize()
-            .help("Toggle Sidebar (⌘B)")
+            WorkspaceSidebarToggleButton()
 
             // Breadcrumb (Antigravity-style: project / active task)
             HStack(spacing: 5) {
@@ -352,7 +457,7 @@ struct AgenticEditorWorkspace: View {
                     }
                     .buttonStyle(.plain)
                     .fixedSize()
-                    .help("Build Project (⌘B)")
+                    .help("Build Project (⌘⇧B)")
 
                     // Preview Menu (Real Device & Simulator Preview)
                     Menu {
@@ -512,6 +617,10 @@ struct AgenticEditorWorkspace: View {
                         appState.openAPIStudio()
                         surface = .editor
                     }
+                    Button("Extension Studio") {
+                        appState.openExtensionStudio()
+                        surface = .editor
+                    }
                 } label: {
                     HStack(spacing: 3) {
                         Image(systemName: "square.grid.2x2")
@@ -544,6 +653,12 @@ struct AgenticEditorWorkspace: View {
                 Image(systemName: "sidebar.right")
                     .font(.system(size: 12))
                     .foregroundColor(appState.agenticContextVisible ? .accentColor : .secondary)
+                    .frame(width: 28, height: 26)
+                    .background(
+                        RoundedRectangle(cornerRadius: 5)
+                            .fill(appState.agenticContextVisible ? Color.accentColor.opacity(0.12) : Color.clear)
+                    )
+                    .contentShape(Rectangle())
             }
             .buttonStyle(.plain)
             .keyboardShortcut("i", modifiers: [.command])
@@ -555,12 +670,15 @@ struct AgenticEditorWorkspace: View {
                 Image(systemName: "gearshape")
                     .font(.system(size: 12))
                     .foregroundColor(.secondary)
+                    .frame(width: 28, height: 26)
+                    .contentShape(Rectangle())
             }
             .buttonStyle(.plain)
             .fixedSize()
             .help("Settings (⌘,)")
         }
-        .padding(.horizontal, 10)
+        .padding(.leading, appState.sidebarVisible ? 10 : 80)
+        .padding(.trailing, 10)
         .frame(height: 38)
         .background(appState.appTheme.isGlass ? Color.clear : Color(nsColor: appState.appTheme.panelBackground))
     }
@@ -643,18 +761,27 @@ struct AgenticWorkspaceSidebar: View {
             
             sidebarNewConversationButton
             
-            Divider().padding(.horizontal, 10).padding(.bottom, 2)
+            Rectangle()
+                .fill(Color.primary.opacity(0.08))
+                .frame(height: 1)
+                .padding(.horizontal, 10)
+                .padding(.bottom, 2)
             
             ScrollView {
                 VStack(alignment: .leading, spacing: 14) {
                     projectsSection
-                    Divider().padding(.horizontal, 10)
+                    Rectangle()
+                        .fill(Color.primary.opacity(0.08))
+                        .frame(height: 1)
+                        .padding(.horizontal, 10)
                     workspaceFilesSection
                 }
                 .padding(.vertical, 6)
             }
             
-            Divider()
+            Rectangle()
+                .fill(Color.primary.opacity(0.08))
+                .frame(height: 1)
             sidebarFooter
         }
         .background(appState.appTheme.isGlass ? Color.clear : Color(nsColor: appState.appTheme.panelBackground))
@@ -755,6 +882,7 @@ struct AgenticWorkspaceSidebar: View {
     @ViewBuilder
     private var sidebarNewConversationButton: some View {
         Button {
+            ImplementationPlanManager.shared.clearPlan()
             let ws = appState.workspaceFolder?.path ?? agent.currentWorkspace
             _ = agent.createNewChat(projectPath: ws)
             surface = .agent
@@ -891,6 +1019,7 @@ struct AgenticWorkspaceSidebar: View {
                                 }
                             }
                         }
+                        ImplementationPlanManager.shared.clearPlan()
                         _ = agent.createNewChat(projectPath: group.projectPath)
                         collapsedProjectIds.remove(group.id)
                         surface = .agent
@@ -1122,10 +1251,14 @@ struct XcodeEditorSidebar: View {
     var body: some View {
         VStack(spacing: 0) {
             navigatorTabBar
-            Divider()
+            Rectangle()
+                .fill(Color.primary.opacity(0.08))
+                .frame(height: 1)
 
             projectHeaderBar
-            Divider()
+            Rectangle()
+                .fill(Color.primary.opacity(0.08))
+                .frame(height: 1)
 
             Group {
                 switch selectedTab {
@@ -1143,7 +1276,9 @@ struct XcodeEditorSidebar: View {
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity)
 
-            Divider()
+            Rectangle()
+                .fill(Color.primary.opacity(0.08))
+                .frame(height: 1)
             bottomFilterBar
         }
         .background(appState.appTheme.isGlass ? Color.clear : Color(nsColor: appState.appTheme.panelBackground))
@@ -1162,6 +1297,7 @@ struct XcodeEditorSidebar: View {
 
     private var navigatorTabBar: some View {
         HStack(spacing: 2) {
+            Spacer().frame(width: 72)
             ForEach(XcodeNavigatorTab.allCases, id: \.self) { tab in
                 Button {
                     withAnimation(.easeInOut(duration: 0.12)) {
@@ -1834,180 +1970,227 @@ struct XcodeEditorSidebar: View {
     }
 }
 
-enum AgenticInspectorTab: String, CaseIterable {
-    case context = "Context"
-    case preview = "Preview"
-    case tasks = "Tasks & Plan"
-}
-
 struct AgenticContextInspector: View {
     @EnvironmentObject var appState: AppState
     @StateObject private var agent = AgentService.shared
     @ObservedObject private var deviceRuntime = DeviceRuntimeService.shared
     @Binding var surface: AgenticWorkspaceSurface
-    @State private var selectedTab: AgenticInspectorTab = .context
+    private var selectedTab: AgenticInspectorTab {
+        get { appState.selectedInspectorTab }
+        nonmutating set { appState.selectedInspectorTab = newValue }
+    }
     @State private var taskMarkdownContent: String = ""
     @State private var walkthroughMarkdownContent: String = ""
     @State private var taskSubTab: Int = 0 // 0 = Task, 1 = Walkthrough
+    @AppStorage("agenticInspectorWidth") private var inspectorWidth: Double = 460
+    @State private var isHoveringSplitter = false
+    @State private var isDraggingSplitter = false
+    @State private var dragStartWidth: Double = 460
 
     var body: some View {
-        VStack(spacing: 0) {
-            // Header Bar with Tab Switcher
-            HStack(spacing: 6) {
-                ForEach(AgenticInspectorTab.allCases, id: \.self) { tab in
-                    Button {
-                        withAnimation(.easeInOut(duration: 0.16)) {
-                            selectedTab = tab
-                            if tab == .preview && !deviceRuntime.showingEmbeddedDeviceDock {
-                                deviceRuntime.showingEmbeddedDeviceDock = true
-                            }
-                        }
-                    } label: {
-                        HStack(spacing: 3) {
-                            switch tab {
-                            case .context:
-                                Image(systemName: "sidebar.right")
-                                    .font(.system(size: 9))
-                            case .preview:
-                                Image(systemName: deviceRuntime.embeddedDockMode == .web ? "globe" : (deviceRuntime.showingEmbeddedAppleDock ? "iphone" : "candybarphone"))
-                                    .font(.system(size: 9))
-                            case .tasks:
-                                Image(systemName: "checklist")
-                                    .font(.system(size: 9))
-                            }
-                            Text(tab.rawValue)
-                                .font(.system(size: 10, weight: selectedTab == tab ? .semibold : .regular))
-                                .lineLimit(1)
-                                .fixedSize(horizontal: true, vertical: false)
-                        }
-                        .padding(.horizontal, 7)
-                        .padding(.vertical, 4)
-                        .foregroundColor(selectedTab == tab ? .primary : .secondary)
-                        .background(selectedTab == tab ? Color.primary.opacity(0.1) : Color.clear)
-                        .cornerRadius(4)
-                    }
-                    .buttonStyle(.plain)
+        HStack(spacing: 0) {
+            // Draggable resize splitter divider on leading edge
+            ZStack {
+                Rectangle()
+                    .fill(isHoveringSplitter || isDraggingSplitter ? Color.accentColor : Color.primary.opacity(0.08))
+                    .frame(width: isHoveringSplitter || isDraggingSplitter ? 2.5 : 1)
+                Color.clear
+                    .frame(width: 8)
+                    .contentShape(Rectangle())
+            }
+            .frame(width: 4)
+            .zIndex(10)
+            .onHover { hovering in
+                isHoveringSplitter = hovering
+                if hovering {
+                    NSCursor.resizeLeftRight.push()
+                } else if !isDraggingSplitter {
+                    NSCursor.pop()
                 }
-
-                Spacer()
-
-                if selectedTab == .preview {
-                    Menu {
-                        Section("Preview Target") {
-                            Button("WebApp Preview") {
-                                PreviewDockService.shared.selectTab(id: "web")
-                                deviceRuntime.embeddedDockMode = .web
-                                deviceRuntime.showingEmbeddedDeviceDock = true
-                            }
-                            Button("iOS Simulator") {
-                                PreviewDockService.shared.selectTab(id: "ios")
-                                deviceRuntime.embeddedDockMode = .ios
-                                deviceRuntime.showingEmbeddedDeviceDock = true
-                                deviceRuntime.showingEmbeddedAppleDock = true
-                                Task { await deviceRuntime.startEmbeddedAppleSimulator() }
-                            }
-                            Button("Android Emulator") {
-                                PreviewDockService.shared.selectTab(id: "android")
-                                deviceRuntime.embeddedDockMode = .android
-                                deviceRuntime.showingEmbeddedDeviceDock = true
-                                deviceRuntime.showingEmbeddedAppleDock = false
-                                Task { await deviceRuntime.startPreferredEmbeddedAndroid() }
-                            }
+            }
+            .gesture(
+                DragGesture(minimumDistance: 1, coordinateSpace: .global)
+                    .onChanged { val in
+                        if !isDraggingSplitter {
+                            isDraggingSplitter = true
+                            dragStartWidth = inspectorWidth
                         }
-
-                        Divider()
-
-                        Button("Choose Device & Run…") {
-                            deviceRuntime.showingDeviceRuntimeSheet = true
+                        let newW = dragStartWidth - Double(val.translation.width)
+                        inspectorWidth = max(280, min(1000, newW))
+                    }
+                    .onEnded { _ in
+                        isDraggingSplitter = false
+                        if !isHoveringSplitter {
+                            NSCursor.pop()
                         }
-                        Divider()
-                        let appleSimulators = deviceRuntime.devices.filter(\.isAppleSimulator)
-                        let androidDevices = deviceRuntime.devices.filter { $0.platform == .android }
-                        if !appleSimulators.isEmpty {
-                            Section("iOS Simulators") {
-                                ForEach(appleSimulators.prefix(6)) { device in
-                                    Button(device.name) {
-                                        Task {
-                                            deviceRuntime.selectedDeviceID = device.id
-                                            deviceRuntime.stopEmbeddedAndroid()
-                                            deviceRuntime.showingEmbeddedDeviceDock = true
-                                            deviceRuntime.showingEmbeddedAppleDock = true
-                                            await deviceRuntime.startEmbeddedAppleSimulator()
+                    }
+            )
+
+            VStack(spacing: 0) {
+                // Header Bar with Tab Switcher
+                HStack(spacing: 6) {
+                    ForEach(AgenticInspectorTab.allCases, id: \.self) { tab in
+                        Button {
+                            withAnimation(.easeInOut(duration: 0.16)) {
+                                selectedTab = tab
+                                if tab == .preview && !deviceRuntime.showingEmbeddedDeviceDock {
+                                    deviceRuntime.showingEmbeddedDeviceDock = true
+                                }
+                            }
+                        } label: {
+                            HStack(spacing: 3) {
+                                switch tab {
+                                case .context:
+                                    Image(systemName: "sidebar.right")
+                                        .font(.system(size: 9))
+                                case .preview:
+                                    Image(systemName: deviceRuntime.embeddedDockMode == .web ? "globe" : (deviceRuntime.showingEmbeddedAppleDock ? "iphone" : "candybarphone"))
+                                        .font(.system(size: 9))
+                                case .plan:
+                                    Image(systemName: "doc.text.magnifyingglass")
+                                        .font(.system(size: 9))
+                                case .tasks:
+                                    Image(systemName: "checklist")
+                                        .font(.system(size: 9))
+                                }
+                                Text(tab.rawValue)
+                                    .font(.system(size: 10, weight: selectedTab == tab ? .semibold : .regular))
+                                    .lineLimit(1)
+                                    .fixedSize(horizontal: true, vertical: false)
+                            }
+                            .padding(.horizontal, 7)
+                            .padding(.vertical, 4)
+                            .foregroundColor(selectedTab == tab ? .primary : .secondary)
+                            .background(selectedTab == tab ? Color.primary.opacity(0.1) : Color.clear)
+                            .cornerRadius(4)
+                        }
+                        .buttonStyle(.plain)
+                    }
+
+                    Spacer()
+
+                    if selectedTab == .preview {
+                        Menu {
+                            Section("Preview Target") {
+                                Button("WebApp Preview") {
+                                    PreviewDockService.shared.selectTab(id: "web")
+                                    deviceRuntime.embeddedDockMode = .web
+                                    deviceRuntime.showingEmbeddedDeviceDock = true
+                                }
+                                Button("iOS Simulator") {
+                                    PreviewDockService.shared.selectTab(id: "ios")
+                                    deviceRuntime.embeddedDockMode = .ios
+                                    deviceRuntime.showingEmbeddedDeviceDock = true
+                                    deviceRuntime.showingEmbeddedAppleDock = true
+                                    Task { await deviceRuntime.startEmbeddedAppleSimulator() }
+                                }
+                                Button("Android Emulator") {
+                                    PreviewDockService.shared.selectTab(id: "android")
+                                    deviceRuntime.embeddedDockMode = .android
+                                    deviceRuntime.showingEmbeddedDeviceDock = true
+                                    deviceRuntime.showingEmbeddedAppleDock = false
+                                    Task { await deviceRuntime.startPreferredEmbeddedAndroid() }
+                                }
+                            }
+
+                            Divider()
+
+                            Button("Choose Device & Run…") {
+                                deviceRuntime.showingDeviceRuntimeSheet = true
+                            }
+                            let appleDevices = deviceRuntime.devices.filter(\.isAppleSimulator)
+                            let androidDevices = deviceRuntime.devices.filter { $0.platform == .android }
+                            if !appleDevices.isEmpty {
+                                Section("iOS Simulators") {
+                                    ForEach(appleDevices.prefix(6)) { device in
+                                        Button(device.name) {
+                                            Task {
+                                                deviceRuntime.selectedDeviceID = device.id
+                                                deviceRuntime.stopEmbeddedAndroid()
+                                                deviceRuntime.showingEmbeddedDeviceDock = true
+                                                deviceRuntime.showingEmbeddedAppleDock = true
+                                                await deviceRuntime.startEmbeddedAppleSimulator()
+                                            }
                                         }
                                     }
                                 }
                             }
-                        }
-                        if !androidDevices.isEmpty {
-                            Section("Android Emulators") {
-                                ForEach(androidDevices.prefix(6)) { device in
-                                    Button(device.name) {
-                                        Task {
-                                            deviceRuntime.selectedDeviceID = device.id
-                                            deviceRuntime.showingEmbeddedDeviceDock = true
-                                            deviceRuntime.showingEmbeddedAppleDock = false
-                                            await deviceRuntime.startEmbeddedAndroid()
+                            if !androidDevices.isEmpty {
+                                Section("Android Emulators") {
+                                    ForEach(androidDevices.prefix(6)) { device in
+                                        Button(device.name) {
+                                            Task {
+                                                deviceRuntime.selectedDeviceID = device.id
+                                                deviceRuntime.showingEmbeddedDeviceDock = true
+                                                deviceRuntime.showingEmbeddedAppleDock = false
+                                                await deviceRuntime.startEmbeddedAndroid()
+                                            }
                                         }
                                     }
                                 }
                             }
+                            Divider()
+                            Button("Refresh Devices") {
+                                Task { await deviceRuntime.refresh(workspace: appState.workspaceFolder) }
+                            }
+                        } label: {
+                            Image(systemName: "ellipsis.circle")
+                                .font(.system(size: 11))
+                                .foregroundColor(.secondary)
                         }
-                        Divider()
-                        Button("Refresh Devices") {
-                            Task { await deviceRuntime.refresh(workspace: appState.workspaceFolder) }
-                        }
-                    } label: {
-                        Image(systemName: "ellipsis.circle")
-                            .font(.system(size: 11))
+                        .menuStyle(.borderlessButton)
+                        .frame(width: 18)
+                    } else {
+                        Text(agent.isLoading ? "Working" : "Ready")
+                            .font(.system(size: 9))
                             .foregroundColor(.secondary)
                     }
-                    .menuStyle(.borderlessButton)
-                    .frame(width: 18)
-                } else {
-                    Text(agent.isLoading ? "Working" : "Ready")
-                        .font(.system(size: 9))
-                        .foregroundColor(.secondary)
-                }
 
-                // Standard macOS HIG Close button [✕] at top-right
-                Button {
-                    withAnimation(.easeInOut(duration: 0.16)) {
-                        appState.agenticContextVisible = false
+                    // Standard macOS HIG Close button [✕] at top-right
+                    Button {
+                        withAnimation(.easeInOut(duration: 0.16)) {
+                            appState.hidePreviewInspector()
+                        }
+                    } label: {
+                        Image(systemName: "xmark")
+                            .font(.system(size: 9, weight: .bold))
+                            .foregroundColor(.secondary)
+                            .frame(width: 18, height: 18)
+                            .background(Color.primary.opacity(0.06))
+                            .clipShape(Circle())
                     }
-                } label: {
-                    Image(systemName: "xmark")
-                        .font(.system(size: 9, weight: .bold))
-                        .foregroundColor(.secondary)
-                        .frame(width: 18, height: 18)
-                        .background(Color.primary.opacity(0.06))
-                        .clipShape(Circle())
+                    .buttonStyle(.plain)
+                    .help("Close Inspector (⌘I)")
                 }
-                .buttonStyle(.plain)
-                .help("Close Inspector (⌘I)")
-            }
-            .padding(.horizontal, 10)
-            .frame(height: 38)
+                .padding(.horizontal, 10)
+                .frame(height: 38)
 
-            Divider()
+                Divider()
 
-            // Tab Content
-            switch selectedTab {
-            case .context:
-                contextTabView
-            case .preview:
-                previewTabView
-            case .tasks:
-                tasksAndWalkthroughTabView
+                // Tab Content
+                switch selectedTab {
+                case .context:
+                    contextTabView
+                case .preview:
+                    previewTabView
+                case .plan:
+                    implementationPlanTabView
+                case .tasks:
+                    tasksAndWalkthroughTabView
+                }
             }
         }
-        .background(appState.appTheme.isGlass ? Color.clear : Color(nsColor: appState.appTheme.panelBackground))
+        .frame(width: CGFloat(inspectorWidth))
+        .background(
+            appState.appTheme.isGlass ? Color.clear : Color(nsColor: selectedTab == .preview ? appState.appTheme.editorBackground : appState.appTheme.panelBackground)
+        )
         .onAppear {
             reloadTaskAndWalkthrough()
         }
         .onChange(of: deviceRuntime.showingEmbeddedDeviceDock) { showing in
-            if !showing && selectedTab == .preview {
+            if !showing && appState.selectedInspectorTab == .preview {
                 withAnimation(.easeInOut(duration: 0.16)) {
-                    selectedTab = .context
+                    appState.selectedInspectorTab = .context
                 }
             }
         }
@@ -2078,6 +2261,295 @@ struct AgenticContextInspector: View {
                 .environmentObject(appState)
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
+    }
+
+    // MARK: - Implementation Plan Tab View
+    @ObservedObject private var planManager = ImplementationPlanManager.shared
+    
+    private var implementationPlanTabView: some View {
+        VStack(spacing: 0) {
+            if let plan = planManager.currentPlan {
+                // Scrollable content
+                ScrollView {
+                    VStack(alignment: .leading, spacing: 14) {
+                        // Plan Title & Summary
+                        VStack(alignment: .leading, spacing: 4) {
+                            Text(plan.title)
+                                .font(.system(size: 14, weight: .bold))
+                                .foregroundColor(.primary)
+                            
+                            if !plan.summary.isEmpty {
+                                Text(plan.summary)
+                                    .font(.system(size: 11))
+                                    .foregroundColor(.secondary)
+                                    .lineLimit(3)
+                            }
+                            
+                            // Progress indicator
+                            if plan.totalSteps > 0 {
+                                HStack(spacing: 6) {
+                                    GeometryReader { geometry in
+                                        ZStack(alignment: .leading) {
+                                            RoundedRectangle(cornerRadius: 2)
+                                                .fill(Color.primary.opacity(0.08))
+                                                .frame(height: 3)
+                                            RoundedRectangle(cornerRadius: 2)
+                                                .fill(Color.primary.opacity(0.4))
+                                                .frame(width: geometry.size.width * plan.progress, height: 3)
+                                        }
+                                    }
+                                    .frame(height: 3)
+                                    
+                                    Text("\(plan.completedSteps)/\(plan.totalSteps)")
+                                        .font(.system(size: 9, design: .monospaced))
+                                        .foregroundColor(.secondary)
+                                }
+                                .padding(.top, 4)
+                            }
+                        }
+                        .padding(.horizontal, 14)
+                        .padding(.top, 12)
+                        
+                        // Open Questions
+                        if !plan.openQuestions.isEmpty {
+                            VStack(alignment: .leading, spacing: 6) {
+                                HStack(spacing: 4) {
+                                    Image(systemName: "questionmark.circle")
+                                        .font(.system(size: 10))
+                                    Text("OPEN QUESTIONS")
+                                        .font(.system(size: 9.5, weight: .semibold, design: .monospaced))
+                                }
+                                .foregroundColor(.secondary)
+                                
+                                ForEach(Array(plan.openQuestions.enumerated()), id: \.offset) { idx, question in
+                                    HStack(alignment: .top, spacing: 6) {
+                                        Text("\(idx + 1).")
+                                            .font(.system(size: 10, design: .monospaced))
+                                            .foregroundColor(.secondary)
+                                            .frame(width: 16, alignment: .trailing)
+                                        Text(question)
+                                            .font(.system(size: 10.5))
+                                            .foregroundColor(.primary.opacity(0.8))
+                                    }
+                                }
+                            }
+                            .padding(.horizontal, 14)
+                        }
+                        
+                        // Proposed Changes (Sections)
+                        if !plan.sections.isEmpty {
+                            VStack(alignment: .leading, spacing: 8) {
+                                HStack(spacing: 4) {
+                                    Image(systemName: "list.bullet.indent")
+                                        .font(.system(size: 10))
+                                    Text("PROPOSED CHANGES")
+                                        .font(.system(size: 9.5, weight: .semibold, design: .monospaced))
+                                }
+                                .foregroundColor(.secondary)
+                                .padding(.horizontal, 14)
+                                
+                                ForEach(plan.sections) { section in
+                                    PlanSectionRow(section: section)
+                                }
+                            }
+                        }
+                        
+                        // Verification Plan
+                        if !plan.verificationSteps.isEmpty {
+                            VStack(alignment: .leading, spacing: 6) {
+                                HStack(spacing: 4) {
+                                    Image(systemName: "checkmark.shield")
+                                        .font(.system(size: 10))
+                                    Text("VERIFICATION PLAN")
+                                        .font(.system(size: 9.5, weight: .semibold, design: .monospaced))
+                                }
+                                .foregroundColor(.secondary)
+                                
+                                ForEach(plan.verificationSteps, id: \.self) { step in
+                                    HStack(alignment: .top, spacing: 6) {
+                                        Image(systemName: "circle")
+                                            .font(.system(size: 6))
+                                            .foregroundColor(.secondary)
+                                            .padding(.top, 4)
+                                        Text(step)
+                                            .font(.system(size: 10.5))
+                                            .foregroundColor(.primary.opacity(0.8))
+                                    }
+                                }
+                            }
+                            .padding(.horizontal, 14)
+                        }
+                        
+                        Spacer(minLength: 60)
+                    }
+                }
+                
+                // Sticky bottom bar with Proceed/Reject
+                if plan.approvalState == .pending {
+                    Divider().opacity(0.3)
+                    
+                    HStack(spacing: 8) {
+                        Button(action: { planManager.reject() }) {
+                            Text("Reject")
+                                .font(.system(size: 11, weight: .medium))
+                                .foregroundColor(.primary.opacity(0.5))
+                                .padding(.horizontal, 14)
+                                .padding(.vertical, 6)
+                                .background(Color.primary.opacity(0.06))
+                                .cornerRadius(6)
+                        }
+                        .buttonStyle(.plain)
+                        
+                        Spacer()
+                        
+                        Button(action: { planManager.approve() }) {
+                            HStack(spacing: 5) {
+                                Text("Proceed")
+                                    .font(.system(size: 11, weight: .semibold))
+                                Text("⌘↵")
+                                    .font(.system(size: 10, design: .monospaced))
+                                    .foregroundColor(.primary.opacity(0.5))
+                            }
+                            .foregroundColor(.primary)
+                            .padding(.horizontal, 16)
+                            .padding(.vertical, 6)
+                            .background(Color.primary.opacity(0.12))
+                            .cornerRadius(6)
+                        }
+                        .buttonStyle(.plain)
+                        .keyboardShortcut(.return, modifiers: .command)
+                    }
+                    .padding(.horizontal, 14)
+                    .padding(.vertical, 8)
+                } else if plan.approvalState == .approved {
+                    HStack(spacing: 6) {
+                        Image(systemName: "checkmark.seal.fill")
+                            .font(.system(size: 10))
+                            .foregroundColor(.primary.opacity(0.5))
+                        Text("Plan Approved")
+                            .font(.system(size: 11, weight: .medium))
+                            .foregroundColor(.primary.opacity(0.7))
+                    }
+                    .frame(maxWidth: .infinity)
+                    .padding(.vertical, 8)
+                    .background(Color.primary.opacity(0.04))
+                }
+            } else {
+                // No plan state
+                VStack(spacing: 10) {
+                    Image(systemName: "doc.text.magnifyingglass")
+                        .font(.system(size: 28))
+                        .foregroundColor(.secondary.opacity(0.3))
+                    Text("No Implementation Plan")
+                        .font(.system(size: 12, weight: .medium))
+                        .foregroundColor(.secondary)
+                    Text("When the agent proposes a plan, it will appear here for review.")
+                        .font(.system(size: 10.5))
+                        .foregroundColor(.secondary.opacity(0.6))
+                        .multilineTextAlignment(.center)
+                        .frame(maxWidth: 220)
+                }
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+            }
+        }
+    }
+
+    private struct PlanSectionRow: View {
+        let section: PlanSection
+        @State private var isExpanded: Bool = true
+        
+        var body: some View {
+            VStack(alignment: .leading, spacing: 0) {
+                Button(action: {
+                    withAnimation(.snappy(duration: 0.2)) {
+                        isExpanded.toggle()
+                    }
+                }) {
+                    HStack(spacing: 6) {
+                        Image(systemName: "chevron.right")
+                            .font(.system(size: 8, weight: .bold))
+                            .rotationEffect(.degrees(isExpanded ? 90 : 0))
+                            .foregroundColor(.secondary)
+                            .frame(width: 12)
+                        
+                        Text(section.title)
+                            .font(.system(size: 11, weight: .semibold))
+                            .foregroundColor(.primary)
+                        
+                        Spacer()
+                    }
+                    .padding(.vertical, 6)
+                    .padding(.horizontal, 14)
+                    .background(Color.primary.opacity(0.02))
+                }
+                .buttonStyle(.plain)
+                
+                if isExpanded {
+                    VStack(alignment: .leading, spacing: 8) {
+                        ForEach(section.steps) { step in
+                            HStack(alignment: .top, spacing: 8) {
+                                Image(systemName: step.status.statusIcon)
+                                    .font(.system(size: 10))
+                                    .foregroundColor(step.status.statusColor)
+                                    .frame(width: 14)
+                                    .padding(.top, 2)
+                                
+                                VStack(alignment: .leading, spacing: 3) {
+                                    HStack(alignment: .top, spacing: 6) {
+                                        if let action = step.action {
+                                            Text("[\(action)]")
+                                                .font(.system(size: 9, weight: .bold, design: .monospaced))
+                                                .foregroundColor(actionColor(for: action))
+                                                .padding(.top, 1)
+                                        }
+                                        
+                                        Text(step.description)
+                                            .font(.system(size: 11))
+                                            .foregroundColor(.primary.opacity(0.9))
+                                            .fixedSize(horizontal: false, vertical: true)
+                                    }
+                                    
+                                    if let fileLink = step.fileLink {
+                                        Text(fileLink)
+                                            .font(.system(size: 9.5, design: .monospaced))
+                                            .foregroundColor(.secondary.opacity(0.8))
+                                    }
+                                    
+                                    if let detail = step.detail {
+                                        Text(detail)
+                                            .font(.system(size: 10))
+                                            .foregroundColor(.secondary)
+                                            .fixedSize(horizontal: false, vertical: true)
+                                            .padding(.top, 1)
+                                    }
+                                }
+                            }
+                            .padding(.leading, 32)
+                            .padding(.trailing, 14)
+                            .padding(.vertical, 2)
+                        }
+                    }
+                    .padding(.vertical, 8)
+                    .padding(.bottom, 4)
+                }
+            }
+            .background(Color.primary.opacity(0.01))
+            .cornerRadius(6)
+            .padding(.horizontal, 10)
+        }
+        
+        private func actionColor(for action: String) -> Color {
+            switch action.uppercased() {
+            case "NEW":
+                return .primary.opacity(0.8)
+            case "MODIFY":
+                return .primary.opacity(0.6)
+            case "DELETE":
+                return .primary.opacity(0.4)
+            default:
+                return .primary.opacity(0.5)
+            }
+        }
     }
 
     // MARK: - Tasks & Walkthrough Tab View
@@ -2328,7 +2800,7 @@ struct LegacyInlineAgentPanel: View {
                     Text("AI Agent")
                         .font(.system(size: 11, weight: .semibold))
                         .foregroundColor(.primary)
-                    Text(appState.aiModel.isEmpty ? "Ready" : appState.aiModel)
+                    Text(appState.aiModel.isEmpty ? "Ready" : AIModelCatalog.formatFullDisplayName(provider: appState.aiProvider, modelId: appState.aiModel))
                         .font(.system(size: 9))
                         .foregroundColor(.secondary)
                         .lineLimit(1)
@@ -2651,6 +3123,7 @@ struct ToolbarButton: View {
                     RoundedRectangle(cornerRadius: 5)
                         .fill(isHovering || isActive ? Color.accentColor.opacity(0.15) : Color.clear)
                 )
+                .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
         .onHover { isHovering = $0 }
@@ -2838,9 +3311,16 @@ struct FileTreeRow: View, Equatable {
             }
             
             // Icon & Name
-            Image(systemName: node.isDirectory ? "folder.fill" : fileIcon(for: node.name))
-                .font(.system(size: 13))
-                .foregroundColor(node.isDirectory ? .blue : iconColor(for: node.name))
+            if let extIcon = ExtensionManager.shared.iconImage(for: node.name, isDirectory: node.isDirectory, isExpanded: isExpanded) {
+                Image(nsImage: extIcon)
+                    .resizable()
+                    .scaledToFit()
+                    .frame(width: 14, height: 14)
+            } else {
+                Image(systemName: node.isDirectory ? "folder.fill" : fileIcon(for: node.name))
+                    .font(.system(size: 13))
+                    .foregroundColor(node.isDirectory ? .blue : iconColor(for: node.name))
+            }
             
             if isRenaming {
                 renameField
@@ -3056,6 +3536,9 @@ struct EditorArea: View {
                 APIClientView()
                     .environmentObject(appState)
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
+            case .extensions:
+                ExtensionStudioView()
+                    .environmentObject(appState)
             case .code:
                 CompatHSplitView {
                     VStack(spacing: 0) {
@@ -3152,9 +3635,16 @@ struct EditorBreadcrumbBar: View {
                         }
                         
                         HStack(spacing: 4) {
-                            Image(systemName: seg.icon)
-                                .font(.system(size: 11))
-                                .foregroundColor(seg.color)
+                            if let extIcon = ExtensionManager.shared.iconImage(for: seg.name, isDirectory: seg.icon.contains("folder")) {
+                                Image(nsImage: extIcon)
+                                    .resizable()
+                                    .scaledToFit()
+                                    .frame(width: 12, height: 12)
+                            } else {
+                                Image(systemName: seg.icon)
+                                    .font(.system(size: 11))
+                                    .foregroundColor(seg.color)
+                            }
                             
                             Text(seg.name)
                                 .font(.system(size: 11, weight: index == segments.count - 1 ? .medium : .regular))
@@ -3256,6 +3746,10 @@ struct EditorBreadcrumbBar: View {
 struct RightPreviewPanel: View {
     @EnvironmentObject var appState: AppState
     @ObservedObject private var deviceRuntime = DeviceRuntimeService.shared
+    @AppStorage("rightPreviewPanelWidth") private var previewWidth: Double = 460
+    @State private var isHoveringSplitter = false
+    @State private var isDraggingSplitter = false
+    @State private var dragStartWidth: Double = 460
 
     private var currentDeviceName: String {
         if deviceRuntime.showingEmbeddedAppleDock {
@@ -3272,12 +3766,51 @@ struct RightPreviewPanel: View {
     }
 
     var body: some View {
-        EmbeddedDeviceDockView()
-            .environmentObject(appState)
-            .frame(minWidth: 380, idealWidth: 440, maxWidth: 540)
-            .background(
-                Color(nsColor: appState.appTheme.editorBackground)
+        HStack(spacing: 0) {
+            // Draggable resize splitter divider on leading edge
+            ZStack {
+                Rectangle()
+                    .fill(isHoveringSplitter || isDraggingSplitter ? Color.accentColor : Color.secondary.opacity(0.15))
+                    .frame(width: isHoveringSplitter || isDraggingSplitter ? 2.5 : 1)
+                Color.clear
+                    .frame(width: 8)
+                    .contentShape(Rectangle())
+            }
+            .frame(width: 4)
+            .zIndex(10)
+            .onHover { hovering in
+                isHoveringSplitter = hovering
+                if hovering {
+                    NSCursor.resizeLeftRight.push()
+                } else if !isDraggingSplitter {
+                    NSCursor.pop()
+                }
+            }
+            .gesture(
+                DragGesture(minimumDistance: 1, coordinateSpace: .global)
+                    .onChanged { val in
+                        if !isDraggingSplitter {
+                            isDraggingSplitter = true
+                            dragStartWidth = previewWidth
+                        }
+                        let newW = dragStartWidth - Double(val.translation.width)
+                        previewWidth = max(280, min(1000, newW))
+                    }
+                    .onEnded { _ in
+                        isDraggingSplitter = false
+                        if !isHoveringSplitter {
+                            NSCursor.pop()
+                        }
+                    }
             )
+
+            EmbeddedDeviceDockView()
+                .environmentObject(appState)
+                .background(
+                    Color(nsColor: appState.appTheme.editorBackground)
+                )
+        }
+        .frame(width: CGFloat(previewWidth))
         .onAppear {
             autoSelectPlatform()
             Task {
@@ -3303,6 +3836,10 @@ struct RightPreviewPanel: View {
             deviceRuntime.showingEmbeddedDeviceDock = true
             PreviewDockService.shared.selectTab(id: "ios")
             Task { await deviceRuntime.startPreferredEmbeddedAppleSimulator() }
+        } else if ["html", "htm", "css", "js", "ts", "jsx", "tsx", "vue", "svelte", "astro"].contains(ext) || path.contains("/web/") || path.contains("/public/") {
+            deviceRuntime.showingEmbeddedAppleDock = false
+            deviceRuntime.showingEmbeddedDeviceDock = true
+            PreviewDockService.shared.selectTab(id: "web")
         }
     }
 }
@@ -3315,12 +3852,13 @@ struct EditorTabBar: View {
     var body: some View {
         ScrollView(.horizontal, showsIndicators: false) {
             HStack(spacing: 0) {
-                ForEach(Array(appState.openFiles.enumerated()), id: \.element.id) { index, file in
+                ForEach(appState.openFiles) { file in
+                    let isSelected = file.id == appState.currentFile?.id
                     EditorTab(
                         file: file,
-                        isSelected: index == appState.currentFileIndex,
-                        onSelect: { appState.currentFileIndex = index },
-                        onClose: { appState.closeFile(at: index) }
+                        isSelected: isSelected,
+                        onSelect: { appState.selectFile(file) },
+                        onClose: { appState.closeFile(file) }
                     )
                 }
                 Spacer()
@@ -3344,14 +3882,22 @@ struct EditorTab: View {
     var body: some View {
         HStack(spacing: 6) {
             // File icon
-            Image(systemName: iconForFile(file.name))
-                .font(.system(size: 11))
-                .foregroundColor(colorForFile(file.name))
+            if let extIcon = ExtensionManager.shared.iconImage(for: file.name, isDirectory: false) {
+                Image(nsImage: extIcon)
+                    .resizable()
+                    .scaledToFit()
+                    .frame(width: 13, height: 13)
+            } else {
+                Image(systemName: iconForFile(file.name))
+                    .font(.system(size: 11))
+                    .foregroundColor(colorForFile(file.name))
+            }
             
             // File name
             Text(file.name)
                 .font(.system(size: 12))
                 .foregroundColor(isSelected ? .primary : .secondary)
+                .lineLimit(1)
             
             // Modified indicator
             if file.isUnsaved {
@@ -3360,17 +3906,20 @@ struct EditorTab: View {
                     .frame(width: 6, height: 6)
             }
             
-            // Close button
+            // Close button (independent click target)
             Button(action: onClose) {
                 Image(systemName: "xmark")
                     .font(.system(size: 9, weight: .semibold))
                     .foregroundColor(.secondary)
+                    .padding(4)
+                    .contentShape(Rectangle())
             }
-            .buttonStyle(.borderless)
+            .buttonStyle(.plain)
             .opacity(isHovering || isSelected ? 1 : 0)
+            .help("Close Tab (⌘W)")
         }
-        .padding(.horizontal, 12)
-        .padding(.vertical, 8)
+        .padding(.horizontal, 10)
+        .padding(.vertical, 7)
         .background(
             isSelected 
                 ? (appState.appTheme == .extraClear ? Color.white.opacity(0.1) : Color.compat(nsColor: .textBackgroundColor))
@@ -5676,9 +6225,9 @@ struct AIChatPanel: View {
     
     private var modelDisplayName: String {
         if let m = AIModelCatalog.shared.model(id: appState.aiModel) {
-            return m.name
+            return m.fullDisplayName
         }
-        return AIModelCatalog.formatModelName(appState.aiModel)
+        return AIModelCatalog.formatFullDisplayName(provider: appState.aiProvider, modelId: appState.aiModel)
     }
     
     private func setModel(_ model: String, provider: String) {
@@ -6765,7 +7314,7 @@ struct SettingsView: View {
                                 if let provider = aiProviders.first(where: { $0.id == selectedProvider }) {
                                     ForEach(provider.models, id: \.id) { m in
                                         HStack {
-                                            Text(m.name)
+                                            Text("\(provider.name) : \(m.name)")
                                             if !m.badge.isEmpty {
                                                 Text("[\(m.badge)]")
                                             }
@@ -7049,7 +7598,7 @@ struct SettingsView: View {
                                 Section(prov.displayName) {
                                     ForEach(prov.modelInfos) { m in
                                         HStack {
-                                            Text(m.name)
+                                            Text("\(prov.displayName.components(separatedBy: " ").first ?? "Sub") : \(m.name)")
                                             if !m.badge.isEmpty {
                                                 Text("[\(m.badge)]")
                                             }
@@ -8366,6 +8915,10 @@ struct SecondarySheetsModifier: ViewModifier {
                 SubAgentMonitorView()
                     .environmentObject(appState)
             }
+            .sheet(isPresented: $appState.showingKeyboardShortcuts) {
+                KeyboardShortcutsCheatSheetView()
+                    .environmentObject(appState)
+            }
     }
 }
 
@@ -8399,4 +8952,208 @@ struct StudioSheetsModifier: ViewModifier {
             }
     }
 }
+
+// MARK: - Global Window-Level Shortcuts Modifier
+
+struct GlobalKeyboardShortcutsModifier: ViewModifier {
+    @ObservedObject var appState: AppState
+
+    func body(content: Content) -> some View {
+        content
+            // HUD Cheat Sheet (⌘/)
+            .background(
+                Button("") {
+                    appState.showingKeyboardShortcuts.toggle()
+                }
+                .keyboardShortcut("/", modifiers: .command)
+                .hidden()
+            )
+            // Tabs & Navigation (⌘], ⌘[, ⌘⌥W)
+            .background(
+                Button("") {
+                    appState.selectNextTab()
+                }
+                .keyboardShortcut("]", modifiers: .command)
+                .hidden()
+            )
+            .background(
+                Button("") {
+                    appState.selectPreviousTab()
+                }
+                .keyboardShortcut("[", modifiers: .command)
+                .hidden()
+            )
+            .background(
+                Button("") {
+                    appState.closeOtherTabs()
+                }
+                .keyboardShortcut("w", modifiers: [.command, .option])
+                .hidden()
+            )
+            // Panels & Layout (⌘J, ⌘I, ⌘⌥G, ⌘⌥P)
+            .background(
+                Button("") {
+                    withAnimation(.easeInOut(duration: 0.2)) {
+                        appState.toggleConsole()
+                    }
+                }
+                .keyboardShortcut("j", modifiers: .command)
+                .hidden()
+            )
+            .background(
+                Button("") {
+                    withAnimation(.easeInOut(duration: 0.2)) {
+                        appState.toggleAgenticContext()
+                    }
+                }
+                .keyboardShortcut("i", modifiers: .command)
+                .hidden()
+            )
+            .background(
+                Button("") {
+                    withAnimation(.easeInOut(duration: 0.2)) {
+                        appState.toggleGitPanel()
+                    }
+                }
+                .keyboardShortcut("g", modifiers: [.command, .option])
+                .hidden()
+            )
+            .background(
+                Button("") {
+                    withAnimation(.easeInOut(duration: 0.2)) {
+                        appState.showingPreviewView.toggle()
+                    }
+                }
+                .keyboardShortcut("p", modifiers: [.command, .option])
+                .hidden()
+            )
+            // Code Execution & Build (⌘R, ⌘⇧B, ⌘., ⌘⌥F)
+            .background(
+                Button("") {
+                    appState.runCode()
+                }
+                .keyboardShortcut("r", modifiers: .command)
+                .hidden()
+            )
+            .background(
+                Button("") {
+                    appState.buildProject()
+                }
+                .keyboardShortcut("b", modifiers: [.command, .shift])
+                .hidden()
+            )
+            .background(
+                Button("") {
+                    appState.stopExecution()
+                }
+                .keyboardShortcut(".", modifiers: .command)
+                .hidden()
+            )
+            .background(
+                Button("") {
+                    appState.formatCode()
+                }
+                .keyboardShortcut("f", modifiers: [.command, .option])
+                .hidden()
+            )
+            // Editor Modes (Control + 1..9, 0)
+            .background(
+                Button("") { appState.switchToMode(.code) }
+                    .keyboardShortcut("1", modifiers: .control)
+                    .hidden()
+            )
+            .background(
+                Button("") { appState.switchToMode(.aiAgent) }
+                    .keyboardShortcut("2", modifiers: .control)
+                    .hidden()
+            )
+            .background(
+                Button("") { appState.switchToMode(.notebook) }
+                    .keyboardShortcut("3", modifiers: .control)
+                    .hidden()
+            )
+            .background(
+                Button("") { appState.switchToMode(.playground) }
+                    .keyboardShortcut("4", modifiers: .control)
+                    .hidden()
+            )
+            .background(
+                Button("") { appState.switchToMode(.science) }
+                    .keyboardShortcut("5", modifiers: .control)
+                    .hidden()
+            )
+            .background(
+                Button("") { appState.switchToMode(.browser) }
+                    .keyboardShortcut("6", modifiers: .control)
+                    .hidden()
+            )
+            .background(
+                Button("") { appState.switchToMode(.remoteX) }
+                    .keyboardShortcut("7", modifiers: .control)
+                    .hidden()
+            )
+            .background(
+                Button("") { appState.switchToMode(.embedded) }
+                    .keyboardShortcut("8", modifiers: .control)
+                    .hidden()
+            )
+            .background(
+                Button("") { appState.openAPIStudio() }
+                    .keyboardShortcut("9", modifiers: .control)
+                    .hidden()
+            )
+            .background(
+                Button("") { appState.showingWelcomeHome = true }
+                    .keyboardShortcut("0", modifiers: .control)
+                    .hidden()
+            )
+            // Option alternatives for Mode Switching (⌘⌥1..9)
+            .background(
+                Button("") { appState.switchToMode(.code) }
+                    .keyboardShortcut("1", modifiers: [.command, .option])
+                    .hidden()
+            )
+            .background(
+                Button("") { appState.switchToMode(.aiAgent) }
+                    .keyboardShortcut("2", modifiers: [.command, .option])
+                    .hidden()
+            )
+            .background(
+                Button("") { appState.switchToMode(.notebook) }
+                    .keyboardShortcut("3", modifiers: [.command, .option])
+                    .hidden()
+            )
+            .background(
+                Button("") { appState.switchToMode(.playground) }
+                    .keyboardShortcut("4", modifiers: [.command, .option])
+                    .hidden()
+            )
+            .background(
+                Button("") { appState.switchToMode(.science) }
+                    .keyboardShortcut("5", modifiers: [.command, .option])
+                    .hidden()
+            )
+            .background(
+                Button("") { appState.switchToMode(.browser) }
+                    .keyboardShortcut("6", modifiers: [.command, .option])
+                    .hidden()
+            )
+            .background(
+                Button("") { appState.switchToMode(.remoteX) }
+                    .keyboardShortcut("7", modifiers: [.command, .option])
+                    .hidden()
+            )
+            .background(
+                Button("") { appState.switchToMode(.embedded) }
+                    .keyboardShortcut("8", modifiers: [.command, .option])
+                    .hidden()
+            )
+            .background(
+                Button("") { appState.openAPIStudio() }
+                    .keyboardShortcut("9", modifiers: [.command, .option])
+                    .hidden()
+            )
+    }
+}
+
 

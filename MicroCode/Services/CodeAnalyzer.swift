@@ -2,7 +2,7 @@
 //  CodeAnalyzer.swift
 //  MicroCode
 //
-//  Created by SPU AI CLUB
+//  Created by Tirawat Nantamas
 //  Copyright © 2025 Dotmini Software. All rights reserved.
 //
 

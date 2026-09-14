@@ -2,8 +2,8 @@
 //  SSHConfigParser.swift
 //  MicroCode
 //
-//  Created by SPU AI CLUB.
-//  Copyright © 2025 SPU AI CLUB. All rights reserved.
+//  Created by Tirawat Nantamas.
+//  Copyright © 2025 Dotmini Company Limited. All rights reserved.
 //
 
 import Foundation

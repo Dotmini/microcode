@@ -155,8 +155,10 @@ final class DeviceMetalRenderer {
             return
         }
 
-        // Triple buffering
-        inflightSemaphore.wait()
+        // Triple buffering (50ms timeout protects against GPU stalls/dropped frames)
+        guard inflightSemaphore.wait(timeout: .now() + 0.05) == .success else {
+            return
+        }
 
         guard let drawable = layer.nextDrawable(),
               let commandBuffer = commandQueue.makeCommandBuffer() else {
@@ -217,7 +219,10 @@ final class DeviceMetalRenderer {
             height: height
         ) else { return }
 
-        inflightSemaphore.wait()
+        // Triple buffering (50ms timeout protects against GPU stalls/dropped frames)
+        guard inflightSemaphore.wait(timeout: .now() + 0.05) == .success else {
+            return
+        }
 
         guard let drawable = layer.nextDrawable(),
               let commandBuffer = commandQueue.makeCommandBuffer() else {

@@ -24,7 +24,7 @@ Usage:
        }
      }
 
-Copyright © 2025 SPU AI CLUB — Dotmini Software
+Copyright © 2024-2026 Dotmini Company Limited (บริษัท ดอทมินิ จำกัด)
 """
 
 import json

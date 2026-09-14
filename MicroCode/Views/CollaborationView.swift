@@ -5,7 +5,7 @@
 //  Realtime Collaboration UI
 //  User presence, cursor indicators, chat
 //
-//  SPU AI CLUB - Dotmini Software
+//  Dotmini Company Limited
 //
 
 import SwiftUI

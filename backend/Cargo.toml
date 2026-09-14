@@ -14,7 +14,7 @@ ethnum = { git = "https://github.com/nlordell/ethnum-rs.git", rev = "712d6393b07
 name = "microcode-backend"
 version = "2.0.1"
 edition = "2021"
-authors = ["SPU AI CLUB"]
+authors = ["Tirawat Nantamas", "Dotmini Company Limited"]
 
 [lib]
 name = "microcode_embedded"

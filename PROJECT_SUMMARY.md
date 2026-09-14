@@ -266,48 +266,44 @@ We welcome contributions! Areas for contribution:
 
 ## 📄 License
 
-MIT License - See LICENSE file for details
+Elastic License v2 (ELv2) & BSL - See LICENSE and README.md for details
 
-## 👥 Team
+## 👥 Creator & Maintainer
 
-**SPU AI CLUB (AIPRENEUR)**
-- Organization: Seattle Pacific University AI Club
-- Website: aipreneur.club
-- Email: contact@aipreneur.club
+**Dotmini Company Limited (บริษัท ดอทมินิ จำกัด)**
+- Founder & CEO: Tirawat Nantamas (นายถิรวัฒน์ นันตมาศ)
+- Organization: Dotmini Company Limited
+- GitHub: [Dotmini](https://github.com/Dotmini)
 
 ## 🙏 Acknowledgments
 
 - **Rust Community**: For amazing libraries and tools
-- **Swift Community**: For SwiftUI and modern iOS development
-- **AI Providers**: Google (Gemini), OpenAI, Anthropic
+- **Swift Community**: For SwiftUI, AppKit, and Metal
+- **AI Providers**: Google (Gemini), Anthropic (Claude), OpenAI, DeepSeek, xAI
 - **Open Source**: All the amazing open source projects we build upon
 
 ## 📞 Support & Resources
 
 - **Documentation**: README.md for detailed docs
-- **Quick Start**: QUICKSTART.md for setup guide
+- **Build Guide**: BUILDING.md for setup instructions
 - **Issues**: GitHub Issues for bug reports
-- **Email**: contact@aipreneur.club
-- **Discord**: Coming soon!
 
 ## 📈 Project Status
 
-**Current Version**: 2.0.0
+**Current Version**: 2.0.1
 **Status**: Active Development
-**Stability**: Beta
-**Production Ready**: Not yet (use at your own risk)
+**Stability**: Stable Workstation
 
 ## 🎯 Project Goals
 
-1. **Performance**: Match or exceed native IDE performance
-2. **Usability**: Intuitive for beginners, powerful for experts
-3. **AI Integration**: Seamless, non-intrusive AI assistance
-4. **Extensibility**: Easy to add new features and languages
-5. **Open Source**: Build a thriving community
+1. **Performance**: Native macOS speed, instant launch, Metal GPU text rendering
+2. **Autonomous AI**: Formal implementation planning with human-in-the-loop safety gate
+3. **Simulators & Streaming**: Live iOS & Android device mirroring inside editor
+4. **Developer Studios**: Built-in Database, API, and CI/CD testing workbench
+5. **No Electron**: 100% native SwiftUI, AppKit, Metal, and Rust
 
 ---
 
-**Last Updated**: December 2024
-**Maintained by**: SPU AI CLUB
+**Maintained by**: Dotmini Company Limited (Tirawat Nantamas)
 
-Made with ❤️ and lots of ☕
+Made with ❤️ by Dotmini Company Limited

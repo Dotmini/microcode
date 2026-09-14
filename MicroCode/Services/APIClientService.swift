@@ -5,7 +5,7 @@
 //  Professional HTTP Client — Postman-level API Testing
 //  Direct execution, Collections, Environments, Auth, cURL
 //
-//  Copyright © 2025 SPU AI CLUB. All rights reserved.
+//  Copyright © 2025 Dotmini Company Limited. All rights reserved.
 //
 
 import Foundation

@@ -13,7 +13,7 @@
 //  - Each language has its own Lexer implementation
 //  - State machine handles context-aware tokenization
 //
-//  Copyright © 2025 SPU AI CLUB. All rights reserved.
+//  Copyright © 2025 Dotmini Company Limited. All rights reserved.
 //
 
 import Foundation

@@ -8,59 +8,24 @@ set -e
 # Keep generated build products and downloaded package caches off the internal
 # drive when the configured external volume is available. Override this path
 # with CODETUNER_BUILD_ROOT when using a different volume or directory.
-DEFAULT_BUILD_ROOT="/Volumes/MAC/CodeTunerBuild"
-if [ -n "${CODETUNER_BUILD_ROOT:-}" ]; then
-    BUILD_ROOT="$CODETUNER_BUILD_ROOT"
-elif [ -d "/Volumes/MicroCodeBuild" ]; then
-    # The physical external disk is FAT32.  Use its mounted APFS sparse volume
-    # for executable build artifacts when available.
-    BUILD_ROOT="/Volumes/MicroCodeBuild"
-elif [ -d "/Volumes/MAC 1" ]; then
-    BUILD_ROOT="/Volumes/MAC 1/CodeTunerBuild"
-elif [ -d "/Volumes/MAC" ]; then
-    BUILD_ROOT="$DEFAULT_BUILD_ROOT"
-else
-    BUILD_ROOT="$(pwd)/.codetuner-build"
-    echo "Warning: External drive is not mounted; using local build cache at $BUILD_ROOT"
-fi
-
-mkdir -p "$BUILD_ROOT/cargo-home" "$BUILD_ROOT/cargo-target" "$BUILD_ROOT/rustup-home" "$BUILD_ROOT/swiftpm" "$BUILD_ROOT/derived-data" "$BUILD_ROOT/tmp"
-export TMPDIR="$BUILD_ROOT/tmp"
-export CARGO_HOME="$BUILD_ROOT/cargo-home"
-export CARGO_TARGET_DIR="$BUILD_ROOT/cargo-target"
-# Keep cargo downloads and build artifacts on the configured build volume.  A
-# toolchain can be supplied separately when the external drive uses a
-if [ -z "$CODETUNER_RUSTUP_HOME" ] && [ ! -d "$BUILD_ROOT/rustup-home/toolchains" ] && [ -d "$HOME/.rustup/toolchains" ]; then
-    export RUSTUP_HOME="$HOME/.rustup"
-else
-    export RUSTUP_HOME="${CODETUNER_RUSTUP_HOME:-$BUILD_ROOT/rustup-home}"
-fi
-# Xcode beta's linker can produce an invalid Mach-O proc-macro when Cargo
-# strips symbols during linking. Keep symbols while compiling, then strip only
-# the final app executables below after all linkers have completed.
-export CARGO_PROFILE_RELEASE_STRIP="${CARGO_PROFILE_RELEASE_STRIP:-none}"
-export COPYFILE_DISABLE=1
-export COPY_EXTENDED_ATTRIBUTES_DISABLE=1
-SWIFT_SCRATCH_PATH="$BUILD_ROOT/swiftpm/$(basename "$PWD")"
-XCODE_DERIVED_DATA_PATH="$BUILD_ROOT/derived-data/$(basename "$PWD")"
-
 # Colors for output
 RED='\033[0;31m'
 GREEN='\033[0;32m'
 YELLOW='\033[1;33m'
+BLUE='\033[0;34m'
 NC='\033[0m' # No Color
 
 echo -e "${GREEN}╔═══════════════════════════════════════════════════════════════════════════════╗${NC}"
 echo -e "${GREEN}║                                                                               ║${NC}"
 echo -e "${GREEN}║                              MicroCode Build Script                          ║${NC}"
-echo -e "${GREEN}║                              By SPU AI CLUB                                   ║${NC}"
+echo -e "${GREEN}║                       Dotmini Company Limited                                ║${NC}"
 echo -e "${GREEN}║                                                                               ║${NC}"
 echo -e "${GREEN}╚═══════════════════════════════════════════════════════════════════════════════╝${NC}"
 echo ""
 
 # Check if we're in the right directory
 if [ ! -d "backend" ] || [ ! -d "MicroCode" ]; then
-    echo -e "${RED}Error: This script must be run from the microcode-native directory${NC}"
+    echo -e "${RED}Error: This script must be run from the repository root directory${NC}"
     exit 1
 fi
 
@@ -69,6 +34,8 @@ BUILD_TYPE="release"
 BACKEND_ONLY=false
 FRONTEND_ONLY=false
 CLEAN=false
+USE_EXTERNAL_SSD=false
+CUSTOM_BUILD_ROOT=""
 
 while [[ $# -gt 0 ]]; do
     case $1 in
@@ -88,15 +55,25 @@ while [[ $# -gt 0 ]]; do
             CLEAN=true
             shift
             ;;
+        --external-ssd)
+            USE_EXTERNAL_SSD=true
+            shift
+            ;;
+        --build-root)
+            CUSTOM_BUILD_ROOT="$2"
+            shift 2
+            ;;
         --help)
             echo "Usage: ./build.sh [OPTIONS]"
             echo ""
             echo "Options:"
-            echo "  --debug           Build in debug mode (default: release)"
-            echo "  --backend-only    Only build the Rust backend"
-            echo "  --frontend-only   Only build the SwiftUI frontend"
-            echo "  --clean           Clean before building"
-            echo "  --help            Show this help message"
+            echo "  --debug             Build in debug mode (default: release)"
+            echo "  --backend-only      Only build the Rust backend"
+            echo "  --frontend-only     Only build the SwiftUI frontend"
+            echo "  --clean             Clean before building"
+            echo "  --external-ssd      Offload build caches & artifacts to external SSD (/Volumes/...)"
+            echo "  --build-root <DIR>  Specify custom build directory"
+            echo "  --help              Show this help message"
             exit 0
             ;;
         *)
@@ -105,6 +82,58 @@ while [[ $# -gt 0 ]]; do
             ;;
     esac
 done
+
+# ==============================================================================
+# Build Root & Environment Configuration
+# Separated: Standard User Mode (Default) vs. External SSD Mode (Maintainer)
+# ==============================================================================
+
+if [ -n "$CUSTOM_BUILD_ROOT" ]; then
+    BUILD_ROOT="$CUSTOM_BUILD_ROOT"
+    echo -e "${BLUE}ℹ Custom build root specified: $BUILD_ROOT${NC}"
+elif [ "$USE_EXTERNAL_SSD" = true ] || [ -n "${CODETUNER_BUILD_ROOT:-}" ]; then
+    # Maintainer / External SSD Mode
+    if [ -n "${CODETUNER_BUILD_ROOT:-}" ]; then
+        BUILD_ROOT="$CODETUNER_BUILD_ROOT"
+    elif [ -d "/Volumes/MicroCodeBuild" ]; then
+        BUILD_ROOT="/Volumes/MicroCodeBuild"
+    elif [ -d "/Volumes/MAC 1/CodeTunerBuild" ]; then
+        BUILD_ROOT="/Volumes/MAC 1/CodeTunerBuild"
+    elif [ -d "/Volumes/MAC/CodeTunerBuild" ]; then
+        BUILD_ROOT="/Volumes/MAC/CodeTunerBuild"
+    elif [ -d "/Volumes/MAC" ]; then
+        BUILD_ROOT="/Volumes/MAC/CodeTunerBuild"
+    else
+        echo -e "${RED}Error: External SSD mode requested, but no external build volume found (/Volumes/MicroCodeBuild or /Volumes/MAC).${NC}"
+        echo "Please connect your external drive or omit --external-ssd to build locally."
+        exit 1
+    fi
+    echo -e "${BLUE}ℹ External SSD Mode Active: $BUILD_ROOT${NC}"
+    mkdir -p "$BUILD_ROOT/cargo-home" "$BUILD_ROOT/cargo-target" "$BUILD_ROOT/rustup-home" "$BUILD_ROOT/swiftpm" "$BUILD_ROOT/derived-data" "$BUILD_ROOT/tmp"
+    export TMPDIR="$BUILD_ROOT/tmp"
+    export CARGO_HOME="$BUILD_ROOT/cargo-home"
+    export CARGO_TARGET_DIR="$BUILD_ROOT/cargo-target"
+    if [ -z "$CODETUNER_RUSTUP_HOME" ] && [ ! -d "$BUILD_ROOT/rustup-home/toolchains" ] && [ -d "$HOME/.rustup/toolchains" ]; then
+        export RUSTUP_HOME="$HOME/.rustup"
+    else
+        export RUSTUP_HOME="${CODETUNER_RUSTUP_HOME:-$BUILD_ROOT/rustup-home}"
+    fi
+else
+    # Standard User Mode (Default for open-source / GitHub contributors)
+    # Builds locally on internal drive without isolating user's ~/.cargo or requiring external drives
+    BUILD_ROOT="$(pwd)/.build"
+    mkdir -p "$BUILD_ROOT/cargo-target" "$BUILD_ROOT/swiftpm" "$BUILD_ROOT/derived-data"
+    export CARGO_TARGET_DIR="$BUILD_ROOT/cargo-target"
+    export TMPDIR="${TMPDIR:-/tmp}"
+    # Use user's default CARGO_HOME and RUSTUP_HOME naturally
+fi
+
+# macOS linker safety flags
+export CARGO_PROFILE_RELEASE_STRIP="${CARGO_PROFILE_RELEASE_STRIP:-none}"
+export COPYFILE_DISABLE=1
+export COPY_EXTENDED_ATTRIBUTES_DISABLE=1
+SWIFT_SCRATCH_PATH="$BUILD_ROOT/swiftpm/$(basename "$PWD")"
+XCODE_DERIVED_DATA_PATH="$BUILD_ROOT/derived-data/$(basename "$PWD")"
 
 # Function to check if a command exists
 command_exists() {
@@ -127,7 +156,12 @@ fi
 
 echo -e "${GREEN}✓ Rust $(rustc --version)${NC}"
 echo -e "${GREEN}✓ Cargo $(cargo --version)${NC}"
-echo -e "${GREEN}✓ Build/cache root: $BUILD_ROOT${NC}"
+if [ "$USE_EXTERNAL_SSD" = true ] || [ -n "${CODETUNER_BUILD_ROOT:-}" ]; then
+    echo -e "${GREEN}✓ Mode: External SSD ($BUILD_ROOT)${NC}"
+else
+    echo -e "${GREEN}✓ Mode: Standard Local Build (Internal Drive)${NC}"
+    echo -e "${GREEN}✓ Build directory: $BUILD_ROOT${NC}"
+fi
 
 # Set deployment target for both Rust and Swift
 export MACOSX_DEPLOYMENT_TARGET=12.0
@@ -147,7 +181,7 @@ if [ "$FRONTEND_ONLY" = false ]; then
     # files while scanning their source tree, so fetch first and remove only
     # this generated metadata from Cargo's cache.
     cargo fetch
-    find "$CARGO_HOME" -type f -name '._*' -delete
+    [ -n "${CARGO_HOME:-}" ] && [ -d "$CARGO_HOME" ] && find "$CARGO_HOME" -type f -name '._*' -delete 2>/dev/null || true
 
     if [ "$CLEAN" = true ]; then
         echo -e "${YELLOW}Cleaning backend...${NC}"
@@ -261,7 +295,7 @@ elif [ -f "Package.swift" ]; then
             echo -e "${YELLOW}Building Rust FFI libraries...${NC}"
             cargo fetch --manifest-path backend/Cargo.toml
             cargo fetch --manifest-path microcode_core/Cargo.toml
-            find "$CARGO_HOME" -type f -name '._*' -delete
+            [ -n "${CARGO_HOME:-}" ] && [ -d "$CARGO_HOME" ] && find "$CARGO_HOME" -type f -name '._*' -delete 2>/dev/null || true
 
             if [ "$CONFIG" = "release" ]; then
                 cargo build --manifest-path backend/Cargo.toml --release
@@ -422,7 +456,8 @@ EOF
 
         # exFAT may store macOS metadata as AppleDouble files, which codesign
         # treats as invalid nested bundle content.
-        find "$APP_BUNDLE" -type f -name '._*' -delete
+        xattr -cr "$APP_BUNDLE" 2>/dev/null || true
+        find "$APP_BUNDLE" -name '._*' -delete 2>/dev/null || true
         codesign --force --deep --sign - "$APP_BUNDLE"
         echo -e "${GREEN}✓ App bundle: $APP_BUNDLE${NC}"
         

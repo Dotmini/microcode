@@ -41,6 +41,13 @@ struct ACPAgentChatView: View {
                         .foregroundColor(session.state.isActive ? .white : Color.white.opacity(0.6))
                     Text(formatTime(session.elapsedSeconds))
                         .foregroundColor(Color.white.opacity(0.6))
+                        
+                    if ProjectMemoryService.shared.isLoaded {
+                        Circle()
+                            .fill(Color.green)
+                            .frame(width: 6, height: 6)
+                            .help("Project Memory Loaded")
+                    }
                 } else {
                     Text("No agent connected")
                         .foregroundColor(Color.white.opacity(0.6))

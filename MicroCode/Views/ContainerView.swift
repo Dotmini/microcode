@@ -4,7 +4,7 @@
 //
 //  Apple Container Management UI
 //
-//  SPU AI CLUB - Dotmini Software
+//  Dotmini Company Limited
 //
 
 import SwiftUI

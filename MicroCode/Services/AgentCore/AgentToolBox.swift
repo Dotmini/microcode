@@ -97,12 +97,24 @@ class AgentToolBox: ObservableObject {
         register(InspectImageTool())
         register(ExtractPDFTool())
         register(AgentPlanTool())
+        register(CreatePlanTool())
         register(DefineSubagentTool())
         register(InvokeSubagentTool())
         register(ManageSubagentsTool())
         register(SendMessageTool())
         register(DeviceRuntimeTool())
         register(PreviewControlTool())
+        register(RepoMapTool())
+        // Feature 8: LSP Agent Bridge
+        register(LSPHoverTool())
+        register(LSPDefinitionTool())
+        register(LSPCompletionsTool())
+        register(LSPActiveDiagnosticsTool())
+        register(LSPStatusTool())
+        // Feature 9: Background Agent
+        register(BackgroundAgentControlTool())
+        // Feature 10: Voice Coding
+        register(VoiceCodingTool())
     }
     
     func register(_ tool: any AgentTool) {
@@ -153,6 +165,25 @@ class AgentToolBox: ObservableObject {
             }
         }
         
+        // Check tool approval
+        let stringArgs = resolvedParams.compactMapValues { "\($0)" }
+        let approved = await ToolApprovalManager.shared.requestApproval(
+            toolName: toolName,
+            arguments: stringArgs,
+            description: tool.description
+        )
+        if !approved {
+            return "Tool execution rejected by user"
+        }
+        
+        // Auto-commit safety net: checkpoint before file-modifying tools
+        let fileModifyingTools: Set<String> = ["file_write", "replace_in_file", "patch_file", "rename_file", "create_directory", "shell"]
+        if fileModifyingTools.contains(toolName) {
+            AutoCommitService.shared.workspaceRoot = workspaceRoot
+            let targetPath = resolvedParams["path"] as? String ?? resolvedParams["directory"] as? String
+            await AutoCommitService.shared.createCheckpoint(toolName: toolName, targetPath: targetPath)
+        }
+        
         let startTime = Date()
         let cacheKey = executionCacheKey(toolName: toolName, params: resolvedParams)
         let cacheable = ["file_read", "grep_search", "list_directory_tree", "git_status", "find_symbol", "multi_file_read", "get_diagnostics", "science_inspect", "alphafold_input_validate"].contains(toolName)
@@ -170,6 +201,10 @@ class AgentToolBox: ObservableObject {
             if cacheable { readCache[cacheKey] = (result, Date()) }
             if ["file_write", "replace_in_file", "patch_file", "rename_file", "create_directory", "shell"].contains(toolName) {
                 readCache.removeAll(keepingCapacity: true)
+                // Track modified file in auto-commit service
+                if let path = resolvedParams["path"] as? String {
+                    AutoCommitService.shared.modifiedFiles.insert(path)
+                }
             }
             
             // Allow rich tool outputs up to 2M characters (~500k tokens)
@@ -345,12 +380,22 @@ struct AgentPlanTool: AgentTool {
     }
 
     func execute(params: [String: Any]) async throws -> String {
-        guard let runID = await MainActor.run(body: { AgentService.shared.currentKernelRunID }) else {
-            throw ToolBoxError.executionFailed("No durable agent run is active")
-        }
+        let activeRunID = await MainActor.run(body: { AgentService.shared.currentKernelRunID })
+        let runID = activeRunID ?? UUID().uuidString
         let action = (params["action"] as? String ?? "").lowercased()
         switch action {
         case "set":
+            // Support direct markdown in set action
+            let directMarkdown = (params["markdown"] as? String)
+                ?? (params["plan_markdown"] as? String)
+            if let markdown = directMarkdown, !markdown.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                let approved = await ImplementationPlanManager.shared.presentMarkdownPlan(markdown, title: "Execution Plan")
+                guard approved else {
+                    return "Plan was rejected by the user. Please revise the plan based on user feedback and resubmit."
+                }
+                return "Implementation plan APPROVED by the user. You may now proceed with code edits and execution."
+            }
+
             let rawInput = params["plan_json"] ?? params["plan"] ?? params["nodes"]
             let data: Data?
             if let str = rawInput as? String {
@@ -381,6 +426,26 @@ struct AgentPlanTool: AgentTool {
                     owner: node.owner
                 )
             }
+            // Present the plan to the user for approval via ImplementationPlanManager
+            let planMarkdown = nodes.map { node -> String in
+                let deps = node.dependencies.isEmpty ? "" : " — after: \(node.dependencies.joined(separator: ", "))"
+                let verify = node.verification.isEmpty ? "" : "\n  - Verify: \(node.verification)"
+                let owner = node.owner.map { "\n  - Owner: \($0)" } ?? ""
+                return "- \(node.title)\(deps)\(verify)\(owner)"
+            }.joined(separator: "\n")
+
+            let fullMarkdown = """
+            # Execution Plan
+
+            \(planMarkdown)
+            """
+
+            let approved = await ImplementationPlanManager.shared.presentMarkdownPlan(fullMarkdown, title: "Execution Plan")
+
+            guard approved else {
+                return "Plan was rejected by the user. Please revise the plan based on user feedback and resubmit."
+            }
+
             if let response = await AgentKernelClient.shared.setPlan(runID: runID, nodes: nodes) {
                 try await mirrorTaskMarkdown(response.run.plan)
                 let assignments = response.run.plan.compactMap { node -> String? in
@@ -482,7 +547,39 @@ struct AgentPlanTool: AgentTool {
         guard var markdown = try? String(contentsOf: target, encoding: .utf8) else { return }
         markdown = markdown.replacingOccurrences(of: "- [ ] **\(nodeID)**", with: "- [x] **\(nodeID)**")
         try AgentPrivacyGuard.safeWrite(content: markdown, to: target)
-        NotificationCenter.default.post(name: NSNotification.Name("MicroCodeAgentWorkspaceFilesChanged"), object: nil)
+    }
+}
+
+// MARK: - Create Implementation Plan Tool
+
+struct CreatePlanTool: AgentTool {
+    let name = "create_plan"
+    let description = "Creates a structured Implementation Plan and presents it to the user for explicit review and approval before mutating codebase files. Returns user approval status."
+    let parameters = [
+        ToolParameter(name: "title", type: "string", description: "Title of the implementation plan", required: true),
+        ToolParameter(name: "markdown", type: "string", description: "Full implementation plan in markdown format. Include ### Sections, list of changes with [NEW], [MODIFY], [DELETE], ## Open Questions, and ## Verification steps.", required: true),
+        ToolParameter(name: "summary", type: "string", description: "Short summary of the proposed plan", required: false)
+    ]
+    
+    func execute(params: [String: Any]) async throws -> String {
+        let title = (params["title"] as? String) ?? "Implementation Plan"
+        let rawMarkdown = (params["markdown"] as? String)
+            ?? (params["plan_markdown"] as? String)
+            ?? (params["plan"] as? String)
+            ?? (params["content"] as? String)
+            ?? ""
+        
+        guard !rawMarkdown.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+            throw ToolBoxError.invalidParams("markdown content is required for create_plan")
+        }
+        
+        let approved = await ImplementationPlanManager.shared.presentMarkdownPlan(rawMarkdown, title: title)
+        
+        if approved {
+            return "Implementation plan APPROVED by user. You may now proceed with code edits and executing the proposed changes."
+        } else {
+            return "Implementation plan REJECTED by user. Do NOT modify any files. Ask the user for feedback or propose a revised approach."
+        }
     }
 }
 
@@ -574,8 +671,15 @@ struct PreviewControlTool: AgentTool {
                 } else if runtime.embeddedDockMode != .web && url != nil {
                     runtime.embeddedDockMode = .web
                 }
-                if let urlString = url, let parsedURL = URL(string: urlString.hasPrefix("http") ? urlString : "http://\(urlString)") {
-                    runtime.targetWebURL = parsedURL
+                if let urlString = url {
+                    var trimmed = urlString.trimmingCharacters(in: .whitespacesAndNewlines)
+                    if trimmed.hasPrefix("http://file://") { trimmed = String(trimmed.dropFirst(7)) }
+                    let parsedURL: URL? = (trimmed.hasPrefix("file://") || trimmed.hasPrefix("http://") || trimmed.hasPrefix("https://"))
+                        ? URL(string: trimmed)
+                        : (trimmed.hasPrefix("/") ? URL(fileURLWithPath: trimmed) : URL(string: "http://\(trimmed)"))
+                    if let parsedURL = parsedURL {
+                        runtime.targetWebURL = parsedURL
+                    }
                 }
                 if let viewport = viewport {
                     runtime.targetViewport = viewport
@@ -597,8 +701,12 @@ struct PreviewControlTool: AgentTool {
                 guard let urlString = url, !urlString.isEmpty else {
                     throw ToolBoxError.invalidParams("url is required for set_url action")
                 }
-                let full = urlString.hasPrefix("http") ? urlString : "http://\(urlString)"
-                guard let target = URL(string: full) else {
+                var trimmed = urlString.trimmingCharacters(in: .whitespacesAndNewlines)
+                if trimmed.hasPrefix("http://file://") { trimmed = String(trimmed.dropFirst(7)) }
+                let target: URL? = (trimmed.hasPrefix("file://") || trimmed.hasPrefix("http://") || trimmed.hasPrefix("https://"))
+                    ? URL(string: trimmed)
+                    : (trimmed.hasPrefix("/") ? URL(fileURLWithPath: trimmed) : URL(string: "http://\(trimmed)"))
+                guard let target = target else {
                     throw ToolBoxError.invalidParams("Invalid URL format: \(urlString)")
                 }
                 runtime.targetWebURL = target
@@ -1666,12 +1774,6 @@ class MCPClient: ObservableObject {
             let cwdCandidate = FileManager.default.currentDirectoryPath + "/mcp-server.py"
             if FileManager.default.fileExists(atPath: cwdCandidate) {
                 scriptPath = cwdCandidate
-            }
-        }
-        if scriptPath == nil || !FileManager.default.fileExists(atPath: scriptPath!) {
-            let devCandidate = "/Users/dotmini/Documents/SX/codetunner-native/mcp-server.py"
-            if FileManager.default.fileExists(atPath: devCandidate) {
-                scriptPath = devCandidate
             }
         }
         

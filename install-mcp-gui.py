@@ -5,7 +5,7 @@ MicroCode MCP — GUI Installer (macOS)
 One-click installer for Claude Desktop, Cursor, Windsurf, and any MCP client.
 Double-click to launch → Select workspace → Click Install → Done.
 
-Copyright © 2025 SPU AI CLUB — Dotmini Software
+Copyright © 2024-2026 Dotmini Company Limited (บริษัท ดอทมินิ จำกัด)
 """
 
 import os
@@ -261,7 +261,7 @@ class MCPInstallerApp:
         install_btn.pack(fill="x")
         
         # Footer
-        tk.Label(self.root, text="After installing, restart the AI client to activate • SPU AI CLUB — Dotmini Software", font=("SF Pro Text", 9), bg=bg, fg="#555").pack(pady=(4, 12))
+        tk.Label(self.root, text="After installing, restart the AI client to activate • Dotmini Company Limited", font=("SF Pro Text", 9), bg=bg, fg="#555").pack(pady=(4, 12))
     
     def browse_workspace(self):
         path = filedialog.askdirectory(title="Select Workspace Folder", initialdir=self.workspace_var.get())

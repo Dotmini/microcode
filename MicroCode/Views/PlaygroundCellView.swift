@@ -3,9 +3,9 @@
 //  MicroCode
 //
 //  Individual cell view for Playground Cell Mode
-//  Copyright © 2025 SPU AI CLUB. All rights reserved.
+//  Copyright © 2025 Dotmini Company Limited. All rights reserved.
 //
-//  Tirawat Nantamas | Dotmini Software | SPU AI CLUB
+//  Tirawat Nantamas | Dotmini Company Limited
 //
 
 import SwiftUI

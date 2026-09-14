@@ -5,7 +5,7 @@
 //  Apple Container Integration
 //  Run, Build, Manage containers seamlessly
 //
-//  SPU AI CLUB - Dotmini Software
+//  Dotmini Company Limited
 //
 
 import Foundation

@@ -2,8 +2,8 @@
 //  DatabaseStudioView.swift
 //  MicroCode
 //
-//  Created by SPU AI CLUB
-//  Copyright © 2024 AIPRENEUR. All rights reserved.
+//  Created by Tirawat Nantamas
+//  Copyright © 2024 Dotmini Company Limited. All rights reserved.
 //
 
 import SwiftUI

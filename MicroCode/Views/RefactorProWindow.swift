@@ -3,7 +3,7 @@
 //  MicroCode
 //
 //  AI Refactor Pro - Full-Screen Cross-Language Migration Tool
-//  Copyright © 2025 SPU AI CLUB. All rights reserved.
+//  Copyright © 2025 Dotmini Company Limited. All rights reserved.
 //
 
 import SwiftUI
@@ -1229,7 +1229,7 @@ struct RefactorProWindow: View {
         \(refactoredCode)
         
         ═══════════════════════════════════════════════════════
-        © 2025 Project IDX | SPU AI CLUB
+        © 2025 Dotmini Company Limited
         ═══════════════════════════════════════════════════════
         """
     }

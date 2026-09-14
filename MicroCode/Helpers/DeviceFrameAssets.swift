@@ -43,14 +43,7 @@ public enum DeviceFrameAssets {
             }
         }
 
-        // 5. Try Project Resources Directory
-        let projectPath = "/Users/dotmini/Documents/SX/codetunner-native/MicroCode/Resources/\(name).\(fileExtension)"
-        if FileManager.default.fileExists(atPath: projectPath),
-           let img = NSImage(contentsOfFile: projectPath) {
-            return img
-        }
-
-        // 6. Try current working directory
+        // 5. Try current working directory
         let cwdPath = FileManager.default.currentDirectoryPath + "/MicroCode/Resources/\(name).\(fileExtension)"
         if FileManager.default.fileExists(atPath: cwdPath),
            let img = NSImage(contentsOfFile: cwdPath) {

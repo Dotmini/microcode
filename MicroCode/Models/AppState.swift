@@ -2,8 +2,8 @@
 //  AppState.swift
 //  MicroCode
 //
-//  Created by SPU AI CLUB
-//  Copyright © 2024 AIPRENEUR. All rights reserved.
+//  Created by Tirawat Nantamas
+//  Copyright © 2024 Dotmini Company Limited. All rights reserved.
 //
 
 import SwiftUI
@@ -65,6 +65,13 @@ struct AgentAction: Identifiable {
     }
 }
 
+public enum AgenticInspectorTab: String, CaseIterable, Codable {
+    case context = "Context"
+    case preview = "Preview"
+    case plan = "Plan"
+    case tasks = "Tasks"
+}
+
 // MARK: - App Theme System
 
 enum AppTheme: String, CaseIterable {
@@ -99,6 +106,7 @@ enum AppTheme: String, CaseIterable {
     // Modern
     case monokaiPro = "monokaiPro"
     case oneDarkPro = "oneDarkPro"
+    case nightOwl = "nightOwl"
     case nord = "nord"
     case tokyoNight = "tokyoNight"
     case catppuccin = "catppuccin"
@@ -178,6 +186,7 @@ enum AppTheme: String, CaseIterable {
         case .microCodeTheme: return "MicroCode Theme (Presentation) "
         case .monokaiPro: return "Monokai Pro 🎨"
         case .oneDarkPro: return "One Dark Pro ⚛️"
+        case .nightOwl: return "Night Owl 🦉"
         case .nord: return "Nord ❄️"
         case .tokyoNight: return "Tokyo Night 🌃"
         case .catppuccin: return "Catppuccin Mocha ☕️"
@@ -244,6 +253,7 @@ enum AppTheme: String, CaseIterable {
         case .microCodeTheme: return NSColor(white: 1.0, alpha: 1.0) // Pure White
         case .monokaiPro: return NSColor(red: 0.173, green: 0.169, blue: 0.196, alpha: 1.0) // #2D2A32
         case .oneDarkPro: return NSColor(red: 0.157, green: 0.165, blue: 0.184, alpha: 1.0) // #282C34
+        case .nightOwl: return NSColor(red: 0.004, green: 0.086, blue: 0.153, alpha: 1.0) // #011627
         case .nord: return NSColor(red: 0.180, green: 0.204, blue: 0.251, alpha: 1.0) // #2E3440
         case .tokyoNight: return NSColor(red: 0.102, green: 0.106, blue: 0.169, alpha: 1.0) // #1A1B26
         case .catppuccin: return NSColor(red: 0.118, green: 0.118, blue: 0.180, alpha: 1.0) // #1E1E2E
@@ -287,6 +297,7 @@ enum AppTheme: String, CaseIterable {
         case .microCodeTheme: return NSColor(red: 0.1, green: 0.15, blue: 0.25, alpha: 1.0) // Deep Navy Text
         case .monokaiPro: return NSColor(red: 0.988, green: 0.988, blue: 0.941, alpha: 1.0) // #FCFCF0
         case .oneDarkPro: return NSColor(red: 0.675, green: 0.745, blue: 0.804, alpha: 1.0) // #ABB2BF
+        case .nightOwl: return NSColor(red: 0.839, green: 0.871, blue: 0.922, alpha: 1.0) // #D6DEEB
         case .nord: return NSColor(red: 0.847, green: 0.871, blue: 0.914, alpha: 1.0) // #D8DEE9
         case .tokyoNight: return NSColor(red: 0.780, green: 0.792, blue: 0.910, alpha: 1.0) // #C0CAF5
         case .catppuccin: return NSColor(red: 0.804, green: 0.839, blue: 0.957, alpha: 1.0) // #CDD6F4
@@ -329,6 +340,7 @@ enum AppTheme: String, CaseIterable {
         case .microCodeTheme: return NSColor(red: 0.608, green: 0.165, blue: 0.639, alpha: 1.0) // Apple Purple (Xcode)
         case .monokaiPro: return NSColor(red: 1.0, green: 0.380, blue: 0.412, alpha: 1.0) // #FF6188 (Red/Pink)
         case .oneDarkPro: return NSColor(red: 0.796, green: 0.467, blue: 0.898, alpha: 1.0) // #CB77E5 (Purple)
+        case .nightOwl: return NSColor(red: 0.780, green: 0.573, blue: 0.918, alpha: 1.0) // #C792EA (Purple)
         case .nord: return NSColor(red: 0.506, green: 0.631, blue: 0.757, alpha: 1.0) // #81A1C1 (Blue)
         case .tokyoNight: return NSColor(red: 0.729, green: 0.506, blue: 0.886, alpha: 1.0) // #BB9AF7 (Purple)
         case .catppuccin: return NSColor(red: 0.796, green: 0.651, blue: 0.969, alpha: 1.0) // #CBA6F7 (Mauve)
@@ -370,6 +382,7 @@ enum AppTheme: String, CaseIterable {
         case .microCodeTheme: return NSColor(red: 0.761, green: 0.196, blue: 0.169, alpha: 1.0) // Apple Red
         case .monokaiPro: return NSColor(red: 1.0, green: 0.847, blue: 0.361, alpha: 1.0) // #FFD866 (Yellow)
         case .oneDarkPro: return NSColor(red: 0.596, green: 0.765, blue: 0.455, alpha: 1.0) // #98C379 (Green)
+        case .nightOwl: return NSColor(red: 0.925, green: 0.769, blue: 0.553, alpha: 1.0) // #ECC48D (Peach)
         case .nord: return NSColor(red: 0.643, green: 0.741, blue: 0.549, alpha: 1.0) // #A3BE8C (Green)
         case .tokyoNight: return NSColor(red: 0.608, green: 0.796, blue: 0.655, alpha: 1.0) // #9ECE6A (Green)
         case .catppuccin: return NSColor(red: 0.651, green: 0.890, blue: 0.631, alpha: 1.0) // #A6E3A1 (Green)
@@ -411,6 +424,7 @@ enum AppTheme: String, CaseIterable {
         case .microCodeTheme: return NSColor(red: 0.33, green: 0.38, blue: 0.44, alpha: 1.0) // Apple Gray
         case .monokaiPro: return NSColor(red: 0.447, green: 0.439, blue: 0.412, alpha: 1.0) // #727069
         case .oneDarkPro: return NSColor(red: 0.365, green: 0.392, blue: 0.439, alpha: 1.0) // #5C6370
+        case .nightOwl: return NSColor(red: 0.388, green: 0.467, blue: 0.467, alpha: 1.0) // #637777
         case .nord: return NSColor(red: 0.369, green: 0.416, blue: 0.482, alpha: 1.0) // #4C566A
         case .tokyoNight: return NSColor(red: 0.345, green: 0.369, blue: 0.494, alpha: 1.0) // #565F89
         case .catppuccin: return NSColor(red: 0.424, green: 0.447, blue: 0.522, alpha: 1.0) // #6C7086 (Overlay0)
@@ -451,6 +465,7 @@ enum AppTheme: String, CaseIterable {
         case .microCodeTheme: return NSColor(red: 0.071, green: 0.408, blue: 0.616, alpha: 1.0) // Apple Blue
         case .monokaiPro: return NSColor(red: 0.671, green: 0.553, blue: 1.0, alpha: 1.0) // #AB8DFF (Purple)
         case .oneDarkPro: return NSColor(red: 0.898, green: 0.725, blue: 0.369, alpha: 1.0) // #E5C07B (Gold)
+        case .nightOwl: return NSColor(red: 0.969, green: 0.549, blue: 0.424, alpha: 1.0) // #F78C6C (Orange)
         case .nord: return NSColor(red: 0.733, green: 0.580, blue: 0.835, alpha: 1.0) // #B48EAD (Purple)
         case .tokyoNight: return NSColor(red: 1.0, green: 0.608, blue: 0.404, alpha: 1.0) // #FF9E64 (Orange)
         case .catppuccin: return NSColor(red: 0.980, green: 0.702, blue: 0.529, alpha: 1.0) // #FAB387 (Peach)
@@ -492,6 +507,7 @@ enum AppTheme: String, CaseIterable {
         case .microCodeTheme: return NSColor(red: 0.05, green: 0.45, blue: 0.55, alpha: 1.0) // Deep Apple Teal
         case .monokaiPro: return NSColor(red: 0.412, green: 0.847, blue: 0.988, alpha: 1.0) // #69D9FC (Blue)
         case .oneDarkPro: return NSColor(red: 0.349, green: 0.718, blue: 0.773, alpha: 1.0) // #56B6C2 (Cyan)
+        case .nightOwl: return NSColor(red: 0.510, green: 0.667, blue: 1.0, alpha: 1.0) // #82AAFF (Blue)
         case .nord: return NSColor(red: 0.561, green: 0.737, blue: 0.733, alpha: 1.0) // #8FBCBB (Teal)
         case .tokyoNight: return NSColor(red: 0.165, green: 0.796, blue: 0.902, alpha: 1.0) // #2AC3DE (Cyan)
         case .catppuccin: return NSColor(red: 0.533, green: 0.753, blue: 0.933, alpha: 1.0) // #89B4FA (Blue)
@@ -534,6 +550,7 @@ enum AppTheme: String, CaseIterable {
         case .microCodeTheme: return NSColor(red: 0.0, green: 0.22, blue: 0.38, alpha: 1.0) // Deep Navy (Focus)
         case .monokaiPro: return NSColor(red: 0.639, green: 0.863, blue: 0.353, alpha: 1.0) // #A9DC5A (Green)
         case .oneDarkPro: return NSColor(red: 0.380, green: 0.655, blue: 0.871, alpha: 1.0) // #61AFEF (Blue)
+        case .nightOwl: return NSColor(red: 0.510, green: 0.667, blue: 1.0, alpha: 1.0) // #82AAFF (Blue)
         case .nord: return NSColor(red: 0.533, green: 0.655, blue: 0.812, alpha: 1.0) // #88C0D0 (Blue)
         case .tokyoNight: return NSColor(red: 0.490, green: 0.690, blue: 0.941, alpha: 1.0) // #7DCFFF (Blue)
         case .catppuccin: return NSColor(red: 0.537, green: 0.706, blue: 0.980, alpha: 1.0) // #89B4FA (Blue)
@@ -579,6 +596,7 @@ enum AppTheme: String, CaseIterable {
         case .microCodeTheme: return NSColor(red: 0.70, green: 0.84, blue: 1.0, alpha: 1.0) // Apple Highlight Blue
         case .monokaiPro: return NSColor(red: 0.251, green: 0.243, blue: 0.282, alpha: 1.0) // #403E48
         case .oneDarkPro: return NSColor(red: 0.235, green: 0.251, blue: 0.306, alpha: 1.0) // #3D414D
+        case .nightOwl: return NSColor(red: 0.114, green: 0.231, blue: 0.325, alpha: 1.0) // #1D3B53
         case .nord: return NSColor(red: 0.263, green: 0.298, blue: 0.369, alpha: 1.0) // #434C5E
         case .tokyoNight: return NSColor(red: 0.204, green: 0.227, blue: 0.314, alpha: 1.0) // #343A50
         case .catppuccin: return NSColor(red: 0.275, green: 0.275, blue: 0.369, alpha: 1.0) // #45475A
@@ -622,6 +640,7 @@ enum AppTheme: String, CaseIterable {
         case .microCodeTheme: return NSColor(red: 0.96, green: 0.97, blue: 0.99, alpha: 1.0) // Very Light Blue-Grey
         case .monokaiPro: return NSColor(red: 0.22, green: 0.22, blue: 0.24, alpha: 1.0)
         case .oneDarkPro: return NSColor(red: 0.18, green: 0.20, blue: 0.23, alpha: 1.0)
+        case .nightOwl: return NSColor(red: 0.004, green: 0.071, blue: 0.122, alpha: 1.0) // #01121F
         case .nord: return NSColor(red: 0.23, green: 0.26, blue: 0.32, alpha: 1.0)
         case .tokyoNight: return NSColor(red: 0.13, green: 0.13, blue: 0.22, alpha: 1.0)
         case .catppuccin: return NSColor(red: 0.15, green: 0.15, blue: 0.22, alpha: 1.0)
@@ -704,6 +723,7 @@ enum EditorMode: String, CaseIterable, Identifiable {
     case aiAgent = "AI Agent"
     case browser = "Browser"
     case apiClient = "apiClient"
+    case extensions = "extensions"
     
     var id: String { rawValue }
     
@@ -720,6 +740,7 @@ enum EditorMode: String, CaseIterable, Identifiable {
         case .aiAgent: return "AI Agent"
         case .browser: return "Browser"
         case .apiClient: return "API Studio"
+        case .extensions: return "Extension Studio"
         }
     }
     
@@ -736,6 +757,7 @@ enum EditorMode: String, CaseIterable, Identifiable {
         case .aiAgent: return "brain.head.profile" // AI brain icon
         case .browser: return "globe" // Browser icon
         case .apiClient: return "network" // API Studio icon
+        case .extensions: return "puzzlepiece.extension" // Extension Studio icon
         }
     }
 }
@@ -770,6 +792,7 @@ class AppState: ObservableObject {
     @Published var consoleVisible: Bool = true
     @Published var gitPanelVisible: Bool = false
     @Published var agenticContextVisible: Bool = true
+    @Published var selectedInspectorTab: AgenticInspectorTab = .context
 
     @Published var consoleOutput: String = ""
     @Published var isExecuting: Bool = false
@@ -805,9 +828,6 @@ class AppState: ObservableObject {
         }
         if let last = UserDefaults.standard.string(forKey: "lastWorkspacePath"), !last.isEmpty, FileManager.default.fileExists(atPath: last) {
             return last
-        }
-        if FileManager.default.fileExists(atPath: "/Volumes/MAC/microcode_lib_kernel") {
-            return "/Volumes/MAC/microcode_lib_kernel"
         }
         return FileManager.default.homeDirectoryForCurrentUser.path
     }
@@ -941,6 +961,7 @@ class AppState: ObservableObject {
     @Published var showingContainerView: Bool = false
     @Published var showingPreviewView: Bool = false
     @Published var showingEmbeddedTools: Bool = false
+    @Published var showingKeyboardShortcuts: Bool = false
 
     
     // Build Configuration
@@ -1079,10 +1100,12 @@ class AppState: ObservableObject {
             }
             .store(in: &cancellables)
             
-        // Presentation Mode Auto-Scaling
+        // Theme & Presentation Mode Auto-Scaling
         $appTheme
             .sink { [weak self] theme in
                 guard let self = self else { return }
+                ThemeManager.shared.setActiveTheme(theme.rawValue)
+                NotificationCenter.default.post(name: NSNotification.Name("MicroCodeThemeChanged"), object: theme)
                 if theme == .wwdc || theme == .keynote || theme == .wwdcLight || theme == .keynoteLight {
                     self.fontSize = 24
                     self.fontFamily = "SF Mono"
@@ -1656,9 +1679,6 @@ class AppState: ObservableObject {
         
         // Discover current active/development project if list is small or empty
         let discoveryCandidates = [
-            "/Users/dotmini/Documents/SX/codetunner-native",
-            "/Volumes/MAC/3DAR",
-            "/Volumes/MAC/microcode_lib_kernel",
             FileManager.default.currentDirectoryPath
         ]
         for candidate in discoveryCandidates {
@@ -1961,7 +1981,7 @@ class AppState: ObservableObject {
         // Selecting an already-open tab must be instant and must not start a
         // second disk read, lexer, or LSP request.
         if let existingIndex = openFiles.firstIndex(where: { $0.path == normalizedURL.path }) {
-            currentFileIndex = existingIndex
+            selectFile(at: existingIndex)
             return
         }
 
@@ -2013,7 +2033,7 @@ class AppState: ObservableObject {
         )
 
         openFiles.append(file)
-        currentFileIndex = openFiles.count - 1
+        selectFile(at: openFiles.count - 1)
         // Keep Science Mode active when opening a scientific artifact from its
         // navigator. Other file types retain the editor's established behavior.
         if !(editorMode == .science && scienceExtensions.contains(ext)) {
@@ -2039,6 +2059,22 @@ class AppState: ObservableObject {
                 }
                 await lspTask.value
                 timeoutTask.cancel()
+            }
+        }
+    }
+
+    public func reloadFileFromDisk(path: String) {
+        let normalizedPath = URL(fileURLWithPath: path).standardizedFileURL.path
+        if let index = openFiles.firstIndex(where: { $0.path == normalizedPath }) {
+            let url = URL(fileURLWithPath: normalizedPath)
+            let result = Self.readFileSafely(at: url)
+            guard result.errorMessage == nil else { return }
+            openFiles[index].content = result.content
+            openFiles[index].isUnsaved = false
+            openFiles[index].originalByteSize = result.originalByteSize
+            openFiles[index].isTruncated = result.isTruncated
+            if currentFileIndex == index || currentFile?.path == normalizedPath {
+                currentFile = openFiles[index]
             }
         }
     }
@@ -2352,6 +2388,24 @@ class AppState: ObservableObject {
         }
     }
 
+    func selectFile(at index: Int) {
+        guard index >= 0 && index < openFiles.count else { return }
+        currentFileIndex = index
+        currentFile = openFiles[index]
+    }
+
+    func selectFile(_ file: CodeFile) {
+        if let index = openFiles.firstIndex(where: { $0.id == file.id }) {
+            selectFile(at: index)
+        }
+    }
+
+    func closeFile(_ file: CodeFile) {
+        if let index = openFiles.firstIndex(where: { $0.id == file.id }) {
+            closeFile(at: index)
+        }
+    }
+
     func closeFile(at index: Int) {
         guard index >= 0 && index < openFiles.count else { return }
 
@@ -2390,9 +2444,30 @@ class AppState: ObservableObject {
         if openFiles.isEmpty {
             currentFileIndex = 0
             currentFile = nil
-        } else if currentFileIndex >= openFiles.count {
-            currentFileIndex = openFiles.count - 1
+        } else {
+            if currentFileIndex >= openFiles.count {
+                currentFileIndex = max(0, openFiles.count - 1)
+            }
+            currentFile = openFiles[currentFileIndex]
         }
+    }
+
+    func selectNextTab() {
+        guard openFiles.count > 1 else { return }
+        let nextIndex = (currentFileIndex + 1) % openFiles.count
+        selectFile(openFiles[nextIndex])
+    }
+
+    func selectPreviousTab() {
+        guard openFiles.count > 1 else { return }
+        let prevIndex = (currentFileIndex - 1 + openFiles.count) % openFiles.count
+        selectFile(openFiles[prevIndex])
+    }
+
+    func closeOtherTabs() {
+        guard let current = currentFile else { return }
+        openFiles = [current]
+        currentFileIndex = 0
     }
 
     func updateFileContent(_ content: String, for fileId: UUID) {
@@ -4189,7 +4264,9 @@ class AppState: ObservableObject {
     @Published var selectedConsoleTab: Int = 0
 
     func toggleSidebar() {
-        sidebarVisible.toggle()
+        withAnimation(.easeInOut(duration: 0.22)) {
+            sidebarVisible.toggle()
+        }
         saveSettings()
     }
 
@@ -4211,21 +4288,73 @@ class AppState: ObservableObject {
         agenticContextVisible.toggle()
         saveSettings()
     }
+
+    func showPreviewInspector(tab: String? = nil) {
+        agenticContextVisible = true
+        selectedInspectorTab = .preview
+        showingPreviewView = true
+        DeviceRuntimeService.shared.showingEmbeddedDeviceDock = true
+        PreviewDockService.shared.isDockVisible = true
+        if let tab = tab {
+            PreviewDockService.shared.selectTab(id: tab)
+        } else {
+            let autoTab = detectBestPreviewTab()
+            PreviewDockService.shared.selectTab(id: autoTab)
+        }
+        saveSettings()
+    }
+
+    func hidePreviewInspector() {
+        agenticContextVisible = false
+        showingPreviewView = false
+        DeviceRuntimeService.shared.showingEmbeddedDeviceDock = false
+        DeviceRuntimeService.shared.stopEmbeddedAndroid()
+        AppleSimulatorCaptureService.shared.stop()
+        PreviewDockService.shared.isDockVisible = false
+        saveSettings()
+    }
+
+    /// Intelligently detect the best preview platform for the current workspace (defaulting to Web)
+    func detectBestPreviewTab() -> String {
+        guard let folder = workspaceFolder else {
+            return PreviewDockService.shared.activeTabId
+        }
+        let fm = FileManager.default
+        let folderPath = folder.path
+        
+        // 1. WebApp indicators (HTML, Vite, Next, React, Vue, Svelte, static web)
+        let webFiles = ["index.html", "package.json", "vite.config.ts", "vite.config.js", "next.config.js", "next.config.mjs", "nuxt.config.ts", "svelte.config.js", "astro.config.mjs", "public/index.html", "dist/index.html"]
+        for rel in webFiles {
+            if fm.fileExists(atPath: folder.appendingPathComponent(rel).path) {
+                return "web"
+            }
+        }
+        
+        // 2. iOS indicators (Xcode project, xcworkspace, Podfile)
+        if let items = try? fm.contentsOfDirectory(atPath: folderPath) {
+            if items.contains(where: { $0.hasSuffix(".xcodeproj") || $0.hasSuffix(".xcworkspace") || $0 == "Podfile" }) {
+                return "ios"
+            }
+            // 3. Android indicators (Gradle, AndroidManifest)
+            if items.contains(where: { $0 == "build.gradle" || $0 == "build.gradle.kts" || $0 == "settings.gradle" || $0 == "settings.gradle.kts" }) {
+                return "android"
+            }
+        }
+        
+        return "web"
+    }
     
     // MARK: - Editor Mode
     
     func setEditorMode(_ mode: EditorMode) {
-        // Only update if different
-        guard editorMode != mode else { return }
-        
         // Mutual exclusion: Close inline agent panel when entering full agent mode
         if mode == .aiAgent {
             aiChatVisible = false
         }
         
-        // `editorMode` is @Published; manually publishing here caused two
-        // complete SwiftUI invalidations for one click.
+        // Update published property
         editorMode = mode
+        NotificationCenter.default.post(name: NSNotification.Name("MicroCodeEditorModeChanged"), object: mode)
     }
     
     func toggleEditorMode(_ mode: EditorMode) {
@@ -4235,11 +4364,21 @@ class AppState: ObservableObject {
             setEditorMode(mode)
         }
     }
+
+    func switchToMode(_ mode: EditorMode) {
+        showingWelcomeHome = false
+        setEditorMode(mode)
+    }
     
     func openAPIStudio() {
         showingWelcomeHome = false
         showingAPIClient = false
         setEditorMode(.apiClient)
+    }
+    
+    func openExtensionStudio() {
+        showingWelcomeHome = false
+        setEditorMode(.extensions)
     }
     
     // MARK: - File Watcher

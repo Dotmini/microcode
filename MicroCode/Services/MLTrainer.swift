@@ -3,7 +3,7 @@
 //  MicroCode
 //
 //  Enterprise ML Training Service
-//  Created by SPU AI CLUB
+//  Created by Tirawat Nantamas
 //  Copyright © 2025 Dotmini Software. All rights reserved.
 //
 

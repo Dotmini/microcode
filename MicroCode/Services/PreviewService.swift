@@ -6,7 +6,7 @@
 //  Xcode owns the public SwiftUI preview renderer; MicroCode must not
 //  manufacture a guessed image from source code and call it a preview.
 //
-//  SPU AI CLUB - Dotmini Software
+//  Dotmini Company Limited
 //
 
 import SwiftUI

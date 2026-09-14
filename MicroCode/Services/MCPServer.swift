@@ -8,7 +8,7 @@
 //  Supports: read_file, write_file, edit_file, search_files,
 //            list_files, run_terminal, git_status, get_diagnostics
 //
-//  Copyright © 2025 SPU AI CLUB — Dotmini Software
+//  Copyright © 2025 Dotmini Company Limited
 //
 
 import Foundation

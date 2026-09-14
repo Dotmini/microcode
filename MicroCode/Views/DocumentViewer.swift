@@ -3,7 +3,7 @@
 //  MicroCode
 //
 //  A versatile document viewer for PDF and Image files with PiP support.
-//  Copyright © 2025 SPU AI CLUB. All rights reserved.
+//  Copyright © 2025 Dotmini Company Limited. All rights reserved.
 //
 
 import SwiftUI

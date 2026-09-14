@@ -5,7 +5,7 @@
 //  Shared cell data models for Notebook and Playground
 //  Copyright © 2025 Dotmini Software. All rights reserved.
 //
-//  Tirawat Nantamas | Dotmini Software | SPU AI CLUB
+//  Tirawat Nantamas | Dotmini Company Limited
 //
 
 import SwiftUI

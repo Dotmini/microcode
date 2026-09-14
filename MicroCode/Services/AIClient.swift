@@ -516,7 +516,17 @@ final class AIClient: ObservableObject {
                         // Direct / BYOK mode: use native protocols where necessary
                         switch provider {
                         case .gemini:
-                            try await streamGemini(prompt: prompt, attachments: attachments, systemPrompt: systemPrompt, conversationHistory: trimmedHistory, model: resolvedModel, apiKey: actualKey, tools: tools, onToken: onToken, onToolCall: onToolCall)
+                            let lower = resolvedModel.lowercased()
+                            if !lower.contains("gemini") && !lower.contains("gemma") {
+                                let fallback = StreamableAIProvider.detect(from: resolvedModel)
+                                if fallback != .gemini {
+                                    try await streamOpenAI(prompt: prompt, attachments: attachments, systemPrompt: systemPrompt, conversationHistory: trimmedHistory, model: resolvedModel, apiKey: actualKey, baseURL: fallback.directBaseURL, tools: tools, onToken: onToken, onToolCall: onToolCall)
+                                } else {
+                                    try await streamGemini(prompt: prompt, attachments: attachments, systemPrompt: systemPrompt, conversationHistory: trimmedHistory, model: resolvedModel, apiKey: actualKey, tools: tools, onToken: onToken, onToolCall: onToolCall)
+                                }
+                            } else {
+                                try await streamGemini(prompt: prompt, attachments: attachments, systemPrompt: systemPrompt, conversationHistory: trimmedHistory, model: resolvedModel, apiKey: actualKey, tools: tools, onToken: onToken, onToolCall: onToolCall)
+                            }
                         case .anthropic:
                             try await streamAnthropic(prompt: prompt, attachments: attachments, systemPrompt: systemPrompt, conversationHistory: trimmedHistory, model: resolvedModel, apiKey: actualKey, tools: tools, onToken: onToken, onToolCall: onToolCall)
                         case .omni, .openai, .deepseek, .grok, .qwen, .glm, .copilot, .local:
@@ -626,6 +636,13 @@ final class AIClient: ObservableObject {
             // Direct/Subscription mode → use native protocols
             switch provider {
             case .gemini:
+                let lower = model.lowercased()
+                if !lower.contains("gemini") && !lower.contains("gemma") {
+                    let fallback = StreamableAIProvider.detect(from: model)
+                    if fallback != .gemini {
+                        return try await syncOpenAI(messages: messages, systemPrompt: systemPrompt, model: model, apiKey: actualKey, baseURL: fallback.directBaseURL, tools: tools)
+                    }
+                }
                 return try await syncGemini(messages: messages, systemPrompt: systemPrompt, model: model, apiKey: actualKey, tools: tools)
             case .anthropic:
                 return try await syncAnthropic(messages: messages, systemPrompt: systemPrompt, model: model, apiKey: actualKey, tools: tools)
@@ -1438,5 +1455,76 @@ final class AIClient: ObservableObject {
             }
         }
         return (text: text, toolCalls: toolCalls)
+    }
+}
+
+// MARK: - Stream Completion Extension
+
+extension AIClient {
+    /// Stream completion using AsyncThrowingStream for modern async/await callers.
+    /// Canonical implementation — used by all Phase 2 killer feature services.
+    public func streamCompletion(
+        messages: [(role: String, content: String)],
+        model: String? = nil,
+        provider: String? = nil,
+        tools: [[String: Any]]? = nil,
+        stream: Bool = true,
+        onToolCall: ((AIToolCall) -> Void)? = nil
+    ) async throws -> AsyncThrowingStream<String, Error> {
+        let configuredModel = UserDefaults.standard.string(forKey: "aiModel") ?? StreamableAIProvider.omni.defaultModel
+        let requestedModel = model ?? configuredModel
+        let configuredProvider = provider ?? UserDefaults.standard.string(forKey: "aiProvider") ?? "omni"
+
+        let selection = AIModelCatalog.shared.normalizedSelection(provider: configuredProvider, model: requestedModel)
+        let resolvedModel = selection.model
+        let resolvedProvider = StreamableAIProvider(rawValue: selection.provider) ?? StreamableAIProvider.detect(from: resolvedModel)
+
+        let apiKey = UserDefaults.standard.string(forKey: "\(resolvedProvider.rawValue)_api_key")
+            ?? UserDefaults.standard.string(forKey: "apiKey") ?? ""
+
+        let systemPrompt = messages.first(where: { $0.role == "system" })?.content
+        let conversationMessages = messages.filter { $0.role != "system" }
+        let prompt = conversationMessages.last?.content ?? "Proceed."
+        let history = conversationMessages.dropLast().map { (role: $0.role, content: $0.content) }
+
+        return AsyncThrowingStream<String, Error> { continuation in
+            AIClient.shared.sendMessage(
+                prompt: prompt,
+                systemPrompt: systemPrompt,
+                conversationHistory: Array(history),
+                provider: resolvedProvider,
+                model: resolvedModel,
+                apiKey: apiKey,
+                tools: tools,
+                onToken: { token in
+                    continuation.yield(token)
+                },
+                onToolCall: { toolCall in
+                    onToolCall?(toolCall)
+                },
+                onComplete: { _ in
+                    continuation.finish()
+                },
+                onError: { err in
+                    continuation.finish(throwing: NSError(domain: "AIClient", code: -1, userInfo: [NSLocalizedDescriptionKey: err]))
+                }
+            )
+        }
+    }
+
+    /// Convenience text generation helper for prompt-response queries
+    public func generateText(prompt: String, systemPrompt: String? = nil) async throws -> String {
+        let stream = try await streamCompletion(
+            messages: [
+                (role: "system", content: systemPrompt ?? "You are an expert programming assistant."),
+                (role: "user", content: prompt)
+            ],
+            stream: false
+        )
+        var result = ""
+        for try await chunk in stream {
+            result += chunk
+        }
+        return result
     }
 }

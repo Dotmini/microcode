@@ -5,7 +5,7 @@
 //  Secure Keychain CRUD for AI Provider API Keys
 //  Bridges to Rust FFI via init_llm_client() after key retrieval
 //
-//  Copyright © 2025 SPU AI CLUB — Dotmini Software
+//  Copyright © 2025 Dotmini Company Limited
 //
 
 import Foundation

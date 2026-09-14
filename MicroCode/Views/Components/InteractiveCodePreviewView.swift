@@ -342,6 +342,7 @@ struct InteractiveDiffPreviewView: View {
     let newContent: String
     
     @State private var isCopied: Bool = false
+    @State private var cardWidth: CGFloat = 0
     
     private var diffLines: [UnifiedDiffLine] {
         DiffCacheManager.getOrComputeDiff(
@@ -423,6 +424,16 @@ struct InteractiveDiffPreviewView: View {
             
             Divider()
             
+            let maxTextWidth = diffLines.reduce(CGFloat(0)) { currentMax, line in
+                let textWidth = (line.text as NSString).size(
+                    withAttributes: [.font: NSFont.monospacedSystemFont(ofSize: 11, weight: .regular)]
+                ).width
+                return max(currentMax, textWidth)
+            }
+            let gutterWidth: CGFloat = 95.5
+            let minContentWidth = gutterWidth + maxTextWidth + 32
+            let effectiveWidth = max(cardWidth, minContentWidth)
+            
             // Diff Content Lines
             ScrollView([.horizontal, .vertical], showsIndicators: true) {
                 VStack(alignment: .leading, spacing: 0) {
@@ -464,17 +475,26 @@ struct InteractiveDiffPreviewView: View {
                                 .foregroundColor(diffLine.textColor)
                                 .lineLimit(1)
                             
-                            Spacer(minLength: 24)
+                            Spacer(minLength: 0)
                         }
                         .frame(height: 18)
-                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .frame(width: effectiveWidth > 0 ? effectiveWidth : nil, alignment: .leading)
                         .background(diffLine.bgColor)
                     }
                 }
+                .frame(width: effectiveWidth > 0 ? effectiveWidth : nil, alignment: .leading)
                 .padding(.vertical, 2)
             }
+            .frame(maxWidth: .infinity, alignment: .leading)
             .background(Color(nsColor: .textBackgroundColor).opacity(0.85))
         }
+        .background(
+            GeometryReader { geo in
+                Color.clear
+                    .onAppear { cardWidth = geo.size.width }
+                    .onChange(of: geo.size.width) { newW in cardWidth = newW }
+            }
+        )
     }
 }
 

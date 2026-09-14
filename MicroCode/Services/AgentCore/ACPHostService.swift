@@ -36,6 +36,7 @@ class ACPAgentSession: ObservableObject, Identifiable {
     
     /// Continuation for streaming events to async consumers
     private var eventContinuation: AsyncStream<ACPStreamEvent>.Continuation?
+    private var recentStderr: String = ""
     
     init(config: ACPAgentConfig) {
         self.id = config.id
@@ -60,6 +61,7 @@ class ACPAgentSession: ObservableObject, Identifiable {
         stdinPipe = nil
         stdoutPipe = nil
         stderrPipe = nil
+        recentStderr = ""
         ndjsonParser.reset()
         stopTimer()
     }
@@ -71,6 +73,7 @@ class ACPAgentSession: ObservableObject, Identifiable {
         
         state = .connecting
         self.model = model
+        self.recentStderr = ""
         
         // Resolve and validate executable path before spawning
         guard let resolvedExecutable = ACPHostService.resolveExecutablePath(config.command) else {
@@ -115,6 +118,9 @@ class ACPAgentSession: ObservableObject, Identifiable {
         self.events = []
         self.pendingPermissions = []
         
+        // Immediate progress event so UI is never blank
+        eventContinuation?.yield(.progress(ACPProgress(id: UUID().uuidString, step: 1, total: nil, message: "⚡ Connecting to \(config.name)...")))
+        
         // Handle stdout — NDJSON stream
         stdout.fileHandleForReading.readabilityHandler = { [weak self] handle in
             let data = handle.availableData
@@ -130,6 +136,10 @@ class ACPAgentSession: ObservableObject, Identifiable {
             guard !data.isEmpty else { return }
             if let text = String(data: data, encoding: .utf8) {
                 DispatchQueue.main.async {
+                    self?.recentStderr += text
+                    if let cur = self?.recentStderr, cur.count > 4000 {
+                        self?.recentStderr = String(cur.suffix(4000))
+                    }
                     print("[ACP/\(self?.config.type.rawValue ?? "?")] stderr: \(text)")
                 }
             }
@@ -152,7 +162,13 @@ class ACPAgentSession: ObservableObject, Identifiable {
                         model: self.model
                     )))
                 } else {
-                    let errMsg = "Process exited with code \(exitCode)"
+                    let snippet = self.recentStderr.trimmingCharacters(in: .whitespacesAndNewlines)
+                    let errMsg: String
+                    if !snippet.isEmpty {
+                        errMsg = "Process exited with code \(exitCode):\n\(snippet)"
+                    } else {
+                        errMsg = "Process exited with code \(exitCode)"
+                    }
                     self.state = .error(errMsg)
                     self.eventContinuation?.yield(.error(errMsg))
                 }
@@ -166,12 +182,7 @@ class ACPAgentSession: ObservableObject, Identifiable {
             state = .running(taskId: UUID().uuidString)
             taskStartTime = Date()
             startTimer()
-            print("[ACP] Started \(config.type.displayName) agent")
-            
-            // For non-interactive CLI tools, close stdin write end immediately so they receive EOF and don't block
-            if config.type == .openCode || config.type == .claudeCode || config.type == .agy || config.type == .codexEngine {
-                try? stdin.fileHandleForWriting.close()
-            }
+            print("[ACP] Started \(config.type.displayName) agent (stdin pipe active)")
         } catch {
             let errMsg = "Failed to start \(config.type.displayName): \(error.localizedDescription)"
             state = .error(errMsg)
@@ -238,16 +249,11 @@ class ACPAgentSession: ObservableObject, Identifiable {
         process.executableURL = URL(fileURLWithPath: executablePath)
         process.currentDirectoryURL = URL(fileURLWithPath: workspacePath)
         
-        // Build isolated environment: purge any inherited parent IDE / session tokens
+        // Build isolated environment: purge only session IDs, preserving API keys and auth
         var env = ProcessInfo.processInfo.environment
         
-        // Purge ALL parent Antigravity/AGY, Claude, OpenCode, Codex session/conversation variables
+        // Only purge session/conversation tracking IDs to prevent crosstalk, keep API keys & auth intact!
         let keysToRemove = env.keys.filter { key in
-            key.hasPrefix("ANTIGRAVITY_") ||
-            key.hasPrefix("AGY_") ||
-            key.hasPrefix("CLAUDE_") ||
-            key.hasPrefix("OPENCODE_") ||
-            key.hasPrefix("CODEX_") ||
             key.contains("CONVERSATION_ID") ||
             key.contains("TRAJECTORY_ID") ||
             key.contains("SESSION_ID") ||
@@ -256,6 +262,50 @@ class ACPAgentSession: ObservableObject, Identifiable {
         }
         for k in keysToRemove {
             env.removeValue(forKey: k)
+        }
+        
+        // Ensure robust standard Unix & developer tool PATH for macOS GUI apps
+        let home = FileManager.default.homeDirectoryForCurrentUser.path
+        let standardPaths = [
+            "\(home)/.local/bin",
+            "\(home)/.opencode/bin",
+            "/opt/homebrew/bin",
+            "/usr/local/bin",
+            "\(home)/.cargo/bin",
+            "\(home)/.bun/bin",
+            "\(home)/.npm-global/bin",
+            "/usr/bin",
+            "/bin",
+            "/usr/sbin",
+            "/sbin"
+        ]
+        let currentPath = env["PATH"] ?? "/usr/bin:/bin"
+        var pathComponents = currentPath.components(separatedBy: ":")
+        for p in standardPaths.reversed() {
+            if !pathComponents.contains(p) {
+                pathComponents.insert(p, at: 0)
+            }
+        }
+        env["PATH"] = pathComponents.joined(separator: ":")
+        
+        // Forward configured API keys from MicroCode settings if not already in env
+        let geminiKey = UserDefaults.standard.string(forKey: "gemini_api_key") ?? ""
+        let openaiKey = UserDefaults.standard.string(forKey: "openai_api_key") ?? ""
+        let anthropicKey = UserDefaults.standard.string(forKey: "anthropic_api_key") ?? ""
+        let deepseekKey = UserDefaults.standard.string(forKey: "deepseek_api_key") ?? ""
+        
+        if !geminiKey.isEmpty {
+            if env["GEMINI_API_KEY"] == nil { env["GEMINI_API_KEY"] = geminiKey }
+            if env["GOOGLE_API_KEY"] == nil { env["GOOGLE_API_KEY"] = geminiKey }
+        }
+        if !openaiKey.isEmpty && env["OPENAI_API_KEY"] == nil {
+            env["OPENAI_API_KEY"] = openaiKey
+        }
+        if !anthropicKey.isEmpty && env["ANTHROPIC_API_KEY"] == nil {
+            env["ANTHROPIC_API_KEY"] = anthropicKey
+        }
+        if !deepseekKey.isEmpty && env["DEEPSEEK_API_KEY"] == nil {
+            env["DEEPSEEK_API_KEY"] = deepseekKey
         }
         
         env["MICROCODE_WORKSPACE"] = workspacePath
@@ -312,13 +362,9 @@ class ACPAgentSession: ObservableObject, Identifiable {
             args += ["--model", model]
         }
         
-        // Permission mode
-        args += ["--permission-mode", config.permissionMode.claudeFlag]
-        
-        // Allowed tools
-        let allowed = config.permissionMode.claudeAllowedTools
-        if !allowed.isEmpty {
-            args += ["--allowedTools"] + allowed
+        // Dangerously skip permissions if fullAuto
+        if config.permissionMode == .fullAuto {
+            args += ["--dangerously-skip-permissions"]
         }
         
         // Resume session if available
@@ -336,16 +382,23 @@ class ACPAgentSession: ObservableObject, Identifiable {
     private func buildAGYArgs(task: String, model: String? = nil) -> [String] {
         var args = [
             "--output-format", "stream-json",
-            "--dangerously-skip-permissions"
+            "--dangerously-skip-permissions",
+            "--disable-slash-commands"
         ]
         
         if let model = model, !model.isEmpty {
             args += ["--model", model]
         }
         
-        // Ensure reasoning effort is set (defaults to high for real-time thinking stream)
+        // Fast reasoning effort by default: low/medium starts emitting tokens immediately without 30s delay
         if !config.arguments.contains("--effort") {
-            args += ["--effort", "high"]
+            if let model = model, model.contains("high") {
+                args += ["--effort", "high"]
+            } else if let model = model, model.contains("medium") {
+                args += ["--effort", "medium"]
+            } else {
+                args += ["--effort", "low"]
+            }
         }
         
         // If continuing an established MicroCode ACP conversation, resume it:
@@ -502,6 +555,9 @@ class ACPHostService: ObservableObject {
     
     init() {
         loadConfigs()
+        Task { @MainActor in
+            self.detectInstalledAgents()
+        }
     }
     
     /// The currently active agent session, if any
@@ -540,7 +596,12 @@ class ACPHostService: ObservableObject {
             "\(home)/.cargo/bin/\(trimmed)",
             "\(home)/.bun/bin/\(trimmed)",
             "\(home)/.npm-global/bin/\(trimmed)",
-            "/usr/bin/\(trimmed)"
+            "/usr/bin/\(trimmed)",
+            "/bin/\(trimmed)",
+            "/usr/sbin/\(trimmed)",
+            "/sbin/\(trimmed)",
+            "/Applications/Zed.app/Contents/MacOS/cli/\(trimmed)",
+            "/Applications/Zed.app/Contents/MacOS/\(trimmed)"
         ]
         
         for p in checkPaths {
@@ -549,25 +610,16 @@ class ACPHostService: ObservableObject {
             }
         }
         
-        // Search via /usr/bin/which
-        let process = Process()
-        let pipe = Pipe()
-        process.executableURL = URL(fileURLWithPath: "/usr/bin/which")
-        process.arguments = [trimmed]
-        process.standardOutput = pipe
-        process.standardError = FileHandle.nullDevice
-        
-        do {
-            try process.run()
-            process.waitUntilExit()
-            if process.terminationStatus == 0 {
-                let data = pipe.fileHandleForReading.readDataToEndOfFile()
-                if let path = String(data: data, encoding: .utf8)?.trimmingCharacters(in: .whitespacesAndNewlines),
-                   !path.isEmpty, FileManager.default.isExecutableFile(atPath: path) {
-                    return path
+        // Search environment PATH directly without spawning subprocesses or pumping runloops
+        if let envPath = ProcessInfo.processInfo.environment["PATH"] {
+            let dirs = envPath.split(separator: ":").map(String.init)
+            for dir in dirs {
+                let candidate = "\(dir)/\(trimmed)"
+                if FileManager.default.isExecutableFile(atPath: candidate) {
+                    return candidate
                 }
             }
-        } catch {}
+        }
         
         return nil
     }

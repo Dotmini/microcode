@@ -3,7 +3,7 @@
 //  MicroCode
 //
 //  Engine to execute Ardium code using native arc / ardium CLI.
-//  Copyright © 2025 Dotmini Software | SPU AI CLUB. All rights reserved.
+//  Copyright © 2025 Dotmini Software | Dotmini Company Limited. All rights reserved.
 //
 
 import Foundation

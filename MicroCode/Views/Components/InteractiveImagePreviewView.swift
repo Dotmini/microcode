@@ -3,7 +3,7 @@
 //  MicroCode
 //
 //  Rich Image Viewer with Pan, Zoom, Metadata, and Region Selection Commenting
-//  Copyright © 2026 AIPRENEUR. All rights reserved.
+//  Copyright © 2026 Dotmini Company Limited. All rights reserved.
 //
 
 import SwiftUI

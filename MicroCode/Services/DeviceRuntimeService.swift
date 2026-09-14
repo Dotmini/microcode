@@ -948,34 +948,71 @@ final class DeviceRuntimeService: ObservableObject {
         stopAndroidInputChannel()
         embeddedAndroidSerial = serial
         isEmbeddedAndroidActive = true
-        embeddedAndroidStatus = "Connecting 60 FPS GPU display to \(deviceName)…"
+        embeddedAndroidStatus = "Connecting live display to \(deviceName)…"
         
+        // Retain user's chosen skin if already customized, or default to Note 20 Ultra / Pixel
         let lower = deviceName.lowercased()
-        if lower.contains("pixel") {
+        if selectedAndroidSkin == .galaxyNote20Ultra || selectedAndroidSkin == .pixel9Pro {
+            // keep current skin
+        } else if lower.contains("pixel") {
             selectedAndroidSkin = .pixel9Pro
         } else {
             selectedAndroidSkin = .galaxyNote20Ultra
         }
         updateActiveAndroidSkin()
         
-        // 1. High-speed 60 FPS Metal GPU streaming via VideoToolbox H.264
         Task { [weak self] in
+            guard let self else { return }
+            
+            // Check device state via ADB
+            if let adb = try? self.androidTool("adb"),
+               let check = try? await self.command(adb, ["-s", serial, "get-state"], directory: nil) {
+                let st = check.output.trimmingCharacters(in: .whitespacesAndNewlines)
+                if st != "device" {
+                    await MainActor.run {
+                        self.embeddedAndroidStatus = "Device \(serial) is \(st). Click Attach / Retry."
+                    }
+                    return
+                }
+            }
+            
+            // 1. High-speed 60 FPS Metal GPU streaming via VideoToolbox H.264
             await AndroidStreamService.shared.startStreaming(serial: serial)
             if AndroidStreamService.shared.isStreaming {
                 await MainActor.run {
-                    self?.embeddedAndroidStatus = "Live (60 FPS Native GPU)"
+                    self.embeddedAndroidStatus = "Live (60 FPS Native GPU)"
+                }
+                
+                // Watchdog: If no frames decode within 3.5s, fall back to screencap
+                try? await Task.sleep(nanoseconds: 3_500_000_000)
+                let hasFrame = await MainActor.run {
+                    self.embeddedAndroidImage != nil ||
+                    AndroidStreamService.shared.hasReceivedFirstFrame ||
+                    AndroidStreamService.shared.latestPixelBuffer != nil
+                }
+                if !hasFrame {
+                    print("[DeviceRuntime] Video stream idle after 3.5s; initiating native screencap fallback...")
+                    await MainActor.run {
+                        AndroidStreamService.shared.stopStreaming()
+                        self.startAndroidScreencapFallback(serial: serial, deviceName: deviceName)
+                    }
                 }
             } else {
                 // 2. Compatibility fallback: ADB screencap loop
                 await MainActor.run {
-                    self?.startAndroidScreencapFallback(serial: serial, deviceName: deviceName)
+                    self.startAndroidScreencapFallback(serial: serial, deviceName: deviceName)
                 }
             }
         }
     }
 
     private func startAndroidScreencapFallback(serial: String, deviceName: String) {
+        if androidMirrorProcess?.isRunning == true {
+            androidMirrorProcess?.terminate()
+            androidMirrorProcess = nil
+        }
         startAndroidInputChannel(serial: serial)
+        embeddedAndroidStatus = "Connecting live display to \(deviceName)…"
         do {
             let adb = try androidTool("adb")
             let process = Process()
@@ -1001,7 +1038,7 @@ final class DeviceRuntimeService: ObservableObject {
                     self.androidMirrorReadHandle?.readabilityHandler = nil
                     self.androidMirrorReadHandle = nil
                     self.androidMirrorProcess = nil
-                    self.embeddedAndroidStatus = "Display stream stopped — click Preview to retry."
+                    self.embeddedAndroidStatus = "Display stream stopped — click Attach / Retry."
                 }
             }
         } catch {
@@ -1647,7 +1684,9 @@ final class DeviceRuntimeService: ObservableObject {
             .dropFirst()
             .map { $0.split(separator: "\t") }
             .compactMap { fields -> String? in
-                guard fields.count >= 2, fields[1] == "device", fields[0].hasPrefix("emulator-") else { return nil }
+                guard fields.count >= 2,
+                      fields[1].trimmingCharacters(in: .whitespacesAndNewlines) == "device",
+                      fields[0].hasPrefix("emulator-") else { return nil }
                 return String(fields[0])
             }
         for serial in serials {
@@ -1735,13 +1774,13 @@ final class DeviceRuntimeService: ObservableObject {
 
     private struct CommandResult { let output: String; let status: Int32 }
 
-    private nonisolated func command(_ executable: String, _ arguments: [String], directory: URL?) async throws -> CommandResult {
+    private nonisolated func command(_ executable: String, _ arguments: [String], directory: URL?, timeoutSeconds: TimeInterval = 30.0) async throws -> CommandResult {
         try await withCheckedThrowingContinuation { continuation in
             let process = Process()
             process.executableURL = URL(fileURLWithPath: executable)
             process.arguments = arguments
             process.currentDirectoryURL = directory
-            // xcodebuild can produce megabytes of logs.  Writing to an unread
+            // xcodebuild can produce megabytes of logs. Writing to an unread
             // Pipe can block the build indefinitely, so capture into a bounded-
             // lifetime file and read it once the process exits.
             let outputURL = FileManager.default.temporaryDirectory
@@ -1756,7 +1795,39 @@ final class DeviceRuntimeService: ObservableObject {
             }
             process.standardOutput = outputHandle
             process.standardError = outputHandle
+            
+            let lock = NSLock()
+            var isResumed = false
+            
+            // Watchdog timer to kill hanging commands
+            let timer = DispatchSource.makeTimerSource(queue: DispatchQueue.global(qos: .utility))
+            timer.schedule(deadline: .now() + timeoutSeconds)
+            timer.setEventHandler {
+                lock.lock()
+                guard !isResumed else {
+                    lock.unlock()
+                    return
+                }
+                isResumed = true
+                lock.unlock()
+                
+                if process.isRunning { process.terminate() }
+                try? outputHandle.close()
+                try? FileManager.default.removeItem(at: outputURL)
+                continuation.resume(throwing: ToolBoxError.executionFailed("Command timed out after \(Int(timeoutSeconds))s: \(executable)"))
+            }
+            timer.resume()
+
             process.terminationHandler = { process in
+                timer.cancel()
+                lock.lock()
+                guard !isResumed else {
+                    lock.unlock()
+                    return
+                }
+                isResumed = true
+                lock.unlock()
+                
                 try? outputHandle.close()
                 let data = (try? Data(contentsOf: outputURL)) ?? Data()
                 let output = String(data: data, encoding: .utf8) ?? ""
@@ -1764,14 +1835,26 @@ final class DeviceRuntimeService: ObservableObject {
                 if process.terminationStatus == 0 { continuation.resume(returning: CommandResult(output: output, status: process.terminationStatus)) }
                 else { continuation.resume(throwing: ToolBoxError.executionFailed(output.isEmpty ? "\(executable) exited with status \(process.terminationStatus)." : output)) }
             }
-            do { try process.run() } catch { continuation.resume(throwing: error) }
+            do {
+                try process.run()
+            } catch {
+                timer.cancel()
+                lock.lock()
+                guard !isResumed else {
+                    lock.unlock()
+                    return
+                }
+                isResumed = true
+                lock.unlock()
+                continuation.resume(throwing: error)
+            }
         }
     }
 
     /// Binary command variant for Android's PNG screen capture. The reader is
     /// started before the child can fill its pipe, eliminating per-frame
     /// temporary files and SSD I/O without risking a producer deadlock.
-    private nonisolated func commandData(_ executable: String, _ arguments: [String], directory: URL?) async throws -> Data {
+    private nonisolated func commandData(_ executable: String, _ arguments: [String], directory: URL?, timeoutSeconds: TimeInterval = 8.0) async throws -> Data {
         try await withCheckedThrowingContinuation { continuation in
             let process = Process()
             process.executableURL = URL(fileURLWithPath: executable)
@@ -1780,9 +1863,30 @@ final class DeviceRuntimeService: ObservableObject {
             let outputPipe = Pipe()
             process.standardOutput = outputPipe
             process.standardError = FileHandle.nullDevice
+            
+            let lock = NSLock()
+            var isResumed = false
+            
+            let timer = DispatchSource.makeTimerSource(queue: DispatchQueue.global(qos: .utility))
+            timer.schedule(deadline: .now() + timeoutSeconds)
+            timer.setEventHandler {
+                lock.lock()
+                guard !isResumed else {
+                    lock.unlock()
+                    return
+                }
+                isResumed = true
+                lock.unlock()
+                
+                if process.isRunning { process.terminate() }
+                continuation.resume(throwing: ToolBoxError.executionFailed("Data command timed out after \(Int(timeoutSeconds))s: \(executable)"))
+            }
+            timer.resume()
+            
             do {
                 try process.run()
             } catch {
+                timer.cancel()
                 continuation.resume(throwing: error)
                 return
             }
@@ -1790,6 +1894,14 @@ final class DeviceRuntimeService: ObservableObject {
             DispatchQueue.global(qos: .userInitiated).async {
                 let data = readHandle.readDataToEndOfFile()
                 process.waitUntilExit()
+                timer.cancel()
+                lock.lock()
+                guard !isResumed else {
+                    lock.unlock()
+                    return
+                }
+                isResumed = true
+                lock.unlock()
                 if process.terminationStatus == 0, !data.isEmpty {
                     continuation.resume(returning: data)
                 } else {

@@ -484,7 +484,7 @@ syntect = "5.1"
 ## 📞 Support
 
 For questions about the migration:
-- Email: contact@aipreneur.club
+- Email: ceo@dotmini.co
 - GitHub Issues: Report bugs and suggestions
 - Documentation: See README.md and QUICKSTART.md
 
@@ -500,6 +500,6 @@ The new architecture positions CodeTunner for future growth and feature addition
 
 ---
 
-**Made with ❤️ by SPU AI CLUB**
+**Made with ❤️ by Dotmini Company Limited**
 
-Last Updated: December 2024
+Last Updated: 2026

@@ -10,7 +10,7 @@
 //  - Themes are loaded lazily and cached
 //  - Easy to add custom themes via JSON
 //
-//  Copyright © 2025 SPU AI CLUB. All rights reserved.
+//  Copyright © 2025 Dotmini Company Limited. All rights reserved.
 //
 
 import Foundation

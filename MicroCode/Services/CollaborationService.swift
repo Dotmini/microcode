@@ -5,7 +5,7 @@
 //  Realtime Collaboration via WebSocket
 //  CRDT-based sync for conflict resolution
 //
-//  SPU AI CLUB - Dotmini Software
+//  Dotmini Company Limited
 //
 
 import Foundation
@@ -79,6 +79,10 @@ class CollaborationService: ObservableObject {
     private var reconnectTimer: Timer?
     private var heartbeatTimer: Timer?
     private var cancellables = Set<AnyCancellable>()
+    
+    // CRDT Engine for conflict-free text synchronization
+    let crdtEngine = CRDTEngine.shared
+    private var crdtDocuments: [String: CRDTDocument] = [:]  // keyed by filePath
     
     private let serverURL = "wss://collab.dotmini.dev/ws"
     

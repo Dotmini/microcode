@@ -2,7 +2,7 @@
 //!
 //! Provides code execution capabilities for multiple languages
 //!
-//! Tirawat Nantamas | Dotmini Software | SPU AI CLUB
+//! Tirawat Nantamas | Dotmini Company Limited
 
 use crate::error::{AppError, Result};
 use crate::models::ExecutionOutput;

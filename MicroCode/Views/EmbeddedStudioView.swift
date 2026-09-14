@@ -2,7 +2,7 @@
 //  EmbeddedStudioView.swift
 //  MicroCode
 //
-//  Created by SPU AI CLUB - Dotmini Software
+//  Created by Dotmini Company Limited
 //  Strict Monochrome Black & White Minimalist Studio with Real POSIX Serial & esptool Engine
 //
 
@@ -408,19 +408,57 @@ struct EmbeddedStudioView: View {
     @State private var showAIAgentPanel: Bool = false
     @ObservedObject private var envManager = EmbeddedEnvManager.shared
 
+    @Environment(\.colorScheme) private var colorScheme
+    
+    private var isDark: Bool {
+        appState.appTheme.isDark
+    }
+    
+    private var studioBg: Color {
+        isDark ? Color(white: 0.04) : Color(white: 0.98)
+    }
+    
+    private var sidebarBg: Color {
+        isDark ? Color(white: 0.06) : Color(white: 0.95)
+    }
+    
+    private var headerBg: Color {
+        isDark ? Color(white: 0.05) : Color(white: 0.93)
+    }
+    
+    private var sectionHeaderBg: Color {
+        isDark ? Color(white: 0.08) : Color(white: 0.91)
+    }
+    
+    private var cardBg: Color {
+        isDark ? Color.white.opacity(0.04) : Color.black.opacity(0.03)
+    }
+    
+    private var cardBorderColor: Color {
+        isDark ? Color.white.opacity(0.10) : Color.black.opacity(0.10)
+    }
+    
+    private var dividerLineColor: Color {
+        isDark ? Color.white.opacity(0.08) : Color.black.opacity(0.08)
+    }
+    
+    private var consoleBg: Color {
+        isDark ? Color.black : Color(white: 0.96)
+    }
+
     let baudRates = [9600, 19200, 38400, 57600, 115200, 230400, 460800, 921600]
     
     var body: some View {
         HStack(spacing: 0) {
-            // MARK: - Left Sidebar (Monochrome Dark Minimalist, Collapsible)
+            // MARK: - Left Sidebar (Monochrome, Collapsible)
             if showLeftSidebar {
                 leftSidebar
                     .frame(width: 270)
-                    .background(Color(white: 0.06))
+                    .background(sidebarBg)
                     .transition(.move(edge: .leading))
                 
                 Rectangle()
-                    .fill(Color.white.opacity(0.08))
+                    .fill(dividerLineColor)
                     .frame(width: 1)
             }
             
@@ -429,11 +467,11 @@ struct EmbeddedStudioView: View {
                 topStudioHeader
                 
                 Rectangle()
-                    .fill(Color.white.opacity(0.08))
+                    .fill(dividerLineColor)
                     .frame(height: 1)
                 
                 ZStack {
-                    Color(white: 0.04).ignoresSafeArea()
+                    studioBg.ignoresSafeArea()
                     
                     switch selectedTool {
                     case .sketchEditor:
@@ -460,7 +498,7 @@ struct EmbeddedStudioView: View {
             // MARK: - Right Embedded AI Agent Panel (Collapsible, Cell Mode Style)
             if showAIAgentPanel {
                 Rectangle()
-                    .fill(Color.white.opacity(0.08))
+                    .fill(dividerLineColor)
                     .frame(width: 1)
                 
                 EmbeddedAIAgentPanel(
@@ -505,27 +543,27 @@ struct EmbeddedStudioView: View {
             HStack(spacing: 10) {
                 ZStack {
                     RoundedRectangle(cornerRadius: 6)
-                        .fill(Color.white.opacity(0.1))
+                        .fill(Color.primary.opacity(0.06))
                         .frame(width: 28, height: 28)
-                        .overlay(RoundedRectangle(cornerRadius: 6).stroke(Color.white.opacity(0.2), lineWidth: 1))
+                        .overlay(RoundedRectangle(cornerRadius: 6).stroke(cardBorderColor, lineWidth: 1))
                     
                     Image(systemName: "cpu")
                         .font(.system(size: 14, weight: .semibold))
-                        .foregroundColor(.white)
+                        .foregroundColor(.primary)
                 }
                 
                 VStack(alignment: .leading, spacing: 2) {
                     Text("EMBED & IOT STUDIO")
                         .font(.system(size: 11, weight: .bold, design: .monospaced))
-                        .foregroundColor(.white)
+                        .foregroundColor(.primary)
                     
                     HStack(spacing: 5) {
                         Circle()
-                            .fill(isConnected ? Color.white : Color(white: 0.4))
+                            .fill(isConnected ? (isDark ? Color.white : Color.black) : (isDark ? Color(white: 0.4) : Color(white: 0.6)))
                             .frame(width: 5, height: 5)
                         Text(isConnected ? "ONLINE (REAL)" : "STANDBY")
                             .font(.system(size: 8, weight: .bold, design: .monospaced))
-                            .foregroundColor(Color(white: 0.6))
+                            .foregroundColor(isDark ? Color(white: 0.6) : Color(white: 0.4))
                     }
                 }
                 
@@ -534,19 +572,19 @@ struct EmbeddedStudioView: View {
                 Button(action: { showWizard = true }) {
                     Image(systemName: "plus")
                         .font(.system(size: 12, weight: .medium))
-                        .foregroundColor(Color(white: 0.8))
+                        .foregroundColor(isDark ? Color(white: 0.8) : Color(white: 0.2))
                         .frame(width: 24, height: 24)
-                        .background(Color.white.opacity(0.06))
-                        .cornerRadius(4)
-                        .overlay(RoundedRectangle(cornerRadius: 4).stroke(Color.white.opacity(0.12), lineWidth: 1))
+                        .background(Color.primary.opacity(0.06))
+                        .clipShape(RoundedRectangle(cornerRadius: 7, style: .continuous))
+                        .overlay(RoundedRectangle(cornerRadius: 7, style: .continuous).stroke(cardBorderColor, lineWidth: 1))
                 }
                 .buttonStyle(.plain)
                 .help("New Embedded Project")
             }
             .padding(14)
-            .background(Color(white: 0.08))
+            .background(sectionHeaderBg)
             
-            Rectangle().fill(Color.white.opacity(0.08)).frame(height: 1)
+            Rectangle().fill(dividerLineColor).frame(height: 1)
             
             ScrollView {
                 VStack(alignment: .leading, spacing: 18) {
@@ -567,27 +605,27 @@ struct EmbeddedStudioView: View {
                                 VStack(alignment: .leading, spacing: 2) {
                                     Text(selectedBoard.rawValue)
                                         .font(.system(size: 12, weight: .semibold))
-                                        .foregroundColor(.white)
+                                        .foregroundColor(.primary)
                                     Text(selectedBoard.mcuSummary)
                                         .font(.system(size: 9, design: .monospaced))
-                                        .foregroundColor(Color(white: 0.5))
+                                        .foregroundColor(isDark ? Color(white: 0.5) : Color(white: 0.4))
                                         .lineLimit(1)
                                 }
                                 Spacer()
                                 Image(systemName: "chevron.up.chevron.down")
                                     .font(.system(size: 9))
-                                    .foregroundColor(Color(white: 0.5))
+                                    .foregroundColor(isDark ? Color(white: 0.5) : Color(white: 0.4))
                             }
-                            .padding(8)
-                            .background(Color.white.opacity(0.04))
-                            .cornerRadius(6)
-                            .overlay(RoundedRectangle(cornerRadius: 6).stroke(Color.white.opacity(0.1), lineWidth: 1))
+                            .padding(10)
+                            .background(cardBg)
+                            .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
+                            .overlay(RoundedRectangle(cornerRadius: 10, style: .continuous).stroke(cardBorderColor, lineWidth: 1))
                         }
                         .menuStyle(.borderlessButton)
                         
                         Text(selectedBoard.memorySpecs)
                             .font(.system(size: 9, design: .monospaced))
-                            .foregroundColor(Color(white: 0.45))
+                            .foregroundColor(isDark ? Color(white: 0.45) : Color(white: 0.45))
                             .padding(.horizontal, 2)
                     }
                     
@@ -599,16 +637,16 @@ struct EmbeddedStudioView: View {
                             
                             Text(availablePorts.isEmpty ? "0 DETECTED" : "\(availablePorts.count) CONNECTED")
                                 .font(.system(size: 8, weight: .bold, design: .monospaced))
-                                .padding(.horizontal, 5)
+                                .padding(.horizontal, 6)
                                 .padding(.vertical, 2)
-                                .background(Color.white.opacity(0.06))
-                                .foregroundColor(availablePorts.isEmpty ? Color(white: 0.4) : .white)
-                                .cornerRadius(3)
+                                .background(cardBg)
+                                .foregroundColor(availablePorts.isEmpty ? (isDark ? Color(white: 0.4) : Color(white: 0.5)) : (isDark ? .white : .black))
+                                .clipShape(Capsule())
                             
                             Button(action: { scanRealSerialPorts() }) {
                                 Image(systemName: "arrow.triangle.2.circlepath")
                                     .font(.system(size: 10))
-                                    .foregroundColor(Color(white: 0.6))
+                                    .foregroundColor(isDark ? Color(white: 0.6) : Color(white: 0.4))
                             }
                             .buttonStyle(.plain)
                             .help("Rescan macOS for physical USB microcontroller devices")
@@ -619,14 +657,14 @@ struct EmbeddedStudioView: View {
                                 HStack(spacing: 6) {
                                     Image(systemName: "cable.connector.slash")
                                         .font(.system(size: 12))
-                                        .foregroundColor(Color(white: 0.4))
+                                        .foregroundColor(isDark ? Color(white: 0.4) : Color(white: 0.5))
                                     Text("NO HARDWARE DETECTED")
                                         .font(.system(size: 9, weight: .bold, design: .monospaced))
-                                        .foregroundColor(Color(white: 0.7))
+                                        .foregroundColor(isDark ? Color(white: 0.7) : Color(white: 0.3))
                                 }
                                 Text("No microcontroller is plugged into this Mac. Plug in an ESP32, STM32, RP2040, or Arduino via USB to begin.")
                                     .font(.system(size: 8, design: .monospaced))
-                                    .foregroundColor(Color(white: 0.4))
+                                    .foregroundColor(isDark ? Color(white: 0.4) : Color(white: 0.5))
                                     .multilineTextAlignment(.center)
                                     .padding(.horizontal, 2)
                                 
@@ -638,19 +676,19 @@ struct EmbeddedStudioView: View {
                                     .font(.system(size: 8, weight: .bold, design: .monospaced))
                                     .padding(.horizontal, 8)
                                     .padding(.vertical, 4)
-                                    .background(Color.white.opacity(0.06))
-                                    .foregroundColor(.white)
+                                    .background(isDark ? Color.white.opacity(0.06) : Color.black.opacity(0.06))
+                                    .foregroundColor(.primary)
                                     .cornerRadius(3)
-                                    .overlay(RoundedRectangle(cornerRadius: 3).stroke(Color.white.opacity(0.12), lineWidth: 1))
+                                    .overlay(RoundedRectangle(cornerRadius: 3).stroke(cardBorderColor, lineWidth: 1))
                                 }
                                 .buttonStyle(.plain)
                                 .padding(.top, 2)
                             }
                             .padding(10)
                             .frame(maxWidth: .infinity)
-                            .background(Color.white.opacity(0.02))
+                            .background(cardBg)
                             .cornerRadius(6)
-                            .overlay(RoundedRectangle(cornerRadius: 6).stroke(Color.white.opacity(0.05), lineWidth: 1))
+                            .overlay(RoundedRectangle(cornerRadius: 6).stroke(cardBorderColor, lineWidth: 1))
                         } else {
                             VStack(spacing: 4) {
                                 ForEach(availablePorts) { port in
@@ -672,10 +710,10 @@ struct EmbeddedStudioView: View {
                                 HStack(spacing: 5) {
                                     Text(category.code)
                                         .font(.system(size: 8, weight: .bold, design: .monospaced))
-                                        .foregroundColor(Color(white: 0.45))
+                                        .foregroundColor(isDark ? Color(white: 0.45) : Color(white: 0.45))
                                     Text(category.rawValue)
                                         .font(.system(size: 8, weight: .bold, design: .monospaced))
-                                        .foregroundColor(Color(white: 0.5))
+                                        .foregroundColor(isDark ? Color(white: 0.5) : Color(white: 0.45))
                                     Spacer()
                                 }
                                 .padding(.horizontal, 4)
@@ -689,32 +727,31 @@ struct EmbeddedStudioView: View {
                                             Image(systemName: tool.icon)
                                                 .font(.system(size: 11))
                                                 .frame(width: 16)
-                                                .foregroundColor(selectedTool == tool ? .white : Color(white: 0.45))
+                                                .foregroundColor(selectedTool == tool ? (isDark ? .white : .black) : (isDark ? Color(white: 0.45) : Color(white: 0.5)))
                                             
                                             Text(tool.title)
                                                 .font(.system(size: 10.5, weight: selectedTool == tool ? .semibold : .regular))
-                                                .foregroundColor(selectedTool == tool ? .white : Color(white: 0.65))
+                                                .foregroundColor(selectedTool == tool ? (isDark ? .white : .black) : (isDark ? Color(white: 0.65) : Color(white: 0.35)))
                                                 .lineLimit(1)
                                             
                                             Spacer()
                                             
                                             if selectedTool == tool {
-                                                Rectangle()
-                                                    .fill(Color.white)
+                                                Capsule()
+                                                    .fill(isDark ? Color.white : Color.black)
                                                     .frame(width: 3, height: 12)
-                                                    .cornerRadius(1)
                                             }
                                         }
                                         .padding(.horizontal, 8)
                                         .padding(.vertical, 6)
                                         .contentShape(Rectangle())
                                         .background(
-                                            RoundedRectangle(cornerRadius: 5)
-                                                .fill(selectedTool == tool ? Color.white.opacity(0.08) : Color.clear)
+                                            RoundedRectangle(cornerRadius: 8, style: .continuous)
+                                                .fill(selectedTool == tool ? (isDark ? Color.white.opacity(0.08) : Color.black.opacity(0.06)) : Color.clear)
                                         )
                                         .overlay(
-                                            RoundedRectangle(cornerRadius: 5)
-                                                .stroke(selectedTool == tool ? Color.white.opacity(0.18) : Color.clear, lineWidth: 1)
+                                            RoundedRectangle(cornerRadius: 8, style: .continuous)
+                                                .stroke(selectedTool == tool ? cardBorderColor : Color.clear, lineWidth: 1)
                                         )
                                     }
                                     .buttonStyle(.plain)
@@ -736,10 +773,10 @@ struct EmbeddedStudioView: View {
                 VStack(alignment: .leading, spacing: 2) {
                     Text("ACTIVE USB PORT")
                         .font(.system(size: 8, weight: .bold, design: .monospaced))
-                        .foregroundColor(Color(white: 0.45))
+                        .foregroundColor(isDark ? Color(white: 0.45) : Color(white: 0.5))
                     Text(selectedPort?.name ?? "No USB Hardware")
                         .font(.system(size: 10, design: .monospaced))
-                        .foregroundColor(selectedPort != nil ? .white : Color(white: 0.4))
+                        .foregroundColor(selectedPort != nil ? (isDark ? .white : .black) : (isDark ? Color(white: 0.4) : Color(white: 0.5)))
                         .lineLimit(1)
                 }
                 Spacer()
@@ -753,17 +790,17 @@ struct EmbeddedStudioView: View {
                 }) {
                     Text(isConnected ? "DISCONNECT" : "CONNECT")
                         .font(.system(size: 9, weight: .bold, design: .monospaced))
-                        .padding(.horizontal, 8)
+                        .padding(.horizontal, 10)
                         .padding(.vertical, 5)
-                        .background(selectedPort == nil ? Color.white.opacity(0.04) : (isConnected ? Color.white.opacity(0.15) : Color.white))
-                        .foregroundColor(selectedPort == nil ? Color(white: 0.3) : (isConnected ? .white : .black))
-                        .cornerRadius(4)
+                        .background(selectedPort == nil ? (isDark ? Color.white.opacity(0.04) : Color.black.opacity(0.04)) : (isConnected ? (isDark ? Color.white.opacity(0.15) : Color.black.opacity(0.1)) : (isDark ? Color.white : Color.black)))
+                        .foregroundColor(selectedPort == nil ? (isDark ? Color(white: 0.3) : Color(white: 0.4)) : (isConnected ? (isDark ? .white : .black) : (isDark ? .black : .white)))
+                        .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
                 }
                 .buttonStyle(.plain)
                 .disabled(selectedPort == nil)
             }
             .padding(12)
-            .background(Color(white: 0.03))
+            .background(isDark ? Color(white: 0.03) : Color(white: 0.92))
         }
     }
     
@@ -779,11 +816,11 @@ struct EmbeddedStudioView: View {
             }) {
                 Image(systemName: "sidebar.left")
                     .font(.system(size: 11, weight: .medium))
-                    .foregroundColor(showLeftSidebar ? .white : Color(white: 0.45))
+                    .foregroundColor(showLeftSidebar ? (isDark ? .white : .black) : (isDark ? Color(white: 0.45) : Color(white: 0.55)))
                     .frame(width: 26, height: 26)
-                    .background(showLeftSidebar ? Color.white.opacity(0.12) : Color.white.opacity(0.04))
-                    .cornerRadius(4)
-                    .overlay(RoundedRectangle(cornerRadius: 4).stroke(Color.white.opacity(0.15), lineWidth: 1))
+                    .background(showLeftSidebar ? (isDark ? Color.white.opacity(0.12) : Color.black.opacity(0.08)) : cardBg)
+                    .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
+                    .overlay(RoundedRectangle(cornerRadius: 8, style: .continuous).stroke(dividerLineColor, lineWidth: 1))
             }
             .buttonStyle(.plain)
             .help(showLeftSidebar ? "Hide Hardware & Boards Sidebar" : "Show Hardware & Boards Sidebar")
@@ -792,64 +829,64 @@ struct EmbeddedStudioView: View {
             HStack(spacing: 6) {
                 Text(selectedTool.category.code)
                     .font(.system(size: 9, weight: .bold, design: .monospaced))
-                    .foregroundColor(Color(white: 0.5))
+                    .foregroundColor(isDark ? Color(white: 0.5) : Color(white: 0.5))
                     .lineLimit(1)
                 Text("/")
                     .font(.system(size: 9, design: .monospaced))
-                    .foregroundColor(Color(white: 0.3))
+                    .foregroundColor(isDark ? Color(white: 0.3) : Color(white: 0.6))
                 Image(systemName: selectedTool.icon)
                     .font(.system(size: 11))
-                    .foregroundColor(.white)
+                    .foregroundColor(isDark ? .white : .black)
                 Text(selectedTool.title.uppercased())
                     .font(.system(size: 10, weight: .bold, design: .monospaced))
-                    .foregroundColor(.white)
+                    .foregroundColor(isDark ? .white : .black)
                     .lineLimit(1)
             }
             .padding(.horizontal, 9)
             .padding(.vertical, 5)
-            .background(Color.white.opacity(0.08))
-            .cornerRadius(4)
-            .overlay(RoundedRectangle(cornerRadius: 4).stroke(Color.white.opacity(0.15), lineWidth: 1))
+            .background(cardBg)
+            .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
+            .overlay(RoundedRectangle(cornerRadius: 8, style: .continuous).stroke(cardBorderColor, lineWidth: 1))
             .fixedSize()
             
             // Hardware Target / Arbiter Status Pill
             if isArbiterActive {
                 HStack(spacing: 5) {
                     Circle()
-                        .fill(Color.white)
+                        .fill(isDark ? Color.white : Color.black)
                         .frame(width: 5, height: 5)
                     Text("ARBITER: PORT YIELDED")
                         .font(.system(size: 8.5, weight: .bold, design: .monospaced))
-                        .foregroundColor(.white)
+                        .foregroundColor(isDark ? .white : .black)
                         .lineLimit(1)
                 }
                 .padding(.horizontal, 8)
                 .padding(.vertical, 4)
-                .background(Color.white.opacity(0.12))
-                .cornerRadius(4)
-                .overlay(RoundedRectangle(cornerRadius: 4).stroke(Color.white.opacity(0.25), lineWidth: 1))
+                .background(isDark ? Color.white.opacity(0.12) : Color.black.opacity(0.08))
+                .clipShape(Capsule())
+                .overlay(Capsule().stroke(cardBorderColor, lineWidth: 1))
                 .fixedSize()
             } else if let port = selectedPort {
                 HStack(spacing: 6) {
                     Circle()
-                        .fill(isConnected ? Color.white : Color(white: 0.35))
+                        .fill(isConnected ? (isDark ? Color.white : Color.black) : (isDark ? Color(white: 0.35) : Color(white: 0.6)))
                         .frame(width: 5, height: 5)
                     Text(selectedBoard.rawValue.uppercased())
                         .font(.system(size: 8.5, weight: .bold, design: .monospaced))
-                        .foregroundColor(.white)
+                        .foregroundColor(isDark ? .white : .black)
                         .lineLimit(1)
                     Text("•")
-                        .foregroundColor(Color(white: 0.3))
+                        .foregroundColor(isDark ? Color(white: 0.3) : Color(white: 0.6))
                     Text(port.name)
                         .font(.system(size: 8.5, design: .monospaced))
-                        .foregroundColor(Color(white: 0.6))
+                        .foregroundColor(isDark ? Color(white: 0.6) : Color(white: 0.4))
                         .lineLimit(1)
                 }
                 .padding(.horizontal, 8)
                 .padding(.vertical, 4)
-                .background(Color.white.opacity(0.04))
-                .cornerRadius(4)
-                .overlay(RoundedRectangle(cornerRadius: 4).stroke(Color.white.opacity(0.08), lineWidth: 1))
+                .background(cardBg)
+                .clipShape(Capsule())
+                .overlay(Capsule().stroke(cardBorderColor, lineWidth: 1))
                 .fixedSize()
             }
             
@@ -859,7 +896,7 @@ struct EmbeddedStudioView: View {
             HStack(spacing: 4) {
                 Text("BAUD:")
                     .font(.system(size: 9, weight: .semibold, design: .monospaced))
-                    .foregroundColor(Color(white: 0.45))
+                    .foregroundColor(isDark ? Color(white: 0.45) : Color(white: 0.55))
                     .lineLimit(1)
                 
                 Picker("", selection: $baudRate) {
@@ -877,17 +914,18 @@ struct EmbeddedStudioView: View {
             // Connection Indicator
             HStack(spacing: 5) {
                 Circle()
-                    .fill(isConnected ? Color.white : (selectedPort == nil ? Color(white: 0.15) : Color(white: 0.3)))
+                    .fill(isConnected ? (isDark ? Color.white : Color.black) : (selectedPort == nil ? (isDark ? Color(white: 0.15) : Color(white: 0.7)) : (isDark ? Color(white: 0.3) : Color(white: 0.5))))
                     .frame(width: 5, height: 5)
                 Text(isConnected ? "ONLINE" : (selectedPort == nil ? "NO HARDWARE" : "OFFLINE"))
                     .font(.system(size: 8, weight: .bold, design: .monospaced))
-                    .foregroundColor(isConnected ? .white : (selectedPort == nil ? Color(white: 0.35) : Color(white: 0.5)))
+                    .foregroundColor(isConnected ? (isDark ? .white : .black) : (selectedPort == nil ? (isDark ? Color(white: 0.35) : Color(white: 0.5)) : (isDark ? Color(white: 0.5) : Color(white: 0.4))))
                     .lineLimit(1)
             }
-            .padding(.horizontal, 6)
-            .padding(.vertical, 3)
-            .background(Color.white.opacity(0.03))
-            .cornerRadius(3)
+            .padding(.horizontal, 8)
+            .padding(.vertical, 4)
+            .background(cardBg)
+            .clipShape(Capsule())
+            .overlay(Capsule().stroke(cardBorderColor.opacity(0.6), lineWidth: 1))
             .fixedSize()
             
             if !showAIAgentPanel {
@@ -895,11 +933,11 @@ struct EmbeddedStudioView: View {
                 HStack(spacing: 8) {
                     Text("RX: \(rxByteCount) B")
                         .font(.system(size: 8, design: .monospaced))
-                        .foregroundColor(Color(white: 0.5))
+                        .foregroundColor(isDark ? Color(white: 0.5) : Color(white: 0.45))
                         .lineLimit(1)
                     Text("TX: \(txByteCount) B")
                         .font(.system(size: 8, design: .monospaced))
-                        .foregroundColor(Color(white: 0.5))
+                        .foregroundColor(isDark ? Color(white: 0.5) : Color(white: 0.45))
                         .lineLimit(1)
                 }
                 .fixedSize()
@@ -913,10 +951,10 @@ struct EmbeddedStudioView: View {
                     .font(.system(size: 9, weight: .bold, design: .monospaced))
                     .padding(.horizontal, 8)
                     .padding(.vertical, 4)
-                    .background(Color.white.opacity(0.06))
-                    .foregroundColor(.white)
-                    .cornerRadius(4)
-                    .overlay(RoundedRectangle(cornerRadius: 4).stroke(Color.white.opacity(0.15), lineWidth: 1))
+                    .background(cardBg)
+                    .foregroundColor(isDark ? .white : .black)
+                    .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
+                    .overlay(RoundedRectangle(cornerRadius: 8, style: .continuous).stroke(cardBorderColor, lineWidth: 1))
                 }
                 .buttonStyle(.plain)
                 .disabled(selectedPort == nil || isRunningToolchain)
@@ -937,10 +975,10 @@ struct EmbeddedStudioView: View {
                 }
                 .padding(.horizontal, 8)
                 .padding(.vertical, 4)
-                .background(showAIAgentPanel ? Color.white : Color.white.opacity(0.08))
-                .foregroundColor(showAIAgentPanel ? .black : .white)
-                .cornerRadius(4)
-                .overlay(RoundedRectangle(cornerRadius: 4).stroke(Color.white.opacity(0.2), lineWidth: 1))
+                .background(showAIAgentPanel ? (isDark ? Color.white : Color.black) : cardBg)
+                .foregroundColor(showAIAgentPanel ? (isDark ? .black : .white) : (isDark ? .white : .black))
+                .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
+                .overlay(RoundedRectangle(cornerRadius: 8, style: .continuous).stroke(cardBorderColor, lineWidth: 1))
             }
             .buttonStyle(.plain)
             .help(showAIAgentPanel ? "Hide Embedded AI Agent" : "Open Embedded AI Agent")
@@ -953,8 +991,11 @@ struct EmbeddedStudioView: View {
             }) {
                 Image(systemName: "xmark")
                     .font(.system(size: 10))
-                    .foregroundColor(Color(white: 0.5))
-                    .frame(width: 20, height: 20)
+                    .foregroundColor(isDark ? Color(white: 0.5) : Color(white: 0.45))
+                    .frame(width: 24, height: 24)
+                    .background(cardBg)
+                    .clipShape(RoundedRectangle(cornerRadius: 6, style: .continuous))
+                    .overlay(RoundedRectangle(cornerRadius: 6, style: .continuous).stroke(cardBorderColor, lineWidth: 1))
             }
             .buttonStyle(.plain)
             .help("Close Studio & Return to Code Editor")
@@ -963,8 +1004,8 @@ struct EmbeddedStudioView: View {
         .padding(.horizontal, 14)
         .padding(.vertical, 7)
         .frame(height: 38)
-        .background(Color(white: 0.05))
-        .overlay(Rectangle().frame(height: 1).foregroundColor(Color.white.opacity(0.08)), alignment: .bottom)
+        .background(headerBg)
+        .overlay(Rectangle().frame(height: 1).foregroundColor(dividerLineColor), alignment: .bottom)
     }
     
     // MARK: - TOOL 0: Embedded Sketch & IDE (Category 01: Code & Firmware)
@@ -974,7 +1015,7 @@ struct EmbeddedStudioView: View {
             // Editor Sub-Header / Action Bar
             sketchEditorToolbar
             
-            Rectangle().fill(Color.white.opacity(0.08)).frame(height: 1)
+            Rectangle().fill(dividerLineColor).frame(height: 1)
             
             // Split Editor & Console
             GeometryReader { geo in
@@ -983,17 +1024,18 @@ struct EmbeddedStudioView: View {
                     // Code Editor Area with Authentic Syntax Highlighting & Line Numbers
                     AuthenticEditor(
                         text: $editorSourceCode,
-                        language: editorLanguage.syntaxLanguageId
+                        language: editorLanguage.syntaxLanguageId,
+                        isDark: isDark
                     )
                     .frame(height: max(100, geo.size.height - drawerH - 1))
-                    .background(Color.black)
+                    .background(isDark ? Color.black : Color(white: 0.98))
                     .onChange(of: editorSourceCode) { newCode in
                         envManager.analyzeIncludes(code: newCode)
                         envManager.autoResolveAndInstallDependencies(code: newCode)
                     }
                     
                     // Split separator / drawer handle
-                    Rectangle().fill(Color.white.opacity(0.1)).frame(height: 1)
+                    Rectangle().fill(dividerLineColor).frame(height: 1)
                     
                     // Bottom Split Drawer: Tabs [0: BUILD & FLASH LOG, 1: REALTIME LIVE EXECUTION]
                     sketchBottomConsoleDrawer
@@ -1001,7 +1043,7 @@ struct EmbeddedStudioView: View {
                 }
             }
             
-            Rectangle().fill(Color.white.opacity(0.08)).frame(height: 1)
+            Rectangle().fill(dividerLineColor).frame(height: 1)
             
             // Editor Status Bar Footer
             sketchEditorStatusBar
@@ -1014,7 +1056,7 @@ struct EmbeddedStudioView: View {
             HStack(spacing: 4) {
                 Text("LANG:")
                     .font(.system(size: 9, weight: .bold, design: .monospaced))
-                    .foregroundColor(Color(white: 0.5))
+                    .foregroundColor(isDark ? Color(white: 0.5) : Color(white: 0.5))
                     .lineLimit(1)
                 
                 Menu {
@@ -1038,17 +1080,17 @@ struct EmbeddedStudioView: View {
                     HStack(spacing: 4) {
                         Text(editorLanguage.rawValue)
                             .font(.system(size: 9.5, weight: .semibold, design: .monospaced))
-                            .foregroundColor(.white)
+                            .foregroundColor(isDark ? .white : .black)
                             .lineLimit(1)
                         Image(systemName: "chevron.up.chevron.down")
                             .font(.system(size: 7))
-                            .foregroundColor(Color(white: 0.5))
+                            .foregroundColor(isDark ? Color(white: 0.5) : Color(white: 0.5))
                     }
                     .padding(.horizontal, 7)
                     .padding(.vertical, 4)
-                    .background(Color.white.opacity(0.06))
-                    .cornerRadius(4)
-                    .overlay(RoundedRectangle(cornerRadius: 4).stroke(Color.white.opacity(0.12), lineWidth: 1))
+                    .background(cardBg)
+                    .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
+                    .overlay(RoundedRectangle(cornerRadius: 8, style: .continuous).stroke(cardBorderColor, lineWidth: 1))
                 }
                 .menuStyle(.borderlessButton)
                 .fixedSize()
@@ -1059,16 +1101,17 @@ struct EmbeddedStudioView: View {
             HStack(spacing: 4) {
                 Image(systemName: "doc.text")
                     .font(.system(size: 9))
-                    .foregroundColor(Color(white: 0.5))
+                    .foregroundColor(isDark ? Color(white: 0.5) : Color(white: 0.5))
                 Text(editorFilePath)
                     .font(.system(size: 9.5, weight: .medium, design: .monospaced))
-                    .foregroundColor(Color(white: 0.8))
+                    .foregroundColor(isDark ? Color(white: 0.8) : Color(white: 0.2))
                     .lineLimit(1)
             }
-            .padding(.horizontal, 6)
-            .padding(.vertical, 3)
-            .background(Color.white.opacity(0.04))
-            .cornerRadius(3)
+            .padding(.horizontal, 7)
+            .padding(.vertical, 4)
+            .background(cardBg)
+            .clipShape(RoundedRectangle(cornerRadius: 7, style: .continuous))
+            .overlay(RoundedRectangle(cornerRadius: 7, style: .continuous).stroke(cardBorderColor.opacity(0.6), lineWidth: 1))
             .fixedSize()
             
             // "RELOAD TEMPLATE" button
@@ -1084,12 +1127,12 @@ struct EmbeddedStudioView: View {
                     Text("RELOAD")
                         .font(.system(size: 8.5, weight: .bold, design: .monospaced))
                 }
-                .padding(.horizontal, 6)
+                .padding(.horizontal, 7)
                 .padding(.vertical, 4)
-                .background(Color.white.opacity(0.06))
-                .foregroundColor(Color(white: 0.7))
-                .cornerRadius(4)
-                .overlay(RoundedRectangle(cornerRadius: 4).stroke(Color.white.opacity(0.1), lineWidth: 1))
+                .background(cardBg)
+                .foregroundColor(isDark ? Color(white: 0.7) : Color(white: 0.3))
+                .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
+                .overlay(RoundedRectangle(cornerRadius: 8, style: .continuous).stroke(cardBorderColor, lineWidth: 1))
             }
             .buttonStyle(.plain)
             .help("Replace editor contents with official hardware boilerplate for current board")
@@ -1103,10 +1146,10 @@ struct EmbeddedStudioView: View {
                 HStack(spacing: 5) {
                     Image(systemName: "shippingbox.fill")
                         .font(.system(size: 9))
-                        .foregroundColor(.white)
+                        .foregroundColor(isDark ? .white : .black)
                     Text("LIBRARIES & ENV")
                         .font(.system(size: 9, weight: .bold, design: .monospaced))
-                        .foregroundColor(.white)
+                        .foregroundColor(isDark ? .white : .black)
                     
                     let missing = envManager.detectedLibraries.filter { item in
                         !envManager.installedLibraries.contains(where: { $0.name.lowercased() == item.lowercased() }) &&
@@ -1116,22 +1159,22 @@ struct EmbeddedStudioView: View {
                     if missing > 0 {
                         Text("\(missing) NEW")
                             .font(.system(size: 7.5, weight: .bold, design: .monospaced))
-                            .foregroundColor(.black)
-                            .padding(.horizontal, 4)
-                            .padding(.vertical, 1)
-                            .background(Color.white)
-                            .cornerRadius(2)
+                            .foregroundColor(isDark ? .black : .white)
+                            .padding(.horizontal, 5)
+                            .padding(.vertical, 2)
+                            .background(isDark ? Color.white : Color.black)
+                            .clipShape(Capsule())
                     } else {
                         Text("\(envManager.installedLibraries.count)")
                             .font(.system(size: 8, weight: .bold, design: .monospaced))
-                            .foregroundColor(Color(white: 0.6))
+                            .foregroundColor(isDark ? Color(white: 0.6) : Color(white: 0.4))
                     }
                 }
-                .padding(.horizontal, 7)
+                .padding(.horizontal, 8)
                 .padding(.vertical, 4)
-                .background(Color.white.opacity(0.08))
-                .cornerRadius(4)
-                .overlay(RoundedRectangle(cornerRadius: 4).stroke(Color.white.opacity(0.18), lineWidth: 1))
+                .background(cardBg)
+                .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
+                .overlay(RoundedRectangle(cornerRadius: 8, style: .continuous).stroke(cardBorderColor, lineWidth: 1))
             }
             .buttonStyle(.plain)
             .help("Manage Arduino libraries, dependencies, and hardware toolchains")
@@ -1141,16 +1184,16 @@ struct EmbeddedStudioView: View {
             HStack(spacing: 4) {
                 Image(systemName: "bolt.fill")
                     .font(.system(size: 8))
-                    .foregroundColor(envManager.isWorking ? Color.white : Color(white: 0.8))
+                    .foregroundColor(isDark ? (envManager.isWorking ? Color.white : Color(white: 0.8)) : (envManager.isWorking ? Color.black : Color(white: 0.4)))
                 Text("AUTO-DEPS")
                     .font(.system(size: 8, weight: .bold, design: .monospaced))
-                    .foregroundColor(Color(white: 0.85))
+                    .foregroundColor(isDark ? Color(white: 0.85) : Color(white: 0.2))
             }
-            .padding(.horizontal, 6)
+            .padding(.horizontal, 7)
             .padding(.vertical, 4)
-            .background(Color.white.opacity(0.06))
-            .cornerRadius(4)
-            .overlay(RoundedRectangle(cornerRadius: 4).stroke(Color.white.opacity(0.12), lineWidth: 1))
+            .background(cardBg)
+            .clipShape(Capsule())
+            .overlay(Capsule().stroke(cardBorderColor, lineWidth: 1))
             .help("MicroCode detects #include in your code and automatically resolves & synthesizes headers instantly: \(envManager.autoDepStatus)")
             .fixedSize()
             
@@ -1160,25 +1203,26 @@ struct EmbeddedStudioView: View {
                 // Hardware target summary badge
                 HStack(spacing: 5) {
                     Circle()
-                        .fill(selectedPort != nil ? Color.white : Color(white: 0.3))
+                        .fill(selectedPort != nil ? (isDark ? Color.white : Color.black) : (isDark ? Color(white: 0.3) : Color(white: 0.6)))
                         .frame(width: 5, height: 5)
                     Text(selectedBoard.rawValue.uppercased())
                         .font(.system(size: 8, weight: .bold, design: .monospaced))
-                        .foregroundColor(Color(white: 0.7))
+                        .foregroundColor(isDark ? Color(white: 0.7) : Color(white: 0.3))
                         .lineLimit(1)
                     if let p = selectedPort {
                         Text("•")
-                            .foregroundColor(Color(white: 0.3))
+                            .foregroundColor(isDark ? Color(white: 0.3) : Color(white: 0.6))
                         Text(p.name)
                             .font(.system(size: 8, design: .monospaced))
-                            .foregroundColor(Color(white: 0.5))
+                            .foregroundColor(isDark ? Color(white: 0.5) : Color(white: 0.5))
                             .lineLimit(1)
                     }
                 }
-                .padding(.horizontal, 7)
+                .padding(.horizontal, 8)
                 .padding(.vertical, 4)
-                .background(Color.white.opacity(0.04))
-                .cornerRadius(3)
+                .background(cardBg)
+                .clipShape(Capsule())
+                .overlay(Capsule().stroke(cardBorderColor.opacity(0.6), lineWidth: 1))
             }
             
             // COMPILE ONLY button
@@ -1195,12 +1239,12 @@ struct EmbeddedStudioView: View {
                     Text("COMPILE ONLY")
                         .font(.system(size: 8.5, weight: .bold, design: .monospaced))
                 }
-                .padding(.horizontal, 8)
+                .padding(.horizontal, 9)
                 .padding(.vertical, 5)
-                .background(Color.white.opacity(0.08))
-                .foregroundColor(.white)
-                .cornerRadius(4)
-                .overlay(RoundedRectangle(cornerRadius: 4).stroke(Color.white.opacity(0.18), lineWidth: 1))
+                .background(cardBg)
+                .foregroundColor(isDark ? .white : .black)
+                .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
+                .overlay(RoundedRectangle(cornerRadius: 8, style: .continuous).stroke(cardBorderColor, lineWidth: 1))
             }
             .buttonStyle(.plain)
             .disabled(isCompilingToBoard)
@@ -1215,21 +1259,21 @@ struct EmbeddedStudioView: View {
                         ProgressView().scaleEffect(0.6).frame(width: 10, height: 10)
                         Text("FLASHING CHIP...")
                             .font(.system(size: 8.5, weight: .bold, design: .monospaced))
-                            .foregroundColor(.black)
+                            .foregroundColor(isDark ? .black : .white)
                     } else {
                         Image(systemName: "bolt.fill")
                             .font(.system(size: 9.5))
-                            .foregroundColor(.black)
+                            .foregroundColor(isDark ? .black : .white)
                         Text("RUN DIRECT TO BOARD")
                             .font(.system(size: 8.5, weight: .bold, design: .monospaced))
-                            .foregroundColor(.black)
+                            .foregroundColor(isDark ? .black : .white)
                     }
                 }
                 .padding(.horizontal, 10)
                 .padding(.vertical, 5)
-                .background(isCompilingToBoard ? Color(white: 0.7) : Color.white)
-                .cornerRadius(4)
-                .shadow(color: Color.white.opacity(0.2), radius: 3, x: 0, y: 1)
+                .background(isCompilingToBoard ? (isDark ? Color(white: 0.7) : Color(white: 0.3)) : (isDark ? Color.white : Color.black))
+                .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
+                .shadow(color: isDark ? Color.white.opacity(0.2) : Color.black.opacity(0.15), radius: 3, x: 0, y: 1)
             }
             .buttonStyle(.plain)
             .disabled(isCompilingToBoard)
@@ -1239,7 +1283,7 @@ struct EmbeddedStudioView: View {
         .padding(.horizontal, 12)
         .padding(.vertical, 6)
         .frame(height: 38)
-        .background(Color(white: 0.05))
+        .background(headerBg)
     }
     
     private var sketchLineNumberGutter: some View {
@@ -1275,14 +1319,14 @@ struct EmbeddedStudioView: View {
                         Text("BUILD & FLASH LOG")
                             .font(.system(size: 9, weight: (editorConsoleTab == 0 && showBottomDrawer) ? .bold : .medium, design: .monospaced))
                         if isCompilingToBoard {
-                            Circle().fill(Color.white).frame(width: 4, height: 4)
+                            Circle().fill(isDark ? Color.white : Color.black).frame(width: 4, height: 4)
                         }
                     }
                     .padding(.horizontal, 8)
                     .padding(.vertical, 4)
-                    .background((editorConsoleTab == 0 && showBottomDrawer) ? Color.white.opacity(0.15) : Color.clear)
-                    .foregroundColor((editorConsoleTab == 0 && showBottomDrawer) ? .white : Color(white: 0.5))
-                    .cornerRadius(3)
+                    .background((editorConsoleTab == 0 && showBottomDrawer) ? (isDark ? Color.white.opacity(0.15) : Color.black.opacity(0.08)) : Color.clear)
+                    .foregroundColor((editorConsoleTab == 0 && showBottomDrawer) ? (isDark ? .white : .black) : (isDark ? Color(white: 0.5) : Color(white: 0.5)))
+                    .clipShape(RoundedRectangle(cornerRadius: 6, style: .continuous))
                 }
                 .buttonStyle(.plain)
                 
@@ -1300,14 +1344,14 @@ struct EmbeddedStudioView: View {
                             .font(.system(size: 9, weight: (editorConsoleTab == 1 && showBottomDrawer) ? .bold : .medium, design: .monospaced))
                         
                         Circle()
-                            .fill(isConnected ? Color.white : Color(white: 0.3))
+                            .fill(isConnected ? (isDark ? Color.white : Color.black) : (isDark ? Color(white: 0.3) : Color(white: 0.6)))
                             .frame(width: 5, height: 5)
                     }
                     .padding(.horizontal, 8)
                     .padding(.vertical, 4)
-                    .background((editorConsoleTab == 1 && showBottomDrawer) ? Color.white.opacity(0.15) : Color.clear)
-                    .foregroundColor((editorConsoleTab == 1 && showBottomDrawer) ? .white : Color(white: 0.5))
-                    .cornerRadius(3)
+                    .background((editorConsoleTab == 1 && showBottomDrawer) ? (isDark ? Color.white.opacity(0.15) : Color.black.opacity(0.08)) : Color.clear)
+                    .foregroundColor((editorConsoleTab == 1 && showBottomDrawer) ? (isDark ? .white : .black) : (isDark ? Color(white: 0.5) : Color(white: 0.5)))
+                    .clipShape(RoundedRectangle(cornerRadius: 6, style: .continuous))
                 }
                 .buttonStyle(.plain)
                 
@@ -1327,11 +1371,11 @@ struct EmbeddedStudioView: View {
                                 Text("AI AUTO-FIX")
                                     .font(.system(size: 8, weight: .bold, design: .monospaced))
                             }
-                            .padding(.horizontal, 6)
+                            .padding(.horizontal, 8)
                             .padding(.vertical, 3)
-                            .background(Color.white)
-                            .foregroundColor(.black)
-                            .cornerRadius(3)
+                            .background(isDark ? Color.white : Color.black)
+                            .foregroundColor(isDark ? .black : .white)
+                            .clipShape(Capsule())
                         }
                         .buttonStyle(.plain)
                         .help("Open Embedded AI Agent to automatically fix compilation errors")
@@ -1347,11 +1391,11 @@ struct EmbeddedStudioView: View {
                                 Text("DECODE CRASH")
                                     .font(.system(size: 8, weight: .bold, design: .monospaced))
                             }
-                            .padding(.horizontal, 6)
+                            .padding(.horizontal, 8)
                             .padding(.vertical, 3)
-                            .background(Color.white)
-                            .foregroundColor(.black)
-                            .cornerRadius(3)
+                            .background(isDark ? Color.white : Color.black)
+                            .foregroundColor(isDark ? .black : .white)
+                            .clipShape(Capsule())
                         }
                         .buttonStyle(.plain)
                         .help("Open Embedded AI Agent to decode this crash trace")
@@ -1363,7 +1407,7 @@ struct EmbeddedStudioView: View {
                             buildLogOutput = ""
                         }
                         .font(.system(size: 8.5, weight: .bold, design: .monospaced))
-                        .foregroundColor(Color(white: 0.5))
+                        .foregroundColor(isDark ? Color(white: 0.5) : Color(white: 0.5))
                         .buttonStyle(.plain)
                     } else {
                         Toggle(isOn: $autoScroll) {
@@ -1384,7 +1428,7 @@ struct EmbeddedStudioView: View {
                             consoleEntries.removeAll()
                         }
                         .font(.system(size: 8.5, weight: .bold, design: .monospaced))
-                        .foregroundColor(Color(white: 0.5))
+                        .foregroundColor(isDark ? Color(white: 0.5) : Color(white: 0.5))
                         .buttonStyle(.plain)
                     }
                     
@@ -1396,10 +1440,10 @@ struct EmbeddedStudioView: View {
                     }) {
                         Image(systemName: editorDrawerHeight > 240 ? "arrow.down.right.and.arrow.up.left" : "arrow.up.left.and.arrow.down.right")
                             .font(.system(size: 8.5))
-                            .foregroundColor(Color(white: 0.6))
-                            .frame(width: 18, height: 18)
-                            .background(Color.white.opacity(0.06))
-                            .cornerRadius(3)
+                            .foregroundColor(isDark ? Color(white: 0.6) : Color(white: 0.4))
+                            .frame(width: 20, height: 20)
+                            .background(cardBg)
+                            .clipShape(RoundedRectangle(cornerRadius: 6, style: .continuous))
                     }
                     .buttonStyle(.plain)
                     .help(editorDrawerHeight > 240 ? "Make drawer compact" : "Expand drawer height")
@@ -1419,21 +1463,21 @@ struct EmbeddedStudioView: View {
                                 .font(.system(size: 8, weight: .bold, design: .monospaced))
                         }
                     }
-                    .foregroundColor(Color(white: 0.7))
-                    .padding(.horizontal, 6)
-                    .padding(.vertical, 3)
-                    .background(Color.white.opacity(0.06))
-                    .cornerRadius(3)
+                    .foregroundColor(isDark ? Color(white: 0.7) : Color(white: 0.3))
+                    .padding(.horizontal, 7)
+                    .padding(.vertical, 4)
+                    .background(cardBg)
+                    .clipShape(RoundedRectangle(cornerRadius: 6, style: .continuous))
                 }
                 .buttonStyle(.plain)
                 .help(showBottomDrawer ? "Collapse console drawer" : "Open console drawer")
             }
             .padding(.horizontal, 12)
             .padding(.vertical, 5)
-            .background(Color(white: 0.06))
+            .background(headerBg)
             
             if showBottomDrawer {
-                Rectangle().fill(Color.white.opacity(0.08)).frame(height: 1)
+                Rectangle().fill(dividerLineColor).frame(height: 1)
                 
                 // Tab Content
                 if editorConsoleTab == 0 {
@@ -1444,26 +1488,26 @@ struct EmbeddedStudioView: View {
                             VStack(spacing: 6) {
                                 Image(systemName: "hammer")
                                     .font(.system(size: 16))
-                                    .foregroundColor(Color(white: 0.3))
+                                    .foregroundColor(isDark ? Color(white: 0.3) : Color(white: 0.5))
                                 Text("NO COMPILATION ACTIVE")
                                     .font(.system(size: 9, weight: .bold, design: .monospaced))
-                                    .foregroundColor(Color(white: 0.5))
+                                    .foregroundColor(isDark ? Color(white: 0.5) : Color(white: 0.4))
                                 Text("Click 'COMPILE ONLY' to verify code or 'RUN DIRECT TO BOARD' to flash the microcontroller.")
                                     .font(.system(size: 8, design: .monospaced))
-                                    .foregroundColor(Color(white: 0.35))
+                                    .foregroundColor(isDark ? Color(white: 0.35) : Color(white: 0.55))
                             }
                             .frame(maxWidth: .infinity)
                             .padding(24)
                         } else {
                             Text(buildLogOutput)
                                 .font(.system(size: 10.5, design: .monospaced))
-                                .foregroundColor(Color(white: 0.85))
+                                .foregroundColor(isDark ? Color(white: 0.85) : Color(white: 0.15))
                                 .frame(maxWidth: .infinity, alignment: .leading)
                                 .padding(10)
                                 .textSelection(.enabled)
                         }
                     }
-                    .background(Color.black)
+                    .background(consoleBg)
                 }
             } else {
                 // REALTIME LIVE EXECUTION
@@ -1475,13 +1519,13 @@ struct EmbeddedStudioView: View {
                                     VStack(spacing: 6) {
                                         Image(systemName: "terminal")
                                             .font(.system(size: 16))
-                                            .foregroundColor(Color(white: 0.3))
+                                            .foregroundColor(isDark ? Color(white: 0.3) : Color(white: 0.5))
                                         Text("STANDBY - NO SERIAL DATA RECEIVED")
                                             .font(.system(size: 9, weight: .bold, design: .monospaced))
-                                            .foregroundColor(Color(white: 0.5))
+                                            .foregroundColor(isDark ? Color(white: 0.5) : Color(white: 0.4))
                                         Text("Connect hardware or click 'RUN DIRECT TO BOARD' to flash and start live execution stream.")
                                             .font(.system(size: 8, design: .monospaced))
-                                            .foregroundColor(Color(white: 0.35))
+                                            .foregroundColor(isDark ? Color(white: 0.35) : Color(white: 0.55))
                                     }
                                     .frame(maxWidth: .infinity)
                                     .padding(20)
@@ -1491,20 +1535,20 @@ struct EmbeddedStudioView: View {
                                             if showTimestamps {
                                                 Text(entry.timestamp)
                                                     .font(.system(size: 9.5, design: .monospaced))
-                                                    .foregroundColor(Color(white: 0.4))
+                                                    .foregroundColor(isDark ? Color(white: 0.4) : Color(white: 0.5))
                                             }
                                             
                                             Text("[\(entry.tag)]")
                                                 .font(.system(size: 8.5, weight: .bold, design: .monospaced))
-                                                .foregroundColor(entry.isError ? Color(white: 0.5) : Color.white)
+                                                .foregroundColor(entry.isError ? (isDark ? Color(white: 0.5) : Color(white: 0.5)) : (isDark ? Color.white : Color.black))
                                                 .padding(.horizontal, 3)
                                                 .padding(.vertical, 1)
-                                                .background(Color.white.opacity(0.08))
+                                                .background(cardBg)
                                                 .cornerRadius(2)
                                             
                                             Text(entry.content)
                                                 .font(.system(size: 10.5, design: .monospaced))
-                                                .foregroundColor(Color(white: 0.9))
+                                                .foregroundColor(isDark ? Color(white: 0.9) : Color(white: 0.1))
                                                 .textSelection(.enabled)
                                             
                                             Spacer()
@@ -1519,7 +1563,7 @@ struct EmbeddedStudioView: View {
                             }
                             .padding(10)
                         }
-                        .background(Color.black)
+                        .background(consoleBg)
                         .onChange(of: consoleEntries.count) { _ in
                             if autoScroll {
                                 proxy.scrollTo("BOTTOM_DRAWER_ANCHOR", anchor: .bottom)
@@ -1527,18 +1571,18 @@ struct EmbeddedStudioView: View {
                         }
                     }
                     
-                    Rectangle().fill(Color.white.opacity(0.08)).frame(height: 1)
+                    Rectangle().fill(dividerLineColor).frame(height: 1)
                     
                     // Live Command Prompt
                     HStack(spacing: 8) {
                         Text(">")
                             .font(.system(size: 11, weight: .bold, design: .monospaced))
-                            .foregroundColor(.white)
+                            .foregroundColor(isDark ? .white : .black)
                         
                         TextField("Send command to board (e.g. reboot, status, AT)...", text: $editorLiveInput)
                             .textFieldStyle(.plain)
                             .font(.system(size: 10.5, design: .monospaced))
-                            .foregroundColor(.white)
+                            .foregroundColor(isDark ? .white : .black)
                             .onSubmit {
                                 sendEditorLiveCommand()
                             }
@@ -1549,14 +1593,14 @@ struct EmbeddedStudioView: View {
                         .font(.system(size: 9, weight: .bold, design: .monospaced))
                         .padding(.horizontal, 8)
                         .padding(.vertical, 3)
-                        .background(Color.white.opacity(0.12))
-                        .foregroundColor(.white)
+                        .background(isDark ? Color.white.opacity(0.12) : Color.black.opacity(0.08))
+                        .foregroundColor(isDark ? .white : .black)
                         .cornerRadius(3)
                         .buttonStyle(.plain)
                     }
                     .padding(.horizontal, 10)
                     .padding(.vertical, 5)
-                    .background(Color(white: 0.04))
+                    .background(isDark ? Color(white: 0.04) : Color(white: 0.93))
                 }
             }
             }
@@ -1570,36 +1614,36 @@ struct EmbeddedStudioView: View {
             
             Text("LINES: \(lines)")
                 .font(.system(size: 8, weight: .bold, design: .monospaced))
-                .foregroundColor(Color(white: 0.5))
+                .foregroundColor(isDark ? Color(white: 0.5) : Color(white: 0.5))
             
             Text("BYTES: \(chars)")
                 .font(.system(size: 8, design: .monospaced))
-                .foregroundColor(Color(white: 0.4))
+                .foregroundColor(isDark ? Color(white: 0.4) : Color(white: 0.6))
             
             Text("UTF-8")
                 .font(.system(size: 8, design: .monospaced))
-                .foregroundColor(Color(white: 0.4))
+                .foregroundColor(isDark ? Color(white: 0.4) : Color(white: 0.6))
             
             Text("INDENT: 4 SPACES")
                 .font(.system(size: 8, design: .monospaced))
-                .foregroundColor(Color(white: 0.4))
+                .foregroundColor(isDark ? Color(white: 0.4) : Color(white: 0.6))
             
             Spacer()
             
             if isCompilingToBoard {
                 HStack(spacing: 5) {
-                    Circle().fill(Color.white).frame(width: 4, height: 4)
+                    Circle().fill(isDark ? Color.white : Color.black).frame(width: 4, height: 4)
                     Text("TOOLCHAIN BUSY (SMART ARBITER ENGAGED)")
                         .font(.system(size: 8, weight: .bold, design: .monospaced))
-                        .foregroundColor(.white)
+                        .foregroundColor(isDark ? .white : .black)
                 }
             } else {
                 Text("STATUS: READY")
                     .font(.system(size: 8, weight: .bold, design: .monospaced))
-                    .foregroundColor(Color(white: 0.5))
+                    .foregroundColor(isDark ? Color(white: 0.5) : Color(white: 0.5))
             }
             
-            Rectangle().fill(Color.white.opacity(0.12)).frame(width: 1, height: 12)
+            Rectangle().fill(dividerLineColor).frame(width: 1, height: 12)
             
             Button(action: {
                 withAnimation(.easeInOut(duration: 0.15)) {
@@ -1612,10 +1656,10 @@ struct EmbeddedStudioView: View {
                     Text(showBottomDrawer ? "DRAWER: ON" : "DRAWER: OFF")
                         .font(.system(size: 8, weight: .bold, design: .monospaced))
                 }
-                .foregroundColor(showBottomDrawer ? .white : Color(white: 0.45))
+                .foregroundColor(showBottomDrawer ? (isDark ? .white : .black) : (isDark ? Color(white: 0.45) : Color(white: 0.55)))
                 .padding(.horizontal, 6)
                 .padding(.vertical, 2)
-                .background(Color.white.opacity(showBottomDrawer ? 0.08 : 0.03))
+                .background(showBottomDrawer ? (isDark ? Color.white.opacity(0.08) : Color.black.opacity(0.06)) : cardBg)
                 .cornerRadius(3)
             }
             .buttonStyle(.plain)
@@ -1623,7 +1667,7 @@ struct EmbeddedStudioView: View {
         }
         .padding(.horizontal, 14)
         .padding(.vertical, 5)
-        .background(Color(white: 0.03))
+        .background(isDark ? Color(white: 0.03) : Color(white: 0.94))
     }
     
     private func templateForLanguage(lang: EmbeddedSourceLanguage, board: HardwareBoardTarget) -> String {
@@ -3659,27 +3703,29 @@ struct EmbeddedStudioView: View {
                             VStack(alignment: .leading, spacing: 2) {
                                 Text("TARGET IP ADDRESS")
                                     .font(.system(size: 8, weight: .bold, design: .monospaced))
-                                    .foregroundColor(Color(white: 0.45))
+                                    .foregroundColor(isDark ? Color(white: 0.45) : Color(white: 0.55))
                                 TextField("192.168.1.xxx", text: $otaTargetIp)
                                     .textFieldStyle(.plain)
                                     .font(.system(size: 11, design: .monospaced))
+                                    .foregroundColor(isDark ? .white : .black)
                                     .padding(6)
-                                    .background(Color.black)
+                                    .background(cardBg)
                                     .cornerRadius(3)
-                                    .overlay(RoundedRectangle(cornerRadius: 3).stroke(Color.white.opacity(0.1), lineWidth: 1))
+                                    .overlay(RoundedRectangle(cornerRadius: 3).stroke(cardBorderColor, lineWidth: 1))
                             }
                             
                             VStack(alignment: .leading, spacing: 2) {
                                 Text("PORT")
                                     .font(.system(size: 8, weight: .bold, design: .monospaced))
-                                    .foregroundColor(Color(white: 0.45))
+                                    .foregroundColor(isDark ? Color(white: 0.45) : Color(white: 0.55))
                                 TextField("3232", text: $otaTargetPort)
                                     .textFieldStyle(.plain)
                                     .font(.system(size: 11, design: .monospaced))
+                                    .foregroundColor(isDark ? .white : .black)
                                     .padding(6)
-                                    .background(Color.black)
+                                    .background(cardBg)
                                     .cornerRadius(3)
-                                    .overlay(RoundedRectangle(cornerRadius: 3).stroke(Color.white.opacity(0.1), lineWidth: 1))
+                                    .overlay(RoundedRectangle(cornerRadius: 3).stroke(cardBorderColor, lineWidth: 1))
                                     .frame(width: 70)
                             }
                         }
@@ -3687,28 +3733,30 @@ struct EmbeddedStudioView: View {
                         VStack(alignment: .leading, spacing: 2) {
                             Text("SECURITY AUTH / PASSPHRASE (OPTIONAL)")
                                 .font(.system(size: 8, weight: .bold, design: .monospaced))
-                                .foregroundColor(Color(white: 0.45))
+                                .foregroundColor(isDark ? Color(white: 0.45) : Color(white: 0.55))
                             SecureField("Leave empty if node has no password", text: $otaPassword)
                                 .textFieldStyle(.plain)
                                 .font(.system(size: 11, design: .monospaced))
+                                .foregroundColor(isDark ? .white : .black)
                                 .padding(6)
-                                .background(Color.black)
+                                .background(cardBg)
                                 .cornerRadius(3)
-                                .overlay(RoundedRectangle(cornerRadius: 3).stroke(Color.white.opacity(0.1), lineWidth: 1))
+                                .overlay(RoundedRectangle(cornerRadius: 3).stroke(cardBorderColor, lineWidth: 1))
                         }
                         
                         VStack(alignment: .leading, spacing: 2) {
                             Text("FIRMWARE BINARY (.BIN)")
                                 .font(.system(size: 8, weight: .bold, design: .monospaced))
-                                .foregroundColor(Color(white: 0.45))
+                                .foregroundColor(isDark ? Color(white: 0.45) : Color(white: 0.55))
                             HStack(spacing: 6) {
                                 TextField("/path/to/firmware.bin", text: $otaBinaryPath)
                                     .textFieldStyle(.plain)
                                     .font(.system(size: 10, design: .monospaced))
+                                    .foregroundColor(isDark ? .white : .black)
                                     .padding(6)
-                                    .background(Color.black)
+                                    .background(cardBg)
                                     .cornerRadius(3)
-                                    .overlay(RoundedRectangle(cornerRadius: 3).stroke(Color.white.opacity(0.1), lineWidth: 1))
+                                    .overlay(RoundedRectangle(cornerRadius: 3).stroke(cardBorderColor, lineWidth: 1))
                                 
                                 Button("CHOOSE...") {
                                     chooseFirmwareBinaryForOta()
@@ -3716,8 +3764,8 @@ struct EmbeddedStudioView: View {
                                 .font(.system(size: 9, weight: .bold, design: .monospaced))
                                 .padding(.horizontal, 8)
                                 .padding(.vertical, 5)
-                                .background(Color.white.opacity(0.1))
-                                .foregroundColor(.white)
+                                .background(cardBg)
+                                .foregroundColor(isDark ? .white : .black)
                                 .cornerRadius(3)
                                 .buttonStyle(.plain)
                             }
@@ -3731,29 +3779,29 @@ struct EmbeddedStudioView: View {
                             .font(.system(size: 10, weight: .bold, design: .monospaced))
                             .frame(maxWidth: .infinity)
                             .padding(.vertical, 7)
-                            .background(otaBinaryPath.isEmpty || otaTargetIp.isEmpty ? Color.white.opacity(0.05) : Color.white)
-                            .foregroundColor(otaBinaryPath.isEmpty || otaTargetIp.isEmpty ? Color(white: 0.3) : Color.black)
+                            .background(otaBinaryPath.isEmpty || otaTargetIp.isEmpty ? (isDark ? Color.white.opacity(0.05) : Color.black.opacity(0.04)) : (isDark ? Color.white : Color.black))
+                            .foregroundColor(otaBinaryPath.isEmpty || otaTargetIp.isEmpty ? (isDark ? Color(white: 0.3) : Color(white: 0.5)) : (isDark ? Color.black : Color.white))
                             .cornerRadius(4)
                         }
                         .buttonStyle(.plain)
                         .disabled(otaBinaryPath.isEmpty || otaTargetIp.isEmpty || isOtaFlashing)
                     }
                     .padding(12)
-                    .background(Color(white: 0.05))
+                    .background(headerBg)
                     .cornerRadius(6)
-                    .overlay(RoundedRectangle(cornerRadius: 6).stroke(Color.white.opacity(0.08), lineWidth: 1))
+                    .overlay(RoundedRectangle(cornerRadius: 6).stroke(cardBorderColor, lineWidth: 1))
                     
                     // OTA Progress & Terminal Log
                     ScrollView {
                         Text(otaLog.isEmpty ? "OTA deployment terminal standby. Discovered nodes will communicate via espota / HTTP OTA protocol." : otaLog)
                             .font(.system(size: 10, design: .monospaced))
-                            .foregroundColor(Color(white: 0.8))
+                            .foregroundColor(isDark ? Color(white: 0.8) : Color(white: 0.2))
                             .frame(maxWidth: .infinity, alignment: .leading)
                             .padding(10)
                     }
-                    .background(Color.black)
+                    .background(consoleBg)
                     .cornerRadius(4)
-                    .overlay(RoundedRectangle(cornerRadius: 4).stroke(Color.white.opacity(0.08), lineWidth: 1))
+                    .overlay(RoundedRectangle(cornerRadius: 4).stroke(cardBorderColor, lineWidth: 1))
                 }
                 .padding(14)
                 .frame(minWidth: 360, maxWidth: .infinity)
@@ -3838,16 +3886,16 @@ struct EmbeddedStudioView: View {
             HStack(spacing: 6) {
                 Image(systemName: port.isUSB ? "cable.connector" : "antenna.radiowaves.left.and.right")
                     .font(.system(size: 10))
-                    .foregroundColor(isSelected ? .white : Color(white: 0.4))
+                    .foregroundColor(isSelected ? (isDark ? .white : .black) : (isDark ? Color(white: 0.4) : Color(white: 0.55)))
                 
                 VStack(alignment: .leading, spacing: 1) {
                     Text(port.name)
                         .font(.system(size: 10, weight: isSelected ? .bold : .regular, design: .monospaced))
-                        .foregroundColor(isSelected ? .white : Color(white: 0.8))
+                        .foregroundColor(isSelected ? (isDark ? .white : .black) : (isDark ? Color(white: 0.8) : Color(white: 0.2)))
                         .lineLimit(1)
                     Text(port.driverDescription)
                         .font(.system(size: 8, design: .monospaced))
-                        .foregroundColor(Color(white: 0.45))
+                        .foregroundColor(isDark ? Color(white: 0.45) : Color(white: 0.55))
                         .lineLimit(1)
                 }
                 Spacer()
@@ -3857,16 +3905,16 @@ struct EmbeddedStudioView: View {
                         .font(.system(size: 7, weight: .bold, design: .monospaced))
                         .padding(.horizontal, 4)
                         .padding(.vertical, 1)
-                        .background(Color.white.opacity(0.12))
-                        .foregroundColor(.white)
-                        .cornerRadius(2)
+                        .background(isDark ? Color.white.opacity(0.12) : Color.black.opacity(0.08))
+                        .foregroundColor(isDark ? .white : .black)
+                        .clipShape(Capsule())
                 }
             }
             .padding(.horizontal, 8)
             .padding(.vertical, 5)
-            .background(isSelected ? Color.white.opacity(0.1) : Color.clear)
-            .cornerRadius(4)
-            .overlay(RoundedRectangle(cornerRadius: 4).stroke(isSelected ? Color.white.opacity(0.2) : Color.clear, lineWidth: 1))
+            .background(isSelected ? (isDark ? Color.white.opacity(0.1) : Color.black.opacity(0.08)) : Color.clear)
+            .clipShape(RoundedRectangle(cornerRadius: 6, style: .continuous))
+            .overlay(RoundedRectangle(cornerRadius: 6, style: .continuous).stroke(isSelected ? (isDark ? Color.white.opacity(0.2) : Color.black.opacity(0.15)) : Color.clear, lineWidth: 1))
         }
         .buttonStyle(.plain)
     }

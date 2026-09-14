@@ -3,7 +3,7 @@
 //! Async trait abstraction for multiple AI API providers
 //! Supports: Anthropic (Claude), Google Gemini, OpenAI (GPT/Codex)
 //!
-//! Copyright © 2025 SPU AI CLUB — Dotmini Software
+//! Copyright © 2024-2026 Dotmini Company Limited
 
 use async_trait::async_trait;
 use futures::Stream;
