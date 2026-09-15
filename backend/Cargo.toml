@@ -12,7 +12,7 @@ ethnum = { git = "https://github.com/nlordell/ethnum-rs.git", rev = "712d6393b07
 
 [package]
 name = "microcode-backend"
-version = "2.0.1"
+version = "2.3.1"
 edition = "2021"
 authors = ["Tirawat Nantamas", "Dotmini Company Limited"]
 

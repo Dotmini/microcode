@@ -505,9 +505,13 @@ final class AIClient: ObservableObject {
                 requestKey = actualKey
             }
             var retryCount = 0
-            let maxRetries = 2
+            let maxRetries = 3
             
             while retryCount <= maxRetries {
+                if retryCount > 0 {
+                    self.currentStreamedText = ""
+                    self.pendingStreamTokens = ""
+                }
                 do {
                     if baseURL == provider.cloudBaseURL {
                         // All cloud-routed requests (Dotmini Cloud or Web Subscriptions) use OpenAI-compatible gateway
@@ -540,8 +544,9 @@ final class AIClient: ObservableObject {
                     return // Success
                     
                 } catch let error as NSError {
-                    // Retry on transient errors (429, 503)
-                    if (error.code == 429 || error.code == 503) && retryCount < maxRetries {
+                    // Retry on transient errors
+                    let transientCodes: Set<Int> = [429, 503, -1001, -1004, -1005, -1009]
+                    if transientCodes.contains(error.code) && retryCount < maxRetries {
                         retryCount += 1
                         let delay = UInt64(pow(2.0, Double(retryCount))) * 1_000_000_000
                         try? await Task.sleep(nanoseconds: delay)
@@ -695,7 +700,9 @@ final class AIClient: ObservableObject {
     private func streamGemini(prompt: String, attachments: [AIAttachment], systemPrompt: String?, conversationHistory: [(role: String, content: String)], model: String, apiKey: String, tools: [[String: Any]]?, onToken: @escaping (String) -> Void, onToolCall: ((AIToolCall) -> Void)?) async throws {
         let baseURL = StreamableAIProvider.gemini.directBaseURL
         let cleanModel = model.hasPrefix("models/") ? String(model.dropFirst(7)) : model
-        let url = URL(string: "\(baseURL)/models/\(cleanModel):streamGenerateContent?alt=sse&key=\(apiKey)")!
+        guard let url = URL(string: "\(baseURL)/models/\(cleanModel):streamGenerateContent?alt=sse&key=\(apiKey)") else {
+            throw NSError(domain: "AIClient", code: -1, userInfo: [NSLocalizedDescriptionKey: "Invalid URL configuration for gemini"])
+        }
         
         var request = URLRequest(url: url, timeoutInterval: requestTimeout)
         request.httpMethod = "POST"
@@ -789,12 +796,10 @@ final class AIClient: ObservableObject {
                 if errorBody.count > 500 { break }
             }
             // Log to debug file
-            let errDebug = "[\(Date())] GEMINI ERROR \(code): \(errorBody.prefix(300))\n"
-            if let d = errDebug.data(using: .utf8) {
-                if let fh = FileHandle(forWritingAtPath: "/tmp/microcode_ai_debug.log") {
-                    fh.seekToEndOfFile(); fh.write(d); fh.closeFile()
-                }
-            }
+#if DEBUG
+            let errDebug = "[\(Date())] AI ERROR \(code): \(errorBody.prefix(300))\n"
+            print(errDebug)
+#endif
             // Extract message from JSON error if possible
             var detailedMsg = "Gemini API error (\(code))"
             if let data = errorBody.data(using: .utf8),
@@ -874,7 +879,9 @@ final class AIClient: ObservableObject {
     // MARK: - OpenAI/DeepSeek Streaming
     
     private func streamOpenAI(prompt: String, attachments: [AIAttachment], systemPrompt: String?, conversationHistory: [(role: String, content: String)], model: String, apiKey: String, baseURL: String, tools: [[String: Any]]?, onToken: @escaping (String) -> Void, onToolCall: ((AIToolCall) -> Void)?) async throws {
-        let url = URL(string: "\(baseURL)/chat/completions")!
+        guard let url = URL(string: "\(baseURL)/chat/completions") else {
+            throw NSError(domain: "AIClient", code: -1, userInfo: [NSLocalizedDescriptionKey: "Invalid URL configuration for openai"])
+        }
         
         var request = URLRequest(url: url, timeoutInterval: requestTimeout)
         request.httpMethod = "POST"
@@ -1060,7 +1067,9 @@ final class AIClient: ObservableObject {
     
     private func streamAnthropic(prompt: String, attachments: [AIAttachment], systemPrompt: String?, conversationHistory: [(role: String, content: String)], model: String, apiKey: String, tools: [[String: Any]]?, onToken: @escaping (String) -> Void, onToolCall: ((AIToolCall) -> Void)?) async throws {
         let baseURL = StreamableAIProvider.anthropic.directBaseURL
-        let url = URL(string: "\(baseURL)/messages")!
+        guard let url = URL(string: "\(baseURL)/messages") else {
+            throw NSError(domain: "AIClient", code: -1, userInfo: [NSLocalizedDescriptionKey: "Invalid URL configuration for anthropic"])
+        }
         var request = URLRequest(url: url, timeoutInterval: requestTimeout)
         request.httpMethod = "POST"
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
@@ -1186,7 +1195,9 @@ final class AIClient: ObservableObject {
         let baseURL = StreamableAIProvider.gemini.directBaseURL
         let normalizedModel = normalizeModelName(model, provider: .gemini, baseURL: baseURL)
         let cleanModel = normalizedModel.hasPrefix("models/") ? String(normalizedModel.dropFirst(7)) : normalizedModel
-        let url = URL(string: "\(baseURL)/models/\(cleanModel):generateContent?key=\(apiKey)")!
+        guard let url = URL(string: "\(baseURL)/models/\(cleanModel):generateContent?key=\(apiKey)") else {
+            throw NSError(domain: "AIClient", code: -1, userInfo: [NSLocalizedDescriptionKey: "Invalid URL configuration for gemini"])
+        }
         var request = URLRequest(url: url, timeoutInterval: requestTimeout)
         request.httpMethod = "POST"
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
@@ -1272,7 +1283,9 @@ final class AIClient: ObservableObject {
     }
     
     private func syncOpenAI(messages: [[(String, Any)]], systemPrompt: String?, model: String, apiKey: String, baseURL: String, tools: [[String: Any]]?) async throws -> (text: String, toolCalls: [AIToolCall]) {
-        let url = URL(string: "\(baseURL)/chat/completions")!
+        guard let url = URL(string: "\(baseURL)/chat/completions") else {
+            throw NSError(domain: "AIClient", code: -1, userInfo: [NSLocalizedDescriptionKey: "Invalid URL configuration for openai"])
+        }
         var request = URLRequest(url: url, timeoutInterval: requestTimeout)
         request.httpMethod = "POST"
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
@@ -1375,7 +1388,9 @@ final class AIClient: ObservableObject {
     
     private func syncAnthropic(messages: [[(String, Any)]], systemPrompt: String?, model: String, apiKey: String, tools: [[String: Any]]?) async throws -> (text: String, toolCalls: [AIToolCall]) {
         let baseURL = StreamableAIProvider.anthropic.directBaseURL
-        let url = URL(string: "\(baseURL)/messages")!
+        guard let url = URL(string: "\(baseURL)/messages") else {
+            throw NSError(domain: "AIClient", code: -1, userInfo: [NSLocalizedDescriptionKey: "Invalid URL configuration for anthropic"])
+        }
         var request = URLRequest(url: url, timeoutInterval: requestTimeout)
         request.httpMethod = "POST"
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
