@@ -45,17 +45,17 @@ impl GeminiProvider {
 impl AIProvider for GeminiProvider {
     async fn generate(&self, prompt: &str, config: &AIConfig) -> Result<String> {
         let (url, auth_header) = if config.use_microrent_proxy
-            || env::var("USE_MICRORENT_PROXY").unwrap_or_else(|_| "0".to_string()) == "1"
+            || env::var("USE_DOTMINI_PROXY").unwrap_or_else(|_| "0".to_string()) == "1"
         {
-            let proxy_url = env::var("MICRORENT_PROXY_URL").map_err(|_| {
-                AppError::AIProviderError("MICRORENT_PROXY_URL not configured".to_string())
+            let proxy_url = env::var("DOTMINI_API_BASE_URL").map_err(|_| {
+                AppError::AIProviderError("DOTMINI_API_BASE_URL not configured".to_string())
             })?;
             let token = config
                 .microrent_token
                 .clone()
-                .or_else(|| env::var("MICRORENT_TOKEN").ok())
+                .or_else(|| env::var("DOTMINI_API_TOKEN").ok())
                 .ok_or_else(|| {
-                    AppError::AIProviderError("MICRORENT_TOKEN not found for Gateway".to_string())
+                    AppError::AIProviderError("DOTMINI_API_TOKEN not found for Gateway".to_string())
                 })?;
             (proxy_url, format!("Bearer {}", token))
         } else {
@@ -170,17 +170,17 @@ impl AIProvider for GeminiProvider {
         config: &AIConfig,
     ) -> Result<futures::stream::BoxStream<'static, Result<String>>> {
         let (url, auth_header) = if config.use_microrent_proxy
-            || env::var("USE_MICRORENT_PROXY").unwrap_or_else(|_| "0".to_string()) == "1"
+            || env::var("USE_DOTMINI_PROXY").unwrap_or_else(|_| "0".to_string()) == "1"
         {
-            let proxy_url = env::var("MICRORENT_PROXY_URL").map_err(|_| {
-                AppError::AIProviderError("MICRORENT_PROXY_URL not configured".to_string())
+            let proxy_url = env::var("DOTMINI_API_BASE_URL").map_err(|_| {
+                AppError::AIProviderError("DOTMINI_API_BASE_URL not configured".to_string())
             })?;
             let token = config
                 .microrent_token
                 .clone()
-                .or_else(|| env::var("MICRORENT_TOKEN").ok())
+                .or_else(|| env::var("DOTMINI_API_TOKEN").ok())
                 .ok_or_else(|| {
-                    AppError::AIProviderError("MICRORENT_TOKEN not found for Gateway".to_string())
+                    AppError::AIProviderError("DOTMINI_API_TOKEN not found for Gateway".to_string())
                 })?;
             (proxy_url, format!("Bearer {}", token))
         } else {
@@ -256,48 +256,48 @@ impl AIProvider for GeminiProvider {
             )));
         }
 
+        use eventsource_stream::Eventsource;
         use futures::StreamExt;
 
-        let mut stream = response.bytes_stream();
-        let re = std::sync::OnceLock::new();
+        let stream = response
+            .bytes_stream()
+            .eventsource()
+            .map(|event| match event {
+                Ok(event) => {
+                    if event.data.is_empty() {
+                        return Ok("".to_string());
+                    }
+                    let json: serde_json::Value = serde_json::from_str(&event.data)
+                        .map_err(|e| AppError::AIRequestFailed(e.to_string()))?;
 
-        // Manual stream implementation with proper buffer management
-        let stream = async_stream::stream! {
-            let re = re.get_or_init(|| regex::Regex::new(r#""text":\s*"([^"]*)""#).unwrap());
-            let mut buffer = String::new();
-            const OVERLAP: usize = 200; // Keep last N bytes for split-token handling
-
-            while let Some(chunk_res) = stream.next().await {
-                match chunk_res {
-                    Ok(bytes) => {
-                        let s = String::from_utf8_lossy(&bytes);
-                        buffer.push_str(&s);
-
-                        // Find all matches in accumulated buffer
-                        let mut last_match_end = 0;
-                        for cap in re.captures_iter(&buffer) {
-                            let part = cap[1].replace("\\n", "\n").replace("\\\"", "\"").replace("\\\\", "\\");
-                            if let Some(m) = cap.get(0) {
-                                last_match_end = m.end();
+                    if let Some(candidates) = json.get("candidates") {
+                        if let Some(candidate) = candidates.get(0) {
+                            if let Some(content) = candidate.get("content") {
+                                if let Some(parts) = content.get("parts") {
+                                    let mut result = String::new();
+                                    if let Some(parts_array) = parts.as_array() {
+                                        for part in parts_array {
+                                            if part.get("thought").and_then(|t| t.as_bool()).unwrap_or(false) {
+                                                if let Some(text) = part.get("text").and_then(|t| t.as_str()) {
+                                                    result.push_str(&format!("<thought>{}</thought>", text));
+                                                }
+                                            } else if let Some(text) = part.get("text").and_then(|t| t.as_str()) {
+                                                result.push_str(text);
+                                            }
+                                        }
+                                    }
+                                    return Ok(result);
+                                }
                             }
-                            yield Ok(part);
-                        }
-
-                        // Trim processed content, keeping overlap for split tokens
-                        if last_match_end > 0 && buffer.len() > OVERLAP {
-                            let trim_to = last_match_end.saturating_sub(OVERLAP);
-                            buffer = buffer[trim_to..].to_string();
-                        } else if buffer.len() > 8192 {
-                            // Safety valve: if buffer grows too large without matches, trim it
-                            buffer = buffer[buffer.len() - OVERLAP..].to_string();
                         }
                     }
-                    Err(e) => yield Err(AppError::AIRequestFailed(e.to_string())),
+                    Ok("".to_string())
                 }
-            }
-        };
+                Err(e) => Err(AppError::AIRequestFailed(e.to_string())),
+            })
+            .boxed();
 
-        Ok(Box::pin(stream))
+        Ok(stream)
     }
 
     fn name(&self) -> &str {
@@ -360,17 +360,17 @@ impl OpenAIProvider {
 impl AIProvider for OpenAIProvider {
     async fn generate(&self, prompt: &str, config: &AIConfig) -> Result<String> {
         let (url, auth_header) = if config.use_microrent_proxy
-            || env::var("USE_MICRORENT_PROXY").unwrap_or_else(|_| "0".to_string()) == "1"
+            || env::var("USE_DOTMINI_PROXY").unwrap_or_else(|_| "0".to_string()) == "1"
         {
-            let proxy_url = env::var("MICRORENT_PROXY_URL").map_err(|_| {
-                AppError::AIProviderError("MICRORENT_PROXY_URL not configured".to_string())
+            let proxy_url = env::var("DOTMINI_API_BASE_URL").map_err(|_| {
+                AppError::AIProviderError("DOTMINI_API_BASE_URL not configured".to_string())
             })?;
             let token = config
                 .microrent_token
                 .clone()
-                .or_else(|| env::var("MICRORENT_TOKEN").ok())
+                .or_else(|| env::var("DOTMINI_API_TOKEN").ok())
                 .ok_or_else(|| {
-                    AppError::AIProviderError("MICRORENT_TOKEN not found for Gateway".to_string())
+                    AppError::AIProviderError("DOTMINI_API_TOKEN not found for Gateway".to_string())
                 })?;
             (proxy_url, format!("Bearer {}", token))
         } else {
@@ -434,7 +434,7 @@ impl AIProvider for OpenAIProvider {
             .json(&request);
 
         if config.use_microrent_proxy
-            || env::var("USE_MICRORENT_PROXY").unwrap_or_else(|_| "0".to_string()) == "1"
+            || env::var("USE_DOTMINI_PROXY").unwrap_or_else(|_| "0".to_string()) == "1"
         {
             request_builder = request_builder
                 .header("x-microrent-provider", "openai")
@@ -473,17 +473,17 @@ impl AIProvider for OpenAIProvider {
         config: &AIConfig,
     ) -> Result<futures::stream::BoxStream<'static, Result<String>>> {
         let (url, auth_header) = if config.use_microrent_proxy
-            || env::var("USE_MICRORENT_PROXY").unwrap_or_else(|_| "0".to_string()) == "1"
+            || env::var("USE_DOTMINI_PROXY").unwrap_or_else(|_| "0".to_string()) == "1"
         {
-            let proxy_url = env::var("MICRORENT_PROXY_URL").map_err(|_| {
-                AppError::AIProviderError("MICRORENT_PROXY_URL not configured".to_string())
+            let proxy_url = env::var("DOTMINI_API_BASE_URL").map_err(|_| {
+                AppError::AIProviderError("DOTMINI_API_BASE_URL not configured".to_string())
             })?;
             let token = config
                 .microrent_token
                 .clone()
-                .or_else(|| env::var("MICRORENT_TOKEN").ok())
+                .or_else(|| env::var("DOTMINI_API_TOKEN").ok())
                 .ok_or_else(|| {
-                    AppError::AIProviderError("MICRORENT_TOKEN not found for Gateway".to_string())
+                    AppError::AIProviderError("DOTMINI_API_TOKEN not found for Gateway".to_string())
                 })?;
             (proxy_url, format!("Bearer {}", token))
         } else {
@@ -534,7 +534,7 @@ impl AIProvider for OpenAIProvider {
             .json(&request);
 
         if config.use_microrent_proxy
-            || env::var("USE_MICRORENT_PROXY").unwrap_or_else(|_| "0".to_string()) == "1"
+            || env::var("USE_DOTMINI_PROXY").unwrap_or_else(|_| "0".to_string()) == "1"
         {
             request_builder = request_builder
                 .header("x-microrent-provider", "openai")
@@ -642,17 +642,17 @@ impl ClaudeProvider {
 impl AIProvider for ClaudeProvider {
     async fn generate(&self, prompt: &str, config: &AIConfig) -> Result<String> {
         let (url, auth_header) = if config.use_microrent_proxy
-            || env::var("USE_MICRORENT_PROXY").unwrap_or_else(|_| "0".to_string()) == "1"
+            || env::var("USE_DOTMINI_PROXY").unwrap_or_else(|_| "0".to_string()) == "1"
         {
-            let proxy_url = env::var("MICRORENT_PROXY_URL").map_err(|_| {
-                AppError::AIProviderError("MICRORENT_PROXY_URL not configured".to_string())
+            let proxy_url = env::var("DOTMINI_API_BASE_URL").map_err(|_| {
+                AppError::AIProviderError("DOTMINI_API_BASE_URL not configured".to_string())
             })?;
             let token = config
                 .microrent_token
                 .clone()
-                .or_else(|| env::var("MICRORENT_TOKEN").ok())
+                .or_else(|| env::var("DOTMINI_API_TOKEN").ok())
                 .ok_or_else(|| {
-                    AppError::AIProviderError("MICRORENT_TOKEN not found for Gateway".to_string())
+                    AppError::AIProviderError("DOTMINI_API_TOKEN not found for Gateway".to_string())
                 })?;
             (proxy_url, format!("Bearer {}", token))
         } else {
@@ -703,7 +703,7 @@ impl AIProvider for ClaudeProvider {
         let mut request_builder = self.client.post(url);
 
         if config.use_microrent_proxy
-            || env::var("USE_MICRORENT_PROXY").unwrap_or_else(|_| "0".to_string()) == "1"
+            || env::var("USE_DOTMINI_PROXY").unwrap_or_else(|_| "0".to_string()) == "1"
         {
             request_builder = request_builder
                 .header("Authorization", auth_header)
@@ -713,7 +713,7 @@ impl AIProvider for ClaudeProvider {
         } else {
             request_builder = request_builder
                 .header("x-api-key", auth_header)
-                .header("anthropic-version", "2023-06-01");
+                .header("anthropic-version", "2024-10-22");
         }
 
         let response = request_builder
@@ -749,17 +749,17 @@ impl AIProvider for ClaudeProvider {
         config: &AIConfig,
     ) -> Result<futures::stream::BoxStream<'static, Result<String>>> {
         let (url, auth_header) = if config.use_microrent_proxy
-            || env::var("USE_MICRORENT_PROXY").unwrap_or_else(|_| "0".to_string()) == "1"
+            || env::var("USE_DOTMINI_PROXY").unwrap_or_else(|_| "0".to_string()) == "1"
         {
-            let proxy_url = env::var("MICRORENT_PROXY_URL").map_err(|_| {
-                AppError::AIProviderError("MICRORENT_PROXY_URL not configured".to_string())
+            let proxy_url = env::var("DOTMINI_API_BASE_URL").map_err(|_| {
+                AppError::AIProviderError("DOTMINI_API_BASE_URL not configured".to_string())
             })?;
             let token = config
                 .microrent_token
                 .clone()
-                .or_else(|| env::var("MICRORENT_TOKEN").ok())
+                .or_else(|| env::var("DOTMINI_API_TOKEN").ok())
                 .ok_or_else(|| {
-                    AppError::AIProviderError("MICRORENT_TOKEN not found for Gateway".to_string())
+                    AppError::AIProviderError("DOTMINI_API_TOKEN not found for Gateway".to_string())
                 })?;
             (proxy_url, format!("Bearer {}", token))
         } else {
@@ -802,7 +802,7 @@ impl AIProvider for ClaudeProvider {
         let mut request_builder = self.client.post(url);
 
         if config.use_microrent_proxy
-            || env::var("USE_MICRORENT_PROXY").unwrap_or_else(|_| "0".to_string()) == "1"
+            || env::var("USE_DOTMINI_PROXY").unwrap_or_else(|_| "0".to_string()) == "1"
         {
             request_builder = request_builder
                 .header("Authorization", auth_header)
@@ -812,7 +812,7 @@ impl AIProvider for ClaudeProvider {
         } else {
             request_builder = request_builder
                 .header("x-api-key", auth_header)
-                .header("anthropic-version", "2023-06-01");
+                .header("anthropic-version", "2024-10-22");
         }
 
         let response = request_builder
@@ -909,17 +909,17 @@ impl DeepSeekProvider {
 impl AIProvider for DeepSeekProvider {
     async fn generate(&self, prompt: &str, config: &AIConfig) -> Result<String> {
         let (url, auth_header) = if config.use_microrent_proxy
-            || env::var("USE_MICRORENT_PROXY").unwrap_or_else(|_| "0".to_string()) == "1"
+            || env::var("USE_DOTMINI_PROXY").unwrap_or_else(|_| "0".to_string()) == "1"
         {
-            let proxy_url = env::var("MICRORENT_PROXY_URL").map_err(|_| {
-                AppError::AIProviderError("MICRORENT_PROXY_URL not configured".to_string())
+            let proxy_url = env::var("DOTMINI_API_BASE_URL").map_err(|_| {
+                AppError::AIProviderError("DOTMINI_API_BASE_URL not configured".to_string())
             })?;
             let token = config
                 .microrent_token
                 .clone()
-                .or_else(|| env::var("MICRORENT_TOKEN").ok())
+                .or_else(|| env::var("DOTMINI_API_TOKEN").ok())
                 .ok_or_else(|| {
-                    AppError::AIProviderError("MICRORENT_TOKEN not found for Gateway".to_string())
+                    AppError::AIProviderError("DOTMINI_API_TOKEN not found for Gateway".to_string())
                 })?;
             (proxy_url, format!("Bearer {}", token))
         } else {
@@ -983,7 +983,7 @@ impl AIProvider for DeepSeekProvider {
             .json(&request);
 
         if config.use_microrent_proxy
-            || env::var("USE_MICRORENT_PROXY").unwrap_or_else(|_| "0".to_string()) == "1"
+            || env::var("USE_DOTMINI_PROXY").unwrap_or_else(|_| "0".to_string()) == "1"
         {
             request_builder = request_builder
                 .header("x-microrent-provider", "openai") // DeepSeek uses OpenAI format
@@ -1022,17 +1022,17 @@ impl AIProvider for DeepSeekProvider {
         config: &AIConfig,
     ) -> Result<futures::stream::BoxStream<'static, Result<String>>> {
         let (url, auth_header) = if config.use_microrent_proxy
-            || env::var("USE_MICRORENT_PROXY").unwrap_or_else(|_| "0".to_string()) == "1"
+            || env::var("USE_DOTMINI_PROXY").unwrap_or_else(|_| "0".to_string()) == "1"
         {
-            let proxy_url = env::var("MICRORENT_PROXY_URL").map_err(|_| {
-                AppError::AIProviderError("MICRORENT_PROXY_URL not configured".to_string())
+            let proxy_url = env::var("DOTMINI_API_BASE_URL").map_err(|_| {
+                AppError::AIProviderError("DOTMINI_API_BASE_URL not configured".to_string())
             })?;
             let token = config
                 .microrent_token
                 .clone()
-                .or_else(|| env::var("MICRORENT_TOKEN").ok())
+                .or_else(|| env::var("DOTMINI_API_TOKEN").ok())
                 .ok_or_else(|| {
-                    AppError::AIProviderError("MICRORENT_TOKEN not found for Gateway".to_string())
+                    AppError::AIProviderError("DOTMINI_API_TOKEN not found for Gateway".to_string())
                 })?;
             (proxy_url, format!("Bearer {}", token))
         } else {
@@ -1083,7 +1083,7 @@ impl AIProvider for DeepSeekProvider {
             .json(&request);
 
         if config.use_microrent_proxy
-            || env::var("USE_MICRORENT_PROXY").unwrap_or_else(|_| "0".to_string()) == "1"
+            || env::var("USE_DOTMINI_PROXY").unwrap_or_else(|_| "0".to_string()) == "1"
         {
             request_builder = request_builder
                 .header("x-microrent-provider", "openai") // DeepSeek uses OpenAI format
@@ -1774,7 +1774,7 @@ pub fn get_provider(provider_name: &str) -> Result<Box<dyn AIProvider>> {
     let proxy_enabled = env::var("DOTMINI_API_BASE_URL")
         .map(|url| !url.trim().is_empty())
         .unwrap_or(false)
-        && env::var("USE_MICRORENT_PROXY")
+        && env::var("USE_DOTMINI_PROXY")
             .map(|v| v == "1")
             .unwrap_or(false);
 
@@ -1926,10 +1926,10 @@ pub async fn list_models() -> Result<Vec<AIModel>> {
         Box::new(GeminiProvider::new()),
         Box::new(OpenAIProvider::new()),
         Box::new(ClaudeProvider::new()),
-        Box::new(DeepSeekProvider::new()),
-        Box::new(GLMProvider::new()),
-        Box::new(GrokProvider::new()),
-        Box::new(QwenProvider::new()),
+        get_provider("deepseek").unwrap(),
+        get_provider("glm").unwrap(),
+        get_provider("grok").unwrap(),
+        get_provider("qwen").unwrap(),
     ];
 
     for provider in providers {

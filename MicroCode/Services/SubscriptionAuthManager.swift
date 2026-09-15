@@ -355,11 +355,13 @@ public class SubscriptionAuthManager: ObservableObject {
             lastVerified: Date()
         )
         accounts[provider] = account
+        saveTokenToKeychain(provider: provider.rawValue, token: trimmedToken)
         persistAccounts()
     }
     
     public func disconnect(provider: SubscriptionProviderType) {
         accounts.removeValue(forKey: provider)
+        deleteTokenFromKeychain(provider: provider.rawValue)
         persistAccounts()
     }
     
@@ -398,13 +400,22 @@ public class SubscriptionAuthManager: ObservableObject {
                 
                 // Verify token before saving
                 if !token.isEmpty {
-                    var req = URLRequest(url: URL(string: "https://api.openai.com/v1/models")!)
-                    req.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
-                    req.timeoutInterval = 5
-                    if let (_, resp) = try? await URLSession.shared.data(for: req),
-                       let http = resp as? HTTPURLResponse, http.statusCode == 200 {
+                    // If it looks like a real API key, verify it
+                    if token.hasPrefix("sk-") {
+                        var req = URLRequest(url: URL(string: "https://api.openai.com/v1/models")!)
+                        req.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
+                        req.timeoutInterval = 5
+                        if let (_, resp) = try? await URLSession.shared.data(for: req),
+                           let http = resp as? HTTPURLResponse, http.statusCode == 200 {
+                            DispatchQueue.main.async {
+                                self.saveAccount(provider: .chatgpt, emailOrUser: email, sessionToken: token, source: "Codex CLI")
+                            }
+                            detected += 1
+                        }
+                    } else {
+                        // OAuth token from CLI - trust the file existence as proof of auth
                         DispatchQueue.main.async {
-                            self.saveAccount(provider: .chatgpt, emailOrUser: email, sessionToken: token, source: "Manual")
+                            self.saveAccount(provider: .chatgpt, emailOrUser: email.isEmpty ? "Codex CLI User" : email, sessionToken: token, source: "Codex CLI")
                         }
                         detected += 1
                     }
@@ -424,25 +435,30 @@ public class SubscriptionAuthManager: ObservableObject {
             }
         }
         if claudeToken == nil {
-            claudeToken = fetchFromKeychain(service: "Claude Code")
+            claudeToken = await fetchFromKeychainAsync(service: "Claude Code")
         }
         
         if let token = claudeToken, !token.isEmpty {
             if token.hasPrefix("sk-ant-") {
-                // Claude CLI stored an API key, NOT a web session. Route directly to BYOK!
-                UserDefaults.standard.set(token, forKey: "anthropic_api_key")
-            } else {
+                // Real API key - verify and save as direct key
                 var req = URLRequest(url: URL(string: "https://api.anthropic.com/v1/models")!)
                 req.setValue(token, forHTTPHeaderField: "x-api-key")
-                req.setValue("2023-06-01", forHTTPHeaderField: "anthropic-version")
+                req.setValue("2024-10-22", forHTTPHeaderField: "anthropic-version")
                 req.timeoutInterval = 5
                 if let (_, resp) = try? await URLSession.shared.data(for: req),
                    let http = resp as? HTTPURLResponse, http.statusCode == 200 {
+                    UserDefaults.standard.set(token, forKey: "anthropic_api_key")
                     DispatchQueue.main.async {
-                        self.saveAccount(provider: .claude, emailOrUser: "Claude Authenticated", sessionToken: token, source: "Manual")
+                        self.saveAccount(provider: .claude, emailOrUser: "Claude API", sessionToken: token, source: "Claude CLI")
                     }
                     detected += 1
                 }
+            } else {
+                // Session/OAuth token from Claude CLI - trust file existence
+                DispatchQueue.main.async {
+                    self.saveAccount(provider: .claude, emailOrUser: "Claude CLI User", sessionToken: token, source: "Claude CLI")
+                }
+                detected += 1
             }
         }
         
@@ -466,7 +482,7 @@ public class SubscriptionAuthManager: ObservableObject {
             }
         }
         if ghToken == nil {
-            ghToken = fetchInternetPasswordFromKeychain(server: "github.com")
+            ghToken = await fetchInternetPasswordFromKeychainAsync(server: "github.com")
         }
         
         if let token = ghToken, !token.isEmpty {
@@ -485,6 +501,34 @@ public class SubscriptionAuthManager: ObservableObject {
             }
         }
         
+        // 4. Check for Gemini / Google Cloud ADC
+        let adcPath = home.appendingPathComponent(".config/gcloud/application_default_credentials.json")
+        if FileManager.default.fileExists(atPath: adcPath.path),
+           let data = try? Data(contentsOf: adcPath),
+           let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] {
+            // ADC detected - Gemini can use it
+            DispatchQueue.main.async {
+                self.saveAccount(provider: .gemini, emailOrUser: "Google Cloud ADC", sessionToken: "adc", source: "Google Cloud CLI")
+            }
+            detected += 1
+        }
+        
+        // Also check GEMINI_API_KEY env var
+        if let geminiKey = ProcessInfo.processInfo.environment["GEMINI_API_KEY"], !geminiKey.isEmpty {
+            DispatchQueue.main.async {
+                self.saveAccount(provider: .gemini, emailOrUser: "Gemini API", sessionToken: geminiKey, source: "Environment")
+            }
+            detected += 1
+        }
+        
+        // 5. Check for DeepSeek
+        if let dsKey = ProcessInfo.processInfo.environment["DEEPSEEK_API_KEY"], !dsKey.isEmpty {
+            DispatchQueue.main.async {
+                self.saveAccount(provider: .deepseek, emailOrUser: "DeepSeek API", sessionToken: dsKey, source: "Environment")
+            }
+            detected += 1
+        }
+        
         let finalDetected = detected
         DispatchQueue.main.async {
             self.detectedSessionCount = finalDetected
@@ -496,40 +540,90 @@ public class SubscriptionAuthManager: ObservableObject {
         }
     }
     
-    private func fetchFromKeychain(service: String) -> String? {
-        let process = Process()
-        process.executableURL = URL(fileURLWithPath: "/usr/bin/security")
-        process.arguments = ["find-generic-password", "-s", service, "-w"]
-        let pipe = Pipe()
-        process.standardOutput = pipe
-        process.standardError = Pipe()
-        do {
-            try process.run()
-            process.waitUntilExit()
-            let data = pipe.fileHandleForReading.readDataToEndOfFile()
-            if let output = String(data: data, encoding: .utf8)?.trimmingCharacters(in: .whitespacesAndNewlines), !output.isEmpty {
-                return output
+    private func fetchFromKeychainAsync(service: String) async -> String? {
+        await withCheckedContinuation { continuation in
+            DispatchQueue.global(qos: .utility).async {
+                let process = Process()
+                process.executableURL = URL(fileURLWithPath: "/usr/bin/security")
+                process.arguments = ["find-generic-password", "-s", service, "-w"]
+                let pipe = Pipe()
+                process.standardOutput = pipe
+                process.standardError = Pipe()
+                do {
+                    try process.run()
+                    process.waitUntilExit()
+                    let data = pipe.fileHandleForReading.readDataToEndOfFile()
+                    if let output = String(data: data, encoding: .utf8)?.trimmingCharacters(in: .whitespacesAndNewlines), !output.isEmpty {
+                        continuation.resume(returning: output)
+                        return
+                    }
+                } catch {}
+                continuation.resume(returning: nil)
             }
-        } catch {}
-        return nil
+        }
     }
     
-    private func fetchInternetPasswordFromKeychain(server: String) -> String? {
-        let process = Process()
-        process.executableURL = URL(fileURLWithPath: "/usr/bin/security")
-        process.arguments = ["find-internet-password", "-s", server, "-w"]
-        let pipe = Pipe()
-        process.standardOutput = pipe
-        process.standardError = Pipe()
-        do {
-            try process.run()
-            process.waitUntilExit()
-            let data = pipe.fileHandleForReading.readDataToEndOfFile()
-            if let output = String(data: data, encoding: .utf8)?.trimmingCharacters(in: .whitespacesAndNewlines), !output.isEmpty {
-                return output
+    private func fetchInternetPasswordFromKeychainAsync(server: String) async -> String? {
+        await withCheckedContinuation { continuation in
+            DispatchQueue.global(qos: .utility).async {
+                let process = Process()
+                process.executableURL = URL(fileURLWithPath: "/usr/bin/security")
+                process.arguments = ["find-internet-password", "-s", server, "-w"]
+                let pipe = Pipe()
+                process.standardOutput = pipe
+                process.standardError = Pipe()
+                do {
+                    try process.run()
+                    process.waitUntilExit()
+                    let data = pipe.fileHandleForReading.readDataToEndOfFile()
+                    if let output = String(data: data, encoding: .utf8)?.trimmingCharacters(in: .whitespacesAndNewlines), !output.isEmpty {
+                        continuation.resume(returning: output)
+                        return
+                    }
+                } catch {}
+                continuation.resume(returning: nil)
             }
-        } catch {}
-        return nil
+        }
+    }
+    
+    private func saveTokenToKeychain(provider: String, token: String) {
+        let service = "com.dotmini.microcode.subscription"
+        let query: [String: Any] = [
+            kSecClass as String: kSecClassGenericPassword,
+            kSecAttrService as String: service,
+            kSecAttrAccount as String: provider
+        ]
+        SecItemDelete(query as CFDictionary)
+        
+        guard let data = token.data(using: .utf8) else { return }
+        var addQuery = query
+        addQuery[kSecValueData as String] = data
+        SecItemAdd(addQuery as CFDictionary, nil)
+    }
+
+    private func loadTokenFromKeychain(provider: String) -> String? {
+        let service = "com.dotmini.microcode.subscription"
+        let query: [String: Any] = [
+            kSecClass as String: kSecClassGenericPassword,
+            kSecAttrService as String: service,
+            kSecAttrAccount as String: provider,
+            kSecReturnData as String: true,
+            kSecMatchLimit as String: kSecMatchLimitOne
+        ]
+        var result: AnyObject?
+        let status = SecItemCopyMatching(query as CFDictionary, &result)
+        guard status == errSecSuccess, let data = result as? Data else { return nil }
+        return String(data: data, encoding: .utf8)
+    }
+
+    private func deleteTokenFromKeychain(provider: String) {
+        let service = "com.dotmini.microcode.subscription"
+        let query: [String: Any] = [
+            kSecClass as String: kSecClassGenericPassword,
+            kSecAttrService as String: service,
+            kSecAttrAccount as String: provider
+        ]
+        SecItemDelete(query as CFDictionary)
     }
     
     private func base64Padded(_ str: String) -> String {
@@ -673,6 +767,7 @@ public class SubscriptionAuthManager: ObservableObject {
                             )
                             await MainActor.run {
                                 self.accounts[.copilot] = account
+                                self.saveTokenToKeychain(provider: SubscriptionProviderType.copilot.rawValue, token: accessToken)
                                 self.persistAccounts()
                                 onSuccess(account)
                             }
@@ -689,6 +784,9 @@ public class SubscriptionAuthManager: ObservableObject {
     }
     
     public func clearAllAccounts() {
+        for provider in accounts.keys {
+            deleteTokenFromKeychain(provider: provider.rawValue)
+        }
         accounts.removeAll()
         copilotLock.lock()
         cachedCopilotSessionToken = nil
@@ -709,7 +807,11 @@ public class SubscriptionAuthManager: ObservableObject {
             var validAccounts: [SubscriptionProviderType: SubscriptionAccount] = [:]
             var didRedirectAPIKey = false
             for (prov, acc) in decoded {
-                let tok = acc.sessionToken.trimmingCharacters(in: .whitespacesAndNewlines)
+                var loadedToken = acc.sessionToken
+                if let keychainToken = loadTokenFromKeychain(provider: prov.rawValue) {
+                    loadedToken = keychainToken
+                }
+                let tok = loadedToken.trimmingCharacters(in: .whitespacesAndNewlines)
                 // Redirect raw API keys to BYOK storage (not subscription accounts)
                 if tok.hasPrefix("sk-ant-") {
                     UserDefaults.standard.set(tok, forKey: "anthropic_api_key")
@@ -723,7 +825,9 @@ public class SubscriptionAuthManager: ObservableObject {
                 // Accept any valid account regardless of source
                 // (sources: "Manual", "Web Sign-In (1-Click)", "Manual Input")
                 if acc.isValid && !tok.isEmpty {
-                    validAccounts[prov] = acc
+                    var updatedAcc = acc
+                    updatedAcc.sessionToken = tok
+                    validAccounts[prov] = updatedAcc
                 }
             }
             self.accounts = validAccounts

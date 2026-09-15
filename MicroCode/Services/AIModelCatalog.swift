@@ -312,7 +312,7 @@ final class AIModelCatalog: ObservableObject {
         guard !key.isEmpty, let url = URL(string: "https://api.anthropic.com/v1/models") else { return }
         var req = URLRequest(url: url, timeoutInterval: 8)
         req.setValue(key, forHTTPHeaderField: "x-api-key")
-        req.setValue("2023-06-01", forHTTPHeaderField: "anthropic-version")
+        req.setValue("2024-10-22", forHTTPHeaderField: "anthropic-version")
         req.setValue("application/json", forHTTPHeaderField: "Accept")
         
         guard let (data, resp) = try? await URLSession.shared.data(for: req),

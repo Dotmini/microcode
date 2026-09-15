@@ -167,14 +167,42 @@ pub struct HighlightCodeResponse {
 // AI Operations
 // ==========================================
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "lowercase")]
+pub enum AIProviderType {
+    Gemini, OpenAI, Anthropic, DeepSeek, Qwen, GLM, Grok, Ollama, Local
+}
+
+impl std::str::FromStr for AIProviderType {
+    type Err = String;
+
+    fn from_str(s: &str) -> std::result::Result<Self, Self::Err> {
+        match s.to_lowercase().as_str() {
+            "gemini" => Ok(AIProviderType::Gemini),
+            "openai" => Ok(AIProviderType::OpenAI),
+            "anthropic" | "claude" => Ok(AIProviderType::Anthropic),
+            "deepseek" => Ok(AIProviderType::DeepSeek),
+            "qwen" | "alibaba" => Ok(AIProviderType::Qwen),
+            "glm" | "zhipu" => Ok(AIProviderType::GLM),
+            "grok" | "xai" => Ok(AIProviderType::Grok),
+            "ollama" => Ok(AIProviderType::Ollama),
+            "local" => Ok(AIProviderType::Local),
+            _ => Err(format!("Unknown provider type: {}", s)),
+        }
+    }
+}
+
+fn default_temperature() -> f32 { 0.7 }
+fn default_max_tokens() -> usize { 4096 }
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AIConfig {
     pub provider: String, // "gemini", "openai", "anthropic"
     pub model: String,
     pub api_key: String,
-    #[serde(default)]
+    #[serde(default = "default_temperature")]
     pub temperature: f32,
-    #[serde(default)]
+    #[serde(default = "default_max_tokens")]
     pub max_tokens: usize,
     #[serde(default)]
     pub use_microrent_proxy: bool,
