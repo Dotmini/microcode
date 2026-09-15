@@ -232,47 +232,53 @@ High-performance compute offloading when local hardware isn't enough:
 
 ## Architecture
 
-```
-┌─────────────────────────────────────────────────────────────────────────────────┐
-│                                MicroCode.app                                    │
-│                                                                                 │
-│  ┌─────────────────────────┐  ┌───────────────────────┐  ┌────────────────────┐ │
-│  │   SwiftUI + AppKit UI   │  │  Metal Shader Engine  │  │ Objective-C++ Core │ │
-│  │                         │  │                       │  │                    │ │
-│  │ • Code Editor Tabs      │  │ • 120 FPS Device Dock │  │ • Text Buffer      │ │
-│  │ • AI Planning Workboard │  │ • GPU Text Rendering  │  │ • Token Layout     │ │
-│  │ • Developer Studios     │  │ • Liquid Glass UI     │  │ • Memory Primitives│ │
-│  │   (DB, API, CI/CD, Cell)│  │                       │  │                    │ │
-│  └────────────┬────────────┘  └───────────┬───────────┘  └─────────┬──────────┘ │
-│               │                           │                        │            │
-│               └───────────────────────────┼────────────────────────┘            │
-│                                           │ C ABI / Unix Socket / HTTP          │
-│  ┌────────────────────────────────────────▼──────────────────────────────────┐  │
-│  │                         Rust Backend (Axum + Tokio)                       │  │
-│  │                                                                           │  │
-│  │  ┌───────────────────────┐ ┌──────────────────────┐ ┌───────────────────┐  │  │
-│  │  │ AI Multi-Provider     │ │ Autonomous Agent     │ │ Tree-sitter       │  │  │
-│  │  │ (Gemini, Claude, GPT) │ │ & Planning Engine    │ │ Indexer & RepoMap │  │  │
-│  │  └───────────────────────┘ └──────────────────────┘ └───────────────────┘  │  │
-│  │  ┌───────────────────────┐ ┌──────────────────────┐ ┌───────────────────┐  │  │
-│  │  │ MCP Client / Server   │ │ CRDT Realtime Sync   │ │ Candle ML RAG     │  │  │
-│  │  │ Protocol Manager      │ │ Engine (P2P Collab)  │ │ Vector Store      │  │  │
-│  │  └───────────────────────┘ └──────────────────────┘ └───────────────────┘  │  │
-│  │  ┌───────────────────────┐ ┌──────────────────────┐ ┌───────────────────┐  │  │
-│  │  │ Git Engine            │ │ PTY Terminal Harness │ │ Wasmtime Sandbox  │  │  │
-│  │  │ & Sandbox Boundary    │ │ (ANSI TrueColor)     │ │ Extension Host    │  │  │
-│  │  └───────────────────────┘ └──────────────────────┘ └───────────────────┘  │  │
-│  └────────────────────────────────────────┬──────────────────────────────────┘  │
-│                                           │                                     │
-│  ┌────────────────────────────────────────┴──────────────────────────────────┐  │
-│  │                        External Subsystem Integration                     │  │
-│  │                                                                           │  │
-│  │ • Embedded Device Stream: scrcpy-server (Android ADB) / serve-sim (iOS)   │  │
-│  │ • Open VSX & Node.js VS Code Extension Compat Host                        │  │
-│  │ • Native Ardium v2.3 Compiler & Playground Runner                         │  │
-│  │ • Dotmini Cloud GPU Cluster Dispatch (A100/H100)                          │  │
-│  └───────────────────────────────────────────────────────────────────────────┘  │
-└─────────────────────────────────────────────────────────────────────────────────┘
+```mermaid
+flowchart TD
+    subgraph App["MicroCode.app (Native macOS)"]
+        direction TB
+        subgraph UIComponents["SwiftUI + AppKit UI"]
+            Tabs["Code Editor Tabs"]
+            Planning["AI Planning Workboard"]
+            Studios["Developer Studios (DB, API, CI/CD, Cell)"]
+        end
+
+        subgraph MetalEngine["Metal Shader Engine"]
+            DeviceDock["120 FPS Device Dock"]
+            GPUText["GPU Text Rendering"]
+            LiquidGlass["Liquid Glass UI"]
+        end
+
+        subgraph ObjCCore["Objective-C++ Core"]
+            TextBuffer["Text Buffer"]
+            TokenLayout["Token Layout"]
+            MemPrimitives["Memory Primitives"]
+        end
+
+        subgraph RustBackend["Rust Backend (Axum + Tokio)"]
+            AIProviders["AI Multi-Provider (Gemini, Claude, GPT)"]
+            AgentEngine["Autonomous Agent & Planning Engine"]
+            TreeSitter["Tree-sitter Indexer & RepoMap"]
+            MCPManager["MCP Client / Server Protocol Manager"]
+            CRDTSync["CRDT Realtime Sync Engine (P2P Collab)"]
+            CandleML["Candle ML RAG Vector Store"]
+            GitEngine["Git Engine & Sandbox Boundary"]
+            PTYTerminal["PTY Terminal Harness (ANSI TrueColor)"]
+            WasmtimeSandbox["Wasmtime Sandbox Extension Host"]
+        end
+
+        UIComponents -->|"C ABI / Unix Socket / HTTP"| RustBackend
+        MetalEngine -->|"C ABI / Unix Socket / HTTP"| RustBackend
+        ObjCCore -->|"C ABI / Unix Socket / HTTP"| RustBackend
+    end
+
+    subgraph External["External Subsystem Integration"]
+        DeviceStream["Embedded Device Stream (scrcpy ADB / serve-sim iOS)"]
+        OpenVSX["Open VSX & Node.js Extension Compat Host"]
+        ArdiumToolchain["Native Ardium v2.3 Compiler & Playground Runner"]
+        CloudGPU["Dotmini Cloud GPU Cluster Dispatch (A100/H100)"]
+    end
+
+    RustBackend --> External
 ```
 
 ### Tech Stack
