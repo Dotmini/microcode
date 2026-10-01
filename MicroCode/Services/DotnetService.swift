@@ -21,7 +21,7 @@ class DotnetService {
     
     func createProject(template: String, name: String, outputDir: String) async throws -> DotnetResult {
         let url = URL(string: "\(baseURL)/new")!
-        var request = URLRequest(url: url)
+        var request = LocalBackendAuth.request(url: url)
         request.httpMethod = "POST"
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
         request.timeoutInterval = 60 // 60 seconds timeout
@@ -72,7 +72,7 @@ class DotnetService {
     
     func buildProject(projectPath: String, configuration: String) async throws -> DotnetResult {
         let url = URL(string: "\(baseURL)/build")!
-        var request = URLRequest(url: url)
+        var request = LocalBackendAuth.request(url: url)
         request.httpMethod = "POST"
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
         
@@ -95,7 +95,7 @@ class DotnetService {
     
     func runProject(projectPath: String, args: [String]) async throws -> DotnetResult {
         let url = URL(string: "\(baseURL)/run")!
-        var request = URLRequest(url: url)
+        var request = LocalBackendAuth.request(url: url)
         request.httpMethod = "POST"
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
         
@@ -118,7 +118,7 @@ class DotnetService {
     
     func cleanProject(projectPath: String) async throws -> DotnetResult {
         let url = URL(string: "\(baseURL)/clean")!
-        var request = URLRequest(url: url)
+        var request = LocalBackendAuth.request(url: url)
         request.httpMethod = "POST"
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
         

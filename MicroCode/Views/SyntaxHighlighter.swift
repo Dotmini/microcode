@@ -134,16 +134,192 @@ struct LanguageRules {
         stringDelimiters: ["\"\"\"", "\""],
         commentPatterns: [("//", nil), ("/*", "*/")]
     )
+
+    static let c = LanguageRules(
+        keywords: ["if", "else", "for", "while", "do", "switch", "case", "default", "break", "continue", "return", "goto", "struct", "union", "enum", "typedef", "sizeof", "static", "extern", "const", "volatile", "inline", "true", "false", "NULL"],
+        types: ["int", "char", "float", "double", "void", "short", "long", "signed", "unsigned", "bool", "size_t", "int8_t", "int16_t", "int32_t", "int64_t", "uint8_t", "uint16_t", "uint32_t", "uint64_t", "uintptr_t"],
+        stringDelimiters: ["\"", "'"],
+        commentPatterns: [("//", nil), ("/*", "*/")]
+    )
+
+    static let cpp = LanguageRules(
+        keywords: ["if", "else", "for", "while", "do", "switch", "case", "default", "break", "continue", "return", "goto", "class", "struct", "union", "enum", "typedef", "namespace", "using", "template", "typename", "concept", "requires", "public", "private", "protected", "virtual", "override", "final", "constexpr", "consteval", "noexcept", "inline", "static", "extern", "mutable", "explicit", "friend", "const", "new", "delete", "this", "nullptr", "sizeof", "try", "catch", "throw", "co_await", "co_return", "co_yield", "true", "false"],
+        types: ["int", "char", "float", "double", "void", "bool", "auto", "size_t", "string", "string_view", "vector", "map", "set", "unordered_map", "unordered_set", "array", "deque", "list", "pair", "tuple", "unique_ptr", "shared_ptr", "weak_ptr", "optional", "variant", "any", "span", "thread", "mutex", "atomic"],
+        stringDelimiters: ["\"", "'"],
+        commentPatterns: [("//", nil), ("/*", "*/")]
+    )
+
+    static let objc = LanguageRules(
+        keywords: ["@interface", "@implementation", "@protocol", "@end", "@property", "@synthesize", "@dynamic", "@class", "@import", "@selector", "@encode", "@synchronized", "@autoreleasepool", "@try", "@catch", "@finally", "@throw", "nonatomic", "atomic", "strong", "weak", "assign", "copy", "readonly", "readwrite", "nullable", "nonnull", "self", "super", "if", "else", "for", "while", "return", "YES", "NO", "nil", "Nil", "NULL"],
+        types: ["id", "instancetype", "Class", "SEL", "BOOL", "NSInteger", "NSUInteger", "CGFloat", "NSString", "NSArray", "NSDictionary", "NSSet", "NSNumber", "NSData", "NSURL", "NSError", "NSObject", "UIView", "UIViewController", "NSView", "int", "float", "double", "char", "void"],
+        stringDelimiters: ["\"", "'"],
+        commentPatterns: [("//", nil), ("/*", "*/")]
+    )
+
+    static let csharp = LanguageRules(
+        keywords: ["class", "struct", "record", "interface", "enum", "delegate", "namespace", "using", "public", "private", "protected", "internal", "static", "readonly", "volatile", "virtual", "override", "abstract", "sealed", "async", "await", "unsafe", "partial", "required", "if", "else", "switch", "case", "default", "for", "foreach", "in", "while", "do", "break", "continue", "return", "goto", "yield", "throw", "try", "catch", "finally", "from", "where", "select", "new", "this", "base", "null", "true", "false", "is", "as", "typeof", "get", "set", "init"],
+        types: ["void", "bool", "byte", "char", "decimal", "double", "float", "int", "uint", "long", "ulong", "short", "ushort", "object", "string", "dynamic", "var", "Task", "List", "Dictionary", "IEnumerable", "Span"],
+        stringDelimiters: ["\"", "'"],
+        commentPatterns: [("//", nil), ("/*", "*/")]
+    )
+
+    static let dart = LanguageRules(
+        keywords: ["class", "enum", "mixin", "extension", "typedef", "import", "export", "part", "library", "as", "show", "hide", "abstract", "const", "final", "late", "static", "factory", "required", "async", "await", "sync", "yield", "if", "else", "switch", "case", "default", "for", "while", "do", "break", "continue", "return", "throw", "try", "catch", "finally", "rethrow", "assert", "extends", "with", "implements", "super", "this", "new", "is", "true", "false", "null"],
+        types: ["var", "dynamic", "void", "int", "double", "num", "bool", "String", "List", "Map", "Set", "Future", "Stream", "Widget", "StatelessWidget", "StatefulWidget", "State", "BuildContext", "Color", "Container", "Text", "Row", "Column", "Stack", "Scaffold", "AppBar", "MaterialApp"],
+        stringDelimiters: ["\"\"\"", "'''", "\"", "'"],
+        commentPatterns: [("//", nil), ("/*", "*/")]
+    )
+
+    static let java = LanguageRules(
+        keywords: ["class", "interface", "enum", "extends", "implements", "public", "private", "protected", "static", "final", "abstract", "synchronized", "volatile", "transient", "native", "strictfp", "import", "package", "if", "else", "switch", "case", "default", "for", "while", "do", "break", "continue", "return", "throw", "throws", "try", "catch", "finally", "new", "this", "super", "instanceof", "assert", "record", "sealed", "permits", "true", "false", "null"],
+        types: ["void", "boolean", "byte", "char", "short", "int", "long", "float", "double", "String", "Object", "List", "ArrayList", "Map", "HashMap", "Set", "HashSet", "Optional", "CompletableFuture"],
+        stringDelimiters: ["\"\"\"", "\""],
+        commentPatterns: [("//", nil), ("/*", "*/")]
+    )
+
+    static let kotlin = LanguageRules(
+        keywords: ["class", "interface", "object", "fun", "val", "var", "constructor", "init", "this", "super", "package", "import", "public", "private", "protected", "internal", "abstract", "final", "open", "override", "lateinit", "companion", "data", "sealed", "enum", "annotation", "suspend", "inline", "tailrec", "if", "else", "when", "for", "while", "do", "return", "break", "continue", "throw", "try", "catch", "finally", "is", "in", "as", "true", "false", "null"],
+        types: ["Any", "Unit", "Nothing", "Int", "Long", "Short", "Byte", "Float", "Double", "Boolean", "Char", "String", "Array", "List", "Map", "Set", "MutableList", "MutableMap"],
+        stringDelimiters: ["\"\"\"", "\""],
+        commentPatterns: [("//", nil), ("/*", "*/")]
+    )
+
+    static let php = LanguageRules(
+        keywords: ["function", "fn", "class", "interface", "trait", "enum", "extends", "implements", "public", "private", "protected", "static", "final", "readonly", "abstract", "const", "var", "global", "if", "else", "elseif", "switch", "case", "default", "match", "for", "foreach", "as", "while", "do", "break", "continue", "return", "goto", "try", "catch", "finally", "throw", "echo", "print", "isset", "empty", "unset", "include", "require", "namespace", "use", "new", "clone", "instanceof", "yield", "true", "false", "null", "self", "parent"],
+        types: ["string", "int", "float", "bool", "array", "object", "callable", "iterable", "void", "never", "mixed"],
+        stringDelimiters: ["\"", "'"],
+        commentPatterns: [("//", nil), ("#", nil), ("/*", "*/")]
+    )
+
+    static let ruby = LanguageRules(
+        keywords: ["def", "class", "module", "end", "if", "elsif", "else", "unless", "while", "until", "for", "in", "do", "begin", "rescue", "ensure", "raise", "return", "break", "next", "redo", "retry", "yield", "super", "self", "alias", "and", "or", "not", "then", "when", "case", "true", "false", "nil", "attr_accessor", "attr_reader", "attr_writer", "require", "include"],
+        types: ["String", "Integer", "Float", "Array", "Hash", "Symbol", "Regexp", "Range", "NilClass", "TrueClass", "FalseClass"],
+        stringDelimiters: ["\"", "'"],
+        commentPatterns: [("#", nil)]
+    )
+
+    static let shell = LanguageRules(
+        keywords: ["if", "then", "else", "elif", "fi", "for", "in", "do", "done", "while", "until", "case", "esac", "select", "function", "time", "export", "source", "alias", "local", "declare", "readonly", "return", "exit", "set", "unset", "eval", "exec", "trap", "read", "echo", "printf", "test", "cd", "pwd", "true", "false"],
+        types: ["PATH", "HOME", "USER", "SHELL", "TERM"],
+        stringDelimiters: ["\"", "'", "`"],
+        commentPatterns: [("#", nil)]
+    )
+
+    static let sql = LanguageRules(
+        keywords: ["select", "from", "where", "insert", "into", "values", "update", "set", "delete", "join", "inner", "left", "right", "full", "outer", "cross", "on", "using", "group", "by", "having", "order", "asc", "desc", "limit", "offset", "union", "all", "intersect", "except", "distinct", "create", "alter", "drop", "truncate", "table", "view", "index", "schema", "database", "column", "constraint", "primary", "key", "foreign", "references", "check", "unique", "default", "and", "or", "not", "in", "is", "null", "like", "ilike", "between", "exists", "case", "when", "then", "else", "end", "cast", "as", "over", "partition"],
+        types: ["int", "integer", "bigint", "smallint", "varchar", "char", "text", "boolean", "bool", "date", "timestamp", "float", "double", "numeric", "decimal", "json", "jsonb", "uuid", "blob"],
+        stringDelimiters: ["'", "\""],
+        commentPatterns: [("--", nil), ("/*", "*/")]
+    )
+
+    static let html = LanguageRules(
+        keywords: ["html", "head", "body", "div", "span", "p", "a", "img", "button", "input", "form", "label", "select", "option", "textarea", "table", "thead", "tbody", "tr", "th", "td", "ul", "ol", "li", "nav", "header", "footer", "main", "section", "article", "aside", "h1", "h2", "h3", "h4", "h5", "h6", "script", "style", "link", "meta", "title", "svg", "path", "circle", "rect", "iframe"],
+        types: ["class", "id", "name", "value", "type", "src", "href", "rel", "target", "alt", "style", "width", "height", "placeholder", "disabled", "required", "readonly", "data", "aria", "role"],
+        stringDelimiters: ["\"", "'"],
+        commentPatterns: [("<!--", "-->")]
+    )
+
+    static let css = LanguageRules(
+        keywords: ["color", "background", "margin", "padding", "border", "font", "display", "position", "top", "bottom", "left", "right", "width", "height", "flex", "grid", "justify-content", "align-items", "gap", "overflow", "z-index", "opacity", "transform", "transition", "animation", "box-shadow", "border-radius", "cursor", "@media", "@keyframes", "@import", "@font-face", "important"],
+        types: ["none", "block", "inline", "inline-block", "relative", "absolute", "fixed", "sticky", "inherit", "auto"],
+        stringDelimiters: ["\"", "'"],
+        commentPatterns: [("//", nil), ("/*", "*/")]
+    )
+
+    static let json = LanguageRules(
+        keywords: ["true", "false", "null"],
+        types: ["String", "Number", "Boolean", "Array", "Object"],
+        stringDelimiters: ["\""],
+        commentPatterns: [("//", nil), ("/*", "*/")]
+    )
+
+    static let yaml = LanguageRules(
+        keywords: ["true", "false", "yes", "no", "on", "off", "null", "~", "True", "False", "None"],
+        types: ["string", "int", "float", "bool", "list", "map"],
+        stringDelimiters: ["\"", "'"],
+        commentPatterns: [("#", nil)]
+    )
+
+    static let markdown = LanguageRules(
+        keywords: ["TODO", "FIXME", "NOTE", "WARNING", "IMPORTANT", "TIP"],
+        types: ["Heading", "List", "Code", "Link", "Quote"],
+        stringDelimiters: ["`", "\""],
+        commentPatterns: [("<!--", "-->")]
+    )
+
+    static let lua = LanguageRules(
+        keywords: ["and", "break", "do", "else", "elseif", "end", "false", "for", "function", "goto", "if", "in", "local", "nil", "not", "or", "repeat", "return", "then", "true", "until", "while"],
+        types: ["string", "number", "table", "boolean", "nil", "function", "userdata", "thread"],
+        stringDelimiters: ["\"", "'", "`"],
+        commentPatterns: [("--", nil), ("/*", "*/")]
+    )
+
+    static let zig = LanguageRules(
+        keywords: ["const", "var", "fn", "pub", "usingnamespace", "struct", "enum", "union", "error", "test", "comptime", "inline", "extern", "export", "defer", "errdefer", "unreachable", "return", "break", "continue", "if", "else", "switch", "while", "for", "try", "catch", "async", "await", "suspend", "resume", "null", "undefined", "true", "false"],
+        types: ["void", "bool", "i8", "u8", "i16", "u16", "i32", "u32", "i64", "u64", "isize", "usize", "f32", "f64", "anytype", "anyerror"],
+        stringDelimiters: ["\"", "'"],
+        commentPatterns: [("//", nil)]
+    )
+
+    static let r = LanguageRules(
+        keywords: ["if", "else", "repeat", "while", "function", "for", "in", "next", "break", "TRUE", "FALSE", "NULL", "Inf", "NaN", "NA", "library", "require"],
+        types: ["data.frame", "vector", "matrix", "list", "factor", "numeric", "character", "logical"],
+        stringDelimiters: ["\"", "'"],
+        commentPatterns: [("#", nil)]
+    )
+
+    static let julia = LanguageRules(
+        keywords: ["function", "macro", "quote", "let", "local", "global", "const", "do", "struct", "module", "using", "import", "export", "return", "break", "continue", "if", "elseif", "else", "for", "while", "try", "catch", "finally", "throw", "true", "false", "nothing"],
+        types: ["Int", "Int64", "Float64", "Bool", "String", "Char", "Array", "Vector", "Matrix", "Dict", "Set"],
+        stringDelimiters: ["\"\"\"", "\""],
+        commentPatterns: [("#", nil)]
+    )
+
+    static let elixir = LanguageRules(
+        keywords: ["def", "defp", "defmodule", "defmacro", "defprotocol", "defimpl", "do", "end", "if", "unless", "case", "cond", "with", "for", "try", "rescue", "catch", "after", "receive", "send", "import", "require", "use", "alias", "fn", "true", "false", "nil"],
+        types: ["Integer", "Float", "Boolean", "Atom", "String", "List", "Map", "Tuple"],
+        stringDelimiters: ["\"\"\"", "\""],
+        commentPatterns: [("#", nil)]
+    )
+
+    static let solidity = LanguageRules(
+        keywords: ["contract", "interface", "library", "is", "pragma", "solidity", "import", "function", "modifier", "event", "error", "struct", "enum", "mapping", "public", "private", "internal", "external", "view", "pure", "payable", "memory", "storage", "calldata", "virtual", "override", "returns", "return", "emit", "revert", "require", "assert", "if", "else", "for", "while", "true", "false"],
+        types: ["address", "bool", "string", "bytes", "int", "uint", "uint8", "uint256"],
+        stringDelimiters: ["\"", "'"],
+        commentPatterns: [("//", nil), ("/*", "*/")]
+    )
     
     static func forLanguage(_ language: String) -> LanguageRules {
         switch language.lowercased() {
-        case "python": return .python
+        case "python", "py": return .python
         case "swift": return .swift
-        case "rust": return .rust
-        case "javascript", "js": return .javascript
-        case "typescript", "ts": return .javascript  // Similar to JS
+        case "rust", "rs": return .rust
+        case "javascript", "js", "jsx", "mjs", "cjs": return .javascript
+        case "typescript", "ts", "tsx", "mts", "cts": return .javascript
         case "go", "golang": return .go
         case "ardium", "ar": return .ardium
+        case "c", "h": return .c
+        case "cpp", "c++", "cc", "cxx", "hpp", "hxx", "hh", "arduino", "ino": return .cpp
+        case "objc", "objective-c", "m", "objcpp", "objective-cpp", "mm": return .objc
+        case "csharp", "cs", "c#": return .csharp
+        case "dart": return .dart
+        case "java": return .java
+        case "kotlin", "kt", "kts": return .kotlin
+        case "php", "phtml", "php8": return .php
+        case "ruby", "rb": return .ruby
+        case "shell", "sh", "bash", "zsh", "fish": return .shell
+        case "sql", "pgsql", "mysql", "sqlite", "plsql": return .sql
+        case "html", "htm", "xml", "svg", "xhtml", "vue", "svelte": return .html
+        case "css", "scss", "sass", "less": return .css
+        case "json", "jsonc": return .json
+        case "yaml", "yml", "toml", "ini", "conf", "config", "env": return .yaml
+        case "markdown", "md", "mdown", "mkd": return .markdown
+        case "lua": return .lua
+        case "zig": return .zig
+        case "r": return .r
+        case "julia", "jl": return .julia
+        case "elixir", "ex", "exs": return .elixir
+        case "solidity", "sol": return .solidity
         default: return .python
         }
     }

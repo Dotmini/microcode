@@ -40,7 +40,7 @@ struct TerminalWebView: NSViewRepresentable {
               fitAddon.fit();
               
               // Connect WebSocket
-              const ws = new WebSocket("ws://localhost:3000/ws/terminal");
+              const ws = new WebSocket("ws://localhost:3000/ws/terminal?microcode_token=\(LocalBackendAuth.token)");
               
               ws.binaryType = 'arraybuffer';
               

@@ -362,9 +362,7 @@ impl AIProvider for OpenAIProvider {
         let (url, auth_header) = if config.use_microrent_proxy
             || env::var("USE_DOTMINI_PROXY").unwrap_or_else(|_| "0".to_string()) == "1"
         {
-            let proxy_url = env::var("DOTMINI_API_BASE_URL").map_err(|_| {
-                AppError::AIProviderError("DOTMINI_API_BASE_URL not configured".to_string())
-            })?;
+            let proxy_url = cloud_chat_endpoint(config)?;
             let token = config
                 .microrent_token
                 .clone()
@@ -475,9 +473,7 @@ impl AIProvider for OpenAIProvider {
         let (url, auth_header) = if config.use_microrent_proxy
             || env::var("USE_DOTMINI_PROXY").unwrap_or_else(|_| "0".to_string()) == "1"
         {
-            let proxy_url = env::var("DOTMINI_API_BASE_URL").map_err(|_| {
-                AppError::AIProviderError("DOTMINI_API_BASE_URL not configured".to_string())
-            })?;
+            let proxy_url = cloud_chat_endpoint(config)?;
             let token = config
                 .microrent_token
                 .clone()
@@ -1963,4 +1959,16 @@ mod tests {
         let captures = pattern.captures(text).unwrap();
         assert_eq!(captures[1].trim(), "fn main() {}");
     }
+}
+
+/// The desktop passes a base URL, while the provider needs a concrete endpoint.
+fn cloud_chat_endpoint(config: &AIConfig) -> Result<String> {
+    let base = config.proxy_base_url.clone().or_else(|| env::var("DOTMINI_API_BASE_URL").ok())
+        .ok_or_else(|| AppError::AIProviderError("Cloud base URL is missing".into()))?;
+    let url = reqwest::Url::parse(&base).map_err(|_| AppError::AIProviderError("Invalid cloud base URL".into()))?;
+    if url.scheme() != "https" || !url.username().is_empty() || url.password().is_some() || url.query().is_some() || url.fragment().is_some() {
+        return Err(AppError::AIProviderError("Cloud base URL must be an HTTPS endpoint without credentials or query".into()));
+    }
+    let base = base.trim_end_matches('/');
+    Ok(if base.ends_with("/chat/completions") { base.to_string() } else { format!("{base}/chat/completions") })
 }

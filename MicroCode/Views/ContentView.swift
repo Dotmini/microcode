@@ -13,7 +13,12 @@ import AppKit
 
 struct ContentView: View {
     @EnvironmentObject var appState: AppState
-    @AppStorage("microCodeWelcomeCompletedV1") private var welcomeCompleted = false
+    // File-based flag survives app re-signing / dev rebuilds (unlike @AppStorage)
+    @State private var welcomeCompleted: Bool = {
+        let flag = FileManager.default.homeDirectoryForCurrentUser
+            .appendingPathComponent("Library/Application Support/MicroCode/.welcome_done")
+        return FileManager.default.fileExists(atPath: flag.path)
+    }()
 
     var body: some View {
         AgenticEditorWorkspace()
@@ -90,6 +95,14 @@ struct ContentView: View {
     private var welcomeOverlay: some View {
         if !welcomeCompleted {
             FirstLaunchWelcomeView {
+                // Write file-based flag so it survives app re-signing
+                let dir = FileManager.default.homeDirectoryForCurrentUser
+                    .appendingPathComponent("Library/Application Support/MicroCode")
+                try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+                FileManager.default.createFile(
+                    atPath: dir.appendingPathComponent(".welcome_done").path,
+                    contents: Data(), attributes: nil
+                )
                 welcomeCompleted = true
             }
             .environmentObject(appState)
@@ -243,6 +256,13 @@ struct AgenticEditorWorkspace: View {
         appState.sidebarVisible ? (targetSidebarWidth + 4) : 0
     }
 
+    /// Modes that manage their own left sidebar and don't need the global file browser.
+    /// These modes (Embedded Studio, Browser, API Client, Remote Explorer) have
+    /// specialized sidebars with mode-specific navigation.
+    private var modeHasOwnSidebar: Bool {
+        [.embedded, .browser, .apiClient, .remoteX, .notebook, .playground].contains(appState.editorMode)
+    }
+
     var body: some View {
         Group {
             if (appState.workspaceFolder == nil && appState.openFiles.isEmpty && appState.editorMode == .code) || appState.showingWelcomeHome {
@@ -256,25 +276,29 @@ struct AgenticEditorWorkspace: View {
             } else {
                 HStack(spacing: 0) {
                     // Collapsible Left Sidebar & Splitter Container
-                    HStack(spacing: 0) {
-                        Group {
-                            if surface == .editor {
-                                XcodeEditorSidebar(surface: $surface)
-                            } else {
-                                AgenticWorkspaceSidebar(surface: $surface)
+                    // Hidden for modes that manage their own sidebar (Embedded Studio, etc.)
+                    if !modeHasOwnSidebar {
+                        HStack(spacing: 0) {
+                            Group {
+                                if surface == .editor {
+                                    XcodeEditorSidebar(surface: $surface)
+                                } else {
+                                    AgenticWorkspaceSidebar(surface: $surface)
+                                }
                             }
-                        }
-                        .frame(width: targetSidebarWidth)
+                            .frame(width: targetSidebarWidth)
 
-                        SidebarResizeSplitter(width: $sidebarWidth)
-                            .opacity(appState.sidebarVisible ? 1 : 0)
+                            SidebarResizeSplitter(width: $sidebarWidth)
+                                .opacity(appState.sidebarVisible ? 1 : 0)
+                        }
+                        .frame(width: effectiveSidebarWidth, alignment: .leading)
+                        .clipped()
+                        .layoutPriority(2)
+                        .opacity(appState.sidebarVisible ? 1 : 0)
+                        .allowsHitTesting(appState.sidebarVisible)
+                        .accessibilityHidden(!appState.sidebarVisible)
+                        .background(appState.appTheme.isGlass ? Color.clear : Color(nsColor: appState.appTheme.panelBackground))
                     }
-                    .frame(width: effectiveSidebarWidth, alignment: .trailing)
-                    .clipped()
-                    .opacity(appState.sidebarVisible ? 1 : 0)
-                    .allowsHitTesting(appState.sidebarVisible)
-                    .accessibilityHidden(!appState.sidebarVisible)
-                    .background(appState.appTheme.isGlass ? Color.clear : Color(nsColor: appState.appTheme.panelBackground))
 
                     VStack(spacing: 0) {
                         workspaceHeader
@@ -289,10 +313,12 @@ struct AgenticEditorWorkspace: View {
                             activeEditorSurface
                         }
                     }
-                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+                    .frame(minWidth: 320, maxWidth: .infinity, maxHeight: .infinity)
+                    .layoutPriority(0)
 
                     if appState.agenticContextVisible {
                         AgenticContextInspector(surface: $surface)
+                            .layoutPriority(1)
                             .transition(.asymmetric(
                                 insertion: .move(edge: .trailing).combined(with: .opacity),
                                 removal: .move(edge: .trailing).combined(with: .opacity)
@@ -378,27 +404,31 @@ struct AgenticEditorWorkspace: View {
 
     private var workspaceHeader: some View {
         HStack(spacing: 8) {
-            // Sidebar Toggle
-            WorkspaceSidebarToggleButton()
-
-            // Breadcrumb (Antigravity-style: project / active task)
-            HStack(spacing: 5) {
-                Image(systemName: "folder")
-                    .font(.system(size: 11))
-                    .foregroundColor(.secondary)
-                Text(activeProjectName)
-                    .font(.system(size: 12, weight: .semibold))
-                    .lineLimit(1)
-                Text("/")
-                    .foregroundColor(.secondary.opacity(0.6))
-                    .font(.system(size: 11))
-                Text(surface == .agent ? activeTaskTitle : (appState.currentFile?.name ?? (appState.editorMode == .code ? "Editor" : appState.editorMode.displayName)))
-                    .font(.system(size: 12, weight: .medium))
-                    .foregroundColor(.primary.opacity(0.85))
-                    .lineLimit(1)
+            // Sidebar Toggle (only for modes that use the global file browser)
+            if !modeHasOwnSidebar {
+                WorkspaceSidebarToggleButton()
             }
-            .truncationMode(.middle)
-            .frame(maxWidth: 220, alignment: .leading)
+
+            // Breadcrumb (Antigravity-style: project / active task) - only for global modes
+            if !modeHasOwnSidebar {
+                HStack(spacing: 5) {
+                    Image(systemName: "folder")
+                        .font(.system(size: 11))
+                        .foregroundColor(.secondary)
+                    Text(activeProjectName)
+                        .font(.system(size: 12, weight: .semibold))
+                        .lineLimit(1)
+                    Text("/")
+                        .foregroundColor(.secondary.opacity(0.6))
+                        .font(.system(size: 11))
+                    Text(surface == .agent ? activeTaskTitle : (appState.currentFile?.name ?? (appState.editorMode == .code ? "Editor" : appState.editorMode.displayName)))
+                        .font(.system(size: 12, weight: .medium))
+                        .foregroundColor(.primary.opacity(0.85))
+                        .lineLimit(1)
+                }
+                .truncationMode(.middle)
+                .frame(maxWidth: 220, alignment: .leading)
+            }
 
             Spacer(minLength: 4)
 
@@ -677,9 +707,9 @@ struct AgenticEditorWorkspace: View {
             .fixedSize()
             .help("Settings (⌘,)")
         }
-        .padding(.leading, appState.sidebarVisible ? 10 : 80)
+        .padding(.leading, (modeHasOwnSidebar || !appState.sidebarVisible) ? 80 : 10)
         .padding(.trailing, 10)
-        .frame(height: 38)
+        .frame(height: 30)
         .background(appState.appTheme.isGlass ? Color.clear : Color(nsColor: appState.appTheme.panelBackground))
     }
 }
@@ -1982,10 +2012,19 @@ struct AgenticContextInspector: View {
     @State private var taskMarkdownContent: String = ""
     @State private var walkthroughMarkdownContent: String = ""
     @State private var taskSubTab: Int = 0 // 0 = Task, 1 = Walkthrough
-    @AppStorage("agenticInspectorWidth") private var inspectorWidth: Double = 460
+    @AppStorage("agenticInspectorWidth") private var inspectorWidth: Double = 340
     @State private var isHoveringSplitter = false
     @State private var isDraggingSplitter = false
-    @State private var dragStartWidth: Double = 460
+    @State private var dragStartWidth: Double = 340
+
+    private var effectiveInspectorWidth: CGFloat {
+        let current = CGFloat(inspectorWidth)
+        if appState.sidebarVisible {
+            let maxAllowed: CGFloat = (selectedTab == .preview) ? 460 : 360
+            return max(280, min(maxAllowed, current))
+        }
+        return max(280, min(800, current))
+    }
 
     var body: some View {
         HStack(spacing: 0) {
@@ -2013,10 +2052,11 @@ struct AgenticContextInspector: View {
                     .onChanged { val in
                         if !isDraggingSplitter {
                             isDraggingSplitter = true
-                            dragStartWidth = inspectorWidth
+                            dragStartWidth = Double(effectiveInspectorWidth)
                         }
                         let newW = dragStartWidth - Double(val.translation.width)
-                        inspectorWidth = max(280, min(1000, newW))
+                        let maxAllowed: Double = appState.sidebarVisible ? (selectedTab == .preview ? 460 : 360) : 800
+                        inspectorWidth = max(280, min(maxAllowed, newW))
                     }
                     .onEnded { _ in
                         isDraggingSplitter = false
@@ -2150,17 +2190,20 @@ struct AgenticContextInspector: View {
                     Button {
                         withAnimation(.easeInOut(duration: 0.16)) {
                             appState.hidePreviewInspector()
+                            PreviewDockService.shared.hideDock()
                         }
                     } label: {
                         Image(systemName: "xmark")
-                            .font(.system(size: 9, weight: .bold))
+                            .font(.system(size: 10, weight: .bold))
                             .foregroundColor(.secondary)
-                            .frame(width: 18, height: 18)
-                            .background(Color.primary.opacity(0.06))
-                            .clipShape(Circle())
+                            .frame(width: 22, height: 22)
+                            .background(Color.primary.opacity(0.08))
+                            .clipShape(RoundedRectangle(cornerRadius: 5, style: .continuous))
+                            .contentShape(Rectangle())
                     }
                     .buttonStyle(.plain)
                     .help("Close Inspector (⌘I)")
+                    .layoutPriority(10)
                 }
                 .padding(.horizontal, 10)
                 .frame(height: 38)
@@ -2180,7 +2223,7 @@ struct AgenticContextInspector: View {
                 }
             }
         }
-        .frame(width: CGFloat(inspectorWidth))
+        .frame(width: effectiveInspectorWidth)
         .background(
             appState.appTheme.isGlass ? Color.clear : Color(nsColor: selectedTab == .preview ? appState.appTheme.editorBackground : appState.appTheme.panelBackground)
         )
@@ -3551,6 +3594,12 @@ struct EditorArea: View {
                            appState.currentFileIndex < appState.openFiles.count {
                             let fileURL = URL(fileURLWithPath: file.path)
                             let ext = fileURL.pathExtension.lowercased()
+                            
+                            // Convert-to banner for .ipynb files
+                            if ext == "ipynb" {
+                                fileConvertBanner(file: file, ext: ext)
+                            }
+                            
                             let previewExtensions = ["png", "jpg", "jpeg", "pdf", "gif", "bmp", "tiff", "webp", "xlsx", "xls", "csv", "tsv", "numbers", "svg"]
                             
                             if previewExtensions.contains(ext) {
@@ -3611,6 +3660,127 @@ struct EditorArea: View {
             }
         }
         .id(appState.editorMode.rawValue)  // Force re-render when mode changes
+    }
+    
+    // MARK: - File Convert Banner
+    
+    @ViewBuilder
+    private func fileConvertBanner(file: CodeFile, ext: String) -> some View {
+        HStack(spacing: 8) {
+            Image(systemName: "doc.richtext")
+                .font(.system(size: 10))
+                .foregroundColor(.accentColor)
+            
+            Text("Jupyter Notebook detected")
+                .font(.system(size: 11, weight: .medium))
+                .foregroundColor(.primary.opacity(0.8))
+            
+            Spacer()
+            
+            // ipynb → Open in Cell Mode (primary action)
+            Button(action: {
+                convertIpynbToCellMode(file: file)
+            }) {
+                HStack(spacing: 4) {
+                    Image(systemName: "square.grid.2x2.fill")
+                    Text("Open in Cell Mode")
+                }
+                .font(.system(size: 10, weight: .semibold))
+                .foregroundColor(.white)
+                .padding(.horizontal, 8)
+                .padding(.vertical, 3)
+                .background(RoundedRectangle(cornerRadius: 5).fill(Color.accentColor))
+            }
+            .buttonStyle(.plain)
+            
+            // ipynb → Open in Playground (single editor)
+            Button(action: {
+                convertToPlayground(file: file, ext: ext)
+            }) {
+                HStack(spacing: 4) {
+                    Image(systemName: "play.rectangle.fill")
+                    Text("Open in Playground")
+                }
+                .font(.system(size: 10, weight: .semibold))
+                .foregroundColor(.primary)
+                .padding(.horizontal, 8)
+                .padding(.vertical, 3)
+                .background(RoundedRectangle(cornerRadius: 5).fill(Color.primary.opacity(0.08)))
+            }
+            .buttonStyle(.plain)
+        }
+        .padding(.horizontal, 12)
+        .padding(.vertical, 4)
+        .background(Color.accentColor.opacity(0.06))
+    }
+    
+    private func convertIpynbToCellMode(file: CodeFile) {
+        let url = URL(fileURLWithPath: file.path)
+        appState.pendingNotebookURL = url
+        
+        // Switch mode to Cell Mode (.notebook)
+        appState.setEditorMode(.notebook)
+        
+        // Post notification as well in case NotebookView is already mounted
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) {
+            NotificationCenter.default.post(
+                name: NSNotification.Name("ImportNotebookFile"),
+                object: nil,
+                userInfo: ["path": file.path]
+            )
+        }
+    }
+    
+    private func convertToPlayground(file: CodeFile, ext: String) {
+        let url = URL(fileURLWithPath: file.path)
+        if let content = try? String(contentsOf: url, encoding: .utf8) {
+            let langMap: [String: String] = [
+                "py": "Python", "r": "R", "jl": "Julia", "sql": "SQL",
+                "rb": "Ruby", "js": "JavaScript", "ts": "TypeScript",
+                "go": "Go", "rs": "Rust", "cpp": "C++", "c": "C",
+                "swift": "Swift", "ipynb": "Python"
+            ]
+            let lang = langMap[ext] ?? "Python"
+            
+            let code: String
+            if ext == "ipynb" {
+                code = extractCodeFromIpynb(content)
+            } else {
+                code = content
+            }
+            
+            // Switch mode FIRST
+            appState.setEditorMode(.playground)
+            
+            // Post notification AFTER PlaygroundView has mounted
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.4) {
+                NotificationCenter.default.post(
+                    name: NSNotification.Name("LoadPlaygroundCode"),
+                    object: nil,
+                    userInfo: ["code": code, "language": lang]
+                )
+            }
+        }
+    }
+    
+    private func extractCodeFromIpynb(_ jsonString: String) -> String {
+        guard let data = jsonString.data(using: .utf8),
+              let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let cells = json["cells"] as? [[String: Any]] else {
+            return jsonString
+        }
+        
+        var codeBlocks: [String] = []
+        for cell in cells {
+            guard let cellType = cell["cell_type"] as? String,
+                  cellType == "code",
+                  let source = cell["source"] as? [String] else { continue }
+            let code = source.joined()
+            if !code.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                codeBlocks.append(code)
+            }
+        }
+        return codeBlocks.joined(separator: "\n\n# ---\n\n")
     }
 }
 
@@ -5630,75 +5800,74 @@ struct NewFileSheet: View {
         }
     }
     
+    @State private var customLanguageName: String = ""
+    @State private var customLanguageExt: String = ""
+    @State private var showCustomInput: Bool = false
+    
     private let languages: [LanguageInfo] = [
         // Popular
         LanguageInfo(id: "swift", name: "Swift", icon: "swift", ext: "swift", category: .popular, color: .orange),
-        LanguageInfo(id: "python", name: "Python", icon: "ladybug", ext: "py", category: .popular, color: .blue),
-        LanguageInfo(id: "javascript", name: "JavaScript", icon: "j.square", ext: "js", category: .popular, color: .yellow),
-        LanguageInfo(id: "typescript", name: "TypeScript", icon: "t.square.fill", ext: "ts", category: .popular, color: .blue),
-        LanguageInfo(id: "rust", name: "Rust", icon: "gearshape.2", ext: "rs", category: .popular, color: .orange),
-        LanguageInfo(id: "go", name: "Go", icon: "g.square", ext: "go", category: .popular, color: .cyan),
+        LanguageInfo(id: "python", name: "Python", icon: "text.word.spacing", ext: "py", category: .popular, color: Color(red: 0.2, green: 0.6, blue: 0.9)),
+        LanguageInfo(id: "javascript", name: "JavaScript", icon: "j.square.fill", ext: "js", category: .popular, color: .yellow),
+        LanguageInfo(id: "typescript", name: "TypeScript", icon: "t.square.fill", ext: "ts", category: .popular, color: Color(red: 0.2, green: 0.5, blue: 0.9)),
+        LanguageInfo(id: "rust", name: "Rust", icon: "gearshape.2.fill", ext: "rs", category: .popular, color: Color(red: 0.85, green: 0.4, blue: 0.2)),
+        LanguageInfo(id: "go", name: "Go", icon: "g.square.fill", ext: "go", category: .popular, color: .cyan),
+        LanguageInfo(id: "java", name: "Java", icon: "cup.and.saucer.fill", ext: "java", category: .popular, color: Color(red: 0.9, green: 0.4, blue: 0.2)),
+        LanguageInfo(id: "kotlin", name: "Kotlin", icon: "k.square.fill", ext: "kt", category: .popular, color: Color(red: 0.5, green: 0.3, blue: 0.9)),
+        LanguageInfo(id: "csharp", name: "C#", icon: "number.square.fill", ext: "cs", category: .popular, color: Color(red: 0.4, green: 0.2, blue: 0.7)),
+        LanguageInfo(id: "dart", name: "Dart", icon: "d.square.fill", ext: "dart", category: .popular, color: Color(red: 0.0, green: 0.7, blue: 0.8)),
+        LanguageInfo(id: "ardium", name: "Ardium", icon: "a.square.fill", ext: "ar", category: .popular, color: Color(red: 0.9, green: 0.2, blue: 0.4)),
         
         // Web
         LanguageInfo(id: "html", name: "HTML", icon: "chevron.left.forwardslash.chevron.right", ext: "html", category: .web, color: .orange),
-        LanguageInfo(id: "css", name: "CSS", icon: "paintbrush", ext: "css", category: .web, color: .blue),
-        LanguageInfo(id: "javascript", name: "JavaScript", icon: "j.square", ext: "js", category: .web, color: .yellow),
-        LanguageInfo(id: "typescript", name: "TypeScript", icon: "t.square.fill", ext: "ts", category: .web, color: .blue),
+        LanguageInfo(id: "css", name: "CSS", icon: "paintbrush.fill", ext: "css", category: .web, color: Color(red: 0.2, green: 0.5, blue: 0.9)),
         LanguageInfo(id: "jsx", name: "React JSX", icon: "atom", ext: "jsx", category: .web, color: .cyan),
-        LanguageInfo(id: "vue", name: "Vue", icon: "v.square", ext: "vue", category: .web, color: .green),
-        LanguageInfo(id: "svelte", name: "Svelte", icon: "v.square.fill", ext: "svelte", category: .web, color: .orange),
-        LanguageInfo(id: "php", name: "PHP", icon: "elephant.fill", ext: "php", category: .web, color: .indigo),
+        LanguageInfo(id: "tsx", name: "React TSX", icon: "atom", ext: "tsx", category: .web, color: Color(red: 0.2, green: 0.5, blue: 0.9)),
+        LanguageInfo(id: "vue", name: "Vue", icon: "v.square.fill", ext: "vue", category: .web, color: .green),
+        LanguageInfo(id: "svelte", name: "Svelte", icon: "s.square.fill", ext: "svelte", category: .web, color: Color(red: 1.0, green: 0.25, blue: 0.0)),
+        LanguageInfo(id: "php", name: "PHP", icon: "p.square.fill", ext: "php", category: .web, color: Color(red: 0.5, green: 0.4, blue: 0.7)),
+        LanguageInfo(id: "sass", name: "SASS/SCSS", icon: "paintbrush.pointed.fill", ext: "scss", category: .web, color: Color(red: 0.8, green: 0.3, blue: 0.5)),
+        LanguageInfo(id: "solidity", name: "Solidity", icon: "cube.fill", ext: "sol", category: .web, color: .gray),
         
         // Systems
-        LanguageInfo(id: "c", name: "C", icon: "c.square", ext: "c", category: .systems, color: .gray),
-        LanguageInfo(id: "cpp", name: "C++", icon: "c.square.fill", ext: "cpp", category: .systems, color: .blue),
-        LanguageInfo(id: "objective-c", name: "Objective-C", icon: "m.square", ext: "m", category: .systems, color: .blue),
-        LanguageInfo(id: "objective-cpp", name: "Objective-C++", icon: "m.square.fill", ext: "mm", category: .systems, color: .indigo),
-        LanguageInfo(id: "rust", name: "Rust", icon: "gearshape.2", ext: "rs", category: .systems, color: .orange),
-        LanguageInfo(id: "go", name: "Go", icon: "g.square", ext: "go", category: .systems, color: .cyan),
-        LanguageInfo(id: "swift", name: "Swift", icon: "swift", ext: "swift", category: .systems, color: .orange),
-        LanguageInfo(id: "zig", name: "Zig", icon: "z.square", ext: "zig", category: .systems, color: .orange),
-        LanguageInfo(id: "wasm", name: "WebAssembly", icon: "square.fill", ext: "wasm", category: .systems, color: .purple),
-        LanguageInfo(id: "metal", name: "Metal", icon: "cube.fill", ext: "metal", category: .systems, color: .purple),
-        LanguageInfo(id: "assembly", name: "Assembly", icon: "memorychip", ext: "s", category: .systems, color: .gray),
+        LanguageInfo(id: "c", name: "C", icon: "c.square.fill", ext: "c", category: .systems, color: .gray),
+        LanguageInfo(id: "cpp", name: "C++", icon: "plus.square.fill", ext: "cpp", category: .systems, color: Color(red: 0.2, green: 0.5, blue: 0.8)),
+        LanguageInfo(id: "objective-c", name: "Objective-C", icon: "m.square.fill", ext: "m", category: .systems, color: .blue),
+        LanguageInfo(id: "zig", name: "Zig", icon: "z.square.fill", ext: "zig", category: .systems, color: Color(red: 0.95, green: 0.7, blue: 0.0)),
+        LanguageInfo(id: "assembly", name: "Assembly", icon: "memorychip.fill", ext: "s", category: .systems, color: .gray),
+        LanguageInfo(id: "metal", name: "Metal", icon: "cube.transparent.fill", ext: "metal", category: .systems, color: .purple),
+        LanguageInfo(id: "vala", name: "Vala", icon: "v.circle.fill", ext: "vala", category: .systems, color: .purple),
+        LanguageInfo(id: "nim", name: "Nim", icon: "n.square.fill", ext: "nim", category: .systems, color: .yellow),
+        LanguageInfo(id: "haskell", name: "Haskell", icon: "h.square.fill", ext: "hs", category: .systems, color: Color(red: 0.4, green: 0.3, blue: 0.6)),
         
         // Data & Scripting
-        LanguageInfo(id: "python", name: "Python", icon: "ladybug", ext: "py", category: .data, color: .blue), // Re-categorized or duplicated if needed, but keeping primarily in popular
-        LanguageInfo(id: "r", name: "R", icon: "r.square", ext: "r", category: .data, color: .blue),
-        LanguageInfo(id: "matlab", name: "Matlab", icon: "function", ext: "m", category: .data, color: .orange),
-        LanguageInfo(id: "julia", name: "Julia", icon: "circle.grid.hex", ext: "jl", category: .data, color: .purple),
-        LanguageInfo(id: "lua", name: "Lua", icon: "moon.fill", ext: "lua", category: .data, color: .blue),
+        LanguageInfo(id: "r", name: "R", icon: "r.square.fill", ext: "r", category: .data, color: Color(red: 0.2, green: 0.5, blue: 0.8)),
+        LanguageInfo(id: "julia", name: "Julia", icon: "j.circle.fill", ext: "jl", category: .data, color: Color(red: 0.6, green: 0.2, blue: 0.8)),
+        LanguageInfo(id: "lua", name: "Lua", icon: "moon.fill", ext: "lua", category: .data, color: Color(red: 0.0, green: 0.0, blue: 0.6)),
         LanguageInfo(id: "ruby", name: "Ruby", icon: "diamond.fill", ext: "rb", category: .data, color: .red),
-        LanguageInfo(id: "prolog", name: "Prolog", icon: "brain.head.profile", ext: "pl", category: .data, color: .orange),
-
-        // Enterprise / App
-        LanguageInfo(id: "csharp", name: "C#", icon: "c.circle.fill", ext: "cs", category: .popular, color: .purple),
-        LanguageInfo(id: "java", name: "Java", icon: "cup.and.saucer.fill", ext: "java", category: .popular, color: .orange),
-        LanguageInfo(id: "kotlin", name: "Kotlin", icon: "k.square.fill", ext: "kt", category: .popular, color: .purple),
-        LanguageInfo(id: "dart", name: "Dart", icon: "paperplane.fill", ext: "dart", category: .popular, color: .cyan),
-        LanguageInfo(id: "scala", name: "Scala", icon: "s.circle.fill", ext: "scala", category: .popular, color: .red),
-        LanguageInfo(id: "fsharp", name: "F#", icon: "f.cursive", ext: "fs", category: .popular, color: .cyan),
-        LanguageInfo(id: "vala", name: "Vala", icon: "v.circle", ext: "vala", category: .systems, color: .purple),
-        
-        // Functional / Other
-        LanguageInfo(id: "ocaml", name: "OCaml", icon: "camell", ext: "ml", category: .other, color: .orange),
-        LanguageInfo(id: "solidity", name: "Solidity", icon: "bitcoinsign.circle.fill", ext: "sol", category: .web, color: .gray),
-
-        // Data Formats
+        LanguageInfo(id: "perl", name: "Perl", icon: "p.circle.fill", ext: "pl", category: .data, color: Color(red: 0.2, green: 0.3, blue: 0.6)),
+        LanguageInfo(id: "elixir", name: "Elixir", icon: "drop.fill", ext: "ex", category: .data, color: Color(red: 0.4, green: 0.2, blue: 0.6)),
+        LanguageInfo(id: "sql", name: "SQL", icon: "cylinder.fill", ext: "sql", category: .data, color: Color(red: 0.2, green: 0.5, blue: 0.8)),
         LanguageInfo(id: "json", name: "JSON", icon: "curlybraces", ext: "json", category: .data, color: .gray),
-        LanguageInfo(id: "yaml", name: "YAML", icon: "list.bullet.indent", ext: "yaml", category: .data, color: .red),
+        LanguageInfo(id: "yaml", name: "YAML", icon: "list.bullet.indent", ext: "yaml", category: .data, color: Color(red: 0.8, green: 0.2, blue: 0.2)),
         LanguageInfo(id: "xml", name: "XML", icon: "chevron.left.forwardslash.chevron.right", ext: "xml", category: .data, color: .green),
-        LanguageInfo(id: "toml", name: "TOML", icon: "doc.plaintext", ext: "toml", category: .data, color: .gray),
-        LanguageInfo(id: "sql", name: "SQL", icon: "cylinder", ext: "sql", category: .data, color: .blue),
-        LanguageInfo(id: "graphql", name: "GraphQL", icon: "diamond", ext: "graphql", category: .data, color: .pink),
+        LanguageInfo(id: "toml", name: "TOML", icon: "doc.plaintext.fill", ext: "toml", category: .data, color: .gray),
+        LanguageInfo(id: "graphql", name: "GraphQL", icon: "point.3.connected.trianglepath.dotted", ext: "graphql", category: .data, color: .pink),
+        LanguageInfo(id: "matlab", name: "MATLAB", icon: "function", ext: "m", category: .data, color: .orange),
+        LanguageInfo(id: "prolog", name: "Prolog", icon: "questionmark.square.fill", ext: "pl", category: .data, color: .orange),
         
-        // Text
-        LanguageInfo(id: "markdown", name: "Markdown", icon: "doc.richtext", ext: "md", category: .other, color: .gray),
-        LanguageInfo(id: "text", name: "Plain Text", icon: "doc.text", ext: "txt", category: .other, color: .gray),
-        LanguageInfo(id: "shell", name: "Shell Script", icon: "terminal", ext: "sh", category: .other, color: .green),
-        LanguageInfo(id: "dockerfile", name: "Dockerfile", icon: "shippingbox", ext: "dockerfile", category: .other, color: .blue),
-        LanguageInfo(id: "java", name: "Java", icon: "cup.and.saucer", ext: "java", category: .other, color: .red),
-        LanguageInfo(id: "kotlin", name: "Kotlin", icon: "k.square", ext: "kt", category: .other, color: .purple)
+        // Other
+        LanguageInfo(id: "scala", name: "Scala", icon: "s.circle.fill", ext: "scala", category: .other, color: .red),
+        LanguageInfo(id: "fsharp", name: "F#", icon: "f.square.fill", ext: "fs", category: .other, color: .cyan),
+        LanguageInfo(id: "ocaml", name: "OCaml", icon: "o.square.fill", ext: "ml", category: .other, color: .orange),
+        LanguageInfo(id: "erlang", name: "Erlang", icon: "e.square.fill", ext: "erl", category: .other, color: Color(red: 0.6, green: 0.1, blue: 0.2)),
+        LanguageInfo(id: "clojure", name: "Clojure", icon: "circle.grid.cross.fill", ext: "clj", category: .other, color: .green),
+        LanguageInfo(id: "markdown", name: "Markdown", icon: "doc.richtext.fill", ext: "md", category: .other, color: .gray),
+        LanguageInfo(id: "text", name: "Plain Text", icon: "doc.text.fill", ext: "txt", category: .other, color: .gray),
+        LanguageInfo(id: "shell", name: "Shell Script", icon: "terminal.fill", ext: "sh", category: .other, color: .green),
+        LanguageInfo(id: "dockerfile", name: "Dockerfile", icon: "shippingbox.fill", ext: "dockerfile", category: .other, color: Color(red: 0.2, green: 0.5, blue: 0.9)),
+        LanguageInfo(id: "latex", name: "LaTeX", icon: "textformat", ext: "tex", category: .other, color: Color(red: 0.0, green: 0.4, blue: 0.3)),
+        LanguageInfo(id: "makefile", name: "Makefile", icon: "wrench.and.screwdriver.fill", ext: "makefile", category: .other, color: .gray),
     ]
     
     private var filteredLanguages: [LanguageInfo] {
@@ -5710,7 +5879,10 @@ struct NewFileSheet: View {
     }
     
     private var fileExtension: String {
-        selectedLangInfo?.ext ?? "txt"
+        if selectedLanguage.hasPrefix("custom_") {
+            return customLanguageExt.isEmpty ? "txt" : customLanguageExt
+        }
+        return selectedLangInfo?.ext ?? "txt"
     }
     
     private var previewFilename: String {
@@ -5754,7 +5926,7 @@ struct NewFileSheet: View {
                         LazyVGrid(columns: [
                             GridItem(.flexible()),
                             GridItem(.flexible())
-                        ], spacing: 10) {
+                        ], spacing: 8) {
                             ForEach(filteredLanguages) { lang in
                                 NewFileLanguageCard(
                                     language: lang,
@@ -5762,15 +5934,99 @@ struct NewFileSheet: View {
                                 ) {
                                     withAnimation(.easeInOut(duration: 0.15)) {
                                         selectedLanguage = lang.id
+                                        showCustomInput = false
                                     }
                                 }
                             }
                         }
-                        .padding(16)
+                        .padding(.horizontal, 12)
+                        .padding(.top, 10)
+                        
+                        // Custom Language
+                        VStack(spacing: 8) {
+                            Divider()
+                                .padding(.horizontal, 4)
+                            
+                            if showCustomInput {
+                                VStack(spacing: 8) {
+                                    HStack(spacing: 8) {
+                                        Image(systemName: "plus.square.fill")
+                                            .font(.system(size: 14))
+                                            .foregroundColor(.secondary)
+                                        Text("Custom Language")
+                                            .font(.system(size: 11, weight: .semibold))
+                                            .foregroundColor(.secondary)
+                                        Spacer()
+                                    }
+                                    
+                                    HStack(spacing: 6) {
+                                        TextField("Name", text: $customLanguageName)
+                                            .textFieldStyle(.plain)
+                                            .font(.system(size: 11))
+                                            .padding(6)
+                                            .background(Color(white: 0.1))
+                                            .cornerRadius(5)
+                                            .overlay(RoundedRectangle(cornerRadius: 5).stroke(Color.white.opacity(0.1), lineWidth: 1))
+                                        
+                                        TextField("ext", text: $customLanguageExt)
+                                            .textFieldStyle(.plain)
+                                            .font(.system(size: 11, design: .monospaced))
+                                            .padding(6)
+                                            .background(Color(white: 0.1))
+                                            .cornerRadius(5)
+                                            .overlay(RoundedRectangle(cornerRadius: 5).stroke(Color.white.opacity(0.1), lineWidth: 1))
+                                            .frame(width: 60)
+                                    }
+                                    
+                                    if !customLanguageName.isEmpty && !customLanguageExt.isEmpty {
+                                        Button {
+                                            selectedLanguage = "custom_\(customLanguageName.lowercased())"
+                                        } label: {
+                                            HStack(spacing: 4) {
+                                                Image(systemName: "checkmark")
+                                                    .font(.system(size: 9, weight: .bold))
+                                                Text("Use \(customLanguageName)")
+                                                    .font(.system(size: 10, weight: .medium))
+                                            }
+                                            .foregroundColor(.white)
+                                            .padding(.horizontal, 10)
+                                            .padding(.vertical, 5)
+                                            .background(Color(white: 0.2))
+                                            .cornerRadius(5)
+                                            .overlay(RoundedRectangle(cornerRadius: 5).stroke(Color.white.opacity(0.12), lineWidth: 1))
+                                        }
+                                        .buttonStyle(.plain)
+                                    }
+                                }
+                                .padding(10)
+                                .background(Color(white: 0.08))
+                                .cornerRadius(8)
+                                .overlay(RoundedRectangle(cornerRadius: 8).stroke(Color.white.opacity(0.06), lineWidth: 1))
+                            } else {
+                                Button {
+                                    withAnimation(.easeInOut(duration: 0.2)) {
+                                        showCustomInput = true
+                                    }
+                                } label: {
+                                    HStack(spacing: 6) {
+                                        Image(systemName: "plus.circle.fill")
+                                            .font(.system(size: 12))
+                                        Text("Custom Language...")
+                                            .font(.system(size: 11))
+                                    }
+                                    .foregroundColor(.secondary)
+                                    .frame(maxWidth: .infinity)
+                                    .padding(.vertical, 8)
+                                }
+                                .buttonStyle(.plain)
+                            }
+                        }
+                        .padding(.horizontal, 12)
+                        .padding(.bottom, 12)
                     }
                 }
                 .frame(width: 340)
-                .background(Color(nsColor: .controlBackgroundColor).opacity(0.5))
+                .background(Color(white: 0.06))
                 
                 Divider()
                 
@@ -5951,18 +6207,22 @@ struct CategoryTab: View {
     
     var body: some View {
         Button(action: action) {
-            HStack(spacing: 6) {
+            HStack(spacing: 5) {
                 Image(systemName: category.icon)
-                    .font(.system(size: 11))
+                    .font(.system(size: 10))
                 Text(category.rawValue)
-                    .font(.system(size: 12, weight: isSelected ? .semibold : .regular))
+                    .font(.system(size: 11, weight: isSelected ? .semibold : .regular))
             }
-            .foregroundColor(isSelected ? .white : .primary)
-            .padding(.horizontal, 12)
-            .padding(.vertical, 6)
+            .foregroundColor(isSelected ? .white : .secondary)
+            .padding(.horizontal, 10)
+            .padding(.vertical, 5)
             .background(
-                RoundedRectangle(cornerRadius: 6)
-                    .fill(isSelected ? Color.accentColor : (isHovering ? Color.secondary.opacity(0.1) : Color.clear))
+                RoundedRectangle(cornerRadius: 6, style: .continuous)
+                    .fill(isSelected ? Color(white: 0.2) : (isHovering ? Color(white: 0.12) : Color.clear))
+            )
+            .overlay(
+                RoundedRectangle(cornerRadius: 6, style: .continuous)
+                    .stroke(isSelected ? Color.white.opacity(0.15) : Color.clear, lineWidth: 1)
             )
         }
         .buttonStyle(.plain)
@@ -5981,25 +6241,26 @@ struct NewFileLanguageCard: View {
     
     var body: some View {
         Button(action: action) {
-            HStack(spacing: 12) {
+            HStack(spacing: 10) {
                 // Icon
                 ZStack {
-                    RoundedRectangle(cornerRadius: 8)
-                        .fill(language.color.opacity(isSelected ? 0.2 : 0.1))
-                        .frame(width: 36, height: 36)
+                    RoundedRectangle(cornerRadius: 8, style: .continuous)
+                        .fill(isSelected ? language.color.opacity(0.2) : Color(white: 0.12))
+                        .frame(width: 34, height: 34)
                     
                     Image(systemName: language.icon)
-                        .font(.system(size: 16))
-                        .foregroundColor(language.color)
+                        .font(.system(size: 15, weight: .medium))
+                        .foregroundColor(isSelected ? language.color : language.color.opacity(0.8))
                 }
                 
                 // Info
-                VStack(alignment: .leading, spacing: 2) {
+                VStack(alignment: .leading, spacing: 1) {
                     Text(language.name)
-                        .font(.system(size: 13, weight: .medium))
+                        .font(.system(size: 12, weight: .medium))
                         .foregroundColor(.primary)
+                        .lineLimit(1)
                     Text(".\(language.ext)")
-                        .font(.system(size: 11, design: .monospaced))
+                        .font(.system(size: 10, design: .monospaced))
                         .foregroundColor(.secondary)
                 }
                 
@@ -6007,18 +6268,20 @@ struct NewFileLanguageCard: View {
                 
                 if isSelected {
                     Image(systemName: "checkmark.circle.fill")
-                        .foregroundColor(.accentColor)
+                        .font(.system(size: 14))
+                        .foregroundColor(language.color)
                         .transition(.scale.combined(with: .opacity))
                 }
             }
-            .padding(10)
+            .padding(.horizontal, 10)
+            .padding(.vertical, 8)
             .background(
-                RoundedRectangle(cornerRadius: 10)
-                    .fill(isSelected ? Color.accentColor.opacity(0.1) : (isHovering ? Color.secondary.opacity(0.08) : Color(nsColor: .controlBackgroundColor)))
+                RoundedRectangle(cornerRadius: 8, style: .continuous)
+                    .fill(isSelected ? language.color.opacity(0.08) : (isHovering ? Color(white: 0.14) : Color(white: 0.09)))
             )
             .overlay(
-                RoundedRectangle(cornerRadius: 10)
-                    .stroke(isSelected ? Color.accentColor : Color.clear, lineWidth: 2)
+                RoundedRectangle(cornerRadius: 8, style: .continuous)
+                    .stroke(isSelected ? language.color.opacity(0.5) : (isHovering ? Color.white.opacity(0.08) : Color.white.opacity(0.04)), lineWidth: 1)
             )
         }
         .buttonStyle(.plain)
@@ -8139,7 +8402,7 @@ struct SettingsView: View {
         apiKey = providerKeys[selectedProvider] ?? ""
         let savedKeyMode = UserDefaults.standard.string(forKey: "aiKeyMode")
         aiKeyMode = savedKeyMode ?? "direct"
-        microRentToken = UserDefaults.standard.string(forKey: "microRentToken") ?? ""
+        microRentToken = ""
         dotminiLicenseKey = UserDefaults.standard.string(forKey: "dotminiLicenseKey") ?? ""
     }
     
@@ -8214,15 +8477,10 @@ struct SettingsView: View {
         defaults.set(cellFontSize, forKey: "cellFontSize")
         defaults.set(cellFontWeight, forKey: "cellFontWeight")
         
-        defaults.set(microRentToken, forKey: "microRentToken")
-        if !microRentToken.isEmpty {
-            setenv("MICRORENT_TOKEN", microRentToken, 1)
-            setenv("USE_MICRORENT_PROXY", "1", 1)
-        } else {
-            unsetenv("MICRORENT_TOKEN")
-            setenv("USE_MICRORENT_PROXY", "0", 1)
-        }
-        
+        defaults.removeObject(forKey: "microRentToken")
+        unsetenv("MICRORENT_TOKEN")
+        unsetenv("USE_MICRORENT_PROXY")
+
         defaults.synchronize()
     }
     
@@ -8775,17 +9033,48 @@ class SyntaxHighlighter {
     static let shared = SyntaxHighlighter()
     
     private let keywords: [String: [String]] = [
-        "swift": ["func", "var", "let", "class", "struct", "enum", "protocol", "extension", "import", "return", "if", "else", "for", "while", "switch", "case", "default", "guard", "throw", "try", "catch", "async", "await", "private", "public", "internal", "fileprivate", "static", "override", "init", "deinit", "self", "super", "nil", "true", "false", "in", "where", "typealias", "associatedtype", "some", "any", "@Published", "@State", "@Binding", "@ObservableObject", "@MainActor"],
+        "swift": ["func", "var", "let", "class", "struct", "enum", "protocol", "extension", "import", "return", "if", "else", "for", "while", "switch", "case", "default", "guard", "throw", "try", "catch", "async", "await", "private", "public", "internal", "fileprivate", "static", "override", "init", "deinit", "self", "super", "nil", "true", "false", "in", "where", "typealias", "associatedtype", "some", "any", "@Published", "@State", "@Binding", "@ObservableObject", "@MainActor", "actor"],
         "python": ["def", "class", "import", "from", "return", "if", "elif", "else", "for", "while", "try", "except", "finally", "with", "as", "is", "not", "and", "or", "in", "True", "False", "None", "pass", "break", "continue", "raise", "yield", "lambda", "global", "nonlocal", "assert", "del", "async", "await", "self"],
-        "javascript": ["function", "const", "let", "var", "class", "extends", "import", "export", "return", "if", "else", "for", "while", "switch", "case", "default", "try", "catch", "finally", "throw", "async", "await", "new", "this", "super", "true", "false", "null", "undefined", "typeof", "instanceof", "of", "in", "=>"],
-        "typescript": ["function", "const", "let", "var", "class", "extends", "import", "export", "return", "if", "else", "for", "while", "switch", "case", "default", "try", "catch", "finally", "throw", "async", "await", "new", "this", "super", "true", "false", "null", "undefined", "typeof", "instanceof", "of", "in", "interface", "type", "enum", "implements", "readonly", "private", "public", "protected", "=>"],
+        "py": ["def", "class", "import", "from", "return", "if", "elif", "else", "for", "while", "try", "except", "finally", "with", "as", "is", "not", "and", "or", "in", "True", "False", "None", "pass", "break", "continue", "raise", "yield", "lambda", "global", "nonlocal", "assert", "del", "async", "await", "self"],
+        "javascript": ["function", "const", "let", "var", "class", "extends", "import", "export", "return", "if", "else", "for", "while", "switch", "case", "default", "try", "catch", "finally", "throw", "async", "await", "new", "this", "super", "true", "false", "null", "undefined", "typeof", "instanceof", "of", "in", "=>", "yield", "debugger"],
+        "js": ["function", "const", "let", "var", "class", "extends", "import", "export", "return", "if", "else", "for", "while", "switch", "case", "default", "try", "catch", "finally", "throw", "async", "await", "new", "this", "super", "true", "false", "null", "undefined", "typeof", "instanceof", "of", "in", "=>", "yield", "debugger"],
+        "typescript": ["function", "const", "let", "var", "class", "extends", "import", "export", "return", "if", "else", "for", "while", "switch", "case", "default", "try", "catch", "finally", "throw", "async", "await", "new", "this", "super", "true", "false", "null", "undefined", "typeof", "instanceof", "of", "in", "interface", "type", "enum", "implements", "readonly", "private", "public", "protected", "as", "is", "keyof", "declare", "abstract"],
+        "ts": ["function", "const", "let", "var", "class", "extends", "import", "export", "return", "if", "else", "for", "while", "switch", "case", "default", "try", "catch", "finally", "throw", "async", "await", "new", "this", "super", "true", "false", "null", "undefined", "typeof", "instanceof", "of", "in", "interface", "type", "enum", "implements", "readonly", "private", "public", "protected", "as", "is", "keyof", "declare", "abstract"],
         "rust": ["fn", "let", "mut", "const", "struct", "enum", "impl", "trait", "use", "mod", "pub", "crate", "self", "super", "return", "if", "else", "for", "while", "loop", "match", "async", "await", "move", "ref", "where", "type", "dyn", "static", "unsafe", "extern", "true", "false", "Some", "None", "Ok", "Err"],
-        "go": ["func", "var", "const", "type", "struct", "interface", "package", "import", "return", "if", "else", "for", "switch", "case", "default", "go", "select", "chan", "defer", "range", "map", "make", "new", "nil", "true", "false"],
-        "java": ["class", "interface", "enum", "extends", "implements", "import", "package", "public", "private", "protected", "static", "final", "abstract", "return", "if", "else", "for", "while", "switch", "case", "default", "try", "catch", "finally", "throw", "throws", "new", "this", "super", "null", "true", "false", "void", "int", "boolean", "String", "@Override"],
+        "rs": ["fn", "let", "mut", "const", "struct", "enum", "impl", "trait", "use", "mod", "pub", "crate", "self", "super", "return", "if", "else", "for", "while", "loop", "match", "async", "await", "move", "ref", "where", "type", "dyn", "static", "unsafe", "extern", "true", "false", "Some", "None", "Ok", "Err"],
+        "go": ["func", "var", "const", "type", "struct", "interface", "package", "import", "return", "if", "else", "for", "switch", "case", "default", "go", "select", "chan", "defer", "range", "map", "make", "new", "nil", "true", "false", "fallthrough", "goto"],
+        "golang": ["func", "var", "const", "type", "struct", "interface", "package", "import", "return", "if", "else", "for", "switch", "case", "default", "go", "select", "chan", "defer", "range", "map", "make", "new", "nil", "true", "false", "fallthrough", "goto"],
+        "java": ["class", "interface", "enum", "extends", "implements", "import", "package", "public", "private", "protected", "static", "final", "abstract", "return", "if", "else", "for", "while", "switch", "case", "default", "try", "catch", "finally", "throw", "throws", "new", "this", "super", "null", "true", "false", "void", "int", "boolean", "String", "@Override", "record", "sealed"],
+        "kotlin": ["class", "interface", "object", "fun", "val", "var", "constructor", "init", "this", "super", "package", "import", "public", "private", "protected", "internal", "abstract", "final", "open", "override", "lateinit", "companion", "data", "sealed", "enum", "annotation", "suspend", "if", "else", "when", "for", "while", "do", "return", "break", "continue", "throw", "try", "catch", "finally", "is", "in", "as", "true", "false", "null"],
+        "kt": ["class", "interface", "object", "fun", "val", "var", "constructor", "init", "this", "super", "package", "import", "public", "private", "protected", "internal", "abstract", "final", "open", "override", "lateinit", "companion", "data", "sealed", "enum", "annotation", "suspend", "if", "else", "when", "for", "while", "do", "return", "break", "continue", "throw", "try", "catch", "finally", "is", "in", "as", "true", "false", "null"],
         "c": ["int", "char", "float", "double", "void", "if", "else", "for", "while", "do", "switch", "case", "default", "break", "continue", "return", "struct", "union", "enum", "typedef", "const", "static", "extern", "sizeof", "NULL", "true", "false", "#include", "#define", "#ifdef", "#ifndef", "#endif"],
-        "cpp": ["int", "char", "float", "double", "void", "bool", "if", "else", "for", "while", "do", "switch", "case", "default", "break", "continue", "return", "class", "struct", "union", "enum", "typedef", "const", "static", "extern", "virtual", "override", "public", "private", "protected", "namespace", "using", "template", "typename", "new", "delete", "nullptr", "true", "false", "#include", "#define"],
-        "html": ["html", "head", "body", "div", "span", "p", "a", "img", "ul", "ol", "li", "table", "tr", "td", "th", "form", "input", "button", "script", "style", "link", "meta", "title", "class", "id", "href", "src"],
-        "css": ["color", "background", "margin", "padding", "border", "font", "display", "position", "top", "left", "right", "bottom", "width", "height", "flex", "grid", "justify", "align", "transform", "transition", "animation", "@media", "@keyframes", "hover", "active", "focus"]
+        "cpp": ["int", "char", "float", "double", "void", "bool", "if", "else", "for", "while", "do", "switch", "case", "default", "break", "continue", "return", "class", "struct", "union", "enum", "typedef", "const", "static", "extern", "virtual", "override", "public", "private", "protected", "namespace", "using", "template", "typename", "new", "delete", "nullptr", "true", "false", "#include", "#define", "constexpr", "concept", "co_await", "co_return"],
+        "c++": ["int", "char", "float", "double", "void", "bool", "if", "else", "for", "while", "do", "switch", "case", "default", "break", "continue", "return", "class", "struct", "union", "enum", "typedef", "const", "static", "extern", "virtual", "override", "public", "private", "protected", "namespace", "using", "template", "typename", "new", "delete", "nullptr", "true", "false", "#include", "#define", "constexpr", "concept", "co_await", "co_return"],
+        "objective-c": ["@interface", "@implementation", "@protocol", "@end", "@property", "@synthesize", "@dynamic", "@class", "@import", "@selector", "id", "instancetype", "BOOL", "YES", "NO", "nil", "Nil", "self", "super", "nonatomic", "strong", "weak", "readonly", "if", "else", "for", "while", "return"],
+        "objc": ["@interface", "@implementation", "@protocol", "@end", "@property", "@synthesize", "@dynamic", "@class", "@import", "@selector", "id", "instancetype", "BOOL", "YES", "NO", "nil", "Nil", "self", "super", "nonatomic", "strong", "weak", "readonly", "if", "else", "for", "while", "return"],
+        "csharp": ["class", "struct", "record", "interface", "enum", "namespace", "using", "public", "private", "protected", "internal", "static", "readonly", "virtual", "override", "abstract", "sealed", "async", "await", "if", "else", "switch", "case", "default", "for", "foreach", "in", "while", "do", "break", "continue", "return", "throw", "try", "catch", "finally", "from", "where", "select", "new", "this", "base", "null", "true", "false", "var", "Task", "string", "int", "bool"],
+        "cs": ["class", "struct", "record", "interface", "enum", "namespace", "using", "public", "private", "protected", "internal", "static", "readonly", "virtual", "override", "abstract", "sealed", "async", "await", "if", "else", "switch", "case", "default", "for", "foreach", "in", "while", "do", "break", "continue", "return", "throw", "try", "catch", "finally", "from", "where", "select", "new", "this", "base", "null", "true", "false", "var", "Task", "string", "int", "bool"],
+        "dart": ["class", "enum", "mixin", "extension", "typedef", "import", "export", "abstract", "const", "final", "late", "static", "factory", "required", "async", "await", "if", "else", "switch", "case", "default", "for", "while", "do", "break", "continue", "return", "throw", "try", "catch", "finally", "extends", "with", "implements", "super", "this", "new", "is", "true", "false", "null", "var", "dynamic", "void", "Widget", "BuildContext"],
+        "php": ["function", "fn", "class", "interface", "trait", "enum", "extends", "implements", "public", "private", "protected", "static", "final", "readonly", "abstract", "const", "var", "if", "else", "elseif", "switch", "case", "default", "match", "for", "foreach", "as", "while", "do", "break", "continue", "return", "try", "catch", "finally", "throw", "echo", "print", "isset", "empty", "require", "include", "namespace", "use", "new", "true", "false", "null"],
+        "ruby": ["def", "class", "module", "end", "if", "elsif", "else", "unless", "while", "until", "for", "in", "do", "begin", "rescue", "ensure", "raise", "return", "break", "next", "yield", "super", "self", "alias", "true", "false", "nil", "attr_accessor", "require", "include"],
+        "rb": ["def", "class", "module", "end", "if", "elsif", "else", "unless", "while", "until", "for", "in", "do", "begin", "rescue", "ensure", "raise", "return", "break", "next", "yield", "super", "self", "alias", "true", "false", "nil", "attr_accessor", "require", "include"],
+        "shell": ["if", "then", "else", "elif", "fi", "for", "in", "do", "done", "while", "until", "case", "esac", "select", "function", "export", "source", "alias", "local", "declare", "readonly", "return", "exit", "set", "unset", "echo", "printf", "test", "cd", "pwd", "true", "false"],
+        "sh": ["if", "then", "else", "elif", "fi", "for", "in", "do", "done", "while", "until", "case", "esac", "select", "function", "export", "source", "alias", "local", "declare", "readonly", "return", "exit", "set", "unset", "echo", "printf", "test", "cd", "pwd", "true", "false"],
+        "bash": ["if", "then", "else", "elif", "fi", "for", "in", "do", "done", "while", "until", "case", "esac", "select", "function", "export", "source", "alias", "local", "declare", "readonly", "return", "exit", "set", "unset", "echo", "printf", "test", "cd", "pwd", "true", "false"],
+        "zsh": ["if", "then", "else", "elif", "fi", "for", "in", "do", "done", "while", "until", "case", "esac", "select", "function", "export", "source", "alias", "local", "declare", "readonly", "return", "exit", "set", "unset", "echo", "printf", "test", "cd", "pwd", "true", "false"],
+        "sql": ["select", "from", "where", "insert", "into", "values", "update", "set", "delete", "join", "inner", "left", "right", "full", "outer", "cross", "on", "using", "group", "by", "having", "order", "asc", "desc", "limit", "offset", "union", "all", "intersect", "except", "distinct", "create", "alter", "drop", "truncate", "table", "view", "index", "schema", "database", "primary", "key", "foreign", "references", "and", "or", "not", "in", "is", "null", "like", "ilike", "between", "exists", "case", "when", "then", "else", "end", "cast", "as", "count", "sum", "avg", "min", "max", "coalesce"],
+        "html": ["html", "head", "body", "div", "span", "p", "a", "img", "ul", "ol", "li", "table", "tr", "td", "th", "form", "input", "button", "script", "style", "link", "meta", "title", "class", "id", "href", "src", "nav", "header", "footer", "main", "section", "article", "svg", "path", "circle", "rect"],
+        "css": ["color", "background", "margin", "padding", "border", "font", "display", "position", "top", "left", "right", "bottom", "width", "height", "flex", "grid", "justify", "align", "transform", "transition", "animation", "@media", "@keyframes", "hover", "active", "focus", "box-shadow", "border-radius", "opacity", "z-index"],
+        "json": ["true", "false", "null"],
+        "yaml": ["true", "false", "yes", "no", "on", "off", "null", "True", "False", "None"],
+        "markdown": ["TODO", "FIXME", "NOTE", "WARNING", "IMPORTANT", "TIP"],
+        "lua": ["and", "break", "do", "else", "elseif", "end", "false", "for", "function", "goto", "if", "in", "local", "nil", "not", "or", "repeat", "return", "then", "true", "until", "while", "print", "require"],
+        "zig": ["const", "var", "fn", "pub", "usingnamespace", "struct", "enum", "union", "error", "test", "comptime", "inline", "extern", "export", "defer", "errdefer", "return", "break", "continue", "if", "else", "switch", "while", "for", "try", "catch", "async", "await", "suspend", "resume", "null", "undefined", "true", "false"],
+        "r": ["if", "else", "repeat", "while", "function", "for", "in", "next", "break", "TRUE", "FALSE", "NULL", "Inf", "NaN", "NA", "library", "require"],
+        "julia": ["function", "macro", "quote", "let", "local", "global", "const", "do", "struct", "module", "using", "import", "export", "return", "break", "continue", "if", "elseif", "else", "for", "while", "try", "catch", "finally", "throw", "true", "false", "nothing"],
+        "elixir": ["def", "defp", "defmodule", "defmacro", "defprotocol", "defimpl", "do", "end", "if", "unless", "case", "cond", "with", "for", "try", "rescue", "catch", "after", "receive", "send", "import", "require", "use", "alias", "fn", "true", "false", "nil"],
+        "solidity": ["contract", "interface", "library", "is", "pragma", "solidity", "import", "function", "modifier", "event", "error", "struct", "enum", "mapping", "public", "private", "internal", "external", "view", "pure", "payable", "memory", "storage", "calldata", "virtual", "override", "returns", "return", "emit", "revert", "require", "assert", "true", "false"],
+        "ardium": ["fn", "var", "let", "mut", "struct", "class", "enum", "import", "extern", "async", "await", "export", "test", "interrupt", "@owned", "@State", "@External", "@export", "if", "else", "elif", "loop", "while", "for", "return", "break", "continue", "match", "true", "false", "nil", "null", "alloc", "free", "print", "println"]
     ]
     
     func highlight(_ code: String, language: String, fontSize: CGFloat, theme: AppTheme) -> NSAttributedString {
@@ -8803,7 +9092,9 @@ class SyntaxHighlighter {
         // Highlight comments first (so they override everything else)
         highlightPattern(in: attributedString, pattern: "//[^\n]*", color: theme.commentColor)
         highlightPattern(in: attributedString, pattern: "#[^\n]*", color: theme.commentColor)
+        highlightPattern(in: attributedString, pattern: "--[^\n]*", color: theme.commentColor)
         highlightPattern(in: attributedString, pattern: "/\\*[\\s\\S]*?\\*/", color: theme.commentColor)
+        highlightPattern(in: attributedString, pattern: "<!--[\\s\\S]*?-->", color: theme.commentColor)
         
         // Highlight strings
         highlightPattern(in: attributedString, pattern: "\"[^\"\\\\]*(\\\\.[^\"\\\\]*)*\"", color: theme.stringColor)
@@ -8814,11 +9105,12 @@ class SyntaxHighlighter {
         highlightPattern(in: attributedString, pattern: "\\b\\d+(\\.\\d+)?\\b", color: theme.numberColor)
         highlightPattern(in: attributedString, pattern: "\\b0x[0-9a-fA-F]+\\b", color: theme.numberColor)
         
-        // Highlight keywords
+        // Highlight keywords (case-insensitive for SQL and HTML)
+        let isCaseInsensitive = (lang == "sql" || lang == "html")
+        let regexOptions: NSRegularExpression.Options = isCaseInsensitive ? [.caseInsensitive] : []
         for keyword in langKeywords {
-            // Escape special regex characters in keyword
             let escapedKeyword = NSRegularExpression.escapedPattern(for: keyword)
-            highlightPattern(in: attributedString, pattern: "\\b\(escapedKeyword)\\b", color: theme.keywordColor)
+            highlightPattern(in: attributedString, pattern: "\\b\(escapedKeyword)\\b", color: theme.keywordColor, options: regexOptions)
         }
         
         // Highlight types (capitalized words - classes, structs, etc.)
@@ -8827,14 +9119,14 @@ class SyntaxHighlighter {
         // Highlight function calls
         highlightPattern(in: attributedString, pattern: "\\b[a-z_][a-zA-Z0-9_]*(?=\\()", color: theme.functionColor)
         
-        // Highlight decorators/attributes (Swift, Python, Java)
+        // Highlight decorators/attributes (Swift, Python, Java, Ardium)
         highlightPattern(in: attributedString, pattern: "@[a-zA-Z_][a-zA-Z0-9_]*", color: theme.keywordColor)
         
         return attributedString
     }
     
-    private func highlightPattern(in attributedString: NSMutableAttributedString, pattern: String, color: NSColor) {
-        guard let regex = try? NSRegularExpression(pattern: pattern, options: []) else { return }
+    private func highlightPattern(in attributedString: NSMutableAttributedString, pattern: String, color: NSColor, options: NSRegularExpression.Options = []) {
+        guard let regex = try? NSRegularExpression(pattern: pattern, options: options) else { return }
         let string = attributedString.string
         let range = NSRange(location: 0, length: string.utf16.count)
         

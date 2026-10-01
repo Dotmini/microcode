@@ -2,11 +2,13 @@
 //  EmbeddedAIAgentPanel.swift
 //  MicroCode
 //
-//  Dedicated Hardware & Firmware AI Agent for Embedded Studio
-//  Context-aware: understands Target Board, Serial Ports, FreeRTOS, ESP-IDF, Pinouts, and Compiler Logs
+//  Created and Designed by Dotmini Software
+//  Founder & CEO: Tirawat Nantamas
+//  Copyright © 2025-2026 Dotmini Software. All rights reserved.
 //
-//  Created by Dotmini Company Limited
-//  Monochrome Minimalist Black & White Xcode Pro Style
+//  Description:
+//  Dedicated Hardware & Firmware AI Agent for Embedded Studio.
+//  Context-aware: understands Target Board, Serial Ports, FreeRTOS, ESP-IDF, Pinouts, and Compiler Logs.
 //
 
 import SwiftUI
@@ -780,18 +782,17 @@ struct EmbeddedAIAgentPanel: View {
             ?? StreamableAIProvider.detect(from: normalized.model)
         var model = normalized.model
         let lower = model.lowercased()
-        if lower == "deepseek-v4" || lower == "deepseek-chat-v4" || lower == "deepseek" {
+        if lower == "deepseek" {
             model = "deepseek-chat"
-        } else if lower == "gemini-flash" || lower == "gemini" {
-            model = "gemini-2.5-flash"
+        } else if lower == "gemini" {
+            model = "gemini-2.0-flash"
+        } else if lower == "openai" {
+            model = "gpt-4o"
         }
         
         var apiKey = appState.apiKeys[provider.rawValue] ?? ""
         if apiKey.isEmpty {
-            apiKey = UserDefaults.standard.string(forKey: "\(provider.rawValue)_api_key") ?? ""
-        }
-        if apiKey.isEmpty && provider == .openai {
-            apiKey = UserDefaults.standard.string(forKey: "apiKey") ?? ""
+            apiKey = AIModelCatalog.resolveKey(provider.rawValue)
         }
         
         // Build Embedded System Prompt
@@ -981,6 +982,19 @@ struct EmbeddedAICodeBlockView: View {
     @State private var isAppended: Bool = false
     
     var body: some View {
+        let replaceBg: Color = isReplaced
+            ? (isDark ? Color.white : Color.black)
+            : (isDark ? Color.white.opacity(0.12) : Color.black.opacity(0.08))
+        let replaceFg: Color = isReplaced
+            ? (isDark ? .black : .white)
+            : (isDark ? .white : .black)
+        let headerBg: Color = isDark ? Color.white.opacity(0.06) : Color.black.opacity(0.04)
+        let appendBg: Color = isDark ? Color.white.opacity(0.06) : Color.black.opacity(0.05)
+        let appendFg: Color = isDark ? Color(white: 0.8) : Color(white: 0.2)
+        let copyFg: Color = isCopied ? (isDark ? .white : .black) : Color(white: 0.5)
+        let containerBg: Color = isDark ? Color.black : Color(white: 0.95)
+        let borderColor: Color = isDark ? Color.white.opacity(0.15) : Color.black.opacity(0.15)
+
         VStack(alignment: .leading, spacing: 0) {
             // Header bar
             HStack(spacing: 6) {
@@ -1008,8 +1022,8 @@ struct EmbeddedAICodeBlockView: View {
                     }
                     .padding(.horizontal, 6)
                     .padding(.vertical, 3)
-                    .background(isReplaced ? (isDark ? Color.white : Color.black) : (isDark ? Color.white.opacity(0.12) : Color.black.opacity(0.08)))
-                    .foregroundColor(isReplaced ? (isDark ? .black : .white) : (isDark ? .white : .black))
+                    .background(replaceBg)
+                    .foregroundColor(replaceFg)
                     .cornerRadius(3)
                 }
                 .buttonStyle(.plain)
@@ -1029,8 +1043,8 @@ struct EmbeddedAICodeBlockView: View {
                     }
                     .padding(.horizontal, 6)
                     .padding(.vertical, 3)
-                    .background(isDark ? Color.white.opacity(0.06) : Color.black.opacity(0.05))
-                    .foregroundColor(isDark ? Color(white: 0.8) : Color(white: 0.2))
+                    .background(appendBg)
+                    .foregroundColor(appendFg)
                     .cornerRadius(3)
                 }
                 .buttonStyle(.plain)
@@ -1045,7 +1059,7 @@ struct EmbeddedAICodeBlockView: View {
                 }) {
                     Image(systemName: isCopied ? "checkmark" : "doc.on.doc")
                         .font(.system(size: 9))
-                        .foregroundColor(isCopied ? (isDark ? .white : .black) : (isDark ? Color(white: 0.5) : Color(white: 0.5)))
+                        .foregroundColor(copyFg)
                         .frame(width: 20, height: 20)
                 }
                 .buttonStyle(.plain)
@@ -1053,7 +1067,7 @@ struct EmbeddedAICodeBlockView: View {
             }
             .padding(.horizontal, 8)
             .padding(.vertical, 5)
-            .background(isDark ? Color.white.opacity(0.06) : Color.black.opacity(0.04))
+            .background(headerBg)
             
             Rectangle().fill(isDark ? Color.white.opacity(0.08) : Color.black.opacity(0.08)).frame(height: 1)
             
@@ -1066,8 +1080,8 @@ struct EmbeddedAICodeBlockView: View {
                     .padding(8)
             }
         }
-        .background(isDark ? Color.black : Color(white: 0.95))
+        .background(containerBg)
         .cornerRadius(4)
-        .overlay(RoundedRectangle(cornerRadius: 4).stroke(isDark ? Color.white.opacity(0.15) : Color.black.opacity(0.15), lineWidth: 1))
+        .overlay(RoundedRectangle(cornerRadius: 4).stroke(borderColor, lineWidth: 1))
     }
 }

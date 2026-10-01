@@ -20,7 +20,7 @@ class BillingService: ObservableObject {
     
     // MARK: - Stripe Backend Configuration
     private let backendBaseURL = "https://api.dotmini.net/v1/billing"
-    private var authToken: String? // User's JWT or session token
+
     
     @Published var tokenBalance: Int = 0 // Will be fetched from backend
     @Published var currentTier: BillingTier = .free
@@ -39,18 +39,25 @@ class BillingService: ObservableObject {
     // MARK: - Auth Management
     
     func setAuthToken(_ token: String) {
-        self.authToken = token
+        // Compatibility entry point: account credentials are owned by the
+        // central identity service and are refreshed for each request.
+        _ = token
         Task {
             try? await fetchBalance()
         }
     }
     
+    private func currentToken() async -> String? {
+        if let platform = await MainActor.run(body: { DotminiPlatformKeyService.shared.authorizationToken }) { return platform }
+        return await SupabaseAuthService.shared.refreshAccessTokenIfNeeded()
+    }
+
     // MARK: - Compute Pricing
     
     /// Returns the cost per minute of execution for a specific compute target
     func getCostPerMinute(for target: ComputeTarget) -> Int {
         switch target {
-        case .localCPU, .localMLX, .localNvidia, .customHPC, .yourCloud:
+        case .localCPU, .localMLX, .localNvidia, .customHPC, .yourCloud, .googleColab:
             return 0 // Free / Bring your own compute
         case .cloudPremium:
             // Real Cloud GPU billing runs in CloudGPUService / gpu_wallets
@@ -105,7 +112,7 @@ class BillingService: ObservableObject {
     
     /// Fetches the user's token balance and subscription tier from the Stripe Backend
     func fetchBalance() async throws {
-        guard let token = authToken else { throw URLError(.userAuthenticationRequired) }
+        guard let token = await currentToken() else { throw URLError(.userAuthenticationRequired) }
         
         DispatchQueue.main.async { self.isLoading = true }
         defer { DispatchQueue.main.async { self.isLoading = false } }
@@ -132,7 +139,7 @@ class BillingService: ObservableObject {
     
     /// Sends a charge request to the Stripe Backend
     func chargeTokensViaStripe(amount: Int) async throws {
-        guard let token = authToken else { throw URLError(.userAuthenticationRequired) }
+        guard let token = await currentToken() else { throw URLError(.userAuthenticationRequired) }
         
         guard let url = URL(string: "\(backendBaseURL)/charge") else { throw URLError(.badURL) }
         var request = URLRequest(url: url)
@@ -159,7 +166,7 @@ class BillingService: ObservableObject {
     
     /// Triggers a Checkout Session for purchasing tokens via Beam Payment / Gateway
     func buyTokens(packageId: String) async throws -> URL {
-        guard let token = authToken else { throw URLError(.userAuthenticationRequired) }
+        guard let token = await currentToken() else { throw URLError(.userAuthenticationRequired) }
         
         guard let url = URL(string: "\(backendBaseURL)/create-checkout-session") else { throw URLError(.badURL) }
         var request = URLRequest(url: url)

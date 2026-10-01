@@ -18,6 +18,7 @@ enum ComputeTarget: String, CaseIterable, Identifiable, Codable {
     case localCPU = "Local CPU"
     case localMLX = "Apple Silicon (NPU/Metal)"
     case localNvidia = "Nvidia GPU (CUDA/eGPU)"
+    case googleColab = "Google Colab (Cloud GPU/TPU)"
     case cloudPremium = "Microrent Cloud (Serverless)"
     case customHPC = "Custom Cloud GPU (RunPod/Vast.ai/Akamai)"
     case yourCloud = "Your Cloud (SSH)"
@@ -32,6 +33,7 @@ enum ComputeTarget: String, CaseIterable, Identifiable, Codable {
         case .localCPU:      return "Local CPU"
         case .localMLX:      return "Apple Silicon"
         case .localNvidia:   return "Local Nvidia GPU"
+        case .googleColab:   return "Google Colab"
         case .cloudPremium:  return "MicroCode Cloud (Premium)"
         case .customHPC:     return "MicroCode Cloud"
         case .yourCloud:     return "Your Cloud (SSH)"
@@ -42,7 +44,7 @@ enum ComputeTarget: String, CaseIterable, Identifiable, Codable {
     // cloudPremium is legacy (separate stub kernel) — all premium GPUs now
     // ship through the customHPC / Jupyter path managed by CloudGPUService.
     static var userSelectable: [ComputeTarget] {
-        [.localCPU, .localMLX, .localNvidia, .customHPC, .yourCloud]
+        [.localCPU, .localMLX, .localNvidia, .googleColab, .customHPC, .yourCloud]
     }
 
     var icon: String {
@@ -50,6 +52,7 @@ enum ComputeTarget: String, CaseIterable, Identifiable, Codable {
         case .localCPU: return "cpu"
         case .localMLX: return "applelogo"
         case .localNvidia: return "memorychip"
+        case .googleColab: return "sparkles.rectangle.stack"
         case .cloudPremium: return "cloud.fill"
         case .customHPC: return "cloud.fill"
         case .yourCloud: return "server.rack"

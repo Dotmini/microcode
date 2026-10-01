@@ -82,7 +82,7 @@ final class AgentKernelClient {
     private func post<Body: Encodable, Response: Decodable>(path: String, body: Body) async throws -> Response {
         let relativePath = path.trimmingCharacters(in: CharacterSet(charactersIn: "/"))
         let url = baseURL.appendingPathComponent(relativePath)
-        var request = URLRequest(url: url)
+        var request = LocalBackendAuth.request(url: url)
         request.httpMethod = "POST"
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
         request.httpBody = try JSONEncoder.microCodeKernel.encode(body)

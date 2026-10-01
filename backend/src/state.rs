@@ -267,6 +267,7 @@ impl Default for AIConfig {
             temperature: 0.7,
             max_tokens: 2048,
             microrent_token: None,
+            proxy_base_url: None,
             use_microrent_proxy: false,
         }
     }

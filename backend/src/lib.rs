@@ -1,4 +1,5 @@
 pub mod agent_kernel;
+pub mod models;
 pub mod arrow_cdata;
 pub mod arrow_flight;
 pub mod crash_decoder;

@@ -12,10 +12,10 @@ import AppKit
 // MARK: - Node Wrapper (Bridge Class for NSOutlineView)
 
 class FileNodeWrapper: NSObject {
-    let node: FileNode
+    var node: FileNode
     let id: String
     
-    // Cache children wrappers to maintain object identity
+    // Cache children wrappers to maintain object identity across updates
     var childrenWrappers: [FileNodeWrapper]? = nil
     
     init(_ node: FileNode) {
@@ -65,8 +65,9 @@ struct AuthenticFileTree: NSViewRepresentable {
         outlineView.style = .plain
         outlineView.allowsMultipleSelection = true
         
-        // Double click action
+        // Click and Double-click actions
         outlineView.target = context.coordinator
+        outlineView.action = #selector(Coordinator.onClick)
         outlineView.doubleAction = #selector(Coordinator.onDoubleClick)
         
         context.coordinator.outlineView = outlineView
@@ -81,31 +82,8 @@ struct AuthenticFileTree: NSViewRepresentable {
         nsView.backgroundColor = backgroundColor
         outlineView.backgroundColor = backgroundColor
         
-        // Efficient Update: Reload only if data changed
-        // For simplicity in this step, we reload mostly.
-        // Ideally we diff, but `fileTree` replacement is usually a full refresh event in AppState.
-        
-        // Naive update: check count diff or deep logic.
-        // For now, we update the coordinator's root cache and reload.
-        // To preserve expansion state, we would need to save/restore persistent IDs.
-        
         if context.coordinator.needsReload(revision: revision, currentTreeCount: fileTree.count) {
-             // Save expansion state BEFORE updating rootItems
-             let expandedIds = context.coordinator.getExpandedIds(outlineView)
-             
-             let newItems = fileTree.map { FileNodeWrapper($0) }
-             context.coordinator.updateRootItems(newItems)
-             
-             outlineView.reloadData()
-             
-             // Restore expansion state or auto-expand on initial load
-             if expandedIds.isEmpty {
-                 for item in newItems where item.node.isDirectory {
-                     outlineView.expandItem(item)
-                 }
-             } else {
-                 context.coordinator.restoreExpansion(outlineView, ids: expandedIds)
-             }
+            context.coordinator.syncTree(fileTree: fileTree, in: outlineView, scrollView: nsView)
         }
     }
     
@@ -116,6 +94,11 @@ struct AuthenticFileTree: NSViewRepresentable {
         var rootItems: [FileNodeWrapper] = []
         var lastRevision: UInt64?
         weak var outlineView: NSOutlineView?
+        
+        // Expansion and scroll stability tracking
+        var targetFolderId: String?
+        var expandedItemIds = Set<String>()
+        var isRestoringExpansion = false
         
         init(_ parent: AuthenticFileTree) {
             self.parent = parent
@@ -145,29 +128,186 @@ struct AuthenticFileTree: NSViewRepresentable {
             return false
         }
         
+        // MARK: - Lookup Helpers
+        
+        func findWrapper(byId id: String, in items: [FileNodeWrapper]? = nil) -> FileNodeWrapper? {
+            let list = items ?? rootItems
+            for item in list {
+                if item.id == id { return item }
+                if let children = item.childrenWrappers {
+                    if let found = findWrapper(byId: id, in: children) {
+                        return found
+                    }
+                }
+            }
+            return nil
+        }
+        
+        func findNode(byId id: String, in nodes: [FileNode]) -> FileNode? {
+            for node in nodes {
+                if node.id == id { return node }
+                if let found = findNode(byId: id, in: node.children) {
+                    return found
+                }
+            }
+            return nil
+        }
+        
+        // Reconcile wrappers so existing objects maintain identity and memory state
+        func reconcileWrappers(existing: [FileNodeWrapper], newNodes: [FileNode]) -> [FileNodeWrapper] {
+            var existingMap: [String: FileNodeWrapper] = [:]
+            for item in existing {
+                existingMap[item.id] = item
+            }
+            return newNodes.map { node in
+                if let existingWrapper = existingMap[node.id] {
+                    existingWrapper.node = node
+                    if let existingChildren = existingWrapper.childrenWrappers, !node.children.isEmpty {
+                        existingWrapper.childrenWrappers = reconcileWrappers(existing: existingChildren, newNodes: node.children)
+                    } else if node.hasLoadedChildren {
+                        existingWrapper.childrenWrappers = node.children.map { FileNodeWrapper($0) }
+                    }
+                    return existingWrapper
+                } else {
+                    let newWrapper = FileNodeWrapper(node)
+                    if node.hasLoadedChildren && !node.children.isEmpty {
+                        newWrapper.childrenWrappers = node.children.map { FileNodeWrapper($0) }
+                    }
+                    return newWrapper
+                }
+            }
+        }
+        
+        // MARK: - Tree Sync (Preserving Scroll and Preventing Jump-to-Top)
+        
+        func syncTree(fileTree: [FileNode], in outlineView: NSOutlineView, scrollView: NSScrollView) {
+            // 1. FAST PATH: A specific target folder just loaded its children asynchronously
+            if let targetId = targetFolderId,
+               let targetWrapper = findWrapper(byId: targetId, in: rootItems),
+               let updatedNode = findNode(byId: targetId, in: fileTree),
+               updatedNode.hasLoadedChildren && !targetWrapper.node.hasLoadedChildren {
+                
+                targetWrapper.node = updatedNode
+                targetWrapper.childrenWrappers = updatedNode.children.map { FileNodeWrapper($0) }
+                
+                NSAnimationContext.beginGrouping()
+                NSAnimationContext.current.duration = 0.05
+                outlineView.reloadItem(targetWrapper, reloadChildren: true)
+                outlineView.expandItem(targetWrapper)
+                NSAnimationContext.endGrouping()
+                
+                // Immediately scroll to keep the expanded folder and its newly loaded children visible
+                scrollItemIntoView(targetWrapper, in: outlineView)
+                
+                DispatchQueue.main.async { [weak self, weak outlineView] in
+                    guard let self = self, let ov = outlineView,
+                          let wrapper = self.findWrapper(byId: targetId, in: self.rootItems) else { return }
+                    self.scrollItemIntoView(wrapper, in: ov)
+                }
+                return
+            }
+            
+            // 2. FULL SYNC PATH: Root count changed, workspace loaded, or structural update
+            let savedScrollY = scrollView.contentView.bounds.origin.y
+            let visibleRect = outlineView.visibleRect
+            let visibleRows = outlineView.rows(in: visibleRect)
+            let topRow = visibleRows.location != NSNotFound && visibleRows.length > 0 ? visibleRows.location : -1
+            let topItemId: String? = (topRow >= 0 && topRow < outlineView.numberOfRows)
+                ? (outlineView.item(atRow: topRow) as? FileNodeWrapper)?.id
+                : nil
+            let selectedRow = outlineView.selectedRow
+            let selectedItemId: String? = (selectedRow >= 0 && selectedRow < outlineView.numberOfRows)
+                ? (outlineView.item(atRow: selectedRow) as? FileNodeWrapper)?.id
+                : nil
+            
+            var idsToRestore = expandedItemIds
+            if let targetId = targetFolderId {
+                idsToRestore.insert(targetId)
+            }
+            
+            let newItems = reconcileWrappers(existing: rootItems, newNodes: fileTree)
+            updateRootItems(newItems)
+            
+            outlineView.reloadData()
+            
+            if idsToRestore.isEmpty {
+                for item in newItems where item.node.isDirectory {
+                    outlineView.expandItem(item)
+                }
+            } else {
+                restoreExpansion(outlineView, ids: idsToRestore)
+            }
+            
+            outlineView.layoutSubtreeIfNeeded()
+            
+            // Restore scroll: Prioritize target folder, then selected item, then top item, then saved Y
+            let priorityTargetId = targetFolderId ?? selectedItemId
+            if let targetId = priorityTargetId,
+               let wrapper = findWrapper(byId: targetId, in: rootItems),
+               outlineView.row(forItem: wrapper) >= 0 {
+                scrollItemIntoView(wrapper, in: outlineView)
+            } else if let topId = topItemId,
+                      let topWrapper = findWrapper(byId: topId, in: rootItems),
+                      outlineView.row(forItem: topWrapper) >= 0 {
+                let row = outlineView.row(forItem: topWrapper)
+                outlineView.scrollRowToVisible(row)
+            } else {
+                let maxScrollY = max(0, outlineView.frame.height - scrollView.contentView.bounds.height)
+                let clampedY = max(0, min(savedScrollY, maxScrollY))
+                scrollView.contentView.scroll(to: NSPoint(x: 0, y: clampedY))
+                scrollView.reflectScrolledClipView(scrollView.contentView)
+            }
+            
+            DispatchQueue.main.async { [weak self, weak outlineView] in
+                guard let self = self, let ov = outlineView else { return }
+                if let targetId = self.targetFolderId,
+                   let wrapper = self.findWrapper(byId: targetId, in: self.rootItems) {
+                    self.scrollItemIntoView(wrapper, in: ov)
+                }
+            }
+        }
+        
+        // Helper to smoothly scroll an item and its children into comfortable view
+        func scrollItemIntoView(_ wrapper: FileNodeWrapper, in outlineView: NSOutlineView) {
+            let row = outlineView.row(forItem: wrapper)
+            guard row >= 0 else { return }
+            outlineView.scrollRowToVisible(row)
+            let childCount = outlineView.numberOfChildren(ofItem: wrapper)
+            if childCount > 0 {
+                let maxChildRow = min(row + min(childCount, 4), outlineView.numberOfRows - 1)
+                if maxChildRow > row {
+                    outlineView.scrollRowToVisible(maxChildRow)
+                }
+            }
+            outlineView.scrollRowToVisible(row)
+        }
+        
         // MARK: - State Persistence
         
         func getExpandedIds(_ outlineView: NSOutlineView) -> Set<String> {
-            var expanded = Set<String>()
+            var expanded = expandedItemIds
             let rowCount = outlineView.numberOfRows
-            guard rowCount > 0 else { return expanded }
-            for i in 0..<rowCount {
-                if let item = outlineView.item(atRow: i) as? FileNodeWrapper, outlineView.isItemExpanded(item) {
-                     expanded.insert(item.id)
+            if rowCount > 0 {
+                for i in 0..<rowCount {
+                    if let item = outlineView.item(atRow: i) as? FileNodeWrapper, outlineView.isItemExpanded(item) {
+                        expanded.insert(item.id)
+                    }
                 }
             }
             return expanded
         }
         
         func restoreExpansion(_ outlineView: NSOutlineView, ids: Set<String>) {
+            isRestoringExpansion = true
+            NSAnimationContext.beginGrouping()
+            NSAnimationContext.current.duration = 0
+            
             func expand(_ item: FileNodeWrapper) {
                 if ids.contains(item.id) {
                     if item.childrenWrappers == nil {
                         item.childrenWrappers = item.node.children.map { FileNodeWrapper($0) }
                     }
-                    
                     outlineView.expandItem(item)
-                    
                     if let children = item.childrenWrappers {
                         children.forEach { expand($0) }
                     }
@@ -175,6 +315,65 @@ struct AuthenticFileTree: NSViewRepresentable {
             }
             
             rootItems.forEach { expand($0) }
+            
+            NSAnimationContext.endGrouping()
+            isRestoringExpansion = false
+        }
+        
+        // MARK: - Folder Interaction & Expansion
+        
+        func expandFolder(_ item: FileNodeWrapper, in outlineView: NSOutlineView) {
+            targetFolderId = item.id
+            expandedItemIds.insert(item.id)
+            if item.childrenWrappers == nil && !item.node.children.isEmpty {
+                item.childrenWrappers = item.node.children.map { FileNodeWrapper($0) }
+            }
+            outlineView.expandItem(item)
+            scrollItemIntoView(item, in: outlineView)
+            
+            if !item.node.hasLoadedChildren {
+                parent.onAction(.loadChildren(item.node))
+            }
+        }
+        
+        @objc func onClick(_ sender: NSOutlineView) {
+            let row = sender.clickedRow
+            guard row >= 0, let item = sender.item(atRow: row) as? FileNodeWrapper else { return }
+            
+            // Check if the click was directly on the disclosure triangle
+            if let event = NSApp.currentEvent {
+                let point = sender.convert(event.locationInWindow, from: nil)
+                let outlineCellFrame = sender.frameOfOutlineCell(atRow: row)
+                if outlineCellFrame.contains(point) {
+                    // Disclosure triangle click is handled natively by NSOutlineView
+                    return
+                }
+            }
+            
+            if item.node.isDirectory {
+                targetFolderId = item.id
+                if sender.isItemExpanded(item) {
+                    sender.collapseItem(item)
+                } else {
+                    expandFolder(item, in: sender)
+                }
+            }
+        }
+        
+        @objc func onDoubleClick(_ sender: NSOutlineView) {
+            let row = sender.clickedRow
+            guard row >= 0, let item = sender.item(atRow: row) as? FileNodeWrapper else { return }
+            
+            if item.node.isDirectory {
+                targetFolderId = item.id
+                if sender.isItemExpanded(item) {
+                    sender.collapseItem(item)
+                } else {
+                    expandFolder(item, in: sender)
+                }
+            } else {
+                parent.onAction(.openFile(item.node))
+            }
         }
 
         // MARK: - DataSource
@@ -264,25 +463,6 @@ struct AuthenticFileTree: NSViewRepresentable {
             return view
         }
         
-        @objc func onDoubleClick(_ sender: NSOutlineView) {
-            let row = sender.clickedRow
-            guard row >= 0, let item = sender.item(atRow: row) as? FileNodeWrapper else { return }
-            
-            if item.node.isDirectory {
-                if sender.isItemExpanded(item) {
-                     sender.collapseItem(item)
-                } else {
-                     sender.expandItem(item)
-                     // Trigger load children if needed
-                     if !item.node.hasLoadedChildren {
-                         parent.onAction(.loadChildren(item.node))
-                     }
-                }
-            } else {
-                parent.onAction(.openFile(item.node))
-            }
-        }
-        
         // MARK: - Selection Events
         
         func outlineViewSelectionDidChange(_ notification: Notification) {
@@ -298,8 +478,32 @@ struct AuthenticFileTree: NSViewRepresentable {
         
         func outlineViewItemDidExpand(_ notification: Notification) {
             guard let item = notification.userInfo?["NSObject"] as? FileNodeWrapper else { return }
+            expandedItemIds.insert(item.id)
+            
+            if !isRestoringExpansion {
+                targetFolderId = item.id
+                if let ov = outlineView {
+                    scrollItemIntoView(item, in: ov)
+                }
+            }
+            
             if !item.node.hasLoadedChildren {
                 parent.onAction(.loadChildren(item.node))
+            }
+        }
+        
+        func outlineViewItemDidCollapse(_ notification: Notification) {
+            guard let item = notification.userInfo?["NSObject"] as? FileNodeWrapper else { return }
+            expandedItemIds.remove(item.id)
+            
+            if !isRestoringExpansion {
+                targetFolderId = item.id
+                if let ov = outlineView {
+                    let row = ov.row(forItem: item)
+                    if row >= 0 {
+                        ov.scrollRowToVisible(row)
+                    }
+                }
             }
         }
         

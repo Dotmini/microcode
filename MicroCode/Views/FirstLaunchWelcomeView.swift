@@ -188,6 +188,7 @@ struct FirstLaunchWelcomeView: View {
         Task { @MainActor in
             do {
                 try await SupabaseAuthService.shared.startOAuth(provider: "google")
+                        isWorking = false
             } catch {
                 isWorking = false
                 statusMessage = error.localizedDescription

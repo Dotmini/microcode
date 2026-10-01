@@ -107,6 +107,17 @@ class JupyterClient {
             }
         }
 
+        // Fast path: Reuse an existing active kernel if already alive on Colab
+        if let listReq = makeRequest(path: "/api/kernels", method: "GET"),
+           let (kdata, kresp) = try? await URLSession.shared.data(for: listReq),
+           (kresp as? HTTPURLResponse)?.statusCode == 200,
+           let kernels = try? JSONDecoder().decode([JupyterKernelInfo].self, from: kdata),
+           let first = kernels.first {
+            self.activeKernelID = first.id
+            CrashReporter.shared.breadcrumb("Jupyter.startKernel REUSING existing kernel id=\(first.id)")
+            return first.id
+        }
+
         guard let request = makeRequest(path: "/api/kernels", method: "POST", body: ["name": name]) else {
             throw JupyterError.invalidURL
         }

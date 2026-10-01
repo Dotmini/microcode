@@ -66,7 +66,7 @@ class DatabaseService: ObservableObject {
         
         guard let url = URL(string: "\(baseURL)/connect") else { return false }
         
-        var request = URLRequest(url: url)
+        var request = LocalBackendAuth.request(url: url)
         request.httpMethod = "POST"
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
         
@@ -102,7 +102,7 @@ class DatabaseService: ObservableObject {
             throw NSError(domain: "DatabaseService", code: 400, userInfo: [NSLocalizedDescriptionKey: "Invalid URL"])
         }
         
-        var request = URLRequest(url: url)
+        var request = LocalBackendAuth.request(url: url)
         request.httpMethod = "POST"
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
         

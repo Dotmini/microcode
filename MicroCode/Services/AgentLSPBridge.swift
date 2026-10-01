@@ -13,7 +13,7 @@ import Foundation
 
 // MARK: - Helper: Language Detection from File Path
 
-private func languageForFile(_ path: String) -> String {
+func languageForFile(_ path: String) -> String {
     let ext = URL(fileURLWithPath: path).pathExtension.lowercased()
     switch ext {
     case "py":                     return "python"
@@ -367,7 +367,7 @@ struct LSPStatusTool: AgentTool {
 
 // MARK: - Helper: Ensure Document Is Open
 
-private func ensureDocumentOpen(path: String, language: String) async {
+func ensureDocumentOpen(path: String, language: String) async {
     let url = URL(fileURLWithPath: path)
     let uri = url.absoluteString
     

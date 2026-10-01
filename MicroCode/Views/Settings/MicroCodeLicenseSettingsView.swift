@@ -18,7 +18,7 @@ struct MicroCodeLicenseSettingsView: View {
         ScrollView {
             VStack(alignment: .leading, spacing: 18) {
                 header
-                if auth.session != nil || !persistedEmail.isEmpty {
+                if auth.session != nil {
                     accountCard
                 } else {
                     signInCard
@@ -104,6 +104,7 @@ struct MicroCodeLicenseSettingsView: View {
                 Task { @MainActor in
                     do {
                         try await auth.startOAuth(provider: "google")
+                        isWorking = false
                     } catch {
                         status = error.localizedDescription
                         isWorking = false
@@ -146,16 +147,30 @@ struct MicroCodeLicenseSettingsView: View {
                         .foregroundColor(.secondary)
                 }
                 Spacer()
-                Text(auth.entitlement.plan.uppercased())
+                if auth.entitlement.role.lowercased() == "admin" {
+                    Text("ADMIN")
+                        .font(.system(size: 10, weight: .bold))
+                        .padding(.horizontal, 8).padding(.vertical, 4)
+                        .background(Capsule().fill(Color.orange.opacity(0.18)))
+                }
+                Text(auth.entitlement.isLoaded
+                     ? (auth.entitlement.plan.isEmpty ? "UNKNOWN" : auth.entitlement.plan.uppercased())
+                     : "UNAVAILABLE")
                     .font(.system(size: 10, weight: .bold))
                     .padding(.horizontal, 8).padding(.vertical, 4)
                     .background(Capsule().fill(Color.accentColor.opacity(0.15)))
             }
             Divider()
-            HStack {
-                metric("Free tokens remaining", "\(auth.entitlement.freeTokensRemaining)")
-                Spacer()
-                metric("Monthly tokens used", "\(auth.entitlement.monthlyTokensUsed)")
+            if auth.entitlement.isLoaded {
+                HStack {
+                    metric("AI tokens remaining", "\(auth.entitlement.tokensRemaining)")
+                    Spacer()
+                    metric("AI tokens used", "\(auth.entitlement.tokensUsed)")
+                }
+            } else {
+                Text(auth.session == nil ? "Sign in to load your entitlement." : "Could not load your cloud entitlement. Try Refresh.")
+                    .font(.caption)
+                    .foregroundColor(.secondary)
             }
             HStack {
                 Button("Manage plan") {
@@ -163,11 +178,6 @@ struct MicroCodeLicenseSettingsView: View {
                 }
                 .buttonStyle(.bordered)
                 Spacer()
-                if auth.session == nil {
-                    Text("Sign in to load your entitlement.")
-                        .font(.caption)
-                        .foregroundColor(.secondary)
-                }
             }
         }
         .cardStyle()

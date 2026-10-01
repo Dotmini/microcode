@@ -118,7 +118,7 @@ class CICDService: ObservableObject {
     
     func fetchWorkflowRuns(owner: String, repo: String, token: String, completion: @escaping (Result<[WorkflowRun], Error>) -> Void) {
         let url = URL(string: "\(baseURL)/cicd/runs")!
-        var request = URLRequest(url: url)
+        var request = LocalBackendAuth.request(url: url)
         request.httpMethod = "POST"
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
         
@@ -148,7 +148,7 @@ class CICDService: ObservableObject {
     
     func fetchJobs(owner: String, repo: String, token: String, runId: Int, completion: @escaping (Result<[Job], Error>) -> Void) {
         let url = URL(string: "\(baseURL)/cicd/jobs")!
-        var request = URLRequest(url: url)
+        var request = LocalBackendAuth.request(url: url)
         request.httpMethod = "POST"
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
         
@@ -179,7 +179,7 @@ class CICDService: ObservableObject {
     
     func triggerWorkflow(owner: String, repo: String, token: String, workflowId: String, ref: String, completion: @escaping (Result<Bool, Error>) -> Void) {
         let url = URL(string: "\(baseURL)/cicd/trigger")!
-        var request = URLRequest(url: url)
+        var request = LocalBackendAuth.request(url: url)
         request.httpMethod = "POST"
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
         
@@ -207,7 +207,7 @@ class CICDService: ObservableObject {
     
     func getJobLogs(owner: String, repo: String, token: String, jobId: Int, completion: @escaping (Result<String, Error>) -> Void) {
         let url = URL(string: "\(baseURL)/cicd/logs")!
-        var request = URLRequest(url: url)
+        var request = LocalBackendAuth.request(url: url)
         request.httpMethod = "POST"
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
         
@@ -244,7 +244,7 @@ class CICDService: ObservableObject {
     
     func pipelineListWorkflows(projectPath: String, completion: @escaping (Result<[PipelineWorkflowInfo], Error>) -> Void) {
         let url = URL(string: "\(baseURL)/pipeline/list")!
-        var request = URLRequest(url: url)
+        var request = LocalBackendAuth.request(url: url)
         request.httpMethod = "POST"
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
         request.httpBody = try? JSONSerialization.data(withJSONObject: ["project_path": projectPath])
@@ -263,7 +263,7 @@ class CICDService: ObservableObject {
     
     func pipelineSaveWorkflow(projectPath: String, filename: String, content: String, completion: @escaping (Result<Bool, Error>) -> Void) {
         let url = URL(string: "\(baseURL)/pipeline/save")!
-        var request = URLRequest(url: url)
+        var request = LocalBackendAuth.request(url: url)
         request.httpMethod = "POST"
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
         let body: [String: String] = ["project_path": projectPath, "filename": filename, "content": content]
@@ -277,7 +277,7 @@ class CICDService: ObservableObject {
     
     func pipelineDeleteWorkflow(projectPath: String, filename: String, completion: @escaping (Result<Bool, Error>) -> Void) {
         let url = URL(string: "\(baseURL)/pipeline/delete")!
-        var request = URLRequest(url: url)
+        var request = LocalBackendAuth.request(url: url)
         request.httpMethod = "POST"
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
         let body: [String: String] = ["project_path": projectPath, "filename": filename]
@@ -291,7 +291,7 @@ class CICDService: ObservableObject {
     
     func pipelineGetContent(projectPath: String, filename: String, completion: @escaping (Result<String, Error>) -> Void) {
         let url = URL(string: "\(baseURL)/pipeline/content")!
-        var request = URLRequest(url: url)
+        var request = LocalBackendAuth.request(url: url)
         request.httpMethod = "POST"
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
         let body: [String: String] = ["project_path": projectPath, "filename": filename]
@@ -309,7 +309,7 @@ class CICDService: ObservableObject {
     
     func pipelineTrigger(projectPath: String, workflowFile: String, envOverrides: [String: String] = [:], completion: @escaping (Result<String, Error>) -> Void) {
         let url = URL(string: "\(baseURL)/pipeline/trigger")!
-        var request = URLRequest(url: url)
+        var request = LocalBackendAuth.request(url: url)
         request.httpMethod = "POST"
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
         let body: [String: Any] = ["project_path": projectPath, "workflow_file": workflowFile, "env_overrides": envOverrides]
@@ -327,7 +327,7 @@ class CICDService: ObservableObject {
     
     func pipelineListRuns(projectPath: String, completion: @escaping (Result<[PipelineRun], Error>) -> Void) {
         let url = URL(string: "\(baseURL)/pipeline/runs")!
-        var request = URLRequest(url: url)
+        var request = LocalBackendAuth.request(url: url)
         request.httpMethod = "POST"
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
         request.httpBody = try? JSONSerialization.data(withJSONObject: ["project_path": projectPath])
@@ -346,7 +346,7 @@ class CICDService: ObservableObject {
     
     func pipelineGetRun(runId: String, completion: @escaping (Result<PipelineRun, Error>) -> Void) {
         let url = URL(string: "\(baseURL)/pipeline/run")!
-        var request = URLRequest(url: url)
+        var request = LocalBackendAuth.request(url: url)
         request.httpMethod = "POST"
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
         request.httpBody = try? JSONSerialization.data(withJSONObject: ["run_id": runId])
@@ -367,7 +367,7 @@ class CICDService: ObservableObject {
     
     func connectPipelineLogs(onEvent: @escaping (PipelineLogEvent) -> Void) -> URLSessionWebSocketTask? {
         guard let url = URL(string: "ws://127.0.0.1:3000/ws/pipeline/logs") else { return nil }
-        let task = URLSession.shared.webSocketTask(with: url)
+        let task = URLSession.shared.webSocketTask(with: LocalBackendAuth.request(url: url))
         task.resume()
         receiveLogMessage(task: task, onEvent: onEvent)
         return task

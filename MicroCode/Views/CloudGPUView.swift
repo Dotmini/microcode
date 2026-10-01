@@ -346,7 +346,7 @@ struct CloudGPUView: View {
 
             // Custom Top-Up
             VStack(alignment: .leading, spacing: 8) {
-                Text("Custom Top-up (Any Amount)")
+                Text("Custom Top-up (minimum ฿100)")
                     .font(.system(size: 12, weight: .semibold))
 
                 HStack(spacing: 10) {
@@ -369,11 +369,11 @@ struct CloudGPUView: View {
 
                     Button("Top Up ฿\(customAmount)") {
                         let amt = Int(customAmount.trimmingCharacters(in: .whitespacesAndNewlines)) ?? 300
-                        executeTopUp(amountTHB: max(50, amt), packageId: "custom_\(amt)")
+                        executeTopUp(amountTHB: amt, packageId: "custom_\(amt)")
                     }
                     .buttonStyle(.bordered)
                     .controlSize(.regular)
-                    .disabled(topUpBusy || (Int(customAmount) ?? 0) < 20)
+                    .disabled(topUpBusy || (Int(customAmount) ?? 0) < 100)
 
                     if topUpBusy {
                         ProgressView().scaleEffect(0.7)
@@ -387,7 +387,7 @@ struct CloudGPUView: View {
                     .foregroundColor(topUpMsg.hasPrefix("Opened") ? .green : .red)
             }
 
-            Text("Opens secure Beam Payment checkout (PromptPay QR / Card). Balance updates in real-time.")
+            Text("Opens the payment provider's secure checkout. Balance updates after payment is confirmed.")
                 .font(.system(size: 10))
                 .foregroundColor(.secondary)
         }
@@ -603,7 +603,7 @@ struct CloudGPUView: View {
                 topUpBusy = false
                 if let url = r.url {
                     NSWorkspace.shared.open(url)
-                    topUpMsg = "Opened Beam Payment checkout in your browser…"
+                    topUpMsg = "Opened secure checkout in your browser…"
                 } else {
                     topUpMsg = r.error ?? "Top-up failed."
                 }

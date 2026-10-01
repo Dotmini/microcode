@@ -2,8 +2,14 @@
 //  AIClient.swift
 //  MicroCode
 //
-//  Production AI API Client with Streaming + Function Calling
-//  Supports: Gemini, OpenAI, Anthropic, DeepSeek
+//  Created and Designed by Dotmini Software
+//  Founder & CEO: Tirawat Nantamas
+//  Copyright © 2025-2026 Dotmini Software. All rights reserved.
+//
+//  Description:
+//  Production AI API Client with streaming, tool calling / function execution,
+//  multi-provider dispatch (BYOK Direct API, Dotmini Cloud, Subscription OAuth, and Local LLM),
+//  robust token handling, and multi-modal attachment support.
 //
 
 import Foundation
@@ -57,15 +63,15 @@ enum StreamableAIProvider: String, CaseIterable {
     
     var defaultModel: String {
         switch self {
-        case .omni: return "gpt-6-astra"
-        case .anthropic: return "claude-3-7-sonnet"
-        case .openai: return "gpt-6-astra"
-        case .gemini: return "gemini-2.5-pro"
-        case .deepseek: return "deepseek-v4-flash"
-        case .qwen: return "qwen/qwen-2.5-coder-32b-instruct"
-        case .grok: return "grok-3"
+        case .omni: return "gpt-4o"
+        case .anthropic: return "claude-3-7-sonnet-20250219"
+        case .openai: return "gpt-4o"
+        case .gemini: return "gemini-2.0-flash"
+        case .deepseek: return "deepseek-chat"
+        case .qwen: return "qwen-coder-plus"
+        case .grok: return "grok-2"
         case .glm: return "glm-4-plus"
-        case .copilot: return "claude-3-7-sonnet"
+        case .copilot: return "auto"
         case .local: return LocalLLMService.cachedModel
         }
     }
@@ -224,24 +230,18 @@ final class AIClient: ObservableObject {
     
     private func normalizeModelName(_ model: String, provider: StreamableAIProvider, baseURL: String) -> String {
         let trimmed = model.trimmingCharacters(in: .whitespacesAndNewlines)
-        let candidate = trimmed.isEmpty ? provider.defaultModel : trimmed
-        let lower = candidate.lowercased()
-        
-        if provider == .deepseek {
-            if lower == "deepseek" || lower.isEmpty {
-                return "deepseek-v4-flash"
-            }
-            if lower.contains("reasoner") || lower.contains("r1") {
-                return "deepseek-reasoner"
-            }
-            return candidate
-        } else if provider == .gemini {
-            if lower == "gemini" || lower.isEmpty {
-                return "gemini-2.5-pro"
-            }
-            return candidate
+        if trimmed.isEmpty {
+            return provider.defaultModel
         }
-        return candidate
+        let lower = trimmed.lowercased()
+        if provider == .deepseek && lower == "deepseek" {
+            return provider.defaultModel
+        } else if provider == .gemini && lower == "gemini" {
+            return provider.defaultModel
+        } else if provider == .openai && lower == "openai" {
+            return provider.defaultModel
+        }
+        return trimmed
     }
     
     /// Sanitize a tool schema for Gemini API compatibility.
@@ -397,50 +397,44 @@ final class AIClient: ObservableObject {
     ) {
         // Determine key mode: "cloud" (Dotmini proxy) vs "direct" (user's own key)
         let keyMode = UserDefaults.standard.string(forKey: "aiKeyMode") ?? "cloud"
-        let actualKey: String
-        let baseURL: String
+        var actualKey: String = ""
+        var baseURL: String = provider.directBaseURL
         
-        if provider == .local {
-            actualKey = ""
-            baseURL = provider.directBaseURL
+        if provider == .local || keyMode == "local" {
+            actualKey = "local"
+            baseURL = LocalLLMService.cachedEndpoint
             
         } else if keyMode == "subscription" {
-            // ━━━ SUBSCRIPTION MODE ━━━
-            // Uses ONLY tokens from SubscriptionAuthManager (CLI detection / manual input)
-            // Routes directly to provider APIs — no cloud proxy, no BYOK mixing
-            let subToken = resolveSubscriptionToken(for: provider)
-            let account = resolveSubscriptionAccount(for: provider)
-            
-            if !subToken.isEmpty {
-                actualKey = subToken
-                // CLI tokens and manually entered keys go directly to the provider
-                let isCLIToken = account?.source == "Manual"
-                let isManualInput = account?.source == "Manual Input"
-                let isRealAPIKey = subToken.hasPrefix("sk-") || subToken.hasPrefix("AIzaSy") || subToken.hasPrefix("gsk_")
-                if isCLIToken || isManualInput || isRealAPIKey {
+            if let account = resolveSubscriptionAccount(for: provider),
+               account.provider == .copilot, SubscriptionAuthManager.shared.isConnected(.copilot) {
+                actualKey = account.sessionToken
+                baseURL = StreamableAIProvider.copilot.directBaseURL
+            } else {
+                // Fallback to BYOK keys if available — don't block the user
+                let specificKey = UserDefaults.standard.string(forKey: "\(provider.rawValue)_api_key") ?? ""
+                let passedKey = apiKey.trimmingCharacters(in: .whitespacesAndNewlines)
+                if !specificKey.isEmpty {
+                    actualKey = specificKey
+                    baseURL = provider.directBaseURL
+                } else if !passedKey.isEmpty {
+                    actualKey = passedKey
                     baseURL = provider.directBaseURL
                 } else {
-                    // Web session tokens → route through cloud proxy for translation
-                    baseURL = provider.cloudBaseURL
+                    let message = "No API key found for \(provider.rawValue). Add a Direct API Key in Settings, or connect GitHub Copilot for subscription access."
+                    onError(message)
+                    return
                 }
-            } else {
-                actualKey = ""
-                baseURL = provider.directBaseURL
             }
-            
         } else if keyMode == "direct" {
             // ━━━ BYOK (DIRECT) MODE ━━━
             // Uses ONLY user's own API keys — no cloud proxy, no subscription
-            let specificKey = UserDefaults.standard.string(forKey: "\(provider.rawValue)_api_key") ?? ""
-            let legacyKey = UserDefaults.standard.string(forKey: "apiKey") ?? ""
             let passedKey = apiKey.trimmingCharacters(in: .whitespacesAndNewlines)
+            let resolvedKey = AIModelCatalog.resolveKey(provider.rawValue)
             
-            if !specificKey.isEmpty {
-                actualKey = specificKey
-            } else if !passedKey.isEmpty {
+            if !passedKey.isEmpty {
                 actualKey = passedKey
-            } else if !legacyKey.isEmpty {
-                actualKey = legacyKey
+            } else if !resolvedKey.isEmpty {
+                actualKey = resolvedKey
             } else {
                 actualKey = ""
             }
@@ -454,10 +448,6 @@ final class AIClient: ObservableObject {
             actualKey = microToken
             baseURL = provider.cloudBaseURL
         }
-        
-        // DEBUG: Log key resolution (remove after debugging)
-        let keyPreview = actualKey.isEmpty ? "(empty)" : String(actualKey.prefix(12)) + "..."
-        NSLog("🔑 [AIClient.sendMessage] mode=%@ provider=%@ key=%@ url=%@", keyMode, provider.rawValue, keyPreview, baseURL)
         
         if actualKey.isEmpty && provider != .local && provider != .omni {
             switch keyMode {
@@ -473,11 +463,6 @@ final class AIClient: ObservableObject {
             }
         }
 
-        if keyMode == "subscription" && actualKey.hasPrefix("ghp_") && provider == .openai {
-            onError("GitHub Personal Access Token (ghp_...) cannot be used directly as an OpenAI API key. Please switch to Direct API Key (BYOK) mode or configure an OpenAI API key in Settings.")
-            return
-        }
-        
         isStreaming = true
         currentStreamedText = ""
         pendingStreamTokens = ""
@@ -513,7 +498,7 @@ final class AIClient: ObservableObject {
                     self.pendingStreamTokens = ""
                 }
                 do {
-                    if baseURL == provider.cloudBaseURL {
+                    if keyMode == "subscription" || baseURL == provider.cloudBaseURL {
                         // All cloud-routed requests (Dotmini Cloud or Web Subscriptions) use OpenAI-compatible gateway
                         try await streamOpenAI(prompt: prompt, attachments: attachments, systemPrompt: systemPrompt, conversationHistory: trimmedHistory, model: resolvedModel, apiKey: requestKey, baseURL: baseURL, tools: tools, onToken: onToken, onToolCall: onToolCall)
                     } else {
@@ -586,25 +571,23 @@ final class AIClient: ObservableObject {
             baseURL = provider.directBaseURL
             
         } else if keyMode == "subscription" {
-            // ━━━ SUBSCRIPTION MODE ━━━
-            let subToken = resolveSubscriptionToken(for: provider)
-            let account = resolveSubscriptionAccount(for: provider)
-            
-            if !subToken.isEmpty {
-                actualKey = subToken
-                let isCLIToken = account?.source == "Manual"
-                let isManualInput = account?.source == "Manual Input"
-                let isRealAPIKey = subToken.hasPrefix("sk-") || subToken.hasPrefix("AIzaSy") || subToken.hasPrefix("gsk_")
-                if isCLIToken || isManualInput || isRealAPIKey {
+            if let account = resolveSubscriptionAccount(for: provider),
+               account.provider == .copilot, SubscriptionAuthManager.shared.isConnected(.copilot) {
+                actualKey = account.sessionToken
+                baseURL = StreamableAIProvider.copilot.directBaseURL
+            } else {
+                let specificKey = UserDefaults.standard.string(forKey: "\(provider.rawValue)_api_key") ?? ""
+                let passedKey = apiKey.trimmingCharacters(in: .whitespacesAndNewlines)
+                if !specificKey.isEmpty {
+                    actualKey = specificKey
+                    baseURL = provider.directBaseURL
+                } else if !passedKey.isEmpty {
+                    actualKey = passedKey
                     baseURL = provider.directBaseURL
                 } else {
-                    baseURL = provider.cloudBaseURL
+                    throw NSError(domain: "AIClient", code: 401, userInfo: [NSLocalizedDescriptionKey: "No API key found for \(provider.rawValue). Add a Direct API Key in Settings, or connect GitHub Copilot."])
                 }
-            } else {
-                actualKey = ""
-                baseURL = provider.directBaseURL
             }
-            
         } else if keyMode == "direct" {
             // ━━━ BYOK (DIRECT) MODE ━━━
             let specificKey = UserDefaults.standard.string(forKey: "\(provider.rawValue)_api_key") ?? ""
@@ -630,12 +613,9 @@ final class AIClient: ObservableObject {
             baseURL = provider.cloudBaseURL
         }
         
-        // DEBUG: Log key resolution (remove after debugging)
-        let syncKeyPreview = actualKey.isEmpty ? "(empty)" : String(actualKey.prefix(12)) + "..."
-        NSLog("🔑 [AIClient.sendSync] mode=%@ provider=%@ key=%@ url=%@", keyMode, provider.rawValue, syncKeyPreview, baseURL)
         
-        if baseURL == provider.cloudBaseURL {
-            // Cloud mode → all models via OpenAI protocol through Dotmini proxy
+        if keyMode == "subscription" || baseURL == provider.cloudBaseURL {
+            // Cloud and Copilot use the OpenAI-compatible transport → all models via OpenAI protocol through Dotmini proxy
             return try await syncOpenAI(messages: messages, systemPrompt: systemPrompt, model: model, apiKey: actualKey, baseURL: baseURL, tools: tools)
         } else {
             // Direct/Subscription mode → use native protocols
@@ -676,17 +656,17 @@ final class AIClient: ObservableObject {
     
     private func maxOutputTokens(for model: String) -> Int {
         let lower = model.lowercased()
-        if lower.contains("gemini-3") || lower.contains("gemini-2.5") || lower.contains("gemini-1.5") {
+        if lower.contains("gemini") {
             return 65536
-        } else if lower.contains("claude-sonnet-4") || lower.contains("claude-opus-4") || lower.contains("claude-3-7") {
+        } else if lower.contains("claude-3-7") || lower.contains("claude-3-opus") {
             return 64000
         } else if lower.contains("claude-3-5") {
             return 8192
-        } else if lower.contains("o1") || lower.contains("o3") || lower.contains("gpt-6") || lower.contains("gpt-5") {
+        } else if lower.contains("o1") || lower.contains("o3") {
             return 65536
-        } else if lower.contains("gpt-4o") || lower.contains("gpt-4.5") {
+        } else if lower.contains("gpt-4o") || lower.contains("gpt-4") {
             return 16384
-        } else if lower.contains("deepseek-reasoner") || lower.contains("deepseek-v4") {
+        } else if lower.contains("deepseek-reasoner") {
             return 64000
         } else if lower.contains("deepseek") {
             return 16384
@@ -820,8 +800,26 @@ final class AIClient: ObservableObject {
             let jsonString = String(line.dropFirst(6))
             
             guard let data = jsonString.data(using: .utf8),
-                  let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-                  let candidates = json["candidates"] as? [[String: Any]],
+                  let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else { continue }
+            
+            // Capture token usage from Gemini usageMetadata
+            if let usage = json["usageMetadata"] as? [String: Any] {
+                let promptTok = usage["promptTokenCount"] as? Int ?? 0
+                let completionTok = usage["candidatesTokenCount"] as? Int ?? 0
+                let cachedTok = usage["cachedContentTokenCount"] as? Int ?? 0
+                Task { @MainActor in
+                    AIUsageTracker.shared.record(
+                        provider: "gemini",
+                        model: model,
+                        promptTokens: promptTok,
+                        completionTokens: completionTok,
+                        cachedTokens: cachedTok,
+                        taskLabel: "Chat"
+                    )
+                }
+            }
+            
+            guard let candidates = json["candidates"] as? [[String: Any]],
                   let content = candidates.first?["content"] as? [String: Any],
                   let parts = content["parts"] as? [[String: Any]] else { continue }
             
@@ -963,6 +961,9 @@ final class AIClient: ObservableObject {
             body["tools"] = tools.map { ["type": "function", "function": $0] as [String: Any] }
         }
         
+        // Enable usage reporting in stream responses
+        body["stream_options"] = ["include_usage": true]
+        
         request.httpBody = try JSONSerialization.data(withJSONObject: body)
         
         let (bytes, response) = try await URLSession.shared.bytes(for: request)
@@ -996,8 +997,26 @@ final class AIClient: ObservableObject {
             let jsonString = String(line.dropFirst(6))
             
             guard let data = jsonString.data(using: .utf8),
-                  let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-                  let choices = json["choices"] as? [[String: Any]],
+                  let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else { continue }
+            
+            // Capture token usage from final stream chunk (OpenAI/DeepSeek/Grok/Qwen/GLM)
+            if let usage = json["usage"] as? [String: Any] {
+                let promptTok = usage["prompt_tokens"] as? Int ?? 0
+                let completionTok = usage["completion_tokens"] as? Int ?? 0
+                let cachedTok = (usage["prompt_tokens_details"] as? [String: Any])?["cached_tokens"] as? Int ?? 0
+                Task { @MainActor in
+                    AIUsageTracker.shared.record(
+                        provider: StreamableAIProvider.detect(from: model).rawValue,
+                        model: model,
+                        promptTokens: promptTok,
+                        completionTokens: completionTok,
+                        cachedTokens: cachedTok,
+                        taskLabel: "Chat"
+                    )
+                }
+            }
+            
+            guard let choices = json["choices"] as? [[String: Any]],
                   let delta = choices.first?["delta"] as? [String: Any] else { continue }
             
             // Reasoning tokens (DeepSeek R1 / thinking models / GLM)
@@ -1148,6 +1167,8 @@ final class AIClient: ObservableObject {
         var currentToolName = ""
         var currentToolArgs = ""
         var currentToolId = ""
+        var anthropicInputTokens = 0
+        var anthropicCachedTokens = 0
         
         for try await line in bytes.lines {
             if Task.isCancelled { break }
@@ -1182,6 +1203,31 @@ final class AIClient: ObservableObject {
                     onToolCall?(toolCall)
                     currentToolName = ""
                     currentToolArgs = ""
+                }
+            case "message_start":
+                // Capture input token usage from Anthropic
+                if let message = json["message"] as? [String: Any],
+                   let usage = message["usage"] as? [String: Any] {
+                    let inputTok = usage["input_tokens"] as? Int ?? 0
+                    let cachedTok = usage["cache_read_input_tokens"] as? Int ?? 0
+                    // Store for later combination with output tokens
+                    anthropicInputTokens = inputTok
+                    anthropicCachedTokens = cachedTok
+                }
+            case "message_delta":
+                // Capture output token usage from Anthropic
+                if let usage = json["usage"] as? [String: Any] {
+                    let outputTok = usage["output_tokens"] as? Int ?? 0
+                    Task { @MainActor in
+                        AIUsageTracker.shared.record(
+                            provider: "anthropic",
+                            model: model,
+                            promptTokens: anthropicInputTokens,
+                            completionTokens: outputTok,
+                            cachedTokens: anthropicCachedTokens,
+                            taskLabel: "Chat"
+                        )
+                    }
                 }
             default:
                 break
@@ -1264,8 +1310,27 @@ final class AIClient: ObservableObject {
             throw NSError(domain: "AIClient", code: code, userInfo: [NSLocalizedDescriptionKey: detailedMsg])
         }
         
-        guard let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-              let candidates = json["candidates"] as? [[String: Any]],
+        guard let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
+            return (text: "", toolCalls: [])
+        }
+        
+        if let usage = json["usageMetadata"] as? [String: Any] {
+            let promptTok = usage["promptTokenCount"] as? Int ?? 0
+            let completionTok = usage["candidatesTokenCount"] as? Int ?? 0
+            let cachedTok = usage["cachedContentTokenCount"] as? Int ?? 0
+            Task { @MainActor in
+                AIUsageTracker.shared.record(
+                    provider: "gemini",
+                    model: model,
+                    promptTokens: promptTok,
+                    completionTokens: completionTok,
+                    cachedTokens: cachedTok,
+                    taskLabel: "Chat"
+                )
+            }
+        }
+        
+        guard let candidates = json["candidates"] as? [[String: Any]],
               let content = candidates.first?["content"] as? [String: Any],
               let parts = content["parts"] as? [[String: Any]] else {
             return (text: "", toolCalls: [])
@@ -1356,8 +1421,28 @@ final class AIClient: ObservableObject {
             throw NSError(domain: "AIClient", code: httpResponse.statusCode, userInfo: [NSLocalizedDescriptionKey: "API error (\(httpResponse.statusCode)): \(errorText)"])
         }
         
-        guard let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-              let choices = json["choices"] as? [[String: Any]],
+        guard let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
+            let raw = String(data: data, encoding: .utf8) ?? ""
+            return (text: "Error: Unable to parse response from \(baseURL) (\(raw.prefix(200)))", toolCalls: [])
+        }
+        
+        if let usage = json["usage"] as? [String: Any] {
+            let promptTok = usage["prompt_tokens"] as? Int ?? 0
+            let completionTok = usage["completion_tokens"] as? Int ?? 0
+            let cachedTok = (usage["prompt_tokens_details"] as? [String: Any])?["cached_tokens"] as? Int ?? 0
+            Task { @MainActor in
+                AIUsageTracker.shared.record(
+                    provider: StreamableAIProvider.detect(from: model).rawValue,
+                    model: model,
+                    promptTokens: promptTok,
+                    completionTokens: completionTok,
+                    cachedTokens: cachedTok,
+                    taskLabel: "Chat"
+                )
+            }
+        }
+        
+        guard let choices = json["choices"] as? [[String: Any]],
               let message = choices.first?["message"] as? [String: Any] else {
             let raw = String(data: data, encoding: .utf8) ?? ""
             return (text: "Error: Unable to parse response from \(baseURL) (\(raw.prefix(200)))", toolCalls: [])
@@ -1455,8 +1540,28 @@ final class AIClient: ObservableObject {
             throw NSError(domain: "AIClient", code: httpResponse.statusCode, userInfo: [NSLocalizedDescriptionKey: "API error (\(httpResponse.statusCode)): \(errorText)"])
         }
         
-        guard let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-              let content = json["content"] as? [[String: Any]] else {
+        guard let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
+            let raw = String(data: data, encoding: .utf8) ?? ""
+            return (text: "Error: Unable to parse response (\(raw.prefix(200)))", toolCalls: [])
+        }
+        
+        if let usage = json["usage"] as? [String: Any] {
+            let inputTok = usage["input_tokens"] as? Int ?? 0
+            let outputTok = usage["output_tokens"] as? Int ?? 0
+            let cachedTok = usage["cache_read_input_tokens"] as? Int ?? 0
+            Task { @MainActor in
+                AIUsageTracker.shared.record(
+                    provider: "anthropic",
+                    model: model,
+                    promptTokens: inputTok,
+                    completionTokens: outputTok,
+                    cachedTokens: cachedTok,
+                    taskLabel: "Chat"
+                )
+            }
+        }
+        
+        guard let content = json["content"] as? [[String: Any]] else {
             let raw = String(data: data, encoding: .utf8) ?? ""
             return (text: "Error: Unable to parse response (\(raw.prefix(200)))", toolCalls: [])
         }

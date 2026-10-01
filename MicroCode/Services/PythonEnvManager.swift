@@ -487,6 +487,7 @@ class PythonEnvManager: ObservableObject {
             process.arguments = ["-c", sanitizedCode]
             
             var env = ProcessInfo.processInfo.environment
+            env["MICROCODE_LOCAL_API_TOKEN"] = LocalBackendAuth.token
             let standardPath = "/opt/homebrew/bin:/opt/homebrew/sbin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"
             let existingPath = env["PATH"] ?? ""
             env["PATH"] = existingPath.isEmpty ? standardPath : "\(standardPath):\(existingPath)"
@@ -599,6 +600,7 @@ class PythonEnvManager: ObservableObject {
                 
                 // Inherit environment and patch if needed
                 var env = ProcessInfo.processInfo.environment
+                env["MICROCODE_LOCAL_API_TOKEN"] = LocalBackendAuth.token
                 if forceUnbuffered {
                     env["PYTHONUNBUFFERED"] = "1" // Force unbuffered stdout to stream immediately
                 }

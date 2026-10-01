@@ -2,8 +2,11 @@
 //  AgentToolBox.swift
 //  MicroCode
 //
-//  Production-Grade AI Agent ToolBox
-//  Unified tool execution with sandbox validation + JSON Schema export
+//  Production-Grade AI Agent ToolBox & Unified Tool Registry.
+//  Provides autonomous execution for file management, visual regression,
+//  runtime devices, AST inspection, LSP intelligence, and shell operations.
+//  Tirawat Nantamas Founder and CEO of Dotmini Software.
+//  Copyright © 2025-2026 Dotmini Software. All rights reserved.
 //
 
 import Foundation
@@ -104,6 +107,7 @@ class AgentToolBox: ObservableObject {
         register(SendMessageTool())
         register(DeviceRuntimeTool())
         register(PreviewControlTool())
+        register(VisualRegressionTool())
         register(RepoMapTool())
         // Feature 8: LSP Agent Bridge
         register(LSPHoverTool())
@@ -136,6 +140,7 @@ class AgentToolBox: ObservableObject {
             throw ToolBoxError.toolNotFound(toolName)
         }
         
+        let executionWorkspace = workspaceRoot
         var resolvedParams = params
         
         // Auto-resolve relative paths
@@ -146,11 +151,8 @@ class AgentToolBox: ObservableObject {
                 return (root as NSString).appendingPathComponent(p)
             }
             
-            if let path = params["path"] as? String {
-                resolvedParams["path"] = resolvePath(path)
-            }
-            if let directory = params["directory"] as? String {
-                resolvedParams["directory"] = resolvePath(directory)
+            for key in ["path", "directory", "old_path", "new_path", "cwd"] {
+                if let path = params[key] as? String { resolvedParams[key] = resolvePath(path) }
             }
             if let pathsStr = params["paths"] as? String {
                 let paths = pathsStr.components(separatedBy: ",").map { $0.trimmingCharacters(in: .whitespaces) }
@@ -158,13 +160,17 @@ class AgentToolBox: ObservableObject {
             }
         }
         
-        // Sandbox validation for file operations
-        if ["file_read", "file_write", "replace_in_file", "grep_search", "list_directory_tree", "patch_file", "multi_file_read", "science_inspect", "alphafold_input_validate"].contains(toolName) {
-            if let path = resolvedParams["path"] as? String ?? resolvedParams["directory"] as? String {
-                try validateSandbox(path)
+        // Validate every declared local path, including list and rename arguments.
+        // Shell approval authorizes a host process; cwd validation is not OS isolation.
+        for key in ["path", "directory", "old_path", "new_path", "cwd"] {
+            if let path = resolvedParams[key] as? String { try validateSandbox(path) }
+        }
+        if let paths = resolvedParams["paths"] as? String {
+            for path in paths.components(separatedBy: ",") {
+                try validateSandbox(path.trimmingCharacters(in: .whitespacesAndNewlines))
             }
         }
-        
+
         // Check tool approval
         let stringArgs = resolvedParams.compactMapValues { "\($0)" }
         let approved = await ToolApprovalManager.shared.requestApproval(
@@ -173,9 +179,14 @@ class AgentToolBox: ObservableObject {
             description: tool.description
         )
         if !approved {
-            return "Tool execution rejected by user"
+            throw ToolBoxError.executionFailed("Tool execution rejected by user")
         }
         
+        try Task.checkCancellation()
+        guard workspaceRoot == executionWorkspace else {
+            throw ToolBoxError.executionFailed("Workspace changed while awaiting tool approval")
+        }
+
         // Auto-commit safety net: checkpoint before file-modifying tools
         let fileModifyingTools: Set<String> = ["file_write", "replace_in_file", "patch_file", "rename_file", "create_directory", "shell"]
         if fileModifyingTools.contains(toolName) {
@@ -194,7 +205,8 @@ class AgentToolBox: ObservableObject {
         if cacheable { TokenOptimizer.shared.recordContextCache(hit: false, tokens: 0) }
         
         do {
-            let result = try await executeWithTimeout(tool: tool, params: resolvedParams)
+            let rawResult = try await executeWithTimeout(tool: tool, params: resolvedParams)
+            let result = AgentPrivacyGuard.sanitize(rawResult)
             let execution = ToolExecution(toolName: toolName, params: resolvedParams, result: result, success: true, duration: Date().timeIntervalSince(startTime))
             executionHistory.append(execution)
             if executionHistory.count > 300 { executionHistory.removeFirst(executionHistory.count - 300) }
@@ -242,39 +254,14 @@ class AgentToolBox: ObservableObject {
     // MARK: - Sandbox Validation
     
     private func validateSandbox(_ path: String) throws {
-        guard let root = workspaceRoot else { return } // No workspace = no restriction
-        let resolved = URL(fileURLWithPath: (path as NSString).standardizingPath).resolvingSymlinksInPath().path
-        let rootResolved = URL(fileURLWithPath: (root as NSString).standardizingPath).resolvingSymlinksInPath().path
-        
-        // 1. Within workspace root
-        if resolved.hasPrefix(rootResolved) { return }
-        
-        // 2. Temp and cache directories
-        if resolved.hasPrefix("/tmp") || resolved.hasPrefix("/private/tmp") || resolved.hasPrefix("/var/folders") || resolved.hasPrefix(NSTemporaryDirectory()) {
-            return
+        guard let root = workspaceRoot, !root.isEmpty else {
+            throw ToolBoxError.executionFailed("Open a workspace before accessing files")
         }
-        
-        // 3. External SSD / mounted volumes (e.g. /Volumes/MAC, /Volumes/MicroCodeBuild, /Volumes/MicroCodeScratch)
-        if resolved.hasPrefix("/Volumes/") {
-            return
+        guard WorkspacePathPolicy.contains(path, in: root) else {
+            throw ToolBoxError.executionFailed("Path is outside the active workspace. Access denied.")
         }
-        
-        // 4. Global agent skills, Antigravity configs, and toolchain caches
-        let home = NSHomeDirectory()
-        let allowedAgentPaths = [
-            "\(home)/.gemini",
-            "\(home)/.agents",
-            "\(home)/.codex",
-            "\(home)/.cargo",
-            "\(home)/.gradle"
-        ]
-        for allowed in allowedAgentPaths {
-            if resolved.hasPrefix(allowed) { return }
-        }
-        
-        throw ToolBoxError.executionFailed("Path '\(path)' is outside the authorized workspace and volumes. Access denied.")
     }
-    
+
     // MARK: - Tool Descriptions (for prompt injection)
     
     var toolDescriptions: String {
@@ -638,6 +625,165 @@ struct DeviceRuntimeTool: AgentTool {
     }
 }
 
+// MARK: - Visual Regression Testing Tool
+
+struct VisualRegressionTool: AgentTool {
+    let name = "visual_regression"
+    let description = "Autonomous visual regression testing and UI snapshot comparison for WebApp preview, iOS Simulators, and Android Devices. Supports: 'compare' (compare current screen against stored baseline), 'save_baseline' (record new golden master baseline), 'list_baselines', and 'compare_images'."
+    let parameters = [
+        ToolParameter(name: "action", type: "string", description: "One of: 'compare', 'save_baseline', 'list_baselines', 'compare_images'", required: true),
+        ToolParameter(name: "name", type: "string", description: "Name of the baseline or screen (e.g. 'HomeScreen', 'LoginModal', 'Dashboard')", required: false),
+        ToolParameter(name: "image_path", type: "string", description: "Optional path to the image to test or save. If omitted for compare/save_baseline, automatically captures screenshot from active simulator/device.", required: false),
+        ToolParameter(name: "expected_path", type: "string", description: "Path to baseline/expected image for 'compare_images'", required: false),
+        ToolParameter(name: "actual_path", type: "string", description: "Path to actual/current image for 'compare_images'", required: false),
+        ToolParameter(name: "threshold", type: "number", description: "Acceptable mismatch percentage threshold (default: 0.5%)", required: false),
+        ToolParameter(name: "device_type", type: "string", description: "Device descriptor (e.g. 'ios_simulator', 'android_emulator', 'webapp')", required: false)
+    ]
+    
+    func execute(params: [String: Any]) async throws -> String {
+        guard let action = (params["action"] as? String)?.lowercased() else {
+            throw ToolBoxError.invalidParams("action is required ('compare', 'save_baseline', 'list_baselines', 'compare_images')")
+        }
+        
+        switch action {
+        case "list_baselines":
+            let baselines = await MainActor.run { VisualRegressionService.shared.baselines }
+            if baselines.isEmpty {
+                return "No visual regression baselines recorded yet. Use action: 'save_baseline' with a screen name to create one."
+            }
+            var output = "Stored Visual Regression Baselines (\(baselines.count)):\n"
+            for b in baselines {
+                output += "• [\(b.name)] Screen: '\(b.screenName)' | Device: \(b.deviceName) (\(b.deviceType)) | Path: \(b.baselineImagePath)\n"
+            }
+            return output
+            
+        case "save_baseline":
+            guard let name = params["name"] as? String, !name.isEmpty else {
+                throw ToolBoxError.invalidParams("name is required for save_baseline")
+            }
+            let deviceType = params["device_type"] as? String ?? "simulator"
+            
+            let imagePath: String
+            if let path = params["image_path"] as? String, !path.isEmpty {
+                imagePath = path
+            } else {
+                let tmpPath = "\(NSTemporaryDirectory())vr_baseline_\(Int(Date().timeIntervalSince1970)).png"
+                _ = try await DeviceRuntimeService.shared.executeForAgent(
+                    operation: "screenshot",
+                    workspacePath: nil,
+                    deviceID: nil,
+                    x: nil, y: nil, x2: nil, y2: nil, duration: nil,
+                    text: nil, key: nil, packageName: nil,
+                    filePath: tmpPath, command: nil
+                )
+                imagePath = tmpPath
+            }
+            
+            guard let img = NSImage(contentsOfFile: imagePath) else {
+                return "Error: Could not load image from '\(imagePath)' to save as baseline."
+            }
+            
+            let baseline = await MainActor.run {
+                VisualRegressionService.shared.saveBaseline(
+                    image: img,
+                    name: name,
+                    deviceType: deviceType,
+                    deviceName: deviceType,
+                    screenName: name
+                )
+            }
+            if let b = baseline {
+                return "✅ Saved golden baseline '\(b.name)' (\(Int(img.size.width))x\(Int(img.size.height))) at: \(b.baselineImagePath)"
+            } else {
+                return "Error: Failed to save baseline."
+            }
+            
+        case "compare":
+            guard let name = params["name"] as? String, !name.isEmpty else {
+                throw ToolBoxError.invalidParams("name is required for compare")
+            }
+            let threshold = (params["threshold"] as? Double) ?? (params["threshold"] as? Int).map { Double($0) } ?? 0.5
+            
+            let baseline = await MainActor.run {
+                VisualRegressionService.shared.baselines.first { $0.name.lowercased() == name.lowercased() }
+            }
+            guard let baseline = baseline else {
+                return "Error: No baseline found with name '\(name)'. Call list_baselines to see available baselines or save_baseline first."
+            }
+            
+            let imagePath: String
+            if let path = params["image_path"] as? String, !path.isEmpty {
+                imagePath = path
+            } else {
+                let tmpPath = "\(NSTemporaryDirectory())vr_actual_\(Int(Date().timeIntervalSince1970)).png"
+                _ = try await DeviceRuntimeService.shared.executeForAgent(
+                    operation: "screenshot",
+                    workspacePath: nil,
+                    deviceID: nil,
+                    x: nil, y: nil, x2: nil, y2: nil, duration: nil,
+                    text: nil, key: nil, packageName: nil,
+                    filePath: tmpPath, command: nil
+                )
+                imagePath = tmpPath
+            }
+            
+            guard let actualImg = NSImage(contentsOfFile: imagePath) else {
+                return "Error: Could not load actual image at '\(imagePath)'."
+            }
+            
+            await MainActor.run { VisualRegressionService.shared.mismatchThreshold = threshold }
+            let comparison = await MainActor.run {
+                VisualRegressionService.shared.compare(actualImage: actualImg, baseline: baseline)
+            }
+            
+            guard let comp = comparison else {
+                return "Error: Comparison failed."
+            }
+            
+            let passStr = comp.passed ? "PASSED ✅" : "FAILED ❌"
+            var res = "Visual Regression [\(name)]: \(passStr)\n"
+            res += "• Mismatch: \(String(format: "%.2f", comp.mismatchPercentage))% (Tolerance: \(threshold)%)\n"
+            res += "• Mismatch Pixels: \(comp.mismatchPixels) / \(comp.totalPixels)\n"
+            res += "• Actual Image: \(comp.actualImagePath)\n"
+            if let diff = comp.diffImagePath {
+                res += "• Diff Highlight Image: \(diff)\n"
+            }
+            return res
+            
+        case "compare_images":
+            guard let expectedPath = params["expected_path"] as? String,
+                  let actualPath = params["actual_path"] as? String else {
+                throw ToolBoxError.invalidParams("expected_path and actual_path are required for compare_images")
+            }
+            guard let expectedImg = NSImage(contentsOfFile: expectedPath),
+                  let actualImg = NSImage(contentsOfFile: actualPath) else {
+                return "Error: Unable to load one or both images from disk."
+            }
+            let threshold = (params["threshold"] as? Double) ?? 0.5
+            let dummyBaseline = SnapshotBaseline(
+                name: "adhoc_compare",
+                deviceType: "file",
+                deviceName: "file",
+                resolution: expectedImg.size,
+                baselineImagePath: expectedPath
+            )
+            await MainActor.run { VisualRegressionService.shared.mismatchThreshold = threshold }
+            let comp = await MainActor.run {
+                VisualRegressionService.shared.compare(actualImage: actualImg, baseline: dummyBaseline)
+            }
+            if let comp = comp {
+                let passStr = comp.passed ? "PASSED ✅" : "FAILED ❌"
+                return "Image Comparison: \(passStr)\n• Mismatch: \(String(format: "%.2f", comp.mismatchPercentage))%\n• Diff Image: \(comp.diffImagePath ?? "None")"
+            } else {
+                return "Error: Image comparison could not be computed."
+            }
+            
+        default:
+            throw ToolBoxError.invalidParams("Unknown action '\(action)'")
+        }
+    }
+}
+
 // MARK: - Native Preview Control Tool
 
 struct PreviewControlTool: AgentTool {
@@ -665,11 +811,19 @@ struct PreviewControlTool: AgentTool {
             case "open":
                 runtime.showingEmbeddedDeviceDock = true
                 if let mode = mode {
-                    if mode == "web" { runtime.embeddedDockMode = .web }
-                    else if mode == "ios" { runtime.embeddedDockMode = .ios }
-                    else if mode == "android" { runtime.embeddedDockMode = .android }
-                } else if runtime.embeddedDockMode != .web && url != nil {
+                    if mode == "web" {
+                        runtime.embeddedDockMode = .web
+                        PreviewDockService.shared.selectTab(id: "web")
+                    } else if mode == "ios" {
+                        runtime.embeddedDockMode = .ios
+                        PreviewDockService.shared.selectTab(id: "ios")
+                    } else if mode == "android" {
+                        runtime.embeddedDockMode = .android
+                        PreviewDockService.shared.selectTab(id: "android")
+                    }
+                } else {
                     runtime.embeddedDockMode = .web
+                    PreviewDockService.shared.selectTab(id: "web")
                 }
                 if let urlString = url {
                     var trimmed = urlString.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -688,6 +842,7 @@ struct PreviewControlTool: AgentTool {
 
             case "close":
                 runtime.showingEmbeddedDeviceDock = false
+                PreviewDockService.shared.hideDock()
                 return "✅ Live Preview Dock closed."
 
             case "reload", "refresh":
@@ -698,6 +853,7 @@ struct PreviewControlTool: AgentTool {
             case "set_url":
                 runtime.showingEmbeddedDeviceDock = true
                 runtime.embeddedDockMode = .web
+                PreviewDockService.shared.selectTab(id: "web")
                 guard let urlString = url, !urlString.isEmpty else {
                     throw ToolBoxError.invalidParams("url is required for set_url action")
                 }
@@ -718,9 +874,15 @@ struct PreviewControlTool: AgentTool {
                     throw ToolBoxError.invalidParams("mode is required ('web', 'ios', or 'android')")
                 }
                 switch mode {
-                case "web": runtime.embeddedDockMode = .web
-                case "ios": runtime.embeddedDockMode = .ios
-                case "android": runtime.embeddedDockMode = .android
+                case "web":
+                    runtime.embeddedDockMode = .web
+                    PreviewDockService.shared.selectTab(id: "web")
+                case "ios":
+                    runtime.embeddedDockMode = .ios
+                    PreviewDockService.shared.selectTab(id: "ios")
+                case "android":
+                    runtime.embeddedDockMode = .android
+                    PreviewDockService.shared.selectTab(id: "android")
                 default:
                     throw ToolBoxError.invalidParams("Unknown mode '\(mode)'. Use 'web', 'ios', or 'android'.")
                 }
@@ -967,11 +1129,25 @@ struct ReplaceInFileTool: AgentTool {
         let url = URL(fileURLWithPath: path)
         var content = try String(contentsOf: url, encoding: .utf8)
         
-        guard content.contains(oldText) else {
-            throw ToolBoxError.executionFailed("Could not find the specified text in \(url.lastPathComponent). Make sure old_text matches exactly.")
+        // Count occurrences
+        var searchRange = content.startIndex..<content.endIndex
+        var count = 0
+        while let range = content.range(of: oldText, range: searchRange) {
+            count += 1
+            searchRange = range.upperBound..<content.endIndex
+        }
+
+        if count == 0 {
+            return "Error: The specified text was not found in the file."
+        } else if count > 1 {
+            return "Error: Found \(count) occurrences. Include more surrounding context to make the match unique."
+        }
+
+        // Single occurrence - safe to replace
+        if let range = content.range(of: oldText) {
+            content.replaceSubrange(range, with: newText)
         }
         
-        content = content.replacingOccurrences(of: oldText, with: newText)
         try content.write(to: url, atomically: true, encoding: .utf8)
         
         return "✅ Replaced text in \(url.lastPathComponent)"
@@ -1006,14 +1182,20 @@ struct GrepSearchTool: AgentTool {
         process.arguments = args
         
         let pipe = Pipe()
+        let stderrPipe = Pipe()
         process.standardOutput = pipe
-        process.standardError = Pipe() // discard stderr
+        process.standardError = stderrPipe // discard stderr
         
         try process.run()
 
+        async let stdoutData = Task.detached { pipe.fileHandleForReading.readDataToEndOfFile() }.value
+        async let stderrData = Task.detached { stderrPipe.fileHandleForReading.readDataToEndOfFile() }.value
+        
+        let data = await stdoutData
+        _ = await stderrData
+        
         process.waitUntilExit()
         
-        let data = pipe.fileHandleForReading.readDataToEndOfFile()
         let output = String(data: data, encoding: .utf8) ?? ""
         
         if output.isEmpty {
@@ -1097,13 +1279,20 @@ struct FileSearchTool: AgentTool {
         process.arguments = [directory, "-name", pattern, "-type", "f", "-maxdepth", "5"]
         
         let pipe = Pipe()
+        let stderrPipe = Pipe()
         process.standardOutput = pipe
-        process.standardError = Pipe()
+        process.standardError = stderrPipe
         
         try process.run()
+        
+        async let stdoutData = Task.detached { pipe.fileHandleForReading.readDataToEndOfFile() }.value
+        async let stderrData = Task.detached { stderrPipe.fileHandleForReading.readDataToEndOfFile() }.value
+        
+        let data = await stdoutData
+        _ = await stderrData
+        
         process.waitUntilExit()
         
-        let data = pipe.fileHandleForReading.readDataToEndOfFile()
         return String(data: data, encoding: .utf8) ?? ""
     }
 }
@@ -1152,7 +1341,8 @@ struct ShellCommandTool: AgentTool {
     let description = "Execute a shell command in macOS Terminal and the IDE console. Use for building, testing, running CLI commands, or checking project state."
     let parameters = [
         ToolParameter(name: "command", type: "string", description: "Shell command to execute", required: true),
-        ToolParameter(name: "cwd", type: "string", description: "Working directory (optional, defaults to active workspace folder)", required: false)
+        ToolParameter(name: "cwd", type: "string", description: "Working directory (optional, defaults to active workspace folder)", required: false),
+        ToolParameter(name: "timeout", type: "integer", description: "Timeout in seconds (default 120)", required: false)
     ]
     
     /// Strict Safety Guard: Block blind/destructive commands from deleting user files
@@ -1286,17 +1476,20 @@ struct ShellCommandTool: AgentTool {
         )
         
         // Builds and first dependency installs may take several minutes.
-        // Match AgentToolBox's bounded timeout rather than killing a healthy
-        // native process after 45 seconds.
-        let deadline = DispatchTime.now() + .seconds(600)
+        // Bounded timeout so runaway commands don't hang forever
+        let timeout = (params["timeout"] as? Int) ?? 120
+        let deadline = DispatchTime.now() + .seconds(timeout)
         DispatchQueue.global().asyncAfter(deadline: deadline) {
             if process.isRunning { process.terminate() }
         }
         
-        process.waitUntilExit()
+        async let stdoutData = Task.detached { stdoutPipe.fileHandleForReading.readDataToEndOfFile() }.value
+        async let stderrData = Task.detached { stderrPipe.fileHandleForReading.readDataToEndOfFile() }.value
         
-        let stdout = String(data: stdoutPipe.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? ""
-        let stderr = String(data: stderrPipe.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? ""
+        let stdout = String(data: await stdoutData, encoding: .utf8) ?? ""
+        let stderr = String(data: await stderrData, encoding: .utf8) ?? ""
+        
+        process.waitUntilExit()
         
         var output = stdout
         if !stderr.isEmpty { output += "\n[stderr]\n\(stderr)" }
@@ -1435,8 +1628,17 @@ struct ShellCommandTool: AgentTool {
                 try? stdinPipe.fileHandleForWriting.close()
             }
             
-            let outData = stdoutPipe.fileHandleForReading.readDataToEndOfFile()
-            let errData = stderrPipe.fileHandleForReading.readDataToEndOfFile()
+            let timeout = (params["timeout"] as? Int) ?? 120
+            let deadline = DispatchTime.now() + .seconds(timeout)
+            DispatchQueue.global().asyncAfter(deadline: deadline) {
+                if process.isRunning { process.terminate() }
+            }
+            
+            async let outDataTask = Task.detached { stdoutPipe.fileHandleForReading.readDataToEndOfFile() }.value
+            async let errDataTask = Task.detached { stderrPipe.fileHandleForReading.readDataToEndOfFile() }.value
+            
+            let outData = await outDataTask
+            let errData = await errDataTask
             process.waitUntilExit()
             
             if let tempAskPass = tempAskPass { try? FileManager.default.removeItem(atPath: tempAskPass) }
@@ -1503,9 +1705,11 @@ struct GitStatusTool: AgentTool {
         process.standardError = pipe
         
         try process.run()
+        
+        let data = await Task.detached { pipe.fileHandleForReading.readDataToEndOfFile() }.value
+        
         process.waitUntilExit()
         
-        let data = pipe.fileHandleForReading.readDataToEndOfFile()
         return String(data: data, encoding: .utf8) ?? "No git status available"
     }
 }
@@ -1659,11 +1863,22 @@ struct PatchFileTool: AgentTool {
         
         for edit in edits {
             guard let old = edit["old"], let new = edit["new"] else { continue }
-            if content.contains(old) {
-                content = content.replacingOccurrences(of: old, with: new)
-                appliedCount += 1
-            } else {
+            
+            // Count occurrences
+            var searchRange = content.startIndex..<content.endIndex
+            var count = 0
+            while let range = content.range(of: old, range: searchRange) {
+                count += 1
+                searchRange = range.upperBound..<content.endIndex
+            }
+            
+            if count == 0 {
                 failedEdits.append("Could not find: \(old.prefix(60))...")
+            } else if count > 1 {
+                failedEdits.append("Found \(count) occurrences, match not unique: \(old.prefix(60))...")
+            } else if let range = content.range(of: old) {
+                content.replaceSubrange(range, with: new)
+                appliedCount += 1
             }
         }
         

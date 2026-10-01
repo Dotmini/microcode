@@ -2,8 +2,12 @@
 //  AIAgentView.swift
 //  MicroCode
 //
-//  Redesigned by MicroCode AI - Professional Edition + Rich Content
-//  Industrial/IDE aesthetic. Markdown & Code Block Support.
+//  Full-featured AI Workstation & Autonomous Agent Interface
+//  Integrates ACP Local Agents, Dotmini Cloud, BYOK (Direct API Key), Web Subscriptions, and Local LLMs (Ollama/LM Studio).
+//
+//  Created & Designed by Dotmini Software
+//  Founder & CEO: Tirawat Nantamas
+//  Copyright © 2025-2026 Dotmini Software. All rights reserved.
 //
 
 import SwiftUI
@@ -138,6 +142,7 @@ struct AIAgentView: View {
         case cloud = "Dotmini Cloud"
         case byok = "BYOK"
         case subscription = "Subscription"
+        case local = "Local LLM"
         
         var badgeTitle: String {
             switch self {
@@ -145,6 +150,7 @@ struct AIAgentView: View {
             case .cloud: return "Dotmini Cloud"
             case .byok: return "BYOK"
             case .subscription: return "Subscription"
+            case .local: return "Local LLM"
             }
         }
         
@@ -154,6 +160,7 @@ struct AIAgentView: View {
             case .cloud: return "cloud.fill"
             case .byok: return "key.fill"
             case .subscription: return "sparkles.rectangle.stack"
+            case .local: return "desktopcomputer"
             }
         }
         
@@ -163,6 +170,7 @@ struct AIAgentView: View {
             case .cloud: return .purple
             case .byok: return .blue
             case .subscription: return .orange
+            case .local: return .mint
             }
         }
     }
@@ -170,6 +178,9 @@ struct AIAgentView: View {
     private var currentExecutionMode: AIExecutionMode {
         if activeExternalAgentConfig != nil {
             return .acp
+        }
+        if appState.aiProvider == "local" || currentKeyMode == "local" {
+            return .local
         }
         if appState.aiProvider == "omni" || currentKeyMode == "cloud" {
             return .cloud
@@ -248,13 +259,16 @@ struct AIAgentView: View {
                 return ("Subscription", fallbackModel)
             }()
             return "\(provName) : \(modelName)"
+        } else if currentExecutionMode == .local || appState.aiProvider == "local" {
+            let modelName = LocalLLMService.shared.availableModels.first(where: { $0.id == appState.aiModel })?.displayName ?? (appState.aiModel.isEmpty ? "Local Model" : appState.aiModel)
+            return "Local : \(modelName)"
         } else if currentKeyMode == "direct" || currentExecutionMode == .byok {
             let providerName = AIModelCatalog.friendlyProviderName(appState.aiProvider)
             let modelName: String = {
                 if let modelDef = AIModelCatalog.shared.model(id: appState.aiModel) {
                     return modelDef.name
                 }
-                return appState.aiModel.isEmpty ? "Gemini 3.7 Flash" : AIModelCatalog.formatModelName(appState.aiModel)
+                return appState.aiModel.isEmpty ? "Gemini 2.5 Flash" : AIModelCatalog.formatModelName(appState.aiModel)
             }()
             return "\(providerName) : \(modelName)"
         } else {
@@ -360,6 +374,11 @@ struct AIAgentView: View {
                                     // Context Limit Banner (warn user and prompt for new conversation)
                                     if agent.contextLimitReached {
                                         contextLimitBanner
+                                    }
+                                    
+                                    // Live Task Activity Banner (linking directly to Task Logs)
+                                    if agent.isLoading || agent.currentToolExecution != nil {
+                                        liveTaskActivityBanner
                                     }
                                     
                                     // Input Container (Docked at bottom)
@@ -765,6 +784,7 @@ struct AIAgentView: View {
                                         let isShowing = previewDock.isDockVisible || deviceRuntime.showingEmbeddedDeviceDock || (appState.agenticContextVisible && appState.selectedInspectorTab == .preview)
                                          if isShowing {
                                              appState.hidePreviewInspector()
+                                             previewDock.hideDock()
                                          } else {
                                              appState.showPreviewInspector()
                                          }
@@ -847,51 +867,162 @@ struct AIAgentView: View {
                     Divider().frame(height: 16).padding(.horizontal, 2)
                     
                     // Mode Tabs — responsive: icon-only when compact
-                    ScrollView(.horizontal, showsIndicators: false) {
-                        HStack(spacing: 1) {
-                            modePill("Chat", isActive: !isPaperMode && !isCellMode && !isTaskMode && !isWalkthroughMode && !isPlanFullscreen, compact: isCompact) {
-                                withAnimation(.easeInOut(duration: 0.2)) {
+                    // Mode Tabs — Primary Heroes (Chat, Plan, Task) + Sleek More Dropdown
+                    HStack(spacing: 2) {
+                        modePill("Chat", isActive: !isPaperMode && !isCellMode && !isTaskMode && !isWalkthroughMode && !isPlanFullscreen, compact: isCompact) {
+                            withAnimation(.easeInOut(duration: 0.2)) {
+                                isPaperMode = false
+                                isCellMode = false
+                                isTaskMode = false
+                                isWalkthroughMode = false
+                                isPlanFullscreen = false
+                            }
+                        }
+                        modePill("Plan", isActive: isPlanMode || planManager.isPlanVisible, compact: isCompact) {
+                            withAnimation(.easeInOut(duration: 0.2)) {
+                                if isPlanMode || planManager.isPlanVisible {
+                                    isPlanMode = false
+                                    planManager.isPlanVisible = false
+                                    isPlanFullscreen = false
+                                } else {
+                                    isPlanMode = true
+                                    planManager.isPlanVisible = true
                                     isPaperMode = false
                                     isCellMode = false
                                     isTaskMode = false
                                     isWalkthroughMode = false
-                                    isPlanFullscreen = false
-                                }
-                            }
-                            modePill("Plan", isActive: isPlanMode || planManager.isPlanVisible, compact: isCompact) {
-                                withAnimation(.easeInOut(duration: 0.2)) {
-                                    if isPlanMode || planManager.isPlanVisible {
-                                        isPlanMode = false
-                                        planManager.isPlanVisible = false
-                                        isPlanFullscreen = false
-                                    } else {
-                                        isPlanMode = true
-                                        planManager.isPlanVisible = true
-                                        isPaperMode = false
-                                        isCellMode = false
-                                        isTaskMode = false
-                                        isWalkthroughMode = false
-                                        if planManager.currentPlan == nil, let ws = appState.workspaceFolder?.path {
-                                            planManager.loadFromTaskMarkdown(workspacePath: ws)
-                                        }
+                                    if planManager.currentPlan == nil, let ws = appState.workspaceFolder?.path {
+                                        planManager.loadFromTaskMarkdown(workspacePath: ws)
                                     }
                                 }
                             }
-                            modePill("Task", isActive: isTaskMode, compact: isCompact) {
-                                isTaskMode = true; isPlanMode = false; planManager.isPlanVisible = false; isPaperMode = false; isCellMode = false; isWalkthroughMode = false
-                            }
-                            modePill("Walkthrough", isActive: isWalkthroughMode, compact: isCompact) {
-                                isWalkthroughMode = true; isPlanMode = false; planManager.isPlanVisible = false; isPaperMode = false; isCellMode = false; isTaskMode = false
-                            }
-                            modePill("Report", isActive: isPaperMode, compact: isCompact) {
-                                isPaperMode = true; isCellMode = false; isPlanMode = false; planManager.isPlanVisible = false; isTaskMode = false; isWalkthroughMode = false
-                            }
-                            modePill("Cells", isActive: isCellMode, compact: isCompact) {
-                                isCellMode = true; isPaperMode = false; isPlanMode = false; planManager.isPlanVisible = false; isTaskMode = false; isWalkthroughMode = false
+                        }
+                        modePill("Task", isActive: isTaskMode && activeTaskTab == 0, compact: isCompact) {
+                            withAnimation(.easeInOut(duration: 0.2)) {
+                                isTaskMode = true
+                                activeTaskTab = 0
+                                isPlanMode = false
+                                planManager.isPlanVisible = false
+                                isPaperMode = false
+                                isCellMode = false
+                                isWalkthroughMode = false
+                                isPlanFullscreen = false
                             }
                         }
-                        .padding(2)
+
+                        // Secondary views dropdown: Keeps header clean on all screen sizes & preserves focus on Plan/Task
+                        let isSecondaryActive = isPaperMode || isCellMode || isWalkthroughMode || (isTaskMode && activeTaskTab > 0)
+                        let secondaryLabel: String = {
+                            if isWalkthroughMode { return "Walkthrough" }
+                            if isPaperMode { return "Report" }
+                            if isCellMode { return "Cells" }
+                            if isTaskMode {
+                                switch activeTaskTab {
+                                case 1: return "Spec"
+                                case 2: return "Walkthrough"
+                                case 3: return "Logs"
+                                case 4: return "Cost"
+                                case 5: return "Audit"
+                                case 6: return "Verify"
+                                default: break
+                                }
+                            }
+                            return "More"
+                        }()
+
+                        Menu {
+                            Section("Verification & Planning") {
+                                Button {
+                                    withAnimation(.easeInOut(duration: 0.2)) {
+                                        isTaskMode = true; activeTaskTab = 6
+                                        isPlanMode = false; planManager.isPlanVisible = false
+                                        isPaperMode = false; isCellMode = false; isWalkthroughMode = false; isPlanFullscreen = false
+                                    }
+                                } label: {
+                                    Label("Consensus Engine (Builder vs. Auditor)", systemImage: "shield.checkered")
+                                }
+
+                                Button {
+                                    withAnimation(.easeInOut(duration: 0.2)) {
+                                        isWalkthroughMode = true; isPlanMode = false; planManager.isPlanVisible = false
+                                        isPaperMode = false; isCellMode = false; isTaskMode = false
+                                    }
+                                } label: {
+                                    Label("Walkthrough Artifact", systemImage: "sparkles")
+                                }
+                            }
+
+                            Section("Analytics & Governance") {
+                                Button {
+                                    withAnimation(.easeInOut(duration: 0.2)) {
+                                        isTaskMode = true; activeTaskTab = 4
+                                        isPlanMode = false; planManager.isPlanVisible = false
+                                        isPaperMode = false; isCellMode = false; isWalkthroughMode = false; isPlanFullscreen = false
+                                    }
+                                } label: {
+                                    Label("Cost & Token Usage Dashboard", systemImage: "chart.bar.xaxis")
+                                }
+
+                                Button {
+                                    withAnimation(.easeInOut(duration: 0.2)) {
+                                        isTaskMode = true; activeTaskTab = 5
+                                        isPlanMode = false; planManager.isPlanVisible = false
+                                        isPaperMode = false; isCellMode = false; isWalkthroughMode = false; isPlanFullscreen = false
+                                    }
+                                } label: {
+                                    Label("Sovereign Flight Recorder (Audit Trail)", systemImage: "airplane.circle")
+                                }
+                            }
+
+                            Section("Diagnostics & Notebook") {
+                                Button {
+                                    withAnimation(.easeInOut(duration: 0.2)) {
+                                        isTaskMode = true; activeTaskTab = 3
+                                        isPlanMode = false; planManager.isPlanVisible = false
+                                        isPaperMode = false; isCellMode = false; isWalkthroughMode = false; isPlanFullscreen = false
+                                    }
+                                } label: {
+                                    Label("Diagnostic Logs (\(agent.activityLog.count))", systemImage: "terminal")
+                                }
+
+                                Button {
+                                    withAnimation(.easeInOut(duration: 0.2)) {
+                                        isCellMode = true; isPaperMode = false; isPlanMode = false; planManager.isPlanVisible = false; isTaskMode = false; isWalkthroughMode = false
+                                    }
+                                } label: {
+                                    Label("Interactive Notebook Cells", systemImage: "square.grid.2x2")
+                                }
+
+                                Button {
+                                    withAnimation(.easeInOut(duration: 0.2)) {
+                                        isPaperMode = true; isCellMode = false; isPlanMode = false; planManager.isPlanVisible = false; isTaskMode = false; isWalkthroughMode = false
+                                    }
+                                } label: {
+                                    Label("Research Report & Export", systemImage: "doc.text")
+                                }
+                            }
+                        } label: {
+                            HStack(spacing: 3) {
+                                Text(secondaryLabel)
+                                    .font(.system(size: 10, weight: isSecondaryActive ? .semibold : .regular))
+                                    .lineLimit(1)
+                                Image(systemName: "chevron.down")
+                                    .font(.system(size: 7, weight: .bold))
+                                    .foregroundColor(.secondary)
+                            }
+                            .padding(.horizontal, 7)
+                            .padding(.vertical, 4)
+                            .background(isSecondaryActive ? Color.primary.opacity(0.10) : Color.clear)
+                            .cornerRadius(3)
+                            .foregroundColor(isSecondaryActive ? .primary : .secondary)
+                        }
+                        .menuStyle(.borderlessButton)
+                        .fixedSize()
                     }
+                    .padding(2)
+                    
+                    // P5: Compact cost status widget
+                    CostStatusWidget()
                     
                     Spacer(minLength: 4)
                     
@@ -1056,9 +1187,19 @@ struct AIAgentView: View {
             HStack(spacing: 4) {
                 Text(compact ? String(label.prefix(1)) : label)
                     .font(.system(size: 10, weight: isActive ? .semibold : .regular))
+                    .lineLimit(1)
+                    .fixedSize()
                 if label == "Plan", planManager.currentPlan?.approvalState == .pending {
                     Circle()
                         .fill(Color.orange)
+                        .frame(width: 5, height: 5)
+                } else if label == "Logs", agent.isLoading {
+                    Circle()
+                        .fill(Color.accentColor)
+                        .frame(width: 5, height: 5)
+                } else if label == "Logs", agent.activityLog.contains(where: { $0.type == .error }) {
+                    Circle()
+                        .fill(Color(red: 0.90, green: 0.44, blue: 0.44))
                         .frame(width: 5, height: 5)
                 }
             }
@@ -1069,6 +1210,7 @@ struct AIAgentView: View {
             .cornerRadius(3)
         }
         .buttonStyle(.plain)
+        .fixedSize()
         .help(label)
     }
     
@@ -1707,7 +1849,7 @@ struct AIAgentView: View {
     @State private var taskMdText: String = ""
     @State private var agentMdText: String = ""
     @State private var walkthroughMdText: String = ""
-    @State private var activeTaskTab: Int = 0 // 0 = task.md, 1 = agent.md, 2 = walkthrough.md
+    @State private var activeTaskTab: Int = 0 // 0 = task.md, 1 = agent.md, 2 = walkthrough.md, 3 = logs, 4 = cost, 5 = flight recorder
     @State private var taskViewMode: Int = 0  // 0 = Checklist Dashboard, 1 = Raw Markdown
     
     private struct ParsedTaskStep: Identifiable {
@@ -1756,9 +1898,10 @@ struct AIAgentView: View {
         VStack(spacing: 0) {
             // Task Control Toolbar
             HStack(spacing: 6) {
-                taskEditorTab("task.md", idx: 0)
-                taskEditorTab("agent.md", idx: 1)
-                taskEditorTab("walkthrough.md", idx: 2)
+                taskEditorTab("Checklist (task.md)", idx: 0)
+                taskEditorTab("Spec (agent.md)", idx: 1)
+                taskEditorTab("Walkthrough", idx: 2)
+                taskEditorTab("Diagnostic Logs", idx: 3, badge: agent.activityLog.count)
                 
                 if activeTaskTab == 0 {
                     Divider().frame(height: 14).padding(.horizontal, 4).opacity(0.3)
@@ -1796,53 +1939,55 @@ struct AIAgentView: View {
                 Spacer()
                 
                 // Autonomous Execution Action
-                if agent.isLoading {
-                    Button(action: { AgentService.shared.stopGeneration() }) {
-                        HStack(spacing: 4) {
-                            Image(systemName: "stop.fill")
-                                .font(.system(size: 8))
-                            Text("Stop Task")
-                                .font(.system(size: 10, weight: .medium))
+                if activeTaskTab < 3 {
+                    if agent.isLoading {
+                        Button(action: { AgentService.shared.stopGeneration() }) {
+                            HStack(spacing: 4) {
+                                Image(systemName: "stop.fill")
+                                    .font(.system(size: 8))
+                                Text("Stop Task")
+                                    .font(.system(size: 10, weight: .medium))
+                            }
+                            .foregroundColor(.red.opacity(0.9))
+                            .padding(.horizontal, 8)
+                            .padding(.vertical, 4)
+                            .background(Color.red.opacity(0.12))
+                            .cornerRadius(4)
                         }
-                        .foregroundColor(.red.opacity(0.9))
-                        .padding(.horizontal, 8)
-                        .padding(.vertical, 4)
-                        .background(Color.red.opacity(0.12))
-                        .cornerRadius(4)
+                        .buttonStyle(.plain)
+                    } else {
+                        Button(action: executeCurrentTaskPlan) {
+                            HStack(spacing: 4) {
+                                Image(systemName: "play.fill")
+                                    .font(.system(size: 8))
+                                Text("Run Task with Agent")
+                                    .font(.system(size: 10, weight: .medium))
+                            }
+                            .foregroundColor(.primary)
+                            .padding(.horizontal, 10)
+                            .padding(.vertical, 4)
+                            .background(Color.accentColor.opacity(0.2))
+                            .cornerRadius(4)
+                            .overlay(
+                                RoundedRectangle(cornerRadius: 4)
+                                    .stroke(Color.accentColor.opacity(0.4), lineWidth: 1)
+                            )
+                        }
+                        .buttonStyle(.plain)
                     }
-                    .buttonStyle(.plain)
-                } else {
-                    Button(action: executeCurrentTaskPlan) {
-                        HStack(spacing: 4) {
-                            Image(systemName: "play.fill")
-                                .font(.system(size: 8))
-                            Text("Run Task with Agent")
-                                .font(.system(size: 10, weight: .medium))
-                        }
-                        .foregroundColor(.primary)
-                        .padding(.horizontal, 10)
-                        .padding(.vertical, 4)
-                        .background(Color.accentColor.opacity(0.2))
-                        .cornerRadius(4)
-                        .overlay(
-                            RoundedRectangle(cornerRadius: 4)
-                                .stroke(Color.accentColor.opacity(0.4), lineWidth: 1)
-                        )
+                    
+                    // Save button (only for file editor tabs)
+                    Button(action: saveTaskFiles) {
+                        Text("Save")
+                            .font(.system(size: 10, weight: .medium))
+                            .foregroundColor(.secondary)
+                            .padding(.horizontal, 8)
+                            .padding(.vertical, 4)
+                            .background(Color.primary.opacity(0.06))
+                            .cornerRadius(4)
                     }
                     .buttonStyle(.plain)
                 }
-                
-                // Save button
-                Button(action: saveTaskFiles) {
-                    Text("Save")
-                        .font(.system(size: 10, weight: .medium))
-                        .foregroundColor(.secondary)
-                        .padding(.horizontal, 8)
-                        .padding(.vertical, 4)
-                        .background(Color.primary.opacity(0.06))
-                        .cornerRadius(4)
-                }
-                .buttonStyle(.plain)
             }
             .padding(.horizontal, 12)
             .padding(.vertical, 6)
@@ -1957,11 +2102,23 @@ struct AIAgentView: View {
                     .font(.system(size: 12, design: .monospaced))
                     .scrollContentBackground(.hidden)
                     .background(workspaceBg)
-            } else {
+            } else if activeTaskTab == 2 {
                 TextEditor(text: $walkthroughMdText)
                     .font(.system(size: 12, design: .monospaced))
                     .scrollContentBackground(.hidden)
                     .background(workspaceBg)
+            } else if activeTaskTab == 3 {
+                TaskLogsView()
+                    .environmentObject(appState)
+            } else if activeTaskTab == 4 {
+                // P5: Cost Dashboard
+                CostDashboardView()
+            } else if activeTaskTab == 5 {
+                // P2: Flight Recorder / Audit Trail
+                FlightRecorderView()
+            } else if activeTaskTab == 6 {
+                // Phase 1: Dual-Agent Consensus Engine
+                ConsensusEngineView()
             }
         }
         .onAppear { loadTaskFiles() }
@@ -2085,15 +2242,27 @@ struct AIAgentView: View {
         }
     }
     
-    private func taskEditorTab(_ label: String, idx: Int) -> some View {
+    private func taskEditorTab(_ label: String, idx: Int, badge: Int? = nil) -> some View {
         Button(action: { withAnimation { activeTaskTab = idx } }) {
-            Text(label)
-                .font(.system(size: 10, weight: .medium, design: .monospaced))
-                .foregroundColor(activeTaskTab == idx ? .primary : .secondary)
-                .padding(.horizontal, 10)
-                .padding(.vertical, 5)
-                .background(activeTaskTab == idx ? Color.primary.opacity(0.09) : Color.clear)
-                .cornerRadius(4)
+            HStack(spacing: 4) {
+                Text(label)
+                    .font(.system(size: 10, weight: .medium, design: .monospaced))
+                    .lineLimit(1)
+                    .fixedSize()
+                if let b = badge, b > 0 {
+                    Text("\(b)")
+                        .font(.system(size: 8.5, weight: .bold, design: .monospaced))
+                        .padding(.horizontal, 4)
+                        .padding(.vertical, 1)
+                        .background(Color.primary.opacity(0.12))
+                        .cornerRadius(3)
+                }
+            }
+            .foregroundColor(activeTaskTab == idx ? .primary : .secondary)
+            .padding(.horizontal, 10)
+            .padding(.vertical, 5)
+            .background(activeTaskTab == idx ? Color.primary.opacity(0.09) : Color.clear)
+            .cornerRadius(4)
         }
         .buttonStyle(.plain)
     }
@@ -2706,6 +2875,94 @@ struct AIAgentView: View {
         .transition(.move(edge: .bottom).combined(with: .opacity))
     }
     
+    // MARK: - Live Task Activity Banner
+    
+    private var liveTaskActivityBanner: some View {
+        HStack(spacing: 8) {
+            Button(action: {
+                withAnimation(.easeInOut(duration: 0.2)) {
+                    if planManager.currentPlan != nil || planManager.isPlanVisible {
+                        isPlanMode = true
+                        planManager.isPlanVisible = true
+                        isTaskMode = false
+                    } else {
+                        isTaskMode = true
+                        activeTaskTab = 0
+                        isPlanMode = false
+                        planManager.isPlanVisible = false
+                    }
+                    isPaperMode = false
+                    isCellMode = false
+                    isWalkthroughMode = false
+                    isPlanFullscreen = false
+                }
+            }) {
+                HStack(spacing: 8) {
+                    ProgressView()
+                        .controlSize(.mini)
+                    
+                    if let tool = agent.currentToolExecution {
+                        Text(tool)
+                            .font(.system(size: 10.5, weight: .medium, design: .monospaced))
+                            .foregroundColor(.primary)
+                            .lineLimit(1)
+                    } else {
+                        Text("Agent working on task…")
+                            .font(.system(size: 10.5, weight: .medium))
+                            .foregroundColor(.primary)
+                            .lineLimit(1)
+                    }
+                    
+                    Spacer()
+                    
+                    HStack(spacing: 4) {
+                        Image(systemName: "list.bullet.clipboard")
+                            .font(.system(size: 9.5))
+                        Text(planManager.currentPlan != nil ? "View Plan ➔" : "View Tasks ➔")
+                            .font(.system(size: 10, weight: .semibold))
+                    }
+                    .foregroundColor(.primary.opacity(0.85))
+                }
+                .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            
+            Button(action: {
+                withAnimation(.easeInOut(duration: 0.2)) {
+                    isTaskMode = true
+                    activeTaskTab = 3
+                    isPlanMode = false
+                    planManager.isPlanVisible = false
+                    isPaperMode = false
+                    isCellMode = false
+                    isWalkthroughMode = false
+                    isPlanFullscreen = false
+                }
+            }) {
+                HStack(spacing: 3) {
+                    Image(systemName: "terminal")
+                        .font(.system(size: 9))
+                    Text("\(agent.activityLog.count)")
+                        .font(.system(size: 9, weight: .bold, design: .monospaced))
+                }
+                .foregroundColor(.secondary)
+                .padding(.horizontal, 6)
+                .padding(.vertical, 3)
+                .background(Color.primary.opacity(0.06))
+                .cornerRadius(4)
+            }
+            .buttonStyle(.plain)
+            .help("Inspect low-level diagnostic logs & tool executions")
+        }
+        .padding(.horizontal, 12)
+        .padding(.vertical, 6)
+        .background(Color.primary.opacity(0.04))
+        .cornerRadius(6)
+        .overlay(RoundedRectangle(cornerRadius: 6).stroke(Color.primary.opacity(0.08), lineWidth: 0.5))
+        .padding(.horizontal, 14)
+        .padding(.bottom, 4)
+    }
+    
     // MARK: - Context Limit Banner
     
     private var contextLimitBanner: some View {
@@ -3006,7 +3263,7 @@ struct AIAgentView: View {
                 switch activeConfig.type {
                 case .agy:
                     let agyModels = LocalEcosystemDiscovery.shared.models(for: "agy").map(\.id)
-                    return agyModels.contains(appState.aiModel) ? appState.aiModel : (agyModels.first ?? "gemini-3.8-flash-high")
+                    return agyModels.contains(appState.aiModel) ? appState.aiModel : (agyModels.first ?? "gemini-2.0-flash")
                 case .openCode:
                     let isAuthed = LocalEcosystemDiscovery.shared.engines.first(where: { $0.id == "opencode" })?.isAuthenticated ?? false
                     let openCodeModels = LocalEcosystemDiscovery.shared.models(for: "opencode").map(\.id)
@@ -3020,13 +3277,13 @@ struct AIAgentView: View {
                     return openCodeModels.first(where: { $0.contains("free") }) ?? "opencode/nemotron-3.5-lightning-free"
                 case .codexEngine:
                     let codexModels = LocalEcosystemDiscovery.shared.models(for: "codex").map(\.id)
-                    return codexModels.contains(appState.aiModel) ? appState.aiModel : (codexModels.first ?? "gpt-6-astra")
+                    return codexModels.contains(appState.aiModel) ? appState.aiModel : (codexModels.first ?? "gpt-4o")
                 case .claudeCode:
                     let claudeModels = LocalEcosystemDiscovery.shared.models(for: "claude_code").map(\.id)
                     return claudeModels.contains(appState.aiModel) ? appState.aiModel : (claudeModels.first ?? "haiku")
                 case .zedEngine:
                     let zedModels = LocalEcosystemDiscovery.shared.models(for: "zed").map(\.id)
-                    return zedModels.contains(appState.aiModel) ? appState.aiModel : (zedModels.first ?? "deepseek-v4-flash")
+                    return zedModels.contains(appState.aiModel) ? appState.aiModel : (zedModels.first ?? "deepseek-chat")
                 default:
                     return appState.aiModel.isEmpty ? nil : appState.aiModel
                 }
@@ -3396,6 +3653,13 @@ struct AIAgentView: View {
                 SubscriptionAuthManager.shared.activeProvider = first.provider
                 UserDefaults.standard.set(first.provider.rawValue, forKey: "subscriptionActiveProvider")
             }
+        } else if mode == "local" {
+            appState.aiProvider = "local"
+            if let firstM = LocalLLMService.shared.availableModels.first {
+                appState.aiModel = firstM.id
+            } else {
+                appState.aiModel = "local-model"
+            }
         } else if mode == "cloud" {
             if let first = AIModelCatalog.shared.provider("omni")?.models.first {
                 appState.aiProvider = "omni"
@@ -3403,13 +3667,13 @@ struct AIAgentView: View {
             }
         } else {
             // Direct (BYOK)
-            let byok = AIModelCatalog.shared.providers.filter { !["omni", "agy", "codex", "claude_code", "zed"].contains($0.id) && !(appState.apiKeys[$0.id]?.isEmpty ?? true) }
+            let byok = AIModelCatalog.shared.providers.filter { !["omni", "agy", "codex", "claude_code", "zed", "local"].contains($0.id) && !(appState.apiKeys[$0.id]?.isEmpty ?? true) }
             if let firstProv = byok.first, let firstM = firstProv.models.first {
                 appState.aiProvider = firstProv.id
                 appState.aiModel = firstM.id
             } else {
                 appState.aiProvider = "deepseek"
-                appState.aiModel = "deepseek-flash"
+                appState.aiModel = "deepseek-chat"
             }
         }
         appState.saveSettings()
@@ -3498,34 +3762,8 @@ struct AIAgentView: View {
                 return connected.isEmpty ? SubscriptionProviderType.allCases : connected
             }()
             
-            ForEach(providersToShow) { prov in
-                let isConnected = SubscriptionAuthManager.shared.isConnected(prov)
-                Menu("\(prov.displayName)\(isConnected ? " (Active)" : "")") {
-                    ForEach(prov.modelInfos) { subModel in
-                        Button(action: {
-                            switchToNativeMode(mode: "subscription")
-                            appState.aiProvider = subModel.aiProviderID
-                            appState.aiModel = subModel.modelID
-                            SubscriptionAuthManager.shared.activeProvider = subModel.provider
-                            UserDefaults.standard.set(subModel.provider.rawValue, forKey: "subscriptionActiveProvider")
-                            UserDefaults.standard.set("subscription", forKey: "aiKeyMode")
-                            appState.saveSettings()
-                        }) {
-                            HStack {
-                                Text(subModel.name)
-                                if currentExecutionMode == .subscription && appState.aiModel == subModel.modelID {
-                                    Image(systemName: "checkmark")
-                                }
-                            }
-                        }
-                    }
-                    if !isConnected {
-                        Divider()
-                        Button("Connect \(prov.displayName) in Settings...") {
-                            appState.showingSettingsDialog = true
-                        }
-                    }
-                }
+            ForEach(providersToShow, id: \.rawValue) { (prov: SubscriptionProviderType) in
+                subscriptionProviderSubmenu(prov: prov)
             }
             
             Divider()
@@ -3544,31 +3782,17 @@ struct AIAgentView: View {
         
         // MARK: - 2. 🔑 BYOK (Bring Your Own Key)
         Menu {
-            let byokProviders = AIModelCatalog.shared.providers.filter { !["omni", "agy", "codex", "claude_code", "zed"].contains($0.id) }
-            ForEach(byokProviders) { prov in
-                let hasKey = hasActiveKey(prov.id)
-                Menu("\(prov.name)\(hasKey ? "" : " (No Key)")") {
-                    ForEach(prov.models) { m in
-                        Button(action: {
-                            switchToNativeMode(mode: "direct")
-                            setModel(prov.id, m.id)
-                        }) {
-                            HStack {
-                                Text(m.name)
-                                if !m.badge.isEmpty { Text("(\(m.badge))") }
-                                if currentExecutionMode == .byok && appState.aiProvider == prov.id && appState.aiModel == m.id {
-                                    Image(systemName: "checkmark")
-                                }
-                            }
-                        }
-                    }
-                    if !hasKey {
-                        Divider()
-                        Button("Set \(prov.name) API Key in Settings...") {
-                            appState.showingSettingsDialog = true
-                        }
-                    }
+            let byokProviders = AIModelCatalog.shared.providers.filter { !["omni", "agy", "codex", "claude_code", "zed", "local"].contains($0.id) }
+            ForEach(byokProviders, id: \.id) { (prov: AIProviderDefinition) in
+                byokProviderSubmenu(prov: prov)
+            }
+            Divider()
+            Button(action: {
+                Task {
+                    await AIModelCatalog.shared.refreshLiveProviderModels()
                 }
+            }) {
+                Label("Fetch All Provider Models", systemImage: "arrow.clockwise")
             }
         } label: {
             HStack {
@@ -3580,7 +3804,82 @@ struct AIAgentView: View {
             }
         }
         
-        // MARK: - 3. 🔌 ACP (Local CLI Agent)
+        // MARK: - 3. 💻 Local LLM (Ollama, LM Studio, MLX)
+        Menu {
+            let servers = LocalLLMService.shared.detectedServers
+            let onlineServers = servers.filter { $0.isOnline }
+            
+            if onlineServers.isEmpty {
+                Text("No Running Local LLM Server Found")
+                Text("Checked ports 11434 (Ollama), 1234 (LM Studio), 8080 (MLX)")
+                    .font(.caption)
+                Divider()
+                Button(action: {
+                    Task {
+                        await LocalLLMService.shared.scanForServers()
+                        AIModelCatalog.shared.integrateLocalModels()
+                    }
+                }) {
+                    Label("Scan for Local Engines (Ollama, LM Studio)", systemImage: "arrow.clockwise")
+                }
+                Button(action: { appState.showingSettingsDialog = true }) {
+                    Label("Configure Local LLM in Settings...", systemImage: "gearshape")
+                }
+            } else {
+                ForEach(onlineServers) { srv in
+                    Menu("\(srv.displayName) (\(srv.models.count) models)") {
+                        if srv.models.isEmpty {
+                            Text("No models loaded on this server")
+                        } else {
+                            ForEach(srv.models) { m in
+                                Button(action: {
+                                    switchToNativeMode(mode: "local")
+                                    appState.aiProvider = "local"
+                                    appState.aiModel = m.id
+                                    LocalLLMService.shared.selectedModelId = m.id
+                                    LocalLLMService.cachedEndpoint = srv.endpoint
+                                    LocalLLMService.cachedModel = m.id
+                                    appState.saveSettings()
+                                }) {
+                                    HStack {
+                                        Text(m.displayName)
+                                        if let size = m.size, !size.isEmpty {
+                                            Text("• \(size)")
+                                                .foregroundColor(.secondary)
+                                        }
+                                        if currentExecutionMode == .local && appState.aiModel == m.id {
+                                            Image(systemName: "checkmark")
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+                Divider()
+                Button(action: {
+                    Task {
+                        await LocalLLMService.shared.scanForServers()
+                        AIModelCatalog.shared.integrateLocalModels()
+                    }
+                }) {
+                    Label("Rescan Local Engines", systemImage: "arrow.clockwise")
+                }
+                Button(action: { appState.showingSettingsDialog = true }) {
+                    Label("Local LLM Settings...", systemImage: "gearshape")
+                }
+            }
+        } label: {
+            HStack {
+                Label("Local LLM (Ollama, LM Studio, MLX)", systemImage: "desktopcomputer")
+                if currentExecutionMode == .local {
+                    Spacer()
+                    Image(systemName: "checkmark")
+                }
+            }
+        }
+        
+        // MARK: - 4. 🔌 ACP (Local CLI Agent)
         Menu {
             ForEach(LocalEcosystemDiscovery.shared.engines) { engine in
                 Menu(engine.name + (engine.isInstalled ? "" : " (Not Installed)")) {
@@ -3609,7 +3908,7 @@ struct AIAgentView: View {
             }
         }
         
-        // MARK: - 4. ☁️ Dotmini Cloud (Sovereign AI)
+        // MARK: - 5. ☁️ Dotmini Cloud (Sovereign AI)
         Menu {
             if let omni = AIModelCatalog.shared.provider("omni") {
                 // Group 1: 🌟 Flagship & Deep Reasoning
@@ -3799,6 +4098,121 @@ struct AIAgentView: View {
             UserDefaults.standard.set("direct", forKey: "aiKeyMode")
         }
         appState.saveSettings()
+    }
+    
+    private func promptCustomModel(provider: String, isSubscription: Bool) {
+        let alert = NSAlert()
+        alert.messageText = "Enter Custom Model ID"
+        alert.informativeText = "Type the exact model identifier from \(provider) (e.g. gpt-4.5-preview, claude-3-7-sonnet-20250219, gemini-2.5-pro, deepseek-chat):"
+        alert.addButton(withTitle: "Use Model")
+        alert.addButton(withTitle: "Cancel")
+        
+        let inputTextField = NSTextField(frame: NSRect(x: 0, y: 0, width: 280, height: 24))
+        inputTextField.placeholderString = "e.g. model-identifier"
+        alert.accessoryView = inputTextField
+        
+        let response = alert.runModal()
+        if response == .alertFirstButtonReturn {
+            let modelId = inputTextField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !modelId.isEmpty else { return }
+            
+            if isSubscription {
+                if let subType = SubscriptionProviderType(rawValue: provider) {
+                    SubscriptionAuthManager.registerCustomSubscriptionModel(provider: subType, modelId: modelId)
+                    switchToNativeMode(mode: "subscription")
+                    appState.aiProvider = subType.aiProviderID
+                    appState.aiModel = modelId
+                    SubscriptionAuthManager.shared.activeProvider = subType
+                    UserDefaults.standard.set(subType.rawValue, forKey: "subscriptionActiveProvider")
+                    UserDefaults.standard.set("subscription", forKey: "aiKeyMode")
+                    appState.saveSettings()
+                }
+            } else {
+                AIModelCatalog.shared.registerCustomModel(provider: provider, modelId: modelId)
+                switchToNativeMode(mode: "direct")
+                setModel(provider, modelId)
+            }
+        }
+    }
+    
+    @ViewBuilder
+    private func subscriptionProviderSubmenu(prov: SubscriptionProviderType) -> some View {
+        let isConnected = SubscriptionAuthManager.shared.isConnected(prov)
+        Menu("\(prov.displayName)\(isConnected ? " (Active)" : "")") {
+            ForEach(prov.modelInfos) { subModel in
+                Button(action: {
+                    switchToNativeMode(mode: "subscription")
+                    appState.aiProvider = subModel.aiProviderID
+                    appState.aiModel = subModel.modelID
+                    SubscriptionAuthManager.shared.activeProvider = subModel.provider
+                    UserDefaults.standard.set(subModel.provider.rawValue, forKey: "subscriptionActiveProvider")
+                    UserDefaults.standard.set("subscription", forKey: "aiKeyMode")
+                    appState.saveSettings()
+                }) {
+                    HStack {
+                        Text(subModel.name)
+                        if currentExecutionMode == .subscription && appState.aiModel == subModel.modelID {
+                            Image(systemName: "checkmark")
+                        }
+                    }
+                }
+            }
+            Divider()
+            Button("Enter Custom Model ID...") {
+                promptCustomModel(provider: prov.rawValue, isSubscription: true)
+            }
+            if isConnected {
+                Button("Fetch Live Models Now") {
+                    Task {
+                        await SubscriptionAuthManager.shared.fetchLiveModels(for: prov)
+                    }
+                }
+            }
+            if !isConnected {
+                Divider()
+                Button("Connect \(prov.displayName) in Settings...") {
+                    appState.showingSettingsDialog = true
+                }
+            }
+        }
+    }
+
+    @ViewBuilder
+    private func byokProviderSubmenu(prov: AIProviderDefinition) -> some View {
+        let hasKey = hasActiveKey(prov.id)
+        Menu("\(prov.name)\(hasKey ? "" : " (No Key)")") {
+            ForEach(prov.models) { m in
+                Button(action: {
+                    switchToNativeMode(mode: "direct")
+                    setModel(prov.id, m.id)
+                }) {
+                    HStack {
+                        Text(m.name)
+                        if !m.badge.isEmpty { Text("(\(m.badge))") }
+                        if currentExecutionMode == .byok && appState.aiProvider == prov.id && appState.aiModel == m.id {
+                            Image(systemName: "checkmark")
+                        }
+                    }
+                }
+            }
+            Divider()
+            Button("Enter Custom Model ID...") {
+                promptCustomModel(provider: prov.id, isSubscription: false)
+            }
+            if hasKey {
+                Button("Fetch Live Models Now") {
+                    Task {
+                        await AIModelCatalog.shared.fetchLiveModelsForProvider(prov.id)
+                    }
+                }
+            }
+            if !hasKey {
+                Divider()
+                Button("Set \(prov.name) API Key in Settings...") {
+                    appState.showingSettingsDialog = true
+                }
+            }
+        }
     }
     
     private func shortModelName(_ model: String) -> String {
@@ -5587,7 +6001,17 @@ struct RichMessageRow: View, Equatable {
                 .frame(maxWidth: .infinity, alignment: .leading)
             
             ForEach(message.pendingChanges) { change in
-                PendingChangeCard(change: change, onApply: onApplyChange, onReject: onRejectChange)
+                PendingChangeCard(
+                    change: change,
+                    onApply: onApplyChange,
+                    onReject: onRejectChange,
+                    onPartialApply: { change, reconstructedContent in
+                        // P4: Write reconstructed file (with only accepted hunks) to disk
+                        let url = URL(fileURLWithPath: change.filePath)
+                        try? reconstructedContent.write(to: url, atomically: true, encoding: .utf8)
+                        onApplyChange?(change)
+                    }
+                )
                     .equatable()
             }
         }
@@ -5609,7 +6033,10 @@ private struct PendingChangeCard: View, Equatable {
     let change: PendingChangeModel
     var onApply: ((PendingChangeModel) -> Void)?
     var onReject: ((PendingChangeModel) -> Void)?
+    var onPartialApply: ((PendingChangeModel, String) -> Void)?  // P4: partial hunk apply
     @State private var showDiff = true  // Auto-expand diff
+    @State private var showHunkReview = false  // P4: hunk-level review mode
+    @State private var hunkDiffResult = DiffResult(oldContent: "", newContent: "", hunks: [], additions: 0, deletions: 0)
     @State private var cardWidth: CGFloat = 0
     
     static func == (lhs: PendingChangeCard, rhs: PendingChangeCard) -> Bool {
@@ -5620,7 +6047,13 @@ private struct PendingChangeCard: View, Equatable {
         VStack(alignment: .leading, spacing: 0) {
             changeCardHeader
             
-            if showDiff {
+            if showHunkReview && change.status == .pending {
+                // P4: Hunk-level review using InlineDiffView
+                InlineDiffView(diffResult: $hunkDiffResult, filePath: change.filePath, onClose: {
+                    withAnimation(.easeInOut(duration: 0.15)) { showHunkReview = false }
+                })
+                .frame(maxHeight: 400)
+            } else if showDiff {
                 codeDiffSection
             } else {
                 changeSummaryRow
@@ -5832,40 +6265,178 @@ private struct PendingChangeCard: View, Equatable {
     }
     
     private var changeCardActions: some View {
-        HStack(spacing: 8) {
-            Button(action: { onApply?(change) }) {
-                HStack(spacing: 4) {
-                    Image(systemName: "checkmark.circle.fill")
-                    Text("Apply Change")
+        VStack(spacing: 0) {
+            if showHunkReview {
+                // Hunk-level review actions
+                HStack(spacing: 8) {
+                    let accepted = hunkDiffResult.hunks.filter { $0.status == .accepted }.count
+                    let rejected = hunkDiffResult.hunks.filter { $0.status == .rejected }.count
+                    let total = hunkDiffResult.hunks.count
+                    let pending = total - accepted - rejected
+                    
+                    // Status
+                    HStack(spacing: 4) {
+                        if accepted > 0 {
+                            Text("\(accepted)✓")
+                                .font(.system(size: 10, weight: .semibold, design: .monospaced))
+                                .foregroundColor(.green)
+                        }
+                        if rejected > 0 {
+                            Text("\(rejected)✗")
+                                .font(.system(size: 10, weight: .semibold, design: .monospaced))
+                                .foregroundColor(.red)
+                        }
+                        if pending > 0 {
+                            Text("\(pending) pending")
+                                .font(.system(size: 10, design: .monospaced))
+                                .foregroundColor(.secondary)
+                        }
+                    }
+                    
+                    Spacer()
+                    
+                    // Apply Selected Hunks
+                    if accepted > 0 || pending == 0 {
+                        Button(action: {
+                            let reconstructed = reconstructFileFromHunks(
+                                oldContent: change.oldContent,
+                                diff: hunkDiffResult
+                            )
+                            onPartialApply?(change, reconstructed)
+                        }) {
+                            HStack(spacing: 4) {
+                                Image(systemName: "checkmark.circle.fill")
+                                Text(accepted == total ? "Apply All" : "Apply \(accepted) Hunks")
+                            }
+                            .font(.system(size: 11, weight: .medium))
+                            .foregroundColor(.white)
+                            .padding(.horizontal, 12)
+                            .padding(.vertical, 6)
+                            .background(LinearGradient(colors: [.green, .green.opacity(0.8)], startPoint: .leading, endPoint: .trailing))
+                            .cornerRadius(6)
+                        }
+                        .buttonStyle(.plain)
+                    }
+                    
+                    // Back to simple view
+                    Button(action: { withAnimation(.easeInOut(duration: 0.15)) { showHunkReview = false } }) {
+                        Text("Simple View")
+                            .font(.system(size: 10, weight: .medium))
+                            .foregroundColor(.secondary)
+                            .padding(.horizontal, 8)
+                            .padding(.vertical, 4)
+                            .background(Color.primary.opacity(0.06))
+                            .cornerRadius(4)
+                    }
+                    .buttonStyle(.plain)
                 }
-                .font(.system(size: 11, weight: .medium))
-                .foregroundColor(.white)
-                .padding(.horizontal, 12)
-                .padding(.vertical, 6)
-                .background(LinearGradient(colors: [.green, .green.opacity(0.8)], startPoint: .leading, endPoint: .trailing))
-                .cornerRadius(6)
-            }
-            .buttonStyle(.plain)
-            
-            Button(action: { onReject?(change) }) {
-                HStack(spacing: 4) {
-                    Image(systemName: "xmark")
-                    Text("Reject")
+                .padding(.horizontal, 10)
+                .padding(.vertical, 8)
+                .background(Color.primary.opacity(0.02))
+            } else {
+                // Standard file-level actions
+                HStack(spacing: 8) {
+                    Button(action: { onApply?(change) }) {
+                        HStack(spacing: 4) {
+                            Image(systemName: "checkmark.circle.fill")
+                            Text("Apply Change")
+                        }
+                        .font(.system(size: 11, weight: .medium))
+                        .foregroundColor(.white)
+                        .padding(.horizontal, 12)
+                        .padding(.vertical, 6)
+                        .background(LinearGradient(colors: [.green, .green.opacity(0.8)], startPoint: .leading, endPoint: .trailing))
+                        .cornerRadius(6)
+                    }
+                    .buttonStyle(.plain)
+                    
+                    Button(action: { onReject?(change) }) {
+                        HStack(spacing: 4) {
+                            Image(systemName: "xmark")
+                            Text("Reject")
+                        }
+                        .font(.system(size: 11, weight: .medium))
+                        .foregroundColor(.red)
+                        .padding(.horizontal, 12)
+                        .padding(.vertical, 6)
+                        .background(Color.red.opacity(0.1))
+                        .cornerRadius(6)
+                    }
+                    .buttonStyle(.plain)
+                    
+                    Spacer()
+                    
+                    // Hunk review toggle — the P4 feature
+                    Button(action: {
+                        // Compute hunk diff if not already done
+                        if hunkDiffResult.hunks.isEmpty {
+                            hunkDiffResult = DiffEngine.shared.computeDiff(
+                                old: change.oldContent,
+                                new: change.newContent
+                            )
+                        }
+                        withAnimation(.easeInOut(duration: 0.15)) { showHunkReview = true }
+                    }) {
+                        HStack(spacing: 3) {
+                            Image(systemName: "rectangle.split.3x1")
+                            Text("Review Hunks")
+                        }
+                        .font(.system(size: 10, weight: .medium))
+                        .foregroundColor(.blue)
+                        .padding(.horizontal, 8)
+                        .padding(.vertical, 4)
+                        .background(Color.blue.opacity(0.08))
+                        .cornerRadius(4)
+                    }
+                    .buttonStyle(.plain)
                 }
-                .font(.system(size: 11, weight: .medium))
-                .foregroundColor(.red)
-                .padding(.horizontal, 12)
-                .padding(.vertical, 6)
-                .background(Color.red.opacity(0.1))
-                .cornerRadius(6)
+                .padding(.horizontal, 10)
+                .padding(.vertical, 8)
+                .background(Color.primary.opacity(0.02))
             }
-            .buttonStyle(.plain)
-            
-            Spacer()
         }
-        .padding(.horizontal, 10)
-        .padding(.vertical, 8)
-        .background(Color.primary.opacity(0.02))
+    }
+    
+    // MARK: - P4: Reconstruct File from Accepted/Rejected Hunks
+    
+    /// Builds the final file by applying only accepted hunks.
+    /// Rejected hunks keep the original lines. Pending hunks are treated as rejected.
+    private func reconstructFileFromHunks(oldContent: String, diff: DiffResult) -> String {
+        let oldLines = oldContent.components(separatedBy: "\n")
+        var result: [String] = []
+        var oldIndex = 0
+        
+        // Sort hunks by their position in the old file
+        let sortedHunks = diff.hunks.sorted { $0.oldRange.lowerBound < $1.oldRange.lowerBound }
+        
+        for hunk in sortedHunks {
+            let hunkStart = max(0, hunk.oldRange.lowerBound)
+            
+            // Copy unchanged lines before this hunk
+            while oldIndex < hunkStart && oldIndex < oldLines.count {
+                result.append(oldLines[oldIndex])
+                oldIndex += 1
+            }
+            
+            if hunk.status == .accepted {
+                // Apply new lines
+                result.append(contentsOf: hunk.newLines)
+            } else {
+                // Keep old lines (rejected or pending)
+                result.append(contentsOf: hunk.oldLines)
+            }
+            
+            // Skip past old lines covered by this hunk
+            oldIndex = min(oldLines.count, hunk.oldRange.upperBound)
+        }
+        
+        // Copy remaining lines after last hunk
+        while oldIndex < oldLines.count {
+            result.append(oldLines[oldIndex])
+            oldIndex += 1
+        }
+        
+        return result.joined(separator: "\n")
     }
 }
 
@@ -5954,9 +6525,9 @@ public final class DiffCacheManager {
             }
         }
         
-        // Capped DP matrix to guarantee sub-millisecond execution
-        let m = min(oldLines.count, 150)
-        let n = min(newLines.count, 150)
+        // DP matrix capped for performance (P4: raised from 150→500 for complete diffs)
+        let m = min(oldLines.count, 500)
+        let n = min(newLines.count, 500)
         var dp = Array(repeating: Array(repeating: 0, count: n + 1), count: m + 1)
         
         for i in 1...max(1, m) {
@@ -6016,7 +6587,7 @@ public final class DiffCacheManager {
                 ))
                 newLineNum += 1
             }
-            if result.count > 150 { break }
+            if result.count > 500 { break }
         }
         
         return result

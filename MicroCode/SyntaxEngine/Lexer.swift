@@ -53,6 +53,7 @@ public class StateMachineLexer: LexerProtocol, @unchecked Sendable {
     
     /// Single-line comment prefix (e.g., "//", "#")
     private let lineCommentPrefix: String?
+    private let additionalLineCommentPrefixes: [String]
     
     /// Block comment markers (e.g., ("/*", "*/"))
     private let blockCommentMarkers: (start: String, end: String)?
@@ -73,6 +74,7 @@ public class StateMachineLexer: LexerProtocol, @unchecked Sendable {
         languageId: String,
         keywords: [String: SyntaxTokenType],
         lineCommentPrefix: String? = "//",
+        additionalLineCommentPrefixes: [String] = [],
         blockCommentMarkers: (String, String)? = ("/*", "*/"),
         docCommentPrefix: String? = "///",
         stringDelimiters: [Character] = ["\"", "'"],
@@ -82,6 +84,7 @@ public class StateMachineLexer: LexerProtocol, @unchecked Sendable {
         self.languageId = languageId
         self.keywords = keywords
         self.lineCommentPrefix = lineCommentPrefix
+        self.additionalLineCommentPrefixes = additionalLineCommentPrefixes
         self.blockCommentMarkers = blockCommentMarkers
         self.docCommentPrefix = docCommentPrefix
         self.stringDelimiters = stringDelimiters
@@ -205,11 +208,14 @@ public class StateMachineLexer: LexerProtocol, @unchecked Sendable {
         }
         
         // Single-line comment
-        if let prefix = lineCommentPrefix, text.hasPrefix(prefix) {
-            let comment = String(text.prefix(while: { $0 != "\n" }))
-            let range = SyntaxTextRange(line: line, column: column, length: comment.utf16.count, offset: offset)
-            let token = SyntaxToken(type: .comment, text: comment, range: range, endState: .normal)
-            return (token, .normal, comment.count)
+        let allLinePrefixes = ([lineCommentPrefix].compactMap { $0 } + additionalLineCommentPrefixes)
+        for prefix in allLinePrefixes {
+            if text.hasPrefix(prefix) {
+                let comment = String(text.prefix(while: { $0 != "\n" }))
+                let range = SyntaxTextRange(line: line, column: column, length: comment.utf16.count, offset: offset)
+                let token = SyntaxToken(type: .comment, text: comment, range: range, endState: .normal)
+                return (token, .normal, comment.count)
+            }
         }
         
         // Block comment start
@@ -444,11 +450,11 @@ public class StateMachineLexer: LexerProtocol, @unchecked Sendable {
             tokenType = .annotation
         } else if isPreprocessor {
             tokenType = .preprocessor
-        } else if let kwType = keywords[identText] {
+        } else if let kwType = keywords[identText] ?? keywords[identText.lowercased()] {
             tokenType = kwType
-        } else if identText == "true" || identText == "false" {
+        } else if identText == "true" || identText == "false" || identText == "TRUE" || identText == "FALSE" {
             tokenType = .boolean
-        } else if identText == "nil" || identText == "null" || identText == "None" {
+        } else if identText == "nil" || identText == "null" || identText == "None" || identText == "NULL" {
             tokenType = .null
         } else if identText.first?.isUppercase == true {
             tokenType = .type
@@ -1069,4 +1075,516 @@ public func createKotlinLexer() -> StateMachineLexer {
         interpolationStart: "$"
     )
 }
+
+// MARK: - Extended Multi-Language Lexers
+
+/// Creates a pre-configured lexer for C++
+public func createCppLexer() -> StateMachineLexer {
+    var cppKeywords = [
+        // Types
+        "int": SyntaxTokenType.type, "char": .type, "float": .type, "double": .type, "void": .type,
+        "long": .type, "short": .type, "unsigned": .type, "signed": .type, "bool": .type, "size_t": .type,
+        "uint8_t": .type, "uint16_t": .type, "uint32_t": .type, "uint64_t": .type,
+        "int8_t": .type, "int16_t": .type, "int32_t": .type, "int64_t": .type, "uintptr_t": .type, "ptrdiff_t": .type,
+        "string": .type, "string_view": .type, "vector": .type, "map": .type, "set": .type,
+        "unordered_map": .type, "unordered_set": .type, "array": .type, "deque": .type, "list": .type,
+        "queue": .type, "stack": .type, "pair": .type, "tuple": .type, "unique_ptr": .type, "shared_ptr": .type,
+        "weak_ptr": .type, "optional": .type, "variant": .type, "any": .type, "span": .type,
+        "thread": .type, "mutex": .type, "atomic": .type, "auto": .keyword, "decltype": .keyword,
+
+        // Declarations & Modifiers
+        "class": .keywordDeclaration, "struct": .keywordDeclaration, "union": .keywordDeclaration,
+        "enum": .keywordDeclaration, "typedef": .keywordDeclaration, "namespace": .keywordDeclaration,
+        "template": .keywordDeclaration, "typename": .keywordDeclaration, "concept": .keywordDeclaration,
+        "requires": .keywordDeclaration, "public": .keywordModifier, "private": .keywordModifier,
+        "protected": .keywordModifier, "virtual": .keywordModifier, "override": .keywordModifier,
+        "final": .keywordModifier, "constexpr": .keywordModifier, "consteval": .keywordModifier,
+        "constinit": .keywordModifier, "noexcept": .keywordModifier, "inline": .keywordModifier,
+        "static": .keywordModifier, "extern": .keywordModifier, "mutable": .keywordModifier,
+        "explicit": .keywordModifier, "friend": .keywordModifier, "volatile": .keywordModifier, "const": .keywordModifier,
+
+        // Control flow & statements
+        "if": .keyword, "else": .keyword, "switch": .keyword, "case": .keyword, "default": .keyword,
+        "for": .keyword, "while": .keyword, "do": .keyword, "break": .keywordControl,
+        "continue": .keywordControl, "return": .keywordControl, "goto": .keywordControl,
+        "try": .keyword, "catch": .keyword, "throw": .keywordControl, "co_await": .keyword,
+        "co_return": .keywordControl, "co_yield": .keyword, "static_assert": .keyword, "nullptr": .number,
+        "new": .keyword, "delete": .keyword, "sizeof": .keyword, "this": .keyword, "using": .keyword,
+
+        // Preprocessor
+        "include": .preprocessor, "define": .preprocessor, "ifdef": .preprocessor, "ifndef": .preprocessor,
+        "endif": .preprocessor, "pragma": .preprocessor, "true": .number, "false": .number
+    ]
+    return StateMachineLexer(
+        languageId: "cpp",
+        keywords: cppKeywords,
+        lineCommentPrefix: "//",
+        blockCommentMarkers: ("/*", "*/"),
+        docCommentPrefix: "/**",
+        stringDelimiters: ["\"", "'"],
+        multilineStringDelimiter: nil,
+        interpolationStart: nil
+    )
+}
+
+/// Creates a pre-configured lexer for Objective-C / Objective-C++
+public func createObjCLexer() -> StateMachineLexer {
+    let objcKeywords: [String: SyntaxTokenType] = [
+        "@interface": .keywordDeclaration, "@implementation": .keywordDeclaration, "@protocol": .keywordDeclaration,
+        "@end": .keywordDeclaration, "@property": .keywordDeclaration, "@synthesize": .keywordDeclaration,
+        "@dynamic": .keywordDeclaration, "@class": .keywordDeclaration, "@import": .keyword,
+        "@selector": .keyword, "@encode": .keyword, "@synchronized": .keyword, "@autoreleasepool": .keyword,
+        "@try": .keyword, "@catch": .keyword, "@finally": .keyword, "@throw": .keywordControl,
+        "id": .type, "instancetype": .type, "Class": .type, "SEL": .type, "BOOL": .type,
+        "NSInteger": .type, "NSUInteger": .type, "CGFloat": .type, "NSString": .type, "NSArray": .type,
+        "NSDictionary": .type, "NSSet": .type, "NSNumber": .type, "NSData": .type, "NSURL": .type,
+        "NSError": .type, "NSObject": .type, "UIView": .type, "UIViewController": .type, "NSView": .type,
+        "nonatomic": .keywordModifier, "atomic": .keywordModifier, "strong": .keywordModifier,
+        "weak": .keywordModifier, "assign": .keywordModifier, "copy": .keywordModifier, "readonly": .keywordModifier,
+        "readwrite": .keywordModifier, "nullable": .keywordModifier, "nonnull": .keywordModifier,
+        "_Nullable": .keywordModifier, "_Nonnull": .keywordModifier, "YES": .number, "NO": .number,
+        "nil": .null, "Nil": .null, "NULL": .null, "self": .keyword, "super": .keyword,
+        "if": .keyword, "else": .keyword, "switch": .keyword, "case": .keyword, "default": .keyword,
+        "for": .keyword, "while": .keyword, "do": .keyword, "return": .keywordControl, "break": .keywordControl,
+        "int": .type, "float": .type, "double": .type, "char": .type, "void": .type, "static": .keywordModifier
+    ]
+    return StateMachineLexer(
+        languageId: "objective-c",
+        keywords: objcKeywords,
+        lineCommentPrefix: "//",
+        blockCommentMarkers: ("/*", "*/"),
+        docCommentPrefix: "/**",
+        stringDelimiters: ["\"", "'"],
+        multilineStringDelimiter: nil,
+        interpolationStart: nil
+    )
+}
+
+/// Creates a pre-configured lexer for C#
+public func createCSharpLexer() -> StateMachineLexer {
+    let csKeywords: [String: SyntaxTokenType] = [
+        "class": .keywordDeclaration, "struct": .keywordDeclaration, "record": .keywordDeclaration,
+        "interface": .keywordDeclaration, "enum": .keywordDeclaration, "delegate": .keywordDeclaration,
+        "namespace": .keywordDeclaration, "using": .keyword, "event": .keywordDeclaration,
+        "public": .keywordModifier, "private": .keywordModifier, "protected": .keywordModifier,
+        "internal": .keywordModifier, "static": .keywordModifier, "readonly": .keywordModifier,
+        "volatile": .keywordModifier, "virtual": .keywordModifier, "override": .keywordModifier,
+        "abstract": .keywordModifier, "sealed": .keywordModifier, "async": .keywordModifier,
+        "await": .keywordModifier, "unsafe": .keywordModifier, "partial": .keywordModifier,
+        "required": .keywordModifier, "void": .type, "bool": .type, "byte": .type, "char": .type,
+        "decimal": .type, "double": .type, "float": .type, "int": .type, "uint": .type, "long": .type,
+        "ulong": .type, "short": .type, "ushort": .type, "object": .type, "string": .type, "dynamic": .type,
+        "var": .keywordDeclaration, "Task": .type, "List": .type, "Dictionary": .type, "IEnumerable": .type,
+        "if": .keyword, "else": .keyword, "switch": .keyword, "case": .keyword, "default": .keyword,
+        "for": .keyword, "foreach": .keyword, "in": .keywordOperator, "while": .keyword, "do": .keyword,
+        "break": .keywordControl, "continue": .keywordControl, "return": .keywordControl, "goto": .keywordControl,
+        "yield": .keywordControl, "throw": .keywordControl, "try": .keyword, "catch": .keyword, "finally": .keyword,
+        "from": .keyword, "where": .keyword, "select": .keyword, "group": .keyword, "into": .keyword,
+        "orderby": .keyword, "join": .keyword, "let": .keyword, "on": .keyword, "equals": .keyword,
+        "new": .keyword, "this": .keyword, "base": .keyword, "null": .null, "true": .number, "false": .number,
+        "is": .keywordOperator, "as": .keywordOperator, "typeof": .keyword, "sizeof": .keyword, "nameof": .keyword,
+        "get": .keyword, "set": .keyword, "init": .keyword, "value": .keyword
+    ]
+    return StateMachineLexer(
+        languageId: "csharp",
+        keywords: csKeywords,
+        lineCommentPrefix: "//",
+        blockCommentMarkers: ("/*", "*/"),
+        docCommentPrefix: "///",
+        stringDelimiters: ["\"", "'"],
+        multilineStringDelimiter: "\"\"\"",
+        interpolationStart: "{"
+    )
+}
+
+/// Creates a pre-configured lexer for Dart & Flutter
+public func createDartLexer() -> StateMachineLexer {
+    let dartKeywords: [String: SyntaxTokenType] = [
+        "class": .keywordDeclaration, "enum": .keywordDeclaration, "mixin": .keywordDeclaration,
+        "extension": .keywordDeclaration, "typedef": .keywordDeclaration, "import": .keyword,
+        "export": .keyword, "part": .keyword, "library": .keyword, "as": .keywordOperator,
+        "show": .keyword, "hide": .keyword, "abstract": .keywordModifier, "const": .keywordModifier,
+        "final": .keywordModifier, "late": .keywordModifier, "static": .keywordModifier,
+        "factory": .keywordModifier, "external": .keywordModifier, "required": .keywordModifier,
+        "async": .keywordModifier, "await": .keywordModifier, "sync": .keywordModifier,
+        "yield": .keywordControl, "if": .keyword, "else": .keyword, "switch": .keyword, "case": .keyword,
+        "default": .keyword, "for": .keyword, "while": .keyword, "do": .keyword, "break": .keywordControl,
+        "continue": .keywordControl, "return": .keywordControl, "throw": .keywordControl, "try": .keyword,
+        "catch": .keyword, "finally": .keyword, "rethrow": .keywordControl, "assert": .keyword,
+        "extends": .keyword, "with": .keyword, "implements": .keyword, "super": .keyword, "this": .keyword,
+        "new": .keyword, "is": .keywordOperator, "var": .keywordDeclaration, "dynamic": .type,
+        "void": .type, "int": .type, "double": .type, "num": .type, "bool": .type, "String": .type,
+        "List": .type, "Map": .type, "Set": .type, "Future": .type, "Stream": .type,
+        "Widget": .type, "StatelessWidget": .type, "StatefulWidget": .type, "State": .type,
+        "BuildContext": .type, "Color": .type, "Container": .type, "Text": .type, "Row": .type,
+        "Column": .type, "Stack": .type, "Scaffold": .type, "AppBar": .type, "MaterialApp": .type,
+        "true": .number, "false": .number, "null": .null
+    ]
+    return StateMachineLexer(
+        languageId: "dart",
+        keywords: dartKeywords,
+        lineCommentPrefix: "//",
+        blockCommentMarkers: ("/*", "*/"),
+        docCommentPrefix: "///",
+        stringDelimiters: ["\"", "'"],
+        multilineStringDelimiter: "\"\"\"",
+        interpolationStart: "$"
+    )
+}
+
+/// Creates a pre-configured lexer for PHP
+public func createPhpLexer() -> StateMachineLexer {
+    let phpKeywords: [String: SyntaxTokenType] = [
+        "function": .keywordDeclaration, "fn": .keywordDeclaration, "class": .keywordDeclaration,
+        "interface": .keywordDeclaration, "trait": .keywordDeclaration, "enum": .keywordDeclaration,
+        "extends": .keyword, "implements": .keyword, "public": .keywordModifier, "private": .keywordModifier,
+        "protected": .keywordModifier, "static": .keywordModifier, "final": .keywordModifier,
+        "readonly": .keywordModifier, "abstract": .keywordModifier, "const": .keywordModifier,
+        "var": .keywordDeclaration, "global": .keywordModifier, "if": .keyword, "else": .keyword,
+        "elseif": .keyword, "switch": .keyword, "case": .keyword, "default": .keyword, "match": .keyword,
+        "for": .keyword, "foreach": .keyword, "as": .keyword, "while": .keyword, "do": .keyword,
+        "break": .keywordControl, "continue": .keywordControl, "return": .keywordControl, "goto": .keywordControl,
+        "try": .keyword, "catch": .keyword, "finally": .keyword, "throw": .keywordControl,
+        "echo": .keyword, "print": .keyword, "die": .keyword, "exit": .keyword, "isset": .keyword,
+        "empty": .keyword, "unset": .keyword, "include": .keyword, "include_once": .keyword,
+        "require": .keyword, "require_once": .keyword, "namespace": .keywordDeclaration, "use": .keyword,
+        "new": .keyword, "clone": .keyword, "instanceof": .keywordOperator, "yield": .keywordControl,
+        "true": .number, "false": .number, "null": .null, "self": .keyword, "parent": .keyword
+    ]
+    return StateMachineLexer(
+        languageId: "php",
+        keywords: phpKeywords,
+        lineCommentPrefix: "//",
+        additionalLineCommentPrefixes: ["#"],
+        blockCommentMarkers: ("/*", "*/"),
+        docCommentPrefix: "/**",
+        stringDelimiters: ["\"", "'"],
+        multilineStringDelimiter: nil,
+        interpolationStart: "$"
+    )
+}
+
+/// Creates a pre-configured lexer for Shell (Bash / Zsh / POSIX)
+public func createShellLexer() -> StateMachineLexer {
+    let shellKeywords: [String: SyntaxTokenType] = [
+        "if": .keyword, "then": .keyword, "else": .keyword, "elif": .keyword, "fi": .keyword,
+        "for": .keyword, "in": .keyword, "do": .keyword, "done": .keyword, "while": .keyword,
+        "until": .keyword, "case": .keyword, "esac": .keyword, "select": .keyword, "function": .keywordDeclaration,
+        "time": .keyword, "export": .keywordModifier, "source": .keyword, "alias": .keyword,
+        "unalias": .keyword, "local": .keywordDeclaration, "declare": .keywordDeclaration,
+        "typeset": .keywordDeclaration, "readonly": .keywordModifier, "return": .keywordControl,
+        "exit": .keywordControl, "set": .keyword, "unset": .keyword, "eval": .keyword, "exec": .keyword,
+        "trap": .keyword, "shift": .keyword, "read": .keyword, "echo": .keyword, "printf": .keyword,
+        "test": .keyword, "true": .number, "false": .number, "cd": .keyword, "pwd": .keyword
+    ]
+    return StateMachineLexer(
+        languageId: "shell",
+        keywords: shellKeywords,
+        lineCommentPrefix: "#",
+        blockCommentMarkers: nil,
+        docCommentPrefix: nil,
+        stringDelimiters: ["\"", "'", "`"],
+        multilineStringDelimiter: nil,
+        interpolationStart: "$"
+    )
+}
+
+/// Creates a pre-configured lexer for SQL (ANSI, PostgreSQL, MySQL, BigQuery, SQLite)
+public func createSqlLexer() -> StateMachineLexer {
+    let sqlKeywords: [String: SyntaxTokenType] = [
+        "select": .keyword, "from": .keyword, "where": .keyword, "insert": .keyword, "into": .keyword,
+        "values": .keyword, "update": .keyword, "set": .keyword, "delete": .keyword, "join": .keyword,
+        "inner": .keyword, "left": .keyword, "right": .keyword, "full": .keyword, "outer": .keyword,
+        "cross": .keyword, "natural": .keyword, "on": .keyword, "using": .keyword, "group": .keyword,
+        "by": .keyword, "having": .keyword, "order": .keyword, "asc": .keyword, "desc": .keyword,
+        "limit": .keyword, "offset": .keyword, "union": .keyword, "all": .keyword, "intersect": .keyword,
+        "except": .keyword, "distinct": .keyword, "create": .keywordDeclaration, "alter": .keywordDeclaration,
+        "drop": .keywordDeclaration, "truncate": .keywordDeclaration, "table": .keywordDeclaration,
+        "view": .keywordDeclaration, "index": .keywordDeclaration, "schema": .keywordDeclaration,
+        "database": .keywordDeclaration, "column": .keywordDeclaration, "constraint": .keywordDeclaration,
+        "primary": .keywordModifier, "key": .keywordModifier, "foreign": .keywordModifier,
+        "references": .keywordModifier, "check": .keywordModifier, "unique": .keywordModifier,
+        "default": .keywordModifier, "cascade": .keywordModifier, "and": .keywordOperator,
+        "or": .keywordOperator, "not": .keywordOperator, "in": .keywordOperator, "is": .keywordOperator,
+        "null": .null, "like": .keywordOperator, "ilike": .keywordOperator, "between": .keywordOperator,
+        "exists": .keywordOperator, "case": .keyword, "when": .keyword, "then": .keyword,
+        "else": .keyword, "end": .keyword, "cast": .keyword, "as": .keyword, "over": .keyword,
+        "partition": .keyword, "count": .function, "sum": .function, "avg": .function, "min": .function,
+        "max": .function, "coalesce": .function, "int": .type, "integer": .type, "bigint": .type,
+        "varchar": .type, "char": .type, "text": .type, "boolean": .type, "bool": .type,
+        "date": .type, "timestamp": .type, "float": .type, "double": .type, "numeric": .type,
+        "decimal": .type, "json": .type, "jsonb": .type, "true": .number, "false": .number
+    ]
+    return StateMachineLexer(
+        languageId: "sql",
+        keywords: sqlKeywords,
+        lineCommentPrefix: "--",
+        blockCommentMarkers: ("/*", "*/"),
+        docCommentPrefix: nil,
+        stringDelimiters: ["'", "\""],
+        multilineStringDelimiter: nil,
+        interpolationStart: nil
+    )
+}
+
+/// Creates a pre-configured lexer for HTML, XML, and SVG
+public func createHtmlLexer() -> StateMachineLexer {
+    let htmlKeywords: [String: SyntaxTokenType] = [
+        "html": .keyword, "head": .keyword, "body": .keyword, "div": .keyword, "span": .keyword,
+        "p": .keyword, "a": .keyword, "img": .keyword, "button": .keyword, "input": .keyword,
+        "form": .keyword, "label": .keyword, "select": .keyword, "option": .keyword, "textarea": .keyword,
+        "table": .keyword, "thead": .keyword, "tbody": .keyword, "tr": .keyword, "th": .keyword,
+        "td": .keyword, "ul": .keyword, "ol": .keyword, "li": .keyword, "nav": .keyword,
+        "header": .keyword, "footer": .keyword, "main": .keyword, "section": .keyword,
+        "article": .keyword, "aside": .keyword, "h1": .keyword, "h2": .keyword, "h3": .keyword,
+        "h4": .keyword, "h5": .keyword, "h6": .keyword, "script": .keyword, "style": .keyword,
+        "link": .keyword, "meta": .keyword, "title": .keyword, "svg": .keyword, "path": .keyword,
+        "circle": .keyword, "rect": .keyword, "line": .keyword, "g": .keyword, "iframe": .keyword,
+        "class": .property, "id": .property, "name": .property, "value": .property, "type": .property,
+        "src": .property, "href": .property, "rel": .property, "target": .property, "alt": .property,
+        "width": .property, "height": .property, "placeholder": .property,
+        "disabled": .property, "required": .property, "readonly": .property, "data": .property,
+        "doctype": .preprocessor
+    ]
+    return StateMachineLexer(
+        languageId: "html",
+        keywords: htmlKeywords,
+        lineCommentPrefix: nil,
+        blockCommentMarkers: ("<!--", "-->"),
+        docCommentPrefix: nil,
+        stringDelimiters: ["\"", "'"],
+        multilineStringDelimiter: nil,
+        interpolationStart: nil
+    )
+}
+
+/// Creates a pre-configured lexer for CSS, SCSS, and Less
+public func createCssLexer() -> StateMachineLexer {
+    let cssKeywords: [String: SyntaxTokenType] = [
+        "color": .property, "background": .property, "margin": .property, "padding": .property,
+        "border": .property, "font": .property, "display": .property, "position": .property,
+        "top": .property, "bottom": .property, "left": .property, "right": .property,
+        "width": .property, "height": .property, "flex": .property, "grid": .property,
+        "justify-content": .property, "align-items": .property, "gap": .property, "overflow": .property,
+        "z-index": .property, "opacity": .property, "transform": .property, "transition": .property,
+        "animation": .property, "box-shadow": .property, "border-radius": .property, "cursor": .property,
+        "@media": .keyword, "@keyframes": .keyword, "@import": .keyword, "@font-face": .keyword,
+        "@supports": .keyword, "important": .keywordModifier, "none": .type, "block": .type,
+        "inline": .type, "inline-block": .type, "relative": .type, "absolute": .type, "fixed": .type,
+        "sticky": .type, "inherit": .type, "initial": .type, "auto": .type
+    ]
+    return StateMachineLexer(
+        languageId: "css",
+        keywords: cssKeywords,
+        lineCommentPrefix: "//",
+        blockCommentMarkers: ("/*", "*/"),
+        docCommentPrefix: nil,
+        stringDelimiters: ["\"", "'"],
+        multilineStringDelimiter: nil,
+        interpolationStart: nil
+    )
+}
+
+/// Creates a pre-configured lexer for JSON
+public func createJsonLexer() -> StateMachineLexer {
+    let jsonKeywords: [String: SyntaxTokenType] = [
+        "true": .number, "false": .number, "null": .null
+    ]
+    return StateMachineLexer(
+        languageId: "json",
+        keywords: jsonKeywords,
+        lineCommentPrefix: "//",
+        blockCommentMarkers: ("/*", "*/"),
+        docCommentPrefix: nil,
+        stringDelimiters: ["\""],
+        multilineStringDelimiter: nil,
+        interpolationStart: nil
+    )
+}
+
+/// Creates a pre-configured lexer for YAML / TOML
+public func createYamlLexer() -> StateMachineLexer {
+    let yamlKeywords: [String: SyntaxTokenType] = [
+        "true": .number, "false": .number, "yes": .number, "no": .number,
+        "on": .number, "off": .number, "null": .null, "~": .null,
+        "True": .number, "False": .number, "None": .null
+    ]
+    return StateMachineLexer(
+        languageId: "yaml",
+        keywords: yamlKeywords,
+        lineCommentPrefix: "#",
+        blockCommentMarkers: nil,
+        docCommentPrefix: nil,
+        stringDelimiters: ["\"", "'"],
+        multilineStringDelimiter: nil,
+        interpolationStart: nil
+    )
+}
+
+/// Creates a pre-configured lexer for Markdown
+public func createMarkdownLexer() -> StateMachineLexer {
+    return StateMachineLexer(
+        languageId: "markdown",
+        keywords: ["TODO": .keyword, "FIXME": .keywordControl, "NOTE": .type, "WARNING": .keywordControl],
+        lineCommentPrefix: nil,
+        blockCommentMarkers: ("<!--", "-->"),
+        docCommentPrefix: nil,
+        stringDelimiters: ["`", "\""],
+        multilineStringDelimiter: "```",
+        interpolationStart: nil
+    )
+}
+
+/// Creates a pre-configured lexer for Lua
+public func createLuaLexer() -> StateMachineLexer {
+    let luaKeywords: [String: SyntaxTokenType] = [
+        "and": .keywordOperator, "break": .keywordControl, "do": .keyword, "else": .keyword,
+        "elseif": .keyword, "end": .keyword, "false": .number, "for": .keyword,
+        "function": .keywordDeclaration, "goto": .keywordControl, "if": .keyword, "in": .keywordOperator,
+        "local": .keywordDeclaration, "nil": .null, "not": .keywordOperator, "or": .keywordOperator,
+        "repeat": .keyword, "return": .keywordControl, "then": .keyword, "true": .number,
+        "until": .keyword, "while": .keyword, "print": .function, "require": .keyword,
+        "type": .function, "tostring": .function, "tonumber": .function, "pairs": .function, "ipairs": .function
+    ]
+    return StateMachineLexer(
+        languageId: "lua",
+        keywords: luaKeywords,
+        lineCommentPrefix: "--",
+        blockCommentMarkers: ("--[[", "]]"),
+        docCommentPrefix: nil,
+        stringDelimiters: ["\"", "'", "`"],
+        multilineStringDelimiter: nil,
+        interpolationStart: nil
+    )
+}
+
+/// Creates a pre-configured lexer for Zig
+public func createZigLexer() -> StateMachineLexer {
+    let zigKeywords: [String: SyntaxTokenType] = [
+        "const": .keywordDeclaration, "var": .keywordDeclaration, "fn": .keywordDeclaration,
+        "pub": .keywordModifier, "usingnamespace": .keyword, "struct": .keywordDeclaration,
+        "enum": .keywordDeclaration, "union": .keywordDeclaration, "error": .keywordDeclaration,
+        "test": .keywordDeclaration, "comptime": .keywordModifier, "inline": .keywordModifier,
+        "extern": .keywordModifier, "export": .keywordModifier, "threadlocal": .keywordModifier,
+        "align": .keywordModifier, "volatile": .keywordModifier, "asm": .keyword,
+        "defer": .keywordControl, "errdefer": .keywordControl, "unreachable": .keywordControl,
+        "return": .keywordControl, "break": .keywordControl, "continue": .keywordControl,
+        "if": .keyword, "else": .keyword, "switch": .keyword, "while": .keyword, "for": .keyword,
+        "try": .keyword, "catch": .keyword, "async": .keywordModifier, "await": .keywordModifier,
+        "suspend": .keywordModifier, "resume": .keywordModifier, "anytype": .type, "anyerror": .type,
+        "void": .type, "bool": .type, "i8": .type, "u8": .type, "i16": .type, "u16": .type,
+        "i32": .type, "u32": .type, "i64": .type, "u64": .type, "isize": .type, "usize": .type,
+        "f32": .type, "f64": .type, "null": .null, "undefined": .null, "true": .number, "false": .number
+    ]
+    return StateMachineLexer(
+        languageId: "zig",
+        keywords: zigKeywords,
+        lineCommentPrefix: "//",
+        blockCommentMarkers: nil,
+        docCommentPrefix: "///",
+        stringDelimiters: ["\"", "'"],
+        multilineStringDelimiter: nil,
+        interpolationStart: nil
+    )
+}
+
+/// Creates a pre-configured lexer for R
+public func createRLexer() -> StateMachineLexer {
+    let rKeywords: [String: SyntaxTokenType] = [
+        "if": .keyword, "else": .keyword, "repeat": .keyword, "while": .keyword,
+        "function": .keywordDeclaration, "for": .keyword, "in": .keywordOperator,
+        "next": .keywordControl, "break": .keywordControl, "TRUE": .number, "FALSE": .number,
+        "NULL": .null, "Inf": .number, "NaN": .number, "NA": .null, "library": .keyword, "require": .keyword
+    ]
+    return StateMachineLexer(
+        languageId: "r",
+        keywords: rKeywords,
+        lineCommentPrefix: "#",
+        blockCommentMarkers: nil,
+        docCommentPrefix: nil,
+        stringDelimiters: ["\"", "'"],
+        multilineStringDelimiter: nil,
+        interpolationStart: nil
+    )
+}
+
+/// Creates a pre-configured lexer for Julia
+public func createJuliaLexer() -> StateMachineLexer {
+    let juliaKeywords: [String: SyntaxTokenType] = [
+        "function": .keywordDeclaration, "macro": .keywordDeclaration, "quote": .keyword,
+        "let": .keywordDeclaration, "local": .keywordModifier, "global": .keywordModifier,
+        "const": .keywordModifier, "do": .keyword, "struct": .keywordDeclaration,
+        "module": .keywordDeclaration, "using": .keyword, "import": .keyword, "export": .keyword,
+        "type": .keywordDeclaration, "abstract": .keywordModifier, "mutable": .keywordModifier,
+        "return": .keywordControl, "break": .keywordControl, "continue": .keywordControl,
+        "if": .keyword, "elseif": .keyword, "else": .keyword, "for": .keyword, "while": .keyword,
+        "try": .keyword, "catch": .keyword, "finally": .keyword, "throw": .keywordControl,
+        "true": .number, "false": .number, "nothing": .null, "missing": .null
+    ]
+    return StateMachineLexer(
+        languageId: "julia",
+        keywords: juliaKeywords,
+        lineCommentPrefix: "#",
+        blockCommentMarkers: ("#=", "=#"),
+        docCommentPrefix: nil,
+        stringDelimiters: ["\"", "'"],
+        multilineStringDelimiter: "\"\"\"",
+        interpolationStart: "$"
+    )
+}
+
+/// Creates a pre-configured lexer for Elixir
+public func createElixirLexer() -> StateMachineLexer {
+    let elixirKeywords: [String: SyntaxTokenType] = [
+        "def": .keywordDeclaration, "defp": .keywordDeclaration, "defmodule": .keywordDeclaration,
+        "defmacro": .keywordDeclaration, "defprotocol": .keywordDeclaration, "defimpl": .keywordDeclaration,
+        "do": .keyword, "end": .keyword, "if": .keyword, "unless": .keyword, "case": .keyword,
+        "cond": .keyword, "with": .keyword, "for": .keyword, "try": .keyword, "rescue": .keyword,
+        "catch": .keyword, "after": .keyword, "receive": .keyword, "send": .keyword,
+        "import": .keyword, "require": .keyword, "use": .keyword, "alias": .keyword,
+        "fn": .keywordDeclaration, "true": .number, "false": .number, "nil": .null
+    ]
+    return StateMachineLexer(
+        languageId: "elixir",
+        keywords: elixirKeywords,
+        lineCommentPrefix: "#",
+        blockCommentMarkers: nil,
+        docCommentPrefix: "@doc",
+        stringDelimiters: ["\"", "'"],
+        multilineStringDelimiter: "\"\"\"",
+        interpolationStart: "#{"
+    )
+}
+
+/// Creates a pre-configured lexer for Solidity
+public func createSolidityLexer() -> StateMachineLexer {
+    let solidityKeywords: [String: SyntaxTokenType] = [
+        "contract": .keywordDeclaration, "interface": .keywordDeclaration, "library": .keywordDeclaration,
+        "is": .keyword, "pragma": .preprocessor, "solidity": .keyword, "import": .keyword,
+        "function": .keywordDeclaration, "modifier": .keywordDeclaration, "event": .keywordDeclaration,
+        "error": .keywordDeclaration, "struct": .keywordDeclaration, "enum": .keywordDeclaration,
+        "mapping": .keywordDeclaration, "address": .type, "bool": .type, "string": .type,
+        "bytes": .type, "int": .type, "uint": .type, "uint256": .type, "public": .keywordModifier,
+        "private": .keywordModifier, "internal": .keywordModifier, "external": .keywordModifier,
+        "view": .keywordModifier, "pure": .keywordModifier, "payable": .keywordModifier,
+        "memory": .keywordModifier, "storage": .keywordModifier, "calldata": .keywordModifier,
+        "virtual": .keywordModifier, "override": .keywordModifier, "returns": .keyword,
+        "return": .keywordControl, "emit": .keyword, "revert": .keywordControl, "require": .keyword,
+        "assert": .keyword, "if": .keyword, "else": .keyword, "for": .keyword, "while": .keyword,
+        "do": .keyword, "break": .keywordControl, "continue": .keywordControl, "try": .keyword,
+        "catch": .keyword, "assembly": .keyword, "constructor": .keywordDeclaration, "msg": .keyword,
+        "tx": .keyword, "block": .keyword, "this": .keyword, "true": .number, "false": .number
+    ]
+    return StateMachineLexer(
+        languageId: "solidity",
+        keywords: solidityKeywords,
+        lineCommentPrefix: "//",
+        blockCommentMarkers: ("/*", "*/"),
+        docCommentPrefix: "///",
+        stringDelimiters: ["\"", "'"],
+        multilineStringDelimiter: nil,
+        interpolationStart: nil
+    )
+}
+
 

@@ -2,6 +2,11 @@
 //  SubscriptionAuthManager.swift
 //  MicroCode
 //
+//  Created and Designed by Dotmini Software
+//  Founder & CEO: Tirawat Nantamas
+//  Copyright © 2025-2026 Dotmini Software. All rights reserved.
+//
+//  Description:
 //  Manages web subscription connections (ChatGPT Plus/Team/Pro, Claude Pro, Gemini Advanced, DeepSeek, Copilot, Zhipu GLM)
 //  without requiring per-token pay-as-you-go API keys.
 //
@@ -9,6 +14,7 @@
 import Foundation
 import Combine
 import AppKit
+import Security
 
 public struct SubscriptionModelInfo: Identifiable, Hashable, Codable {
     public var id: String { "\(provider.rawValue):\(modelID)" }
@@ -63,11 +69,11 @@ public enum SubscriptionProviderType: String, CaseIterable, Identifiable, Codabl
     
     public var defaultModel: String {
         switch self {
-        case .chatgpt: return "gpt-6-astra"
-        case .claude: return "claude-3-7-sonnet"
-        case .gemini: return "gemini-2.5-pro"
-        case .deepseek: return "deepseek-v4-flash"
-        case .copilot: return "claude-3-7-sonnet"
+        case .chatgpt: return "gpt-4o"
+        case .claude: return "claude-3-7-sonnet-20250219"
+        case .gemini: return "gemini-2.0-flash"
+        case .deepseek: return "deepseek-chat"
+        case .copilot: return "auto"
         case .glm: return "glm-4-plus"
         }
     }
@@ -83,75 +89,115 @@ public enum SubscriptionProviderType: String, CaseIterable, Identifiable, Codabl
         }
     }
     
+    // MARK: - Live Model Store
+    private static var liveModelInfos: [SubscriptionProviderType: [SubscriptionModelInfo]] = [:]
+
+    public static func setLiveModels(for provider: SubscriptionProviderType, models: [SubscriptionModelInfo]) {
+        liveModelInfos[provider] = models
+    }
+
+    public static func registerCustomSubscriptionModel(provider: SubscriptionProviderType, modelId: String) {
+        let cleanId = modelId.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !cleanId.isEmpty else { return }
+        
+        let customKey = "microcode_sub_custom_models_\(provider.rawValue)"
+        var saved = UserDefaults.standard.stringArray(forKey: customKey) ?? []
+        if !saved.contains(cleanId) {
+            saved.append(cleanId)
+            UserDefaults.standard.set(saved, forKey: customKey)
+        }
+        
+        let newInfo = SubscriptionModelInfo(
+            modelID: cleanId,
+            name: AIModelCatalog.formatModelName(cleanId),
+            provider: provider,
+            badge: "CUSTOM",
+            description: "User registered custom model for \(provider.displayName)",
+            aiProviderID: provider.aiProviderID
+        )
+        
+        var current = liveModelInfos[provider] ?? provider.defaultModelInfos
+        if !current.contains(where: { $0.modelID == cleanId }) {
+            current.insert(newInfo, at: 0)
+            liveModelInfos[provider] = current
+        }
+    }
+
+    public var aiProviderID: String {
+        switch self {
+        case .chatgpt: return "openai"
+        case .claude: return "anthropic"
+        case .gemini: return "gemini"
+        case .deepseek: return "deepseek"
+        case .copilot: return "copilot"
+        case .glm: return "glm"
+        }
+    }
+
     public var modelInfos: [SubscriptionModelInfo] {
+        if let live = Self.liveModelInfos[self], !live.isEmpty {
+            return live
+        }
+        let customKey = "microcode_sub_custom_models_\(rawValue)"
+        let customs = UserDefaults.standard.stringArray(forKey: customKey) ?? []
+        var res = defaultModelInfos
+        for cid in customs.reversed() {
+            if !res.contains(where: { $0.modelID == cid }) {
+                res.insert(SubscriptionModelInfo(
+                    modelID: cid,
+                    name: AIModelCatalog.formatModelName(cid),
+                    provider: self,
+                    badge: "CUSTOM",
+                    description: "Custom model",
+                    aiProviderID: self.aiProviderID
+                ), at: 0)
+            }
+        }
+        return res
+    }
+
+    public var defaultModelInfos: [SubscriptionModelInfo] {
         switch self {
         case .chatgpt:
             return [
-                SubscriptionModelInfo(modelID: "gpt-6-astra", name: "GPT-6 Astra", provider: .chatgpt, badge: "FLAGSHIP", description: "OpenAI flagship next-gen multimodal reasoning & autonomous engineering", aiProviderID: "openai"),
-                SubscriptionModelInfo(modelID: "gpt-5.6-sol", name: "GPT-5.6 Sol", provider: .chatgpt, badge: "HIGH PERF", description: "Ultra high-performance full-stack coding & reasoning", aiProviderID: "openai"),
-                SubscriptionModelInfo(modelID: "gpt-5.5", name: "GPT-5.5", provider: .chatgpt, badge: "FRONTIER", description: "Next-gen frontier reasoning, architecture & coding", aiProviderID: "openai"),
-                SubscriptionModelInfo(modelID: "o3", name: "o3 Flagship", provider: .chatgpt, badge: "REASONING PRO", description: "Frontier self-verifying logic, deep math & science", aiProviderID: "openai"),
-                SubscriptionModelInfo(modelID: "o3-mini", name: "o3-mini", provider: .chatgpt, badge: "HIGH SPEED", description: "High-speed STEM, deep code and logic reasoning", aiProviderID: "openai"),
-                SubscriptionModelInfo(modelID: "o1", name: "o1 Pro", provider: .chatgpt, badge: "PRO", description: "Deep architectural planning and math reasoning", aiProviderID: "openai"),
-                SubscriptionModelInfo(modelID: "gpt-4.5-preview", name: "GPT-4.5 Preview", provider: .chatgpt, badge: "CREATIVE", description: "High-precision context, creative & deep synthesis", aiProviderID: "openai"),
-                SubscriptionModelInfo(modelID: "chatgpt-4o-latest", name: "ChatGPT-4o Latest", provider: .chatgpt, badge: "DYNAMIC WEB", description: "Dynamic chatgpt.com rolling production model", aiProviderID: "openai"),
-                SubscriptionModelInfo(modelID: "gpt-4o", name: "GPT-4o (Legacy)", provider: .chatgpt, badge: "LEGACY", description: "Classic multimodal workhorse model", aiProviderID: "openai"),
-                SubscriptionModelInfo(modelID: "gpt-4o-mini", name: "GPT-4o mini", provider: .chatgpt, badge: "FAST", description: "Lightweight fast assistant", aiProviderID: "openai")
+                SubscriptionModelInfo(modelID: "gpt-4o", name: "GPT-4o", provider: .chatgpt, badge: "FLAGSHIP", description: "OpenAI flagship multimodal reasoning & code generation", aiProviderID: "openai"),
+                SubscriptionModelInfo(modelID: "gpt-4o-mini", name: "GPT-4o Mini", provider: .chatgpt, badge: "FAST", description: "Affordable and fast multimodal intelligence", aiProviderID: "openai"),
+                SubscriptionModelInfo(modelID: "o1", name: "o1", provider: .chatgpt, badge: "REASONING", description: "Deep architectural reasoning and STEM intelligence", aiProviderID: "openai"),
+                SubscriptionModelInfo(modelID: "o3-mini", name: "o3-mini", provider: .chatgpt, badge: "FAST REASONING", description: "High-speed logic, STEM, and code reasoning", aiProviderID: "openai")
             ]
         case .claude:
             return [
-                SubscriptionModelInfo(modelID: "claude-sonnet-4-6", name: "Claude Sonnet 4.6", provider: .claude, badge: "FLAGSHIP", description: "Next-gen hybrid thinking & autonomous coding via Claude Pro", aiProviderID: "anthropic"),
-                SubscriptionModelInfo(modelID: "claude-opus-4-6-thinking", name: "Claude Opus 4.6", provider: .claude, badge: "DEEP THINK", description: "Maximum depth architectural synthesis & verification", aiProviderID: "anthropic"),
-                SubscriptionModelInfo(modelID: "claude-3-7-sonnet", name: "Claude 3.7 Sonnet", provider: .claude, badge: "HYBRID", description: "Flagship hybrid thinking & standard code execution via Claude Pro", aiProviderID: "anthropic"),
-                SubscriptionModelInfo(modelID: "claude-3-5-sonnet", name: "Claude 3.5 Sonnet", provider: .claude, badge: "WORKHORSE", description: "Standard agentic coding & tool use", aiProviderID: "anthropic"),
-                SubscriptionModelInfo(modelID: "claude-3-5-haiku", name: "Claude 3.5 Haiku", provider: .claude, badge: "FAST", description: "High-speed lightweight agent assistant", aiProviderID: "anthropic")
+                SubscriptionModelInfo(modelID: "claude-3-7-sonnet-20250219", name: "Claude 3.7 Sonnet", provider: .claude, badge: "HYBRID", description: "Hybrid thinking and coding frontier via Claude Pro", aiProviderID: "anthropic"),
+                SubscriptionModelInfo(modelID: "claude-3-5-sonnet-20241022", name: "Claude 3.5 Sonnet", provider: .claude, badge: "FLAGSHIP", description: "Industry standard agentic coding & tool use", aiProviderID: "anthropic"),
+                SubscriptionModelInfo(modelID: "claude-3-5-haiku-20241022", name: "Claude 3.5 Haiku", provider: .claude, badge: "FAST", description: "High-speed coding and lightweight processing", aiProviderID: "anthropic")
             ]
         case .gemini:
             return [
-                SubscriptionModelInfo(modelID: "gemini-3.8-flash-high", name: "Gemini 3.8 Flash (High)", provider: .gemini, badge: "FLAGSHIP", description: "Google DeepMind frontier multimodal deep reasoning", aiProviderID: "gemini"),
-                SubscriptionModelInfo(modelID: "gemini-3.7-flash-high", name: "Gemini 3.7 Flash", provider: .gemini, badge: "HYBRID", description: "High-speed multimodal hybrid reasoning", aiProviderID: "gemini"),
-                SubscriptionModelInfo(modelID: "gemini-3.1-pro-high", name: "Gemini 3.1 Pro", provider: .gemini, badge: "ADVANCED PRO", description: "Google One AI Premium flagship problem solving", aiProviderID: "gemini"),
-                SubscriptionModelInfo(modelID: "gemini-2.5-pro", name: "Gemini 2.5 Pro", provider: .gemini, badge: "DEEP CONTEXT", description: "2M+ context window with native multimodal reasoning", aiProviderID: "gemini"),
-                SubscriptionModelInfo(modelID: "gemini-2.5-flash", name: "Gemini 2.5 Flash", provider: .gemini, badge: "FAST", description: "Real-time multimodal speed & live awareness", aiProviderID: "gemini"),
-                SubscriptionModelInfo(modelID: "gemini-2.0-flash", name: "Gemini 2.0 Flash", provider: .gemini, badge: "STABLE", description: "Next-gen multimodal workhorse model", aiProviderID: "gemini")
+                SubscriptionModelInfo(modelID: "gemini-2.0-flash", name: "Gemini 2.0 Flash", provider: .gemini, badge: "FLAGSHIP", description: "Next-gen multimodal speed, coding, and real-time awareness", aiProviderID: "gemini"),
+                SubscriptionModelInfo(modelID: "gemini-1.5-pro", name: "Gemini 1.5 Pro", provider: .gemini, badge: "LONG CONTEXT", description: "2M token context window for complex codebase analysis", aiProviderID: "gemini"),
+                SubscriptionModelInfo(modelID: "gemini-1.5-flash", name: "Gemini 1.5 Flash", provider: .gemini, badge: "FAST", description: "Fast, versatile multimodal performance", aiProviderID: "gemini")
             ]
         case .deepseek:
             return [
-                SubscriptionModelInfo(modelID: "deepseek-v4-flash", name: "DeepSeek V4 Flash", provider: .deepseek, badge: "FLASH THINK", description: "Next-gen high-speed thinking & deep coding", aiProviderID: "deepseek"),
-                SubscriptionModelInfo(modelID: "deepseek-v4", name: "DeepSeek V4", provider: .deepseek, badge: "FLAGSHIP", description: "Next-gen autonomous coding flagship", aiProviderID: "deepseek"),
-                SubscriptionModelInfo(modelID: "deepseek-reasoner", name: "DeepSeek R1", provider: .deepseek, badge: "REASONING", description: "Deep R1 mathematical & algorithmic reasoning", aiProviderID: "deepseek"),
-                SubscriptionModelInfo(modelID: "deepseek-chat", name: "DeepSeek V3", provider: .deepseek, badge: "CHAT", description: "Flagship general coding and chat", aiProviderID: "deepseek")
+                SubscriptionModelInfo(modelID: "deepseek-chat", name: "DeepSeek V3 (Chat)", provider: .deepseek, badge: "CHAT", description: "Flagship general coding and chat intelligence", aiProviderID: "deepseek"),
+                SubscriptionModelInfo(modelID: "deepseek-reasoner", name: "DeepSeek R1 (Reasoner)", provider: .deepseek, badge: "REASONER", description: "Open reasoning model with chain-of-thought", aiProviderID: "deepseek")
             ]
         case .copilot:
             return [
                 SubscriptionModelInfo(modelID: "auto", name: "Copilot Auto", provider: .copilot, badge: "AUTO", description: "GitHub Copilot dynamic model routing", aiProviderID: "copilot"),
-                SubscriptionModelInfo(modelID: "gpt-5.6-sol", name: "GPT-5.6 Sol", provider: .copilot, badge: "HIGH PERF", description: "Ultra high-performance full-stack coding & reasoning", aiProviderID: "copilot"),
-                SubscriptionModelInfo(modelID: "gpt-5.6-terra", name: "GPT-5.6 Terra", provider: .copilot, badge: "BALANCED", description: "Balanced reasoning and code generation via Copilot", aiProviderID: "copilot"),
-                SubscriptionModelInfo(modelID: "gpt-5.6-luna", name: "GPT-5.6 Luna", provider: .copilot, badge: "FAST", description: "High speed low-latency assistant via Copilot", aiProviderID: "copilot"),
-                SubscriptionModelInfo(modelID: "claude-sonnet-5", name: "Claude Sonnet 5", provider: .copilot, badge: "FRONTIER", description: "Anthropic Claude Sonnet 5 via GitHub Copilot subscription", aiProviderID: "copilot"),
-                SubscriptionModelInfo(modelID: "claude-sonnet-4-6", name: "Claude Sonnet 4.6", provider: .copilot, badge: "FLAGSHIP", description: "Hybrid thinking & autonomous coding via Copilot", aiProviderID: "copilot"),
-                SubscriptionModelInfo(modelID: "gpt-6-astra", name: "GPT-6 Astra", provider: .copilot, badge: "FLAGSHIP", description: "OpenAI flagship next-gen reasoning via Copilot (Pro+)", aiProviderID: "copilot"),
-                SubscriptionModelInfo(modelID: "gpt-5.5", name: "GPT-5.5", provider: .copilot, badge: "FRONTIER", description: "Frontier reasoning & architecture via Copilot (Pro+)", aiProviderID: "copilot"),
-                SubscriptionModelInfo(modelID: "gpt-5.4", name: "GPT-5.4", provider: .copilot, badge: "STABLE", description: "Reliable deep logic and codebase synthesis via Copilot", aiProviderID: "copilot"),
-                SubscriptionModelInfo(modelID: "gpt-5.3-codex", name: "GPT-5.3 Codex", provider: .copilot, badge: "CODEX", description: "Optimized autonomous programming & tool execution", aiProviderID: "copilot"),
-                SubscriptionModelInfo(modelID: "claude-opus-5", name: "Claude Opus 5", provider: .copilot, badge: "PRO+", description: "Maximum depth architectural synthesis & verification", aiProviderID: "copilot"),
-                SubscriptionModelInfo(modelID: "claude-opus-4-8", name: "Claude Opus 4.8", provider: .copilot, badge: "FAST OPUS", description: "High-speed Opus synthesis via Copilot", aiProviderID: "copilot"),
-                SubscriptionModelInfo(modelID: "claude-3-7-sonnet", name: "Claude 3.7 Sonnet", provider: .copilot, badge: "HYBRID", description: "Anthropic Claude 3.7 hybrid thinking via GitHub Copilot", aiProviderID: "copilot"),
-                SubscriptionModelInfo(modelID: "claude-3-5-sonnet", name: "Claude 3.5 Sonnet", provider: .copilot, badge: "WORKHORSE", description: "Standard agentic coding & tool use via Copilot", aiProviderID: "copilot"),
-                SubscriptionModelInfo(modelID: "o3-mini", name: "o3-mini", provider: .copilot, badge: "REASONING", description: "o3-mini STEM and math reasoning via Copilot", aiProviderID: "copilot"),
-                SubscriptionModelInfo(modelID: "o1", name: "o1", provider: .copilot, badge: "PRO", description: "Deep architectural reasoning via Copilot", aiProviderID: "copilot"),
-                SubscriptionModelInfo(modelID: "gpt-4o", name: "GPT-4o (Legacy)", provider: .copilot, badge: "LEGACY", description: "Classic multimodal workhorse model via Copilot", aiProviderID: "copilot")
+                SubscriptionModelInfo(modelID: "claude-3-7-sonnet", name: "Claude 3.7 Sonnet", provider: .copilot, badge: "HYBRID", description: "Anthropic Claude 3.7 via Copilot", aiProviderID: "copilot"),
+                SubscriptionModelInfo(modelID: "claude-3-5-sonnet", name: "Claude 3.5 Sonnet", provider: .copilot, badge: "FLAGSHIP", description: "Anthropic Claude 3.5 via Copilot", aiProviderID: "copilot"),
+                SubscriptionModelInfo(modelID: "gpt-4o", name: "GPT-4o", provider: .copilot, badge: "FLAGSHIP", description: "OpenAI GPT-4o via Copilot", aiProviderID: "copilot"),
+                SubscriptionModelInfo(modelID: "o3-mini", name: "o3-mini", provider: .copilot, badge: "REASONING", description: "OpenAI o3-mini via Copilot", aiProviderID: "copilot")
             ]
         case .glm:
             return [
                 SubscriptionModelInfo(modelID: "glm-4-plus", name: "GLM-4 Plus", provider: .glm, badge: "MEMBER", description: "Zhipu BigModel flagship membership", aiProviderID: "glm"),
-                SubscriptionModelInfo(modelID: "glm-4-air", name: "GLM-4 Air", provider: .glm, badge: "FAST", description: "Ultra-fast high efficiency reasoning", aiProviderID: "glm"),
-                SubscriptionModelInfo(modelID: "codegeex-4", name: "CodeGeeX-4", provider: .glm, badge: "CODE", description: "Specialized code synthesis & refactoring", aiProviderID: "glm"),
                 SubscriptionModelInfo(modelID: "glm-4-flash", name: "GLM-4 Flash", provider: .glm, badge: "FREE", description: "High-speed zero-latency response", aiProviderID: "glm")
             ]
         }
     }
-    
+
     public var availableModels: [String] {
         return modelInfos.map(\.modelID)
     }
@@ -300,7 +346,7 @@ public class SubscriptionAuthManager: ObservableObject {
     
     public func isConnected(_ provider: SubscriptionProviderType) -> Bool {
         guard let acc = accounts[provider] else { return false }
-        return acc.isValid && !acc.sessionToken.isEmpty
+        return acc.isValid && !acc.sessionToken.isEmpty && (acc.expiresAt.map { $0 > Date() } ?? true)
     }
     
     public var hasAnyConnected: Bool {
@@ -333,6 +379,50 @@ public class SubscriptionAuthManager: ObservableObject {
         return accounts[provider]
     }
     
+    public func token(for provider: SubscriptionProviderType) -> String? {
+        return accounts[provider]?.sessionToken
+    }
+    
+    public static func setLiveModels(for provider: SubscriptionProviderType, models: [SubscriptionModelInfo]) {
+        SubscriptionProviderType.setLiveModels(for: provider, models: models)
+    }
+
+    public static func registerCustomSubscriptionModel(provider: SubscriptionProviderType, modelId: String) {
+        SubscriptionProviderType.registerCustomSubscriptionModel(provider: provider, modelId: modelId)
+    }
+
+    // MARK: - Live Model Fetching & Sync
+    @MainActor
+    public func fetchLiveModels(for provider: SubscriptionProviderType) async {
+        if provider == .copilot {
+            await AIModelCatalog.shared.fetchLiveCopilotModels()
+        } else {
+            await AIModelCatalog.shared.fetchLiveModelsForProvider(provider.aiProviderID)
+            syncLiveModelsFromCatalog(for: provider)
+        }
+    }
+
+    @MainActor
+    public func syncLiveModelsFromCatalog(for provider: SubscriptionProviderType) {
+        let catalogProviderId = provider.aiProviderID
+        if let catalogProv = AIModelCatalog.shared.provider(catalogProviderId) {
+            var subModels: [SubscriptionModelInfo] = []
+            for m in catalogProv.models {
+                subModels.append(SubscriptionModelInfo(
+                    modelID: m.id,
+                    name: m.name,
+                    provider: provider,
+                    badge: m.badge,
+                    description: "\(provider.displayName) live model: \(m.id)",
+                    aiProviderID: provider.aiProviderID
+                ))
+            }
+            if !subModels.isEmpty {
+                Self.setLiveModels(for: provider, models: subModels)
+            }
+        }
+    }
+    
     public func saveAccount(provider: SubscriptionProviderType, emailOrUser: String, sessionToken: String, source: String = "Manual") {
         let trimmedToken = sessionToken.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmedToken.isEmpty else { return }
@@ -354,12 +444,22 @@ public class SubscriptionAuthManager: ObservableObject {
             source: source,
             lastVerified: Date()
         )
+        guard saveTokenToKeychain(provider: provider.rawValue, token: trimmedToken) else {
+            lastDetectionMessage = "Could not save the credential to Keychain. Please reconnect."
+            return
+        }
         accounts[provider] = account
-        saveTokenToKeychain(provider: provider.rawValue, token: trimmedToken)
         persistAccounts()
     }
     
     public func disconnect(provider: SubscriptionProviderType) {
+        if provider == .copilot {
+            copilotLock.lock()
+            cachedCopilotSessionToken = nil
+            cachedCopilotSourceToken = nil
+            copilotTokenExpiresAt = nil
+            copilotLock.unlock()
+        }
         accounts.removeValue(forKey: provider)
         deleteTokenFromKeychain(provider: provider.rawValue)
         persistAccounts()
@@ -423,10 +523,18 @@ public class SubscriptionAuthManager: ObservableObject {
             }
         }
         
-        // 2. Check for Claude CLI session (~/.claude/config.json or keychain)
+        // 2. Check for Claude CLI session (~/.claude.json, ~/.claude/config.json, or environment)
+        let claudeHomeJson = home.appendingPathComponent(".claude.json")
         let claudeConfig = home.appendingPathComponent(".claude/config.json")
         var claudeToken: String?
-        if FileManager.default.fileExists(atPath: claudeConfig.path) {
+        if FileManager.default.fileExists(atPath: claudeHomeJson.path),
+           let data = try? Data(contentsOf: claudeHomeJson),
+           let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+           let token = (json["sessionKey"] ?? json["oauthToken"] ?? json["apiKey"]) as? String,
+           !token.isEmpty {
+            claudeToken = token
+        }
+        if claudeToken == nil, FileManager.default.fileExists(atPath: claudeConfig.path) {
             if let data = try? Data(contentsOf: claudeConfig),
                let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
                let token = (json["sessionKey"] ?? json["oauthToken"] ?? json["apiKey"]) as? String,
@@ -435,7 +543,7 @@ public class SubscriptionAuthManager: ObservableObject {
             }
         }
         if claudeToken == nil {
-            claudeToken = await fetchFromKeychainAsync(service: "Claude Code")
+            claudeToken = ProcessInfo.processInfo.environment["ANTHROPIC_API_KEY"] ?? ProcessInfo.processInfo.environment["CLAUDE_API_KEY"]
         }
         
         if let token = claudeToken, !token.isEmpty {
@@ -462,7 +570,7 @@ public class SubscriptionAuthManager: ObservableObject {
             }
         }
         
-        // 3. Check for GitHub Copilot CLI session
+        // 3. Check for GitHub Copilot CLI session (~/.config/gh/hosts.yml or environment)
         let ghHosts = home.appendingPathComponent(".config/gh/hosts.yml")
         var ghToken: String?
         if FileManager.default.fileExists(atPath: ghHosts.path),
@@ -482,7 +590,7 @@ public class SubscriptionAuthManager: ObservableObject {
             }
         }
         if ghToken == nil {
-            ghToken = await fetchInternetPasswordFromKeychainAsync(server: "github.com")
+            ghToken = ProcessInfo.processInfo.environment["GITHUB_TOKEN"] ?? ProcessInfo.processInfo.environment["GH_TOKEN"] ?? ProcessInfo.processInfo.environment["COPILOT_TOKEN"]
         }
         
         if let token = ghToken, !token.isEmpty {
@@ -499,18 +607,6 @@ public class SubscriptionAuthManager: ObservableObject {
                 }
                 detected += 1
             }
-        }
-        
-        // 4. Check for Gemini / Google Cloud ADC
-        let adcPath = home.appendingPathComponent(".config/gcloud/application_default_credentials.json")
-        if FileManager.default.fileExists(atPath: adcPath.path),
-           let data = try? Data(contentsOf: adcPath),
-           let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] {
-            // ADC detected - Gemini can use it
-            DispatchQueue.main.async {
-                self.saveAccount(provider: .gemini, emailOrUser: "Google Cloud ADC", sessionToken: "adc", source: "Google Cloud CLI")
-            }
-            detected += 1
         }
         
         // Also check GEMINI_API_KEY env var
@@ -533,7 +629,7 @@ public class SubscriptionAuthManager: ObservableObject {
         DispatchQueue.main.async {
             self.detectedSessionCount = finalDetected
             if finalDetected > 0 {
-                self.lastDetectionMessage = "Verified and connected \(finalDetected) active subscription session(s)."
+                self.lastDetectionMessage = "Detected \(finalDetected) active subscription session(s)."
             } else {
                 self.lastDetectionMessage = "No verified subscriptions found. Please connect in settings or use Direct API Key."
             }
@@ -541,64 +637,31 @@ public class SubscriptionAuthManager: ObservableObject {
     }
     
     private func fetchFromKeychainAsync(service: String) async -> String? {
-        await withCheckedContinuation { continuation in
-            DispatchQueue.global(qos: .utility).async {
-                let process = Process()
-                process.executableURL = URL(fileURLWithPath: "/usr/bin/security")
-                process.arguments = ["find-generic-password", "-s", service, "-w"]
-                let pipe = Pipe()
-                process.standardOutput = pipe
-                process.standardError = Pipe()
-                do {
-                    try process.run()
-                    process.waitUntilExit()
-                    let data = pipe.fileHandleForReading.readDataToEndOfFile()
-                    if let output = String(data: data, encoding: .utf8)?.trimmingCharacters(in: .whitespacesAndNewlines), !output.isEmpty {
-                        continuation.resume(returning: output)
-                        return
-                    }
-                } catch {}
-                continuation.resume(returning: nil)
-            }
-        }
+        // Disabled: Spawning /usr/bin/security without user interaction triggers repeated
+        // macOS system password dialogs ("MicroCode wants to access key in your keychain").
+        return nil
     }
     
     private func fetchInternetPasswordFromKeychainAsync(server: String) async -> String? {
-        await withCheckedContinuation { continuation in
-            DispatchQueue.global(qos: .utility).async {
-                let process = Process()
-                process.executableURL = URL(fileURLWithPath: "/usr/bin/security")
-                process.arguments = ["find-internet-password", "-s", server, "-w"]
-                let pipe = Pipe()
-                process.standardOutput = pipe
-                process.standardError = Pipe()
-                do {
-                    try process.run()
-                    process.waitUntilExit()
-                    let data = pipe.fileHandleForReading.readDataToEndOfFile()
-                    if let output = String(data: data, encoding: .utf8)?.trimmingCharacters(in: .whitespacesAndNewlines), !output.isEmpty {
-                        continuation.resume(returning: output)
-                        return
-                    }
-                } catch {}
-                continuation.resume(returning: nil)
-            }
-        }
+        // Disabled: Spawning /usr/bin/security without user interaction triggers repeated
+        // macOS system password dialogs ("MicroCode wants to access key in your keychain").
+        return nil
     }
     
-    private func saveTokenToKeychain(provider: String, token: String) {
-        let service = "com.dotmini.microcode.subscription"
-        let query: [String: Any] = [
+    @discardableResult
+    private func saveTokenToKeychain(provider: String, token: String) -> Bool {
+        var query: [String: Any] = [
             kSecClass as String: kSecClassGenericPassword,
-            kSecAttrService as String: service,
+            kSecAttrService as String: "com.dotmini.microcode.subscription",
             kSecAttrAccount as String: provider
         ]
-        SecItemDelete(query as CFDictionary)
-        
-        guard let data = token.data(using: .utf8) else { return }
-        var addQuery = query
-        addQuery[kSecValueData as String] = data
-        SecItemAdd(addQuery as CFDictionary, nil)
+        let value = [kSecValueData as String: Data(token.utf8)]
+        let status = SecItemUpdate(query as CFDictionary, value as CFDictionary)
+        if status == errSecSuccess { return true }
+        guard status == errSecItemNotFound else { return false }
+        query[kSecValueData as String] = Data(token.utf8)
+        query[kSecAttrAccessible as String] = kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly
+        return SecItemAdd(query as CFDictionary, nil) == errSecSuccess
     }
 
     private func loadTokenFromKeychain(provider: String) -> String? {
@@ -636,12 +699,13 @@ public class SubscriptionAuthManager: ObservableObject {
     
     // MARK: - Copilot Token Exchange
     private var cachedCopilotSessionToken: String?
+    private var cachedCopilotSourceToken: String?
     private var copilotTokenExpiresAt: Date?
     private let copilotLock = NSLock()
     
     public func getCopilotSessionToken(githubToken: String) async throws -> String {
         copilotLock.lock()
-        if let cached = cachedCopilotSessionToken,
+        if cachedCopilotSourceToken == githubToken, let cached = cachedCopilotSessionToken,
            let expires = copilotTokenExpiresAt,
            expires > Date().addingTimeInterval(120) {
             copilotLock.unlock()
@@ -685,6 +749,7 @@ public class SubscriptionAuthManager: ObservableObject {
             ?? Date().addingTimeInterval(1800)
             
         copilotLock.lock()
+        cachedCopilotSourceToken = githubToken
         cachedCopilotSessionToken = sessionToken
         copilotTokenExpiresAt = exp
         copilotLock.unlock()
@@ -758,6 +823,7 @@ public class SubscriptionAuthManager: ObservableObject {
                         }
                         
                         if let accessToken = pollJson["access_token"] as? String, !accessToken.isEmpty {
+                            _ = try await self.getCopilotSessionToken(githubToken: accessToken)
                             let account = SubscriptionAccount(
                                 provider: .copilot,
                                 emailOrUser: "GitHub Copilot Active",
@@ -766,8 +832,11 @@ public class SubscriptionAuthManager: ObservableObject {
                                 source: "GitHub Device Auth"
                             )
                             await MainActor.run {
+                                guard self.saveTokenToKeychain(provider: SubscriptionProviderType.copilot.rawValue, token: accessToken) else {
+                                    onError("Could not save the Copilot credential to Keychain.")
+                                    return
+                                }
                                 self.accounts[.copilot] = account
-                                self.saveTokenToKeychain(provider: SubscriptionProviderType.copilot.rawValue, token: accessToken)
                                 self.persistAccounts()
                                 onSuccess(account)
                             }
@@ -790,13 +859,20 @@ public class SubscriptionAuthManager: ObservableObject {
         accounts.removeAll()
         copilotLock.lock()
         cachedCopilotSessionToken = nil
+        cachedCopilotSourceToken = nil
         copilotTokenExpiresAt = nil
         copilotLock.unlock()
         UserDefaults.standard.removeObject(forKey: userDefaultsKey)
     }
 
     private func persistAccounts() {
-        if let encoded = try? JSONEncoder().encode(accounts) {
+        // Only metadata leaves Keychain. Migrate older copies on every load.
+        let metadata = accounts.mapValues { account in
+            var copy = account
+            copy.sessionToken = ""
+            return copy
+        }
+        if let encoded = try? JSONEncoder().encode(metadata) {
             UserDefaults.standard.set(encoded, forKey: userDefaultsKey)
         }
     }
@@ -805,21 +881,20 @@ public class SubscriptionAuthManager: ObservableObject {
         if let data = UserDefaults.standard.data(forKey: userDefaultsKey),
            let decoded = try? JSONDecoder().decode([SubscriptionProviderType: SubscriptionAccount].self, from: data) {
             var validAccounts: [SubscriptionProviderType: SubscriptionAccount] = [:]
-            var didRedirectAPIKey = false
             for (prov, acc) in decoded {
                 var loadedToken = acc.sessionToken
                 if let keychainToken = loadTokenFromKeychain(provider: prov.rawValue) {
                     loadedToken = keychainToken
+                } else if !loadedToken.isEmpty {
+                    guard saveTokenToKeychain(provider: prov.rawValue, token: loadedToken) else { continue }
                 }
                 let tok = loadedToken.trimmingCharacters(in: .whitespacesAndNewlines)
                 // Redirect raw API keys to BYOK storage (not subscription accounts)
                 if tok.hasPrefix("sk-ant-") {
                     UserDefaults.standard.set(tok, forKey: "anthropic_api_key")
-                    didRedirectAPIKey = true
                     continue
                 } else if tok.hasPrefix("AIzaSy") {
                     UserDefaults.standard.set(tok, forKey: "gemini_api_key")
-                    didRedirectAPIKey = true
                     continue
                 }
                 // Accept any valid account regardless of source
@@ -832,9 +907,7 @@ public class SubscriptionAuthManager: ObservableObject {
             }
             self.accounts = validAccounts
             // Only persist if we actually redirected API keys (removed entries)
-            if didRedirectAPIKey {
-                persistAccounts()
-            }
+            persistAccounts()
         }
     }
 }

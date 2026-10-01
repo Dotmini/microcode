@@ -224,7 +224,7 @@ class AgentMemoryService: ObservableObject {
 
         guard let url = URL(string: "http://localhost:3000/api/ai/embedding") else { return nil }
         
-        var request = URLRequest(url: url)
+        var request = LocalBackendAuth.request(url: url)
         request.httpMethod = "POST"
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
         request.timeoutInterval = 2.0 // Fast timeout to prevent blocking UI

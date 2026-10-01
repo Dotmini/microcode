@@ -36,6 +36,8 @@ public enum AgentPrivacyGuard {
     }
     
     private static let patterns: [SecretPattern] = [
+        SecretPattern(name: "JWT", pattern: #"\beyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\b"#),
+        SecretPattern(name: "Dotmini Platform Key", pattern: #"\bmci-live-[A-Za-z0-9_-]{12,}\b"#),
         // OpenAI / Codex API Keys
         SecretPattern(name: "OpenAI / Codex API Key", pattern: #"\bsk-[A-Za-z0-9_-]{20,}\b"#),
         
@@ -141,6 +143,17 @@ public enum AgentPrivacyGuard {
         return (findings.isEmpty, findings)
     }
     
+    /// Sanitize JSON values without corrupting JSON escaping or schema keys.
+    public static func sanitizeJSON(_ data: Data) throws -> Data {
+        func clean(_ value: Any) -> Any {
+            if let text = value as? String { return sanitize(text) }
+            if let values = value as? [Any] { return values.map(clean) }
+            if let values = value as? [String: Any] { return values.mapValues(clean) }
+            return value
+        }
+        return try JSONSerialization.data(withJSONObject: clean(JSONSerialization.jsonObject(with: data)), options: [.sortedKeys])
+    }
+
     /// Safely writes content to a file URL after guaranteeing that all sensitive secrets have been redacted.
     @discardableResult
     public static func safeWrite(content: String, to url: URL) throws -> (sanitized: Bool, writtenLength: Int) {

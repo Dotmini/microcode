@@ -10,6 +10,20 @@
 import Foundation
 import AppKit
 import Combine
+import CryptoKit
+import AuthenticationServices
+
+private final class OAuthPresentationContext: NSObject, ASWebAuthenticationPresentationContextProviding {
+    let window: NSWindow
+
+    init(window: NSWindow) {
+        self.window = window
+    }
+
+    func presentationAnchor(for session: ASWebAuthenticationSession) -> ASPresentationAnchor {
+        window
+    }
+}
 
 @MainActor
 final class SupabaseAuthService: ObservableObject {
@@ -55,7 +69,7 @@ final class SupabaseAuthService: ObservableObject {
                 if !cached.isEmpty { return cached }
                 switch key {
                 case "SUPABASE_URL": return "https://supabase-ai.dotmini.net"
-                case "SUPABASE_ANON_KEY": return "eyJ0eXAiOiJKV1QiLCJhbGciOiJIUzI1NiJ9.eyJpc3MiOiJzdXBhYmFzZSIsImlhdCI6MTc4NDExODEyMCwiZXhwIjo0OTM5NzkxNzIwLCJyb2xlIjoiYW5vbiJ9.mYIkNUopKdGqKfEnzV68pXTni670PFd-nuWXjCx174M"
+                case "SUPABASE_ANON_KEY": return ""
                 case "SUPABASE_AUTH_REDIRECT_URL": return "microcode://auth/callback"
                 default: return ""
                 }
@@ -106,10 +120,12 @@ final class SupabaseAuthService: ObservableObject {
 
     struct Entitlement: Equatable {
         let plan: String
-        let freeTokensRemaining: Int
-        let monthlyTokensUsed: Int
+        let role: String
+        let tokensRemaining: Int
+        let tokensUsed: Int
+        let isLoaded: Bool
 
-        static let unknown = Entitlement(plan: "free", freeTokensRemaining: 0, monthlyTokensUsed: 0)
+        static let unknown = Entitlement(plan: "", role: "", tokensRemaining: 0, tokensUsed: 0, isLoaded: false)
     }
 
     enum AuthError: LocalizedError {
@@ -136,25 +152,46 @@ final class SupabaseAuthService: ObservableObject {
     private let refreshTokenAccount = "supabase.refresh-token"
     private let sessionAccount = "supabase.session.v1"
 
-    private init() {
+    private let defaults: UserDefaults
+    private let network: URLSession
+    private let configurationProvider: () -> Configuration?
+    private var pendingOAuth: (state: String, verifier: String, redirect: URL, expires: Date)?
+    private var webAuthSession: ASWebAuthenticationSession?
+    private var webAuthContext: OAuthPresentationContext?
+    private var webAuthID: UUID?
+    private var refreshTask: Task<String?, Never>?
+    private var sessionGeneration = UUID()
+
+    init(defaults: UserDefaults = .standard, network: URLSession = .shared,
+         configuration: @escaping () -> Configuration? = { Configuration.load() }) {
+        self.defaults = defaults
+        self.network = network
+        self.configurationProvider = configuration
         restorePersistedSession()
+        clearLegacyCredentials()
     }
 
-    var isConfigured: Bool { Configuration.load() != nil }
+    private func clearLegacyCredentials() {
+        ["cloudGPUAuthToken", "cloudGPURefreshToken", "microRentToken", "dotminiLicenseKey"].forEach {
+            defaults.removeObject(forKey: $0)
+        }
+    }
+
+    var isConfigured: Bool { configurationProvider() != nil }
     var accessToken: String? { session?.accessToken }
-    var currentEmail: String { session?.email ?? UserDefaults.standard.string(forKey: "dotminiUserEmail") ?? "" }
+    var currentEmail: String { session?.email ?? defaults.string(forKey: "dotminiUserEmail") ?? "" }
 
     /// The public Supabase anon key is configuration, not a user credential.
     /// It is fetched from the MicroCode host on first launch so distributed
     /// builds never carry server keys or a developer's local Secrets.plist.
     func bootstrapConfiguration() async -> Bool {
-        if Configuration.load() != nil { return true }
+        if configurationProvider() != nil { return true }
         if let cached = Configuration.cached() {
             Configuration.cache(cached)
             return true
         }
         do {
-            let (data, response) = try await URLSession.shared.data(from: Configuration.remoteConfigurationURL)
+            let (data, response) = try await network.data(from: Configuration.remoteConfigurationURL)
             if (response as? HTTPURLResponse)?.statusCode == 200,
                let raw = try JSONSerialization.jsonObject(with: data) as? [String: String],
                let urlString = raw["url"], let url = URL(string: urlString),
@@ -164,21 +201,12 @@ final class SupabaseAuthService: ObservableObject {
                 return true
             }
         } catch { }
-        if let fallbackURL = URL(string: "https://supabase-ai.dotmini.net") {
-            let prod = Configuration(
-                baseURL: fallbackURL,
-                anonKey: "eyJ0eXAiOiJKV1QiLCJhbGciOiJIUzI1NiJ9.eyJpc3MiOiJzdXBhYmFzZSIsImlhdCI6MTc4NDExODEyMCwiZXhwIjo0OTM5NzkxNzIwLCJyb2xlIjoiYW5vbiJ9.mYIkNUopKdGqKfEnzV68pXTni670PFd-nuWXjCx174M",
-                redirectURL: "microcode://auth/callback"
-            )
-            Configuration.cache(prod)
-            return true
-        }
         return false
     }
 
     func signIn(email: String, password: String) async throws -> Session {
         guard await bootstrapConfiguration() else { throw AuthError.unconfigured }
-        guard let configuration = Configuration.load() else { throw AuthError.unconfigured }
+        guard let configuration = configurationProvider() else { throw AuthError.unconfigured }
         let url = configuration.baseURL.appending(path: "auth/v1/token")
             .appending(queryItems: [URLQueryItem(name: "grant_type", value: "password")])
         var request = URLRequest(url: url)
@@ -194,8 +222,9 @@ final class SupabaseAuthService: ObservableObject {
     /// Supabase intentionally returns no session and the caller must ask the
     /// user to confirm their email before signing in.
     func signUp(email: String, password: String, displayName: String) async throws -> Session? {
+        let generation = sessionGeneration
         guard await bootstrapConfiguration() else { throw AuthError.unconfigured }
-        guard let configuration = Configuration.load() else { throw AuthError.unconfigured }
+        guard let configuration = configurationProvider() else { throw AuthError.unconfigured }
         var request = URLRequest(url: configuration.baseURL.appending(path: "auth/v1/signup"))
         request.httpMethod = "POST"
         request.timeoutInterval = 20
@@ -206,167 +235,249 @@ final class SupabaseAuthService: ObservableObject {
             "password": password,
             "data": ["display_name": displayName]
         ])
-        let (data, response) = try await URLSession.shared.data(for: request)
+        let (data, response) = try await network.data(for: request)
         guard let http = response as? HTTPURLResponse, (200..<300).contains(http.statusCode) else {
             throw AuthError.rejected("Unable to create your account. Check the details and try again.")
         }
         guard let raw = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else { throw AuthError.invalidResponse }
+        guard generation == sessionGeneration else { throw CancellationError() }
         guard raw["access_token"] as? String != nil else { return nil }
         return try await consumeSessionPayload(raw)
     }
 
+    /// GoTrue authorization-code flow. Only the matching in-memory PKCE attempt
+    /// can consume the callback; bearer tokens in deep links are never accepted.
+    func makeOAuthURL(provider: String) throws -> URL {
+        guard let configuration = configurationProvider(),
+              var redirect = URLComponents(string: configuration.redirectURL),
+              redirect.scheme == "microcode", redirect.host == "auth", redirect.path == "/callback" else {
+            throw AuthError.unconfigured
+        }
+        let state = UUID().uuidString
+        let verifier = UUID().uuidString + UUID().uuidString
+        let challenge = Data(SHA256.hash(data: Data(verifier.utf8))).base64EncodedString()
+            .replacingOccurrences(of: "+", with: "-").replacingOccurrences(of: "/", with: "_")
+            .replacingOccurrences(of: "=", with: "")
+        redirect.queryItems = [URLQueryItem(name: "state", value: state)]
+        guard let callback = redirect.url else { throw AuthError.unconfigured }
+        pendingOAuth = (state, verifier, callback, Date().addingTimeInterval(600))
+        return configuration.baseURL.appending(path: "auth/v1/authorize").appending(queryItems: [
+            URLQueryItem(name: "provider", value: provider),
+            URLQueryItem(name: "redirect_to", value: callback.absoluteString),
+            URLQueryItem(name: "code_challenge", value: challenge),
+            URLQueryItem(name: "code_challenge_method", value: "s256")
+        ])
+    }
+
     func startOAuth(provider: String) async throws {
         guard await bootstrapConfiguration() else { throw AuthError.unconfigured }
-        guard let configuration = Configuration.load() else { throw AuthError.unconfigured }
-        let url = configuration.baseURL.appending(path: "auth/v1/authorize")
-            .appending(queryItems: [
-                URLQueryItem(name: "provider", value: provider),
-                URLQueryItem(name: "redirect_to", value: configuration.redirectURL)
-            ])
-        NSWorkspace.shared.open(url)
+        guard let window = NSApp.keyWindow ?? NSApp.windows.first else {
+            throw AuthError.rejected("Open a MicroCode window before signing in.")
+        }
+        webAuthID = nil
+        webAuthSession?.cancel()
+        webAuthSession = nil
+        webAuthContext = nil
+        let authURL = try makeOAuthURL(provider: provider)
+        let attemptID = UUID()
+        webAuthID = attemptID
+        let context = OAuthPresentationContext(window: window)
+        let browserSession = ASWebAuthenticationSession(url: authURL, callbackURLScheme: "microcode") { [weak self] callbackURL, _ in
+            Task { @MainActor in
+                guard let self, self.webAuthID == attemptID else { return }
+                self.webAuthID = nil
+                self.webAuthSession = nil
+                self.webAuthContext = nil
+                if let callbackURL {
+                    NotificationCenter.default.post(name: Notification.Name("MicroCodeOAuthCallback"), object: callbackURL)
+                } else {
+                    self.pendingOAuth = nil
+                }
+            }
+        }
+        browserSession.presentationContextProvider = context
+        webAuthContext = context
+        webAuthSession = browserSession
+        guard browserSession.start() else {
+            webAuthID = nil
+            webAuthSession = nil
+            webAuthContext = nil
+            pendingOAuth = nil
+            throw AuthError.rejected("Could not open the sign-in browser. Please try again.")
+        }
     }
 
-    /// Handles the implicit-flow callback sent to `microcode://auth/callback`.
-    /// Browser fragments are deliberately parsed as well as query items because
-    /// GoTrue places access tokens in the fragment for native redirects.
     func handleCallback(_ url: URL) async -> Bool {
-        var items = URLComponents(url: url, resolvingAgainstBaseURL: false)?.queryItems ?? []
-        if let fragment = URLComponents(url: url, resolvingAgainstBaseURL: false)?.fragment,
-           let fragmentItems = URLComponents(string: "https://callback.invalid/?\(fragment)")?.queryItems {
-            items.append(contentsOf: fragmentItems)
-        }
-        func item(_ name: String) -> String? {
-            items.last(where: { $0.name.caseInsensitiveCompare(name) == .orderedSame })?.value
-        }
-        guard let token = item("access_token"), !token.isEmpty else { return false }
-        let refresh = item("refresh_token") ?? ""
-        let email = item("email") ?? ""
-        let userID = item("user_id") ?? item("sub") ?? ""
-        persist(Session(accessToken: token, refreshToken: refresh, expiresAt: expiry(from: item("expires_in")), userID: userID, email: email))
-        if session?.email.isEmpty ?? true { _ = try? await loadCurrentUser() }
-        await refreshEntitlement()
-        return true
-    }
-
-    @discardableResult
-    func refreshAccessTokenIfNeeded(force: Bool = false) async -> String? {
-        guard let existing = session else { return nil }
-        if !force && !existing.isExpired { return existing.accessToken }
-        guard let configuration = Configuration.load(), !existing.refreshToken.isEmpty else { return existing.accessToken }
-
-        let url = configuration.baseURL.appending(path: "auth/v1/token")
-            .appending(queryItems: [URLQueryItem(name: "grant_type", value: "refresh_token")])
-        var request = URLRequest(url: url)
+        guard let pending = pendingOAuth, pending.expires > Date(),
+              url.scheme == pending.redirect.scheme, url.host == pending.redirect.host,
+              url.path == pending.redirect.path, url.fragment == nil,
+              url.port == pending.redirect.port, url.user == nil, url.password == nil,
+              let components = URLComponents(url: url, resolvingAgainstBaseURL: false),
+              let configuration = configurationProvider() else { return false }
+        let items = components.queryItems ?? []
+        let states = items.filter { $0.name == "state" }
+        let codes = items.filter { $0.name == "code" }
+        guard states.count == 1, states.first?.value == pending.state,
+              codes.count == 1, let code = codes.first?.value, !code.isEmpty else { return false }
+        pendingOAuth = nil // one attempt, including failed/replayed exchanges
+        let generation = sessionGeneration
+        var request = URLRequest(url: configuration.baseURL.appending(path: "auth/v1/token")
+            .appending(queryItems: [URLQueryItem(name: "grant_type", value: "pkce")]))
         request.httpMethod = "POST"
         request.timeoutInterval = 20
         request.setValue(configuration.anonKey, forHTTPHeaderField: "apikey")
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
-        request.httpBody = try? JSONSerialization.data(withJSONObject: ["refresh_token": existing.refreshToken])
+        request.httpBody = try? JSONSerialization.data(withJSONObject: ["auth_code": code, "code_verifier": pending.verifier])
         do {
-            return try await consumeSessionResponse(request).accessToken
-        } catch {
-            // Network outages are not revocation. Keep the refresh credential
-            // so the next request can recover without another Google login.
-            return nil
+            let saved = try await fetchSession(request)
+            guard generation == sessionGeneration else { return false }
+            sessionGeneration = UUID()
+            refreshTask?.cancel()
+            refreshTask = nil
+            try persist(saved)
+            await refreshEntitlement()
+            return true
+        } catch { return false }
+    }
+
+    @discardableResult
+    func refreshAccessTokenIfNeeded(force: Bool = false) async -> String? {
+        if let refreshTask { return await refreshTask.value }
+        guard let existing = session else { return nil }
+        if !force && !existing.isExpired { return existing.accessToken }
+        guard let configuration = configurationProvider(), !existing.refreshToken.isEmpty else { return nil }
+        let generation = sessionGeneration
+        let task = Task { @MainActor () -> String? in
+            var request = URLRequest(url: configuration.baseURL.appending(path: "auth/v1/token")
+                .appending(queryItems: [URLQueryItem(name: "grant_type", value: "refresh_token")]))
+            request.httpMethod = "POST"
+            request.timeoutInterval = 20
+            request.setValue(configuration.anonKey, forHTTPHeaderField: "apikey")
+            request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+            request.httpBody = try? JSONSerialization.data(withJSONObject: ["refresh_token": existing.refreshToken])
+            do {
+                let saved = try await self.fetchSession(request)
+                guard !Task.isCancelled, generation == self.sessionGeneration,
+                      existing.userID.isEmpty || saved.userID == existing.userID else { return nil }
+                try self.persist(saved)
+                return saved.accessToken
+            } catch { return nil } // outages must not erase a recoverable refresh credential
         }
+        refreshTask = task
+        let value = await task.value
+        if generation == sessionGeneration { refreshTask = nil }
+        return value
     }
 
     func refreshEntitlement() async {
-        guard let configuration = Configuration.load(),
+        guard let configuration = configurationProvider(),
               let token = await refreshAccessTokenIfNeeded(),
               let userID = session?.userID, !userID.isEmpty else { return }
-        var components = URLComponents(url: configuration.baseURL.appending(path: "rest/v1/profiles"), resolvingAgainstBaseURL: false)!
+        // Dotmini Cloud stores roles and plans in public.users. The old
+        // profiles table does not exist in production, so a failed lookup
+        // must never be presented as a verified Free entitlement.
+        var components = URLComponents(url: configuration.baseURL.appending(path: "rest/v1/users"), resolvingAgainstBaseURL: false)!
         components.queryItems = [
-            URLQueryItem(name: "select", value: "subscription_plan,free_tokens_remaining,ai_monthly_tokens_used"),
+            URLQueryItem(name: "select", value: "role,plan,ai_quota,ai_used"),
             URLQueryItem(name: "id", value: "eq.\(userID)")
         ]
         guard let url = components.url else { return }
         var request = URLRequest(url: url)
         request.setValue(configuration.anonKey, forHTTPHeaderField: "apikey")
         request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
-        guard let (data, response) = try? await URLSession.shared.data(for: request),
+        guard let (data, response) = try? await network.data(for: request),
               (response as? HTTPURLResponse)?.statusCode == 200,
               let rows = try? JSONSerialization.jsonObject(with: data) as? [[String: Any]],
-              let profile = rows.first else { return }
+              let profile = rows.first else {
+            if session?.userID == userID { entitlement = .unknown }
+            return
+        }
+        guard session?.userID == userID, session != nil else { return }
+        let quota = max(0, profile["ai_quota"] as? Int ?? 0)
+        let used = max(0, profile["ai_used"] as? Int ?? 0)
         entitlement = Entitlement(
-            plan: profile["subscription_plan"] as? String ?? "free",
-            freeTokensRemaining: profile["free_tokens_remaining"] as? Int ?? 0,
-            monthlyTokensUsed: profile["ai_monthly_tokens_used"] as? Int ?? 0
+            plan: profile["plan"] as? String ?? "",
+            role: profile["role"] as? String ?? "",
+            tokensRemaining: max(0, quota - used),
+            tokensUsed: used,
+            isLoaded: true
         )
     }
 
     func signOut() {
+        sessionGeneration = UUID()
+        webAuthID = nil
+        webAuthSession?.cancel()
+        webAuthSession = nil
+        webAuthContext = nil
+        pendingOAuth = nil
+        refreshTask?.cancel()
+        refreshTask = nil
         KeychainManager.shared.deleteIntegrationSecret(account: sessionAccount)
         KeychainManager.shared.deleteIntegrationSecret(account: accessTokenAccount)
         KeychainManager.shared.deleteIntegrationSecret(account: refreshTokenAccount)
-        let defaults = UserDefaults.standard
+        let defaults = defaults
         ["cloudGPUAuthToken", "cloudGPURefreshToken", "microRentToken", "dotminiLicenseKey", "dotminiUserEmail"].forEach { defaults.removeObject(forKey: $0) }
         session = nil
         entitlement = .unknown
     }
 
     private func consumeSessionResponse(_ request: URLRequest) async throws -> Session {
-        let (data, response) = try await URLSession.shared.data(for: request)
-        guard let http = response as? HTTPURLResponse else { throw AuthError.invalidResponse }
-        guard (200..<300).contains(http.statusCode) else {
-            let message = ((try? JSONSerialization.jsonObject(with: data) as? [String: Any])?["msg"] as? String)
-                ?? ((try? JSONSerialization.jsonObject(with: data) as? [String: Any])?["message"] as? String)
-                ?? "Sign-in failed. Check your email and password."
-            throw AuthError.rejected(message)
-        }
-        guard let raw = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else { throw AuthError.invalidResponse }
-        return try await consumeSessionPayload(raw)
-    }
-
-    private func consumeSessionPayload(_ raw: [String: Any]) async throws -> Session {
-        guard let access = raw["access_token"] as? String,
-              let refresh = raw["refresh_token"] as? String,
-              let user = raw["user"] as? [String: Any] else { throw AuthError.invalidResponse }
-        let expiresIn = (raw["expires_in"] as? NSNumber)?.doubleValue
-        let saved = Session(
-            accessToken: access,
-            refreshToken: refresh,
-            expiresAt: expiresIn.map { Date().addingTimeInterval($0) },
-            userID: user["id"] as? String ?? "",
-            email: user["email"] as? String ?? ""
-        )
-        persist(saved)
+        let generation = sessionGeneration
+        let saved = try await fetchSession(request)
+        guard generation == sessionGeneration else { throw CancellationError() }
+        sessionGeneration = UUID()
+        refreshTask?.cancel()
+        refreshTask = nil
+        try persist(saved)
         await refreshEntitlement()
         return saved
     }
 
-    private func loadCurrentUser() async throws -> Session {
-        guard let configuration = Configuration.load(), let existing = session else { throw AuthError.unconfigured }
-        var request = URLRequest(url: configuration.baseURL.appending(path: "auth/v1/user"))
-        request.setValue(configuration.anonKey, forHTTPHeaderField: "apikey")
-        request.setValue("Bearer \(existing.accessToken)", forHTTPHeaderField: "Authorization")
-        let (data, response) = try await URLSession.shared.data(for: request)
-        guard (response as? HTTPURLResponse)?.statusCode == 200,
-              let user = try JSONSerialization.jsonObject(with: data) as? [String: Any] else { throw AuthError.invalidResponse }
-        let updated = Session(accessToken: existing.accessToken, refreshToken: existing.refreshToken, expiresAt: existing.expiresAt, userID: user["id"] as? String ?? existing.userID, email: user["email"] as? String ?? existing.email)
-        persist(updated)
-        return updated
+    private func fetchSession(_ request: URLRequest) async throws -> Session {
+        let (data, response) = try await network.data(for: request)
+        guard let http = response as? HTTPURLResponse else { throw AuthError.invalidResponse }
+        guard (200..<300).contains(http.statusCode) else {
+            throw AuthError.rejected("Authentication failed (HTTP \(http.statusCode)). Please sign in again.")
+        }
+        guard let raw = try JSONSerialization.jsonObject(with: data) as? [String: Any] else { throw AuthError.invalidResponse }
+        return try decodeSession(raw)
     }
 
-    private func persist(_ newSession: Session) {
+    private func decodeSession(_ raw: [String: Any]) throws -> Session {
+        guard let access = raw["access_token"] as? String, !access.isEmpty,
+              let refresh = raw["refresh_token"] as? String, !refresh.isEmpty,
+              let user = raw["user"] as? [String: Any],
+              let id = user["id"] as? String, !id.isEmpty,
+              let expires = (raw["expires_in"] as? NSNumber)?.doubleValue, expires > 60 else {
+            throw AuthError.invalidResponse
+        }
+        return Session(accessToken: access, refreshToken: refresh, expiresAt: Date().addingTimeInterval(expires),
+                       userID: id, email: user["email"] as? String ?? "")
+    }
+
+    private func consumeSessionPayload(_ raw: [String: Any]) async throws -> Session {
+        let saved = try decodeSession(raw)
+        sessionGeneration = UUID()
+        refreshTask?.cancel()
+        refreshTask = nil
+        try persist(saved)
+        await refreshEntitlement()
+        return saved
+    }
+
+    private func persist(_ newSession: Session) throws {
+        let encoded = String(decoding: try JSONEncoder().encode(newSession), as: UTF8.self)
+        guard KeychainManager.shared.saveIntegrationSecret(encoded, account: sessionAccount) else {
+            throw AuthError.rejected("Could not save your session to macOS Keychain.")
+        }
+        if session?.userID != newSession.userID { entitlement = .unknown }
         session = newSession
-        if let data = try? JSONEncoder().encode(newSession),
-           let encoded = String(data: data, encoding: .utf8) {
-            _ = KeychainManager.shared.saveIntegrationSecret(encoded, account: sessionAccount)
-        }
-        _ = KeychainManager.shared.saveIntegrationSecret(newSession.accessToken, account: accessTokenAccount)
-        if !newSession.refreshToken.isEmpty {
-            _ = KeychainManager.shared.saveIntegrationSecret(newSession.refreshToken, account: refreshTokenAccount)
-        }
-        let defaults = UserDefaults.standard
-        // Compatibility bridge while service consumers transition. These values
-        // are genuine Supabase JWTs, never a locally generated license string.
-        defaults.set(newSession.accessToken, forKey: "cloudGPUAuthToken")
-        defaults.set(newSession.accessToken, forKey: "microRentToken")
-        if !newSession.refreshToken.isEmpty { defaults.set(newSession.refreshToken, forKey: "cloudGPURefreshToken") }
+        KeychainManager.shared.deleteIntegrationSecret(account: accessTokenAccount)
+        KeychainManager.shared.deleteIntegrationSecret(account: refreshTokenAccount)
+        clearLegacyCredentials()
         if !newSession.email.isEmpty { defaults.set(newSession.email, forKey: "dotminiUserEmail") }
-        defaults.removeObject(forKey: "dotminiLicenseKey")
-        defaults.set("cloud", forKey: "aiKeyMode")
+        // Identity refresh must never change the user's selected inference mode.
     }
 
     private func restorePersistedSession() {
@@ -378,7 +489,7 @@ final class SupabaseAuthService: ObservableObject {
         }
         guard let access = KeychainManager.shared.readIntegrationSecret(account: accessTokenAccount), !access.isEmpty else { return }
         let refresh = KeychainManager.shared.readIntegrationSecret(account: refreshTokenAccount) ?? ""
-        session = Session(accessToken: access, refreshToken: refresh, expiresAt: nil, userID: "", email: UserDefaults.standard.string(forKey: "dotminiUserEmail") ?? "")
+        session = Session(accessToken: access, refreshToken: refresh, expiresAt: nil, userID: "", email: defaults.string(forKey: "dotminiUserEmail") ?? "")
     }
 
     private func expiry(from seconds: String?) -> Date? {

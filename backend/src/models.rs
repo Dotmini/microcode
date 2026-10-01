@@ -208,6 +208,113 @@ pub struct AIConfig {
     pub use_microrent_proxy: bool,
     #[serde(default)]
     pub microrent_token: Option<String>,
+    #[serde(default)]
+    pub proxy_base_url: Option<String>,
+}
+
+// ==========================================
+// SubAgent Configuration (Multi-Provider)
+// ==========================================
+
+/// Configuration for a subagent with independent provider/model routing.
+/// Each subagent can use a different AI provider and model from the parent,
+/// enabling intelligent workload distribution (e.g., Claude Opus for
+/// architecture, Gemini Flash for code search).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SubAgentConfig {
+    /// Unique identifier for this subagent archetype.
+    pub name: String,
+    /// Role description (e.g., "architect", "bug_hunter").
+    pub role: String,
+    /// System prompt instructions for this subagent.
+    #[serde(default)]
+    pub system_prompt: Option<String>,
+    /// Override the parent's AI provider (e.g., "anthropic", "gemini").
+    #[serde(default)]
+    pub provider: Option<String>,
+    /// Override the parent's model (e.g., "claude-sonnet-4", "gemini-2.5-flash").
+    #[serde(default)]
+    pub model: Option<String>,
+    /// Optional separate API key for this subagent's provider.
+    #[serde(default)]
+    pub api_key: Option<String>,
+    /// Maximum subagent recursion depth (default 3).
+    #[serde(default = "default_max_depth")]
+    pub max_depth: usize,
+    /// Tool whitelist — only these tools are available to this subagent.
+    #[serde(default)]
+    pub allowed_tools: Vec<String>,
+    /// Operational budget limits for this subagent.
+    #[serde(default)]
+    pub budget: Option<BudgetConfig>,
+    /// List of subagent names this agent is allowed to invoke.
+    #[serde(default)]
+    pub allowed_subagents: Vec<String>,
+}
+
+fn default_max_depth() -> usize { 3 }
+
+/// Operational budget limits for an agent session or subagent.
+/// When any limit is reached, the agent stops with `StopReason::BudgetExhausted`.
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct BudgetConfig {
+    /// Maximum number of model inference calls.
+    #[serde(default)]
+    pub max_model_calls: Option<usize>,
+    /// Maximum number of tool executions.
+    #[serde(default)]
+    pub max_tool_calls: Option<usize>,
+    /// Maximum total tokens (prompt + completion) across the session.
+    #[serde(default)]
+    pub max_total_tokens: Option<usize>,
+}
+
+impl BudgetConfig {
+    /// Check if a model call count exceeds the configured limit.
+    pub fn model_calls_exceeded(&self, count: usize) -> bool {
+        self.max_model_calls.map_or(false, |max| count >= max)
+    }
+
+    /// Check if a tool call count exceeds the configured limit.
+    pub fn tool_calls_exceeded(&self, count: usize) -> bool {
+        self.max_tool_calls.map_or(false, |max| count >= max)
+    }
+
+    /// Check if total tokens exceed the configured limit.
+    pub fn tokens_exceeded(&self, count: usize) -> bool {
+        self.max_total_tokens.map_or(false, |max| count >= max)
+    }
+}
+
+/// Reason why an agent session or subagent stopped executing.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "snake_case")]
+pub enum StopReason {
+    /// Agent completed the task normally.
+    Completed,
+    /// Model produced no further tool calls.
+    NoMoreToolCalls,
+    /// Operational budget limit was reached.
+    BudgetExhausted(String),
+    /// Agent was cancelled by the user or system.
+    Cancelled,
+    /// Agent encountered an unrecoverable error.
+    Error(String),
+    /// Maximum loop iterations reached.
+    MaxLoopsReached,
+    /// Policy engine denied a critical tool call.
+    PolicyDenied(String),
+}
+
+/// Recommended provider and model for a task, produced by the agent kernel.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ModelRecommendation {
+    /// Recommended AI provider.
+    pub provider: String,
+    /// Recommended model identifier.
+    pub model: String,
+    /// Reasoning for the recommendation.
+    pub reason: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

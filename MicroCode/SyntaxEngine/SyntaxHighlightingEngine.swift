@@ -33,97 +33,117 @@ public final class SyntaxHighlightingEngine: @unchecked Sendable {
             factories[lang.lowercased()] = factory
         }
         
-        // Core languages
+        // Core & Systems
         register("rust") { createRustLexer() }
+        register("rs") { createRustLexer() }
         register("ardium") { createArdiumLexer() }
         register("ar") { createArdiumLexer() }
-        register("javascript") { createJavaScriptLexer() }
-        register("typescript") { createTypeScriptLexer() }  // Dedicated TypeScript lexer
-        
-        // JavaScript aliases
-        register("js") { createJavaScriptLexer() }
-        register("jsx") { createJavaScriptLexer() }
-        register("json") { createJavaScriptLexer() }
-        
-        // TypeScript aliases
-        register("ts") { createTypeScriptLexer() }
-        register("tsx") { createTypeScriptLexer() }
-        
-        // Ruby
-        register("ruby") { createRubyLexer() }
-        // Go
+        register("swift") { createSwiftLexer() }
+        register("c") { createCLexer() }
+        register("h") { createCLexer() }
+        register("cpp") { createCppLexer() }
+        register("c++") { createCppLexer() }
+        register("cc") { createCppLexer() }
+        register("cxx") { createCppLexer() }
+        register("hpp") { createCppLexer() }
+        register("hxx") { createCppLexer() }
+        register("hh") { createCppLexer() }
+        register("arduino") { createCppLexer() }
+        register("ino") { createCppLexer() }
+        register("objc") { createObjCLexer() }
+        register("objective-c") { createObjCLexer() }
+        register("m") { createObjCLexer() }
+        register("objcpp") { createObjCLexer() }
+        register("objective-cpp") { createObjCLexer() }
+        register("mm") { createObjCLexer() }
+        register("zig") { createZigLexer() }
         register("go") { createGoLexer() }
         register("golang") { createGoLexer() }
-        
-        // C-family
-        register("c") { createSwiftLexer() } // Fallback
-        register("cpp") { createSwiftLexer() }
-        register("c++") { createSwiftLexer() }
-        register("arduino") { createSwiftLexer() }
-        register("ino") { createSwiftLexer() }
-        register("h") { createSwiftLexer() }
-        register("hpp") { createSwiftLexer() }
-        register("objc") { createSwiftLexer() }
-        register("objective-c") { createSwiftLexer() }
-        register("m") { createSwiftLexer() }
-        register("mm") { createSwiftLexer() }
-        
-        // JVM languages (use Swift-like syntax)
-        register("java") { createJavaLexer() } // Keep Swift lexer for Java for now
-        register("kt") { createKotlinLexer() }
+        register("solidity") { createSolidityLexer() }
+        register("sol") { createSolidityLexer() }
+
+        // Mobile & Managed
+        register("java") { createJavaLexer() }
         register("kotlin") { createKotlinLexer() }
+        register("kt") { createKotlinLexer() }
+        register("kts") { createKotlinLexer() }
         register("scala") { createKotlinLexer() }
         register("groovy") { createJavaLexer() }
-        
-        // Swift
-        register("swift") { createSwiftLexer() }
-        
-        // Scripting (Native ObjC++ Engine disabled for now due to pipeline/token issues, using Swift Lexer)
-        register("py") { createPythonLexer() }
+        register("csharp") { createCSharpLexer() }
+        register("cs") { createCSharpLexer() }
+        register("c#") { createCSharpLexer() }
+        register("dart") { createDartLexer() }
+
+        // Web & Frontend
+        register("javascript") { createJavaScriptLexer() }
+        register("js") { createJavaScriptLexer() }
+        register("jsx") { createJavaScriptLexer() }
+        register("mjs") { createJavaScriptLexer() }
+        register("cjs") { createJavaScriptLexer() }
+        register("typescript") { createTypeScriptLexer() }
+        register("ts") { createTypeScriptLexer() }
+        register("tsx") { createTypeScriptLexer() }
+        register("mts") { createTypeScriptLexer() }
+        register("cts") { createTypeScriptLexer() }
+        register("html") { createHtmlLexer() }
+        register("htm") { createHtmlLexer() }
+        register("xhtml") { createHtmlLexer() }
+        register("xml") { createHtmlLexer() }
+        register("svg") { createHtmlLexer() }
+        register("vue") { createHtmlLexer() }
+        register("svelte") { createHtmlLexer() }
+        register("css") { createCssLexer() }
+        register("scss") { createCssLexer() }
+        register("sass") { createCssLexer() }
+        register("less") { createCssLexer() }
+        register("php") { createPhpLexer() }
+        register("phtml") { createPhpLexer() }
+        register("php8") { createPhpLexer() }
+
+        // Scripting & Shell
         register("python") { createPythonLexer() }
-        
-        // Ruby (Keep Swift lexer)
-        register("rb") { createRubyLexer() }
+        register("py") { createPythonLexer() }
         register("ruby") { createRubyLexer() }
-        register("lua") { createRubyLexer() }
-        
-        // Shell
-        register("bash") { createPythonLexer() } // Fallback
-        register("sh") { createPythonLexer() }
-        register("zsh") { createPythonLexer() }
-        register("fish") { createPythonLexer() }
-        
-        // Data Science (Fallback to Python/Swift)
-        register("r") { createPythonLexer() }
-        register("julia") { createPythonLexer() }
-        register("jl") { createPythonLexer() }
-        
-        register("sql") { createJavaScriptLexer() }
-        register("graphql") { createJavaScriptLexer() }
-        
-        // Web
-        register("html") { createJavaScriptLexer() }
-        register("css") { createJavaScriptLexer() }
-        register("scss") { createJavaScriptLexer() }
-        register("sass") { createJavaScriptLexer() }
-        register("less") { createJavaScriptLexer() }
-        register("vue") { createJavaScriptLexer() }
-        register("svelte") { createJavaScriptLexer() }
-        
-        // Config/Data
-        register("yaml") { createPythonLexer() }
-        register("yml") { createPythonLexer() }
-        register("toml") { createPythonLexer() }
-        register("ini") { createPythonLexer() }
-        
-        // Other
+        register("rb") { createRubyLexer() }
+        register("lua") { createLuaLexer() }
+        register("shell") { createShellLexer() }
+        register("sh") { createShellLexer() }
+        register("bash") { createShellLexer() }
+        register("zsh") { createShellLexer() }
+        register("fish") { createShellLexer() }
         register("perl") { createPythonLexer() }
-        register("php") { createJavaScriptLexer() }
-        register("elixir") { createRubyLexer() }
-        register("ex") { createRubyLexer() }
-        register("exs") { createRubyLexer() }
-        register("markdown") { createPythonLexer() }
-        register("md") { createPythonLexer() }
+        register("pl") { createPythonLexer() }
+        register("pm") { createPythonLexer() }
+
+        // Data, Query, & Config
+        register("sql") { createSqlLexer() }
+        register("pgsql") { createSqlLexer() }
+        register("mysql") { createSqlLexer() }
+        register("sqlite") { createSqlLexer() }
+        register("plsql") { createSqlLexer() }
+        register("json") { createJsonLexer() }
+        register("jsonc") { createJsonLexer() }
+        register("yaml") { createYamlLexer() }
+        register("yml") { createYamlLexer() }
+        register("toml") { createYamlLexer() }
+        register("ini") { createYamlLexer() }
+        register("conf") { createYamlLexer() }
+        register("config") { createYamlLexer() }
+        register("env") { createYamlLexer() }
+        register("markdown") { createMarkdownLexer() }
+        register("md") { createMarkdownLexer() }
+        register("mdown") { createMarkdownLexer() }
+        register("mkd") { createMarkdownLexer() }
+        register("graphql") { createJavaScriptLexer() }
+        register("gql") { createJavaScriptLexer() }
+
+        // Functional & Scientific
+        register("r") { createRLexer() }
+        register("julia") { createJuliaLexer() }
+        register("jl") { createJuliaLexer() }
+        register("elixir") { createElixirLexer() }
+        register("ex") { createElixirLexer() }
+        register("exs") { createElixirLexer() }
         
         return factories
     }()

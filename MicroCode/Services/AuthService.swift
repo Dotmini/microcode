@@ -104,9 +104,9 @@ final class AuthService: ObservableObject {
     func syncWithWebSession(email: String, token: String = "", displayName: String = "") {
         let cleanEmail = email.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !cleanEmail.isEmpty else { return }
-        let session = SupabaseAuthService.shared.session
+        guard let session = SupabaseAuthService.shared.session else { return }
         let name = displayName.isEmpty ? cleanEmail.components(separatedBy: "@").first ?? "User" : displayName
-        let userID = session?.userID ?? ""
+        let userID = session.userID
         let user = IDXUser(
             id: userID.isEmpty ? cleanEmail : userID,
             email: cleanEmail,

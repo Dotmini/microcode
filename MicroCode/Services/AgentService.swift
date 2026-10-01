@@ -2,9 +2,11 @@
 //  AgentService.swift
 //  MicroCode
 //
-//  Production AI Agent Service — Unified Pipeline
-//  Direct AIClient streaming + AgentToolBox local execution
-//  No backend dependency. Pure client-side agent.
+//  Production AI Agent Orchestrator & Autonomous Kernel Pipeline.
+//  Direct AI streaming, concurrent tool dispatch, LSP compiler verification loop,
+//  consensus auditing, adaptive tool scoping, and flight recorder telemetry.
+//  Tirawat Nantamas Founder and CEO of Dotmini Software.
+//  Copyright © 2025-2026 Dotmini Software. All rights reserved.
 //
 
 import SwiftUI
@@ -128,6 +130,7 @@ class AgentService: ObservableObject {
         let block = { [weak self] in
             guard let self = self else { return }
             self.isCancelled = true
+            Task { @MainActor in ToolApprovalManager.shared.cancelAll() }
             self.aiClient.cancelStream()
             Task { @MainActor in
                 ACPHostService.shared.stopActiveAgent()
@@ -1032,6 +1035,14 @@ class AgentService: ObservableObject {
         suggestedAction = nil
         logActivity(.thinking, "Processing request...")
         
+        // P2: Record agent start in Flight Recorder
+        FlightRecorder.shared.record(
+            actor: .user,
+            action: .agentStart,
+            target: AuditTarget(type: "model", path: "\(provider)/\(model)", workspace: currentWorkspace ?? ""),
+            details: String(content.prefix(200))
+        )
+        
         // Universal Context Protocol & Mentions Expansion (@file, @git, @diagnostics, @symbol, @rules)
         let mentionContext = await AgentContextProtocolBridge.shared.expandMentions(
             prompt: content,
@@ -1101,7 +1112,7 @@ class AgentService: ObservableObject {
         
         let normalizedAI = AIModelCatalog.shared.normalizedSelection(provider: provider, model: model)
         let resolvedProvider = normalizedAI.provider
-        let resolvedModel = normalizedAI.model
+        var resolvedModel = normalizedAI.model
         var detectedProvider = StreamableAIProvider(rawValue: resolvedProvider) ?? StreamableAIProvider.detect(from: resolvedModel)
         
         // Safety guard: Prevent mismatched models (e.g. gpt-*, o1*, claude-*) from routing to Gemini endpoint
@@ -1128,13 +1139,30 @@ class AgentService: ObservableObject {
         lastProvider = detectedProvider.rawValue
         lastModel = resolvedModel
         
+        // Phase 2: SLM Router — route trivial tasks to local models
+        let routeDecision = SLMRouter.shared.route(
+            prompt: effectiveContent,
+            currentProvider: detectedProvider.rawValue,
+            currentModel: resolvedModel
+        )
+        if routeDecision.useLocal {
+            resolvedModel = routeDecision.suggestedModel
+            detectedProvider = .local
+            SLMRouter.shared.recordRouting(complexity: .simple, model: routeDecision.suggestedModel, estimatedSavings: routeDecision.estimatedCostCloud)
+            logActivity(.info, "SLM Router: \(routeDecision.reason)")
+        }
+        
         if !isChatMode {
             await MCPClient.shared.ensureConnected(workspacePath: toolBox.workspaceRoot)
         }
         
         // Always provide tools in AgentService so the agent can always execute actions
-        let toolSchemas = toolBox.toolSchemas()
-        let toolNames = toolSchemas.compactMap { $0["name"] as? String }
+        let allToolSchemas = toolBox.toolSchemas()
+        let toolNames = allToolSchemas.compactMap { $0["name"] as? String }
+        let slmComplexity = SLMRouter.shared.classifyTask(content)
+        let hasMobilePreview = content.lowercased().contains("preview") || content.lowercased().contains("mobile") || content.lowercased().contains("ui") || content.lowercased().contains("device") || content.lowercased().contains("simulator")
+        let currentDomain: AgentDomain? = activeScope == .science ? .science : nil
+        var currentToolScope = ToolScope.scopeFor(complexity: slmComplexity, domain: currentDomain, hasMobilePreview: hasMobilePreview)
         let kernelRunID = (!isChatMode && isContinuation ? activeKernelRunID : nil) ?? userMessage.id
         activeKernelRunID = isChatMode ? nil : kernelRunID
         if !isChatMode {
@@ -1214,25 +1242,47 @@ class AgentService: ObservableObject {
             var receivedToolCalls: [AIToolCall] = []
             var modelError: String?
             
-            // Use streaming for first iteration (user sees thinking), sync for subsequent
+            // Use streaming for ALL iterations to keep UI responsive
             if iteration == 1 {
                 currentToolExecution = "Analyzing request & planning..."
                 agentPhase = .thinking
-                
-                // Streaming mode — user sees tokens in real-time
+            } else {
+                currentToolExecution = "Evaluating tool outputs & determining next action..."
+                agentPhase = .thinking
+                // Compress iterative history dynamically so context never blows up
+                history = tokenOptimizer.compressIterativeToolHistory(history, budget: budget.maxHistoryTokens)
+            }
+            
+            // Pop the last user message to use as the prompt for the next stream
+            var nextPrompt = ""
+            if iteration == 1 {
+                nextPrompt = effectiveContent
+            } else {
+                if let last = history.last, last.role == "user" {
+                    nextPrompt = last.content
+                    history.removeLast()
+                }
+            }
+            
+            do {
                 let result = await withCheckedContinuation { (continuation: CheckedContinuation<(String, [AIToolCall], String?), Never>) in
                     var toolCalls: [AIToolCall] = []
-                    var text = ""
+                    var text = finalText.isEmpty ? "" : finalText + "\n\n"
+                    let prefixLength = text.count
                     
                     aiClient.sendMessage(
-                        prompt: effectiveContent,
-                        attachments: attachments,
+                        prompt: nextPrompt,
+                        attachments: iteration == 1 ? attachments : [],
                         systemPrompt: optimizedSystemPrompt,
                         conversationHistory: history,
                         provider: detectedProvider,
                         model: resolvedModel,
                         apiKey: apiKey,
-                        tools: toolSchemas,
+                        tools: allToolSchemas.filter { (tool: [String: Any]) -> Bool in
+                            guard let name = tool["name"] as? String else { return true }
+                            guard let tier = ToolScope.toolTierMap[name] else { return true }
+                            return currentToolScope.contains(tier)
+                        },
                         onToken: { token in
                             self.pushStreamingToken(token, currentFullText: &text, toolResults: allToolResults)
                         },
@@ -1241,130 +1291,43 @@ class AgentService: ObservableObject {
                         },
                         onComplete: { fullText in
                             self.flushStreamingToken(fullText, toolResults: allToolResults)
-                            continuation.resume(returning: (fullText, toolCalls, nil))
+                            let newText = String(fullText.dropFirst(prefixLength))
+                            continuation.resume(returning: (newText, toolCalls, nil))
                         },
                         onError: { error in
-                            self.flushStreamingToken("Error: \(error)", toolResults: allToolResults)
-                            continuation.resume(returning: ("Error: \(error)", [], String(describing: error)))
+                            self.flushStreamingToken(text + (text.isEmpty ? "" : "\n\n") + "⚠️ Error: \(error)", toolResults: allToolResults)
+                            continuation.resume(returning: ("", [], String(describing: error)))
                         }
                     )
                 }
+                
+                if let err = result.2 {
+                    throw NSError(domain: "Agent", code: -1, userInfo: [NSLocalizedDescriptionKey: err])
+                }
+                
                 streamedText = result.0
                 receivedToolCalls = result.1
-                modelError = result.2
-            } else {
-                // Non-streaming for tool result follow-ups
-                currentToolExecution = "Evaluating tool outputs & determining next action..."
-                agentPhase = .thinking
                 
-                // Compress iterative history dynamically so context never blows up
-                history = tokenOptimizer.compressIterativeToolHistory(history, budget: budget.maxHistoryTokens)
-                
-                do {
-                    // Build messages array with tool results
-                    let syncMessages = buildSyncMessages(history: history, lastText: finalText, toolResults: allToolResults)
-                    let result = try await aiClient.sendSync(
-                        messages: syncMessages,
-                        systemPrompt: optimizedSystemPrompt,
-                        provider: detectedProvider,
-                        model: resolvedModel,
-                        apiKey: apiKey,
-                        tools: toolSchemas
-                    )
-                    streamedText = result.text
-                    receivedToolCalls = result.toolCalls
-                    
-                    if !streamedText.isEmpty {
-                        if finalText.isEmpty {
-                            finalText = streamedText
-                        } else if !finalText.contains(streamedText) {
-                            let incomingLines = streamedText.components(separatedBy: .newlines)
-                            let newLines = incomingLines.filter { line in
-                                let trimmed = line.trimmingCharacters(in: .whitespacesAndNewlines)
-                                return !trimmed.isEmpty && !finalText.contains(trimmed)
-                            }
-                            if !newLines.isEmpty {
-                                finalText += "\n\n" + newLines.joined(separator: "\n")
-                            }
-                        }
+                if !streamedText.isEmpty {
+                    if finalText.isEmpty {
+                        finalText = streamedText
+                    } else if !finalText.contains(streamedText) {
+                        finalText += "\n\n" + streamedText
                     }
-                    
-                    updateStreamingMessage(finalText, toolResults: allToolResults)
-                } catch {
-                    let errStr = error.localizedDescription
-                    let lowerErr = errStr.lowercased()
-                    let isContextLimit = lowerErr.contains("context_length_exceeded")
-                        || lowerErr.contains("maximum context length")
-                        || lowerErr.contains("prompt is too long")
-                        || lowerErr.contains("token limit exceeded")
-                        || lowerErr.contains("context window")
-                        || lowerErr.contains("too many tokens")
-                    let isRateLimit = lowerErr.contains("rate limit") || lowerErr.contains("429") || lowerErr.contains("too many requests")
-                    let isTransient = isTransientAgentError(errStr)
-                    logActivity(.error, "Tool loop iteration \(iteration): \(errStr)")
-                    
-                    if isContextLimit {
-                        contextLimitReached = true
-                        let limitNotice = """
-                        ⚠️ **Conversation Context Limit Reached**
-                        The current session has reached the model's maximum context capacity (\(iteration) turns executed).
-                        To continue with optimal accuracy and performance, please start a new conversation.
-                        """
-                        terminationNotice = "Context limit reached"
-                        if !finalText.contains("Context Limit Reached") {
-                            finalText = finalText.isEmpty ? limitNotice : finalText + "\n\n" + limitNotice
-                        }
-                        updateStreamingMessage(finalText, toolResults: allToolResults)
-                        logActivity(.error, "Context window saturated. Prompting user to start a new chat.")
-                        break
-                    }
-                    
-                    let response = kernelOnline ? await agentKernel.observe(
-                        runID: kernelRunID,
-                        kind: "provider_error",
-                        success: false,
-                        error: errStr,
-                        transient: isTransient
-                    ) : nil
-                    
-                    let maxRetries = isRateLimit ? 8 : 5
-                    if response?.directive.action == "retry" || isTransient || isRateLimit || (!kernelOnline && kernelRecoveryCount < maxRetries) {
-                        if kernelRecoveryCount < maxRetries {
-                            kernelRecoveryCount += 1
-                            let backoffSec = isRateLimit ? min(3 * kernelRecoveryCount, 30) : min(kernelRecoveryCount * 2, 12)
-                            let delayMs = response?.directive.retryAfterMs ?? UInt64(backoffSec * 1000)
-                            
-                            // Clean user-facing notification in agent phase rather than dumping raw error into chat
-                            currentToolExecution = isRateLimit
-                                ? "Rate limit reached. Backing off... resuming in \(backoffSec)s (attempt \(kernelRecoveryCount)/\(maxRetries))"
-                                : "Connection interrupted. Retrying in \(delayMs / 1000)s (attempt \(kernelRecoveryCount)/\(maxRetries))..."
-                            agentPhase = .thinking
-                            
-                            logActivity(.info, "Model call throttled or interrupted; retrying in \(delayMs)ms (attempt \(kernelRecoveryCount)/\(maxRetries))")
-                            try? await Task.sleep(nanoseconds: delayMs * 1_000_000)
-                            history.append((role: "user", content: "Resume from the last completed checkpoint. Do not repeat completed actions."))
-                            continue
-                        }
-                    }
-                    
-                    terminationNotice = response?.directive.reason ?? "Execution stopped: \(errStr)"
-                    let userFriendlyNotice = isRateLimit 
-                        ? "⚠️ Rate limit reached for current model provider. Please wait a few moments, switch to another model/provider, or check API quota."
-                        : "⚠️ Execution error: \(errStr)"
-                    if finalText.isEmpty { finalText = userFriendlyNotice } else { finalText += "\n\n" + userFriendlyNotice }
-                    updateStreamingMessage(finalText, toolResults: allToolResults)
-                    break
                 }
-            }
-
-            if let modelError {
-                let lowerErr = modelError.lowercased()
+            } catch {
+                let errStr = error.localizedDescription
+                let lowerErr = errStr.lowercased()
                 let isContextLimit = lowerErr.contains("context_length_exceeded")
                     || lowerErr.contains("maximum context length")
                     || lowerErr.contains("prompt is too long")
                     || lowerErr.contains("token limit exceeded")
                     || lowerErr.contains("context window")
                     || lowerErr.contains("too many tokens")
+                let isRateLimit = lowerErr.contains("rate limit") || lowerErr.contains("429") || lowerErr.contains("too many requests")
+                let isTransient = isTransientAgentError(errStr)
+                logActivity(.error, "Tool loop iteration \(iteration): \(errStr)")
+                
                 if isContextLimit {
                     contextLimitReached = true
                     let limitNotice = """
@@ -1377,41 +1340,47 @@ class AgentService: ObservableObject {
                         finalText = finalText.isEmpty ? limitNotice : finalText + "\n\n" + limitNotice
                     }
                     updateStreamingMessage(finalText, toolResults: allToolResults)
+                    logActivity(.error, "Context window saturated. Prompting user to start a new chat.")
                     break
                 }
-
+                
                 let response = kernelOnline ? await agentKernel.observe(
                     runID: kernelRunID,
                     kind: "provider_error",
                     success: false,
-                    error: modelError,
-                    transient: isTransientAgentError(modelError)
+                    error: errStr,
+                    transient: isTransient
                 ) : nil
-                if response?.directive.action == "retry" || isTransientAgentError(modelError) || (!kernelOnline && kernelRecoveryCount < 6) {
-                    if kernelRecoveryCount < 6 {
+                
+                let maxRetries = isRateLimit ? 8 : 5
+                if response?.directive.action == "retry" || isTransient || isRateLimit || (!kernelOnline && kernelRecoveryCount < maxRetries) {
+                    if kernelRecoveryCount < maxRetries {
                         kernelRecoveryCount += 1
-                        let delay = response?.directive.retryAfterMs ?? min(UInt64(500 << min(kernelRecoveryCount - 1, 5)), 20_000)
-                        logActivity(.info, "Streaming interrupted; retrying from durable checkpoint in \(delay)ms (attempt \(kernelRecoveryCount)/6)")
-                        try? await Task.sleep(nanoseconds: delay * 1_000_000)
-                        history.append((role: "user", content: "The stream was interrupted. Resume from the last checkpoint without repeating completed work."))
-                        finalText = ""
+                        let backoffSec = isRateLimit ? min(3 * kernelRecoveryCount, 30) : min(kernelRecoveryCount * 2, 12)
+                        let delayMs = response?.directive.retryAfterMs ?? UInt64(backoffSec * 1000)
+                        
+                        currentToolExecution = isRateLimit
+                            ? "Rate limit reached. Backing off... resuming in \(backoffSec)s (attempt \(kernelRecoveryCount)/\(maxRetries))"
+                            : "Connection interrupted. Retrying in \(delayMs / 1000)s (attempt \(kernelRecoveryCount)/\(maxRetries))...."
+                        agentPhase = .thinking
+                        
+                        logActivity(.info, "Model call throttled or interrupted; retrying in \(delayMs)ms (attempt \(kernelRecoveryCount)/\(maxRetries))")
+                        try? await Task.sleep(nanoseconds: delayMs * 1_000_000)
+                        history.append((role: "user", content: "Resume from the last completed checkpoint. Do not repeat completed actions."))
                         continue
                     }
                 }
-                terminationNotice = response?.directive.reason ?? modelError
-                let userFriendlyNotice = "⚠️ \(modelError)"
-                if finalText.isEmpty {
-                    finalText = userFriendlyNotice
-                } else if !finalText.contains(modelError) {
-                    finalText += "\n\n" + userFriendlyNotice
-                }
+                
+                terminationNotice = response?.directive.reason ?? "Execution stopped: \(errStr)"
+                let userFriendlyNotice = isRateLimit 
+                    ? "⚠️ Rate limit reached for current model provider. Please wait a few moments, switch to another model/provider, or check API quota."
+                    : "⚠️ Execution error: \(errStr)"
+                if finalText.isEmpty { finalText = userFriendlyNotice } else { finalText += "\n\n" + userFriendlyNotice }
                 updateStreamingMessage(finalText, toolResults: allToolResults)
                 break
             }
-            
-            if iteration == 1 {
-                finalText = streamedText
-            }
+
+
             
             // If no native tool calls, try to parse text-based tool calls (for local LLMs)
             if receivedToolCalls.isEmpty {
@@ -1596,154 +1565,320 @@ class AgentService: ObservableObject {
             
             // Execute ALL tool calls in this batch
             var batchResults: [(name: String, output: String, success: Bool)] = []
-            var kernelFollowUp: String?
-            
             for toolCall in receivedToolCalls {
-                if isCancelled || Task.isCancelled { break }
-                let signature = toolCallSignature(toolCall)
-                if let completed = completedToolCalls[signature] {
-                    allToolResults.append(ToolResultModel(
-                        toolCallId: toolCall.id,
-                        toolName: toolCall.name,
-                        success: completed.success,
-                        output: completed.output,
-                        error: completed.success ? nil : completed.output
-                    ))
-                    batchResults.append((name: toolCall.name, output: completed.output, success: completed.success))
-                    logActivity(.info, "\(toolCall.name) reused cached result")
-                    continue
+                if let tier = ToolScope.toolTierMap[toolCall.name], !currentToolScope.contains(tier) {
+                    currentToolScope.insert(tier)
+                    logActivity(.info, "Tool scope expanded to include \(tier) tier")
                 }
-                currentToolExecution = humanFriendlyToolTitle(toolCall.name, args: toolCall.arguments)
-                agentPhase = .executing(toolCall.name)
-                logActivity(.tool, "\(toolCall.name)", detail: truncateArgs(toolCall.arguments))
+            }
+            var kernelFollowUp: String?
+            let readOnlyTools: Set<String> = ["file_read", "multi_file_read", "grep_search", "find_symbol", "list_directory_tree", "file_search", "get_diagnostics", "git_status", "git_diff", "git_log", "lsp_hover", "lsp_definition", "lsp_completions", "lsp_diagnostics", "lsp_status", "inspect_image", "extract_pdf"]
+            let allReadOnly = receivedToolCalls.allSatisfy { readOnlyTools.contains($0.name) }
+            
+            if allReadOnly && receivedToolCalls.count > 1 {
+                currentToolExecution = "Executing \(receivedToolCalls.count) read-only operations concurrently..."
+                agentPhase = .executing("concurrent_tools")
                 
-                // Capture old content for diff BEFORE execution
-                var oldContent: String? = nil
-                if (toolCall.name == "file_write" || toolCall.name == "replace_in_file"),
-                   let path = toolCall.arguments["path"] as? String {
-                    oldContent = try? String(contentsOfFile: path, encoding: .utf8)
+                let concurrentResults = await withTaskGroup(of: (AIToolCall, String, Bool).self) { group in
+                    for toolCall in receivedToolCalls {
+                        let signature = self.toolCallSignature(toolCall)
+                        if let cached = completedToolCalls[signature] {
+                            group.addTask { return (toolCall, cached.output, cached.success) }
+                            continue
+                        }
+                        
+                        group.addTask {
+                            await FlightRecorder.shared.recordToolCall(
+                                toolName: toolCall.name,
+                                arguments: self.truncateArgs(toolCall.arguments),
+                                workspace: self.currentWorkspace ?? ""
+                            )
+                            do {
+                                var output = try await self.toolBox.execute(toolCall.name, params: toolCall.arguments)
+                                output = await MainActor.run { self.tokenOptimizer.compressToolOutput(output, toolName: toolCall.name, budget: 2000) }
+                                return (toolCall, output, true)
+                            } catch {
+                                return (toolCall, error.localizedDescription, false)
+                            }
+                        }
+                    }
+                    var collected: [(AIToolCall, String, Bool)] = []
+                    for await res in group { collected.append(res) }
+                    return collected
                 }
                 
-                do {
-                    var output = try await toolBox.execute(toolCall.name, params: toolCall.arguments)
+                let orderedResults = receivedToolCalls.compactMap { call in 
+                    concurrentResults.first(where: { $0.0.id == call.id })
+                }
+                
+                for (toolCall, output, success) in orderedResults {
+                    if isCancelled || Task.isCancelled { break }
+                    let signature = toolCallSignature(toolCall)
+                    let wasCached = completedToolCalls[signature] != nil
                     
-                    // Compress tool output to save tokens
-                    output = tokenOptimizer.compressToolOutput(output, toolName: toolCall.name, budget: 2000)
+                    if !wasCached {
+                        if success {
+                            if shouldCacheToolResult(toolCall.name) {
+                                completedToolCalls[signature] = (output, true)
+                            }
+                            logActivity(.success, "\(toolCall.name) ✓", detail: truncateArgs(toolCall.arguments), output: String(output.prefix(3000)))
+                            
+                            if kernelOnline {
+                                let kernelResponse = await agentKernel.observe(
+                                    runID: kernelRunID,
+                                    kind: "tool_result",
+                                    toolName: toolCall.name,
+                                    arguments: toolCall.arguments,
+                                    success: true,
+                                    output: output,
+                                    madeProgress: toolMadeProgress(toolCall.name)
+                                )
+                                if let directive = kernelResponse?.directive, directive.action == "replan" || directive.action == "retry" {
+                                    kernelFollowUp = directive.suggestedPrompt ?? directive.reason
+                                }
+                            }
+                        } else {
+                            logActivity(.error, "\(toolCall.name) failed: \(output)", detail: truncateArgs(toolCall.arguments), output: output)
+                            
+                            if kernelOnline {
+                                let kernelResponse = await agentKernel.observe(
+                                    runID: kernelRunID,
+                                    kind: "tool_result",
+                                    toolName: toolCall.name,
+                                    arguments: toolCall.arguments,
+                                    success: false,
+                                    error: output,
+                                    transient: isTransientAgentError(output)
+                                )
+                                if let directive = kernelResponse?.directive, directive.action == "replan" || directive.action == "retry" || directive.action == "blocked" {
+                                    kernelFollowUp = directive.suggestedPrompt ?? directive.reason
+                                }
+                            }
+                        }
+                    } else {
+                        logActivity(.info, "\(toolCall.name) reused cached result")
+                    }
                     
                     allToolResults.append(ToolResultModel(
                         toolCallId: toolCall.id,
                         toolName: toolCall.name,
                         toolParams: toolCall.arguments,
-                        success: true,
-                        output: output,
-                        error: nil
+                        success: success,
+                        output: success ? output : "",
+                        error: success ? nil : output
                     ))
-                    
-                    batchResults.append((name: toolCall.name, output: output, success: true))
-                    // Only memoize read-only inspections.  A build/test/run
-                    // result is invalid as soon as source changes, and caching
-                    // a failed build was causing the agent to report stale
-                    // output instead of rebuilding after its fix.
-                    if shouldCacheToolResult(toolCall.name) {
-                        completedToolCalls[signature] = (output, true)
-                    }
-                    logActivity(.success, "\(toolCall.name) ✓")
-                    if kernelOnline {
-                        let kernelResponse = await agentKernel.observe(
-                            runID: kernelRunID,
-                            kind: "tool_result",
+                    batchResults.append((name: toolCall.name, output: output, success: success))
+                }
+                currentToolExecution = nil
+            } else {
+                for toolCall in receivedToolCalls {
+                    if isCancelled || Task.isCancelled { break }
+                    let signature = toolCallSignature(toolCall)
+                    if let completed = completedToolCalls[signature] {
+                        allToolResults.append(ToolResultModel(
+                            toolCallId: toolCall.id,
                             toolName: toolCall.name,
-                            arguments: toolCall.arguments,
+                            success: completed.success,
+                            output: completed.output,
+                            error: completed.success ? nil : completed.output
+                        ))
+                        batchResults.append((name: toolCall.name, output: completed.output, success: completed.success))
+                        logActivity(.info, "\(toolCall.name) reused cached result")
+                        continue
+                    }
+                    currentToolExecution = humanFriendlyToolTitle(toolCall.name, args: toolCall.arguments)
+                    agentPhase = .executing(toolCall.name)
+                    logActivity(.tool, "\(toolCall.name)", detail: truncateArgs(toolCall.arguments))
+                    
+                    // P2: Record tool call in Flight Recorder audit trail
+                    FlightRecorder.shared.recordToolCall(
+                        toolName: toolCall.name,
+                        arguments: truncateArgs(toolCall.arguments),
+                        workspace: currentWorkspace ?? ""
+                    )
+                    
+                    // Capture old content for diff BEFORE execution
+                    var oldContent: String? = nil
+                    if (toolCall.name == "file_write" || toolCall.name == "replace_in_file"),
+                       let path = toolCall.arguments["path"] as? String {
+                        oldContent = try? String(contentsOfFile: path, encoding: .utf8)
+                    }
+                    
+                    do {
+                        var output = try await toolBox.execute(toolCall.name, params: toolCall.arguments)
+                        
+                        // Phase 3: LSP Deep Integration — Instant Compiler Diagnostics Feedback Loop
+                        if toolCall.name == "file_write" || toolCall.name == "replace_in_file" || toolCall.name == "patch_file" {
+                            if let path = toolCall.arguments["path"] as? String {
+                                let lang = languageForFile(path)
+                                if LSPManager.shared.isAvailable(for: lang) {
+                                    let fileURL = URL(fileURLWithPath: path)
+                                    let fileURI = fileURL.absoluteString
+                                    if let newContent = try? String(contentsOfFile: path, encoding: .utf8) {
+                                        await ensureDocumentOpen(path: path, language: lang)
+                                        await LSPManager.shared.documentChanged(uri: fileURI, language: lang, content: newContent)
+                                        // Brief wait for LSP server to analyze changes and generate diagnostics
+                                        try? await Task.sleep(nanoseconds: 200_000_000)
+                                        let errors = (LSPManager.shared.fileDiagnostics[fileURI] ?? []).filter { $0.severity == 1 }
+                                        if !errors.isEmpty {
+                                            let errorDetails = errors.prefix(5).map { "  ❌ Line \($0.range.start.line + 1): \($0.message)" }.joined(separator: "\n")
+                                            output += "\n\n⚠️ [LSP Compiler Diagnostics Warning]: Compiler/syntax errors detected in \(fileURL.lastPathComponent) after this edit:\n\(errorDetails)\nPlease fix these compilation errors in your next step."
+                                            logActivity(.info, "LSP: \(errors.count) compiler error(s) in \(fileURL.lastPathComponent)", detail: errorDetails)
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                        
+                        // Compress tool output to save tokens
+                        output = tokenOptimizer.compressToolOutput(output, toolName: toolCall.name, budget: 2000)
+                        
+                        allToolResults.append(ToolResultModel(
+                            toolCallId: toolCall.id,
+                            toolName: toolCall.name,
+                            toolParams: toolCall.arguments,
                             success: true,
                             output: output,
-                            madeProgress: toolMadeProgress(toolCall.name)
-                        )
-                        if let directive = kernelResponse?.directive,
-                           directive.action == "replan" || directive.action == "retry" {
-                            kernelFollowUp = directive.suggestedPrompt ?? directive.reason
+                            error: nil
+                        ))
+                        
+                        batchResults.append((name: toolCall.name, output: output, success: true))
+                        // Only memoize read-only inspections.  A build/test/run
+                        // result is invalid as soon as source changes, and caching
+                        // a failed build was causing the agent to report stale
+                        // output instead of rebuilding after its fix.
+                        if shouldCacheToolResult(toolCall.name) {
+                            completedToolCalls[signature] = (output, true)
                         }
-                    }
-                    
-                    // Track file changes with diff
-                    if toolCallMutatesWorkspace(toolCall) {
-                        // Source changes invalidate every prior inspection and
-                        // verification result.  In particular, a subsequent
-                        // build must execute in Terminal again, never replay a
-                        // previous failure from this run.
-                        completedToolCalls.removeAll()
-                    }
+                        logActivity(.success, "\(toolCall.name) ✓", detail: truncateArgs(toolCall.arguments), output: String(output.prefix(3000)))
+                        if kernelOnline {
+                            let kernelResponse = await agentKernel.observe(
+                                runID: kernelRunID,
+                                kind: "tool_result",
+                                toolName: toolCall.name,
+                                arguments: toolCall.arguments,
+                                success: true,
+                                output: output,
+                                madeProgress: toolMadeProgress(toolCall.name)
+                            )
+                            if let directive = kernelResponse?.directive,
+                               directive.action == "replan" || directive.action == "retry" {
+                                kernelFollowUp = directive.suggestedPrompt ?? directive.reason
+                            }
+                        }
+                        
+                        // Track file changes with diff
+                        if toolCallMutatesWorkspace(toolCall) {
+                            // Source changes invalidate every prior inspection and
+                            // verification result.  In particular, a subsequent
+                            // build must execute in Terminal again, never replay a
+                            // previous failure from this run.
+                            completedToolCalls.removeAll()
+                        }
 
-                    if toolCall.name == "file_write" || toolCall.name == "replace_in_file" || toolCall.name == "patch_file" {
-                        if let path = toolCall.arguments["path"] as? String {
-                            filesModified.append(path)
-                            
-                            // Read new content for diff
-                            let newContent = (try? String(contentsOfFile: path, encoding: .utf8)) ?? ""
-                            let old = oldContent ?? ""
-                            
-                            // Compute additions/deletions
-                            let oldLines = old.components(separatedBy: "\n")
-                            let newLines = newContent.components(separatedBy: "\n")
-                            let additions = max(0, newLines.count - oldLines.count)
-                            let deletions = max(0, oldLines.count - newLines.count)
-                            
-                            logActivity(.fileChange, "Modified: \(URL(fileURLWithPath: path).lastPathComponent) (+\(additions) -\(deletions))")
-                            
-                            // Create diff session for inline review
-                            let diffResult = diffEngine.computeDiff(old: old, new: newContent)
-                            
-                            allChanges.append(PendingChangeModel(
-                                id: UUID().uuidString,
-                                filePath: path,
-                                description: "Modified by \(toolCall.name)",
-                                additions: additions, deletions: deletions,
-                                oldContent: old, newContent: newContent,
-                                status: diffResult.hunks.isEmpty ? .accepted : .pending
-                            ))
-                            
-                            // Hot-reload task/agent context if AI updated them autonomously
-                            if path.hasSuffix("task.md") || path.hasSuffix("agent.md") {
-                                Task { @MainActor in self.reloadAgentWorkspaceFiles() }
+                        if toolCall.name == "file_write" || toolCall.name == "replace_in_file" || toolCall.name == "patch_file" {
+                            if let path = toolCall.arguments["path"] as? String {
+                                filesModified.append(path)
+                                
+                                // P2: Record file change in Flight Recorder
+                                let action: AuditAction = oldContent == nil ? .fileCreate : .fileModify
+                                FlightRecorder.shared.recordFileChange(
+                                    action: action,
+                                    filePath: path,
+                                    description: "\(toolCall.name): \(toolCall.arguments["description"] as? String ?? "modified")",
+                                    workspace: currentWorkspace ?? ""
+                                )
+                                
+                                // Read new content for diff
+                                let newContent = (try? String(contentsOfFile: path, encoding: .utf8)) ?? ""
+                                let old = oldContent ?? ""
+                                
+                                // Compute additions/deletions
+                                let oldLines = old.components(separatedBy: "\n")
+                                let newLines = newContent.components(separatedBy: "\n")
+                                let additions = max(0, newLines.count - oldLines.count)
+                                let deletions = max(0, oldLines.count - newLines.count)
+                                
+                                // Create diff session for inline review
+                                let diffResult = diffEngine.computeDiff(old: old, new: newContent)
+                                
+                                logActivity(.fileChange, "Modified: \(URL(fileURLWithPath: path).lastPathComponent) (+\(additions) -\(deletions))", detail: path, output: diffResult.hunks.isEmpty ? nil : "Hunks modified: \(diffResult.hunks.count)")
+                                
+                                allChanges.append(PendingChangeModel(
+                                    id: UUID().uuidString,
+                                    filePath: path,
+                                    description: "Modified by \(toolCall.name)",
+                                    additions: additions, deletions: deletions,
+                                    oldContent: old, newContent: newContent,
+                                    status: diffResult.hunks.isEmpty ? .accepted : .pending
+                                ))
+                                
+                                // Hot-reload task/agent context if AI updated them autonomously
+                                if path.hasSuffix("task.md") || path.hasSuffix("agent.md") {
+                                    Task { @MainActor in self.reloadAgentWorkspaceFiles() }
+                                }
+                            }
+                        }
+                        
+                    } catch {
+                        allToolResults.append(ToolResultModel(
+                            toolCallId: toolCall.id,
+                            toolName: toolCall.name,
+                            toolParams: toolCall.arguments,
+                            success: false,
+                            output: "",
+                            error: error.localizedDescription
+                        ))
+                        
+                        batchResults.append((name: toolCall.name, output: error.localizedDescription, success: false))
+                        // Failed commands must remain retryable after a repair or
+                        // a transient environment recovery.  Do not cache them.
+                        logActivity(.error, "\(toolCall.name) failed: \(error.localizedDescription)", detail: truncateArgs(toolCall.arguments), output: error.localizedDescription)
+                        if kernelOnline {
+                            let kernelResponse = await agentKernel.observe(
+                                runID: kernelRunID,
+                                kind: "tool_result",
+                                toolName: toolCall.name,
+                                arguments: toolCall.arguments,
+                                success: false,
+                                error: error.localizedDescription,
+                                transient: isTransientAgentError(error.localizedDescription)
+                            )
+                            if let directive = kernelResponse?.directive,
+                               directive.action == "replan" || directive.action == "retry" || directive.action == "blocked" {
+                                kernelFollowUp = directive.suggestedPrompt ?? directive.reason
                             }
                         }
                     }
                     
-                } catch {
-                    allToolResults.append(ToolResultModel(
-                        toolCallId: toolCall.id,
-                        toolName: toolCall.name,
-                        toolParams: toolCall.arguments,
-                        success: false,
-                        output: "",
-                        error: error.localizedDescription
-                    ))
-                    
-                    batchResults.append((name: toolCall.name, output: error.localizedDescription, success: false))
-                    // Failed commands must remain retryable after a repair or
-                    // a transient environment recovery.  Do not cache them.
-                    logActivity(.error, "\(toolCall.name) failed: \(error.localizedDescription)")
-                    if kernelOnline {
-                        let kernelResponse = await agentKernel.observe(
-                            runID: kernelRunID,
-                            kind: "tool_result",
-                            toolName: toolCall.name,
-                            arguments: toolCall.arguments,
-                            success: false,
-                            error: error.localizedDescription,
-                            transient: isTransientAgentError(error.localizedDescription)
-                        )
-                        if let directive = kernelResponse?.directive,
-                           directive.action == "replan" || directive.action == "retry" || directive.action == "blocked" {
-                            kernelFollowUp = directive.suggestedPrompt ?? directive.reason
-                        }
-                    }
+                    currentToolExecution = nil
                 }
-                
-                currentToolExecution = nil
             }
             
             // Add assistant message ONCE per iteration (not per tool call)
             history.append((role: "assistant", content: streamedText))
+            
+            if AppState.shared?.consensusEnabled == true && allChanges.count >= (AppState.shared?.consensusThreshold ?? 2) {
+                let sandboxChanges = allChanges.map { change in
+                    SandboxFileChange(
+                        filePath: change.filePath,
+                        changeType: change.oldContent.isEmpty ? .create : .modify,
+                        oldContent: change.oldContent,
+                        newContent: change.newContent
+                    )
+                }
+                let auditResult = await ConsensusOrchestrator.shared.evaluate(
+                    changes: sandboxChanges,
+                    originalRequest: content,
+                    workspaceRoot: currentWorkspace ?? "",
+                    provider: provider,
+                    model: model,
+                    apiKey: apiKey
+                )
+                if auditResult.verdict == .rejected {
+                    batchResults.append((name: "consensus_audit", output: "REJECTED: \(auditResult.summary)", success: false))
+                }
+            }
             
             // Aggregate all tool results into ONE follow-up message
             let resultsText = batchResults.map { r in
@@ -2201,11 +2336,19 @@ class AgentService: ObservableObject {
         let projectURL = URL(fileURLWithPath: workspace, isDirectory: true)
         let projectType = ProjectManager.shared.detectProjectType(at: projectURL)
         
-        let hasConnectedMobileDevices = !DeviceRuntimeService.shared.devices.isEmpty
+        // Check for Web indicators (HTML, Vite, Next, React, Vue, Svelte, package.json)
+        let fm = FileManager.default
+        let isWebProject = fm.fileExists(atPath: projectURL.appendingPathComponent("package.json").path) ||
+            fm.fileExists(atPath: projectURL.appendingPathComponent("index.html").path) ||
+            fm.fileExists(atPath: projectURL.appendingPathComponent("vite.config.ts").path) ||
+            fm.fileExists(atPath: projectURL.appendingPathComponent("vite.config.js").path) ||
+            fm.fileExists(atPath: projectURL.appendingPathComponent("next.config.js").path) ||
+            fm.fileExists(atPath: projectURL.appendingPathComponent("next.config.mjs").path)
+        
         let isMobileProject = projectType == .android || projectType == .flutter
         
-        // If mobile project or has connected mobile simulator/device, use device_runtime
-        if isMobileProject || hasConnectedMobileDevices {
+        // 1. If mobile project AND has connected mobile devices, use device_runtime
+        if isMobileProject && !DeviceRuntimeService.shared.devices.isEmpty {
             return AIToolCall(
                 id: UUID().uuidString,
                 name: "device_runtime",
@@ -2213,7 +2356,7 @@ class AgentService: ObservableObject {
             )
         }
         
-        // For Xcode macOS projects, CLI, Swift, Rust, Node, Python, etc., use projectAction(.run) or .build
+        // 2. For WebApp projects, prioritize projectAction (.run) which starts dev server or open web preview
         if let runAction = projectAction(.run) {
             return runAction
         }
@@ -2221,11 +2364,15 @@ class AgentService: ObservableObject {
             return buildAction
         }
         
-        return AIToolCall(
-            id: UUID().uuidString,
-            name: "device_runtime",
-            arguments: ["operation": "run", "workspace": workspace]
-        )
+        if isWebProject {
+            return AIToolCall(
+                id: UUID().uuidString,
+                name: "preview_control",
+                arguments: ["action": "open", "mode": "web", "url": "http://localhost:5173"]
+            )
+        }
+        
+        return nil
     }
 
     private func isMutationTool(_ toolName: String) -> Bool {
@@ -2813,13 +2960,13 @@ class AgentService: ObservableObject {
     
     // MARK: - Activity Logging
     
-    func logActivity(_ type: AgentActivity.ActivityType, _ message: String, detail: String? = nil) {
-        let activity = AgentActivity(type: type, message: message, detail: detail, timestamp: Date())
+    func logActivity(_ type: AgentActivity.ActivityType, _ message: String, detail: String? = nil, output: String? = nil) {
+        let activity = AgentActivity(type: type, message: message, detail: detail, output: output, timestamp: Date())
         let update = { [weak self] in
             guard let self = self else { return }
             self.activityLog.append(activity)
-            if self.activityLog.count > 100 {
-                self.activityLog.removeFirst(self.activityLog.count - 100)
+            if self.activityLog.count > 1000 {
+                self.activityLog.removeFirst(self.activityLog.count - 1000)
             }
         }
         if Thread.isMainThread {
@@ -2827,6 +2974,14 @@ class AgentService: ObservableObject {
         } else {
             DispatchQueue.main.async(execute: update)
         }
+        
+        // Also persist to system report log for durable auditing
+        let logMsg = "Agent [\(type)]: \(message)\(detail != nil ? " - " + detail! : "")"
+        ReportLogManager.shared.log(logMsg, type: type == .error ? .error : .info)
+    }
+    
+    func clearActivityLog() {
+        activityLog.removeAll()
     }
     
     private func truncateArgs(_ args: [String: Any]) -> String {
@@ -2956,16 +3111,24 @@ class AgentService: ObservableObject {
     }
 }
 
-// MARK: - Agent Activity Model
-
-struct AgentActivity: Identifiable {
-    let id = UUID()
+struct AgentActivity: Identifiable, Equatable {
+    let id: UUID
     let type: ActivityType
     let message: String
     let detail: String?
+    let output: String?
     let timestamp: Date
     
-    enum ActivityType: Equatable {
+    init(id: UUID = UUID(), type: ActivityType, message: String, detail: String? = nil, output: String? = nil, timestamp: Date = Date()) {
+        self.id = id
+        self.type = type
+        self.message = message
+        self.detail = detail
+        self.output = output
+        self.timestamp = timestamp
+    }
+    
+    enum ActivityType: String, Equatable, CaseIterable {
         case thinking, tool, success, error, fileChange, info, done
         
         var icon: String {
@@ -2982,13 +3145,13 @@ struct AgentActivity: Identifiable {
         
         var color: Color {
             switch self {
-            case .thinking: return .purple
-            case .tool: return .blue
-            case .success: return .green
-            case .error: return .red
-            case .fileChange: return .orange
+            case .thinking: return Color(red: 0.68, green: 0.64, blue: 0.82)
+            case .tool: return Color(red: 0.50, green: 0.68, blue: 0.85)
+            case .success: return Color(red: 0.42, green: 0.78, blue: 0.56)
+            case .error: return Color(red: 0.90, green: 0.44, blue: 0.44)
+            case .fileChange: return Color(red: 0.88, green: 0.68, blue: 0.40)
             case .info: return .secondary
-            case .done: return .green
+            case .done: return Color(red: 0.42, green: 0.78, blue: 0.56)
             }
         }
     }
