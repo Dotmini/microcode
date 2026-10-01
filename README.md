@@ -108,6 +108,40 @@ MicroCode features a multi-modal workspace architecture where each mode is engin
   - MicroCode enforces **Formal Implementation Plans**: the agent first reasons through the problem, maps dependencies via the AST RepoMap, and presents a phased plan. Destructive tool invocations (file overwrites, command executions, git operations) are halted at the **`⌘↵` Tool Approval Barrier** until explicitly confirmed by the developer.
   - Direct connection to 7 leading AI providers (Google Gemini 3.1/2.5, Anthropic Claude Opus 4.7/Sonnet 4, OpenAI GPT-5/o3, DeepSeek V4, xAI Grok, Alibaba Qwen, Zhipu GLM) with zero third-party proxy markup or latency penalties.
 
+```mermaid
+flowchart LR
+    %% Deterministic Agent Execution Flow
+    Task(["🎯 <b>User Task Request</b><br/>Multi-Turn Objective"])
+    Plan["📋 <b>Implementation Plan</b><br/>AST Tree-sitter & RepoMap"]
+    Gate{"🔐 <b>⌘↵ Human Approval</b><br/>Review Destructive Ops"}
+    Exec["⚡ <b>Sandboxed Execution</b><br/>File Edit • Shell • Git"]
+    Verify{"🧪 <b>Automated Verification</b><br/>Build • Tests • Lints"}
+    SelfHeal["🔄 <b>Self-Healing Loop</b><br/>Root Cause Diagnosis"]
+    Done(["✅ <b>Verified Complete</b><br/>Clean Working Tree"])
+
+    Task --> Plan
+    Plan --> Gate
+    Gate -- "Approved (⌘↵)" --> Exec
+    Gate -- "Reject / Refine" --> Plan
+    Exec --> Verify
+    Verify -- "Pass" --> Done
+    Verify -- "Fail" --> SelfHeal
+    SelfHeal --> Exec
+
+    classDef step fill:#0f172a,stroke:#38bdf8,stroke-width:1.5px,color:#f8fafc;
+    classDef gate fill:#312e81,stroke:#a855f7,stroke-width:2px,color:#ffffff;
+    classDef action fill:#18181b,stroke:#f97316,stroke-width:1.5px,color:#f8fafc;
+    classDef success fill:#064e3b,stroke:#10b981,stroke-width:1.5px,color:#f8fafc;
+    classDef loop fill:#451a03,stroke:#f59e0b,stroke-width:1.5px,color:#f8fafc;
+
+    class Task,Plan step;
+    class Gate gate;
+    class Exec action;
+    class Verify gate;
+    class SelfHeal loop;
+    class Done success;
+```
+
 #### 3. Embedded Device Dock Mode (`EmbeddedDeviceDockView`)
 - **Purpose**: Unified mobile and desktop application simulation, interactive touch testing, and viewport inspection directly within an editor tab.
 - **Why It Outperforms Competitors**:
@@ -233,52 +267,110 @@ High-performance compute offloading when local hardware isn't enough:
 ## Architecture
 
 ```mermaid
-flowchart TD
-    subgraph App["MicroCode.app (Native macOS)"]
+flowchart TB
+    %% ==========================================
+    %% MicroCode High-Performance Architecture
+    %% ==========================================
+
+    subgraph Client [" 🖥️ Native macOS Client Layer (Swift 5.9 • AppKit • Metal 120 FPS) "]
+        direction LR
+        subgraph UI [" 🎨 Presentation & Studios "]
+            Editor["<b>Native Code Editor</b><br/>AppKit NSTextView • Kinetic"]
+            Planning["<b>AI Agent Workboard</b><br/>Interactive Plan & Tool Approval"]
+            Studios["<b>Developer Studios</b><br/>DB • API • Cell Mode • REPL"]
+        end
+
+        subgraph MetalEngine [" ⚡ Metal GPU Pipeline "]
+            MetalShader["<b>Metal Render Engine</b><br/>Direct GPU Text Rasterization"]
+            DeviceDock["<b>Live Device Dock</b><br/>Interactive H.264 & ADB Bezels"]
+            LiquidGlass["<b>Liquid Glass UI</b><br/>Native macOS Vibrant Materials"]
+        end
+
+        subgraph ObjCCore [" 🧩 Objective-C++ Engine "]
+            TextBuffer["<b>High-Speed Gap Buffer</b><br/>Zero-Cost Buffer Mutations"]
+            TokenLayout["<b>Token Layout Primitives</b><br/>Native C Memory Structures"]
+        end
+    end
+
+    Bridge(["⚡ <b>MicroCode Kernel Bridge</b> — Low-Latency C ABI • Unix Domain Sockets • Zero-Copy Pipes"])
+
+    subgraph RustCore [" 🦀 Embedded Core Engine (Rust Tokio • Axum Microservice) "]
         direction TB
-        subgraph UIComponents["SwiftUI + AppKit UI"]
-            Tabs["Code Editor Tabs"]
-            Planning["AI Planning Workboard"]
-            Studios["Developer Studios (DB, API, CI/CD, Cell)"]
+        subgraph AIService [" 🧠 Autonomous AI & Protocol Engine "]
+            AgentEngine["<b>Autonomous Agent Loop</b><br/>Multi-Turn Self-Healing Engine"]
+            ModelCatalog["<b>Dynamic Model Discovery</b><br/>Real-Time Provider Discovery"]
+            MCPCore["<b>MCP Protocol Manager</b><br/>Anthropic Model Context Protocol"]
         end
 
-        subgraph MetalEngine["Metal Shader Engine"]
-            DeviceDock["120 FPS Device Dock"]
-            GPUText["GPU Text Rendering"]
-            LiquidGlass["Liquid Glass UI"]
+        subgraph CodeIntel [" 🔍 Semantic Intelligence & Indexing "]
+            TreeSitter["<b>Tree-sitter AST Engine</b><br/>Incremental Parsing • 30+ Languages"]
+            CandleVector["<b>Candle ML Vector Store</b><br/>On-Device Semantic RAG Indexing"]
+            CRDTCore["<b>CRDT Realtime Sync</b><br/>Decentralized P2P Collaborative Editing"]
         end
 
-        subgraph ObjCCore["Objective-C++ Core"]
-            TextBuffer["Text Buffer"]
-            TokenLayout["Token Layout"]
-            MemPrimitives["Memory Primitives"]
+        subgraph SystemSec [" 🛡️ Systems, Sandbox & Toolchains "]
+            SandboxCore["<b>Workspace Sandbox Boundary</b><br/>Path Traversal & Safe Command Gate"]
+            PTYTerminal["<b>PTY Terminal Harness</b><br/>24-Bit ANSI TrueColor Virtual Terminal"]
+            WasmHost["<b>Wasmtime & VSX Host</b><br/>Sandboxed Extensions & Runtime Isolation"]
         end
-
-        subgraph RustBackend["Rust Backend (Axum + Tokio)"]
-            AIProviders["AI Multi-Provider (Gemini, Claude, GPT)"]
-            AgentEngine["Autonomous Agent & Planning Engine"]
-            TreeSitter["Tree-sitter Indexer & RepoMap"]
-            MCPManager["MCP Client / Server Protocol Manager"]
-            CRDTSync["CRDT Realtime Sync Engine (P2P Collab)"]
-            CandleML["Candle ML RAG Vector Store"]
-            GitEngine["Git Engine & Sandbox Boundary"]
-            PTYTerminal["PTY Terminal Harness (ANSI TrueColor)"]
-            WasmtimeSandbox["Wasmtime Sandbox Extension Host"]
-        end
-
-        UIComponents -->|"C ABI / Unix Socket / HTTP"| RustBackend
-        MetalEngine -->|"C ABI / Unix Socket / HTTP"| RustBackend
-        ObjCCore -->|"C ABI / Unix Socket / HTTP"| RustBackend
     end
 
-    subgraph External["External Subsystem Integration"]
-        DeviceStream["Embedded Device Stream (scrcpy ADB / serve-sim iOS)"]
-        OpenVSX["Open VSX & Node.js Extension Compat Host"]
-        ArdiumToolchain["Native Ardium v2.3 Compiler & Playground Runner"]
-        CloudGPU["Dotmini Cloud GPU Cluster Dispatch (A100/H100)"]
+    subgraph External [" 🌐 Multi-Provider AI & External Compute Ecosystem "]
+        direction LR
+        subgraph CloudAI [" ☁️ Real-Time Cloud AI (BYOK) "]
+            CloudModels["<b>Tier-1 AI Providers</b><br/>Gemini • OpenAI • Claude • Grok • DeepSeek"]
+        end
+
+        subgraph LocalAI [" 🏠 Local Sovereign AI "]
+            LocalModels["<b>On-Device LLM Runtimes</b><br/>Apple MLX • Ollama (11434) • Dotmini Omni"]
+        end
+
+        subgraph Hardware [" 📱 Live Hardware Streams "]
+            Devices["<b>Embedded Mobile Simulators</b><br/>Android ADB scrcpy • iOS Simulator"]
+        end
+
+        subgraph HeavyCompute [" 🚀 High-Compute & Language "]
+            CloudGPU["<b>Dotmini Cloud GPU</b><br/>NVIDIA A100 / H100 Remote Cluster Dispatch"]
+            ArdiumLang["<b>Ardium v2.3 Native</b><br/>Compiler, AST & CoreUI Engine"]
+        end
     end
 
-    RustBackend --> External
+    %% Wiring
+    UI --> Bridge
+    MetalEngine --> Bridge
+    ObjCCore --> Bridge
+
+    Bridge <===> RustCore
+
+    AIService <===> CloudAI
+    AIService <===> LocalAI
+    SystemSec <===> Hardware
+    RustCore <===> HeavyCompute
+
+    %% Styles & Colors
+    classDef clientCard fill:#0f172a,stroke:#38bdf8,stroke-width:1.5px,color:#f8fafc;
+    classDef metalCard fill:#18181b,stroke:#f43f5e,stroke-width:1.5px,color:#f8fafc;
+    classDef objcCard fill:#1c1917,stroke:#fb923c,stroke-width:1.5px,color:#f8fafc;
+    classDef bridgeNode fill:#312e81,stroke:#a855f7,stroke-width:2px,color:#ffffff;
+    classDef aiCard fill:#022c22,stroke:#10b981,stroke-width:1.5px,color:#f8fafc;
+    classDef intelCard fill:#1e1b4b,stroke:#818cf8,stroke-width:1.5px,color:#f8fafc;
+    classDef secCard fill:#2e1065,stroke:#c084fc,stroke-width:1.5px,color:#f8fafc;
+    classDef extCloud fill:#082f49,stroke:#0ea5e9,stroke-width:1.5px,color:#f8fafc;
+    classDef extLocal fill:#064e3b,stroke:#34d399,stroke-width:1.5px,color:#f8fafc;
+    classDef extDev fill:#451a03,stroke:#f59e0b,stroke-width:1.5px,color:#f8fafc;
+    classDef extComp fill:#3b0764,stroke:#e879f9,stroke-width:1.5px,color:#f8fafc;
+
+    class Editor,Planning,Studios clientCard;
+    class MetalShader,DeviceDock,LiquidGlass metalCard;
+    class TextBuffer,TokenLayout objcCard;
+    class Bridge bridgeNode;
+    class AgentEngine,ModelCatalog,MCPCore aiCard;
+    class TreeSitter,CandleVector,CRDTCore intelCard;
+    class SandboxCore,PTYTerminal,WasmHost secCard;
+    class CloudModels extCloud;
+    class LocalModels extLocal;
+    class Devices extDev;
+    class CloudGPU,ArdiumLang extComp;
 ```
 
 ### Tech Stack
