@@ -2,11 +2,14 @@
 //  AgentConnectionsView.swift
 //  MicroCode
 //
-//  Frictionless, 1-Click Agent Connections & Setup Wizard.
-//  Inspired by Workser's zero-friction agent onboarding with embedded terminal,
-//  1-click install/login runners, and live subscription verification.
+//  Created and Designed by Dotmini Software
+//  Founder & CEO: Tirawat Nantamas
+//  Copyright © 2025-2026 Dotmini Software. All rights reserved.
 //
-//  Copyright © 2026 Dotmini Company Limited. All rights reserved.
+//  Description:
+//  Frictionless, 1-Click Agent Connections & Setup Wizard.
+//  Zero-friction agent onboarding with embedded terminal, 1-click install/login runners,
+//  and live subscription / local ecosystem verification.
 //
 
 import SwiftUI
@@ -1098,7 +1101,7 @@ public struct AgentSetupWizardView: View {
         case .agy:
             if let _ = acpHost.quickConnect(.agy, effort: effortParam) {
                 appState.aiProvider = "agy"
-                let targetModel = selectedModel == "Agent default" ? (discovery.models(for: "agy").first?.id ?? "gemini-3.8-flash-high") : selectedModel
+                let targetModel = selectedModel == "Agent default" ? (discovery.models(for: "agy").first?.id ?? "gemini-2.0-flash") : selectedModel
                 appState.aiModel = targetModel
                 appState.saveSettings()
                 onConnected()
@@ -1131,7 +1134,7 @@ public struct AgentSetupWizardView: View {
         case .codex:
             if let _ = acpHost.quickConnect(.codexEngine, effort: effortParam) {
                 appState.aiProvider = "codex"
-                let targetModel = selectedModel == "Agent default" ? (discovery.models(for: "codex").first?.id ?? "gpt-6-astra") : selectedModel
+                let targetModel = selectedModel == "Agent default" ? (discovery.models(for: "codex").first?.id ?? "gpt-4o") : selectedModel
                 appState.aiModel = targetModel
                 appState.saveSettings()
                 onConnected()
@@ -1142,7 +1145,7 @@ public struct AgentSetupWizardView: View {
         case .microcodeNative:
             acpHost.activeAgentId = nil
             appState.aiProvider = "deepseek"
-            appState.aiModel = "deepseek-flash"
+            appState.aiModel = "deepseek-chat"
             appState.saveSettings()
             onConnected()
             
@@ -1153,7 +1156,7 @@ public struct AgentSetupWizardView: View {
                 appState.aiModel = "opencode/nemotron-3.5-lightning-free"
             } else {
                 appState.aiProvider = "deepseek"
-                appState.aiModel = "deepseek-flash"
+                appState.aiModel = "deepseek-chat"
             }
             appState.saveSettings()
             onConnected()

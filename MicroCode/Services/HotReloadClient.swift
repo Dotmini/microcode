@@ -90,7 +90,7 @@ class HotReloadClient: ObservableObject {
     /// Start the preview agent process
     func startAgent() async throws {
         let url = URL(string: "\(baseURL)/api/preview/agent/start")!
-        var request = URLRequest(url: url)
+        var request = LocalBackendAuth.request(url: url)
         request.httpMethod = "POST"
         
         let (data, _) = try await URLSession.shared.data(for: request)
@@ -108,7 +108,7 @@ class HotReloadClient: ObservableObject {
     /// Stop the preview agent process
     func stopAgent() async throws {
         let url = URL(string: "\(baseURL)/api/preview/agent/stop")!
-        var request = URLRequest(url: url)
+        var request = LocalBackendAuth.request(url: url)
         request.httpMethod = "POST"
         
         let (_, _) = try await URLSession.shared.data(for: request)
@@ -120,7 +120,7 @@ class HotReloadClient: ObservableObject {
         guard let url = URL(string: "\(baseURL)/api/preview/status") else { return }
         
         do {
-            let (data, _) = try await URLSession.shared.data(from: url)
+            let (data, _) = try await URLSession.shared.data(for: LocalBackendAuth.request(url: url))
             let response = try JSONDecoder().decode(PreviewStatusResponse.self, from: data)
             isAgentRunning = response.serverRunning
         } catch {
@@ -136,7 +136,7 @@ class HotReloadClient: ObservableObject {
         defer { isReloading = false }
         
         let url = URL(string: "\(baseURL)/api/preview/reload")!
-        var request = URLRequest(url: url)
+        var request = LocalBackendAuth.request(url: url)
         request.httpMethod = "POST"
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
         
@@ -169,7 +169,7 @@ class HotReloadClient: ObservableObject {
     /// Trigger rollback to previous version
     func rollback() async throws {
         let url = URL(string: "\(baseURL)/api/hotreload/rollback")!
-        var request = URLRequest(url: url)
+        var request = LocalBackendAuth.request(url: url)
         request.httpMethod = "POST"
         
         let (_, _) = try await URLSession.shared.data(for: request)
@@ -184,7 +184,7 @@ class HotReloadClient: ObservableObject {
     func listThunks() async throws {
         let url = URL(string: "\(baseURL)/api/hotreload/thunk/list")!
         
-        let (data, _) = try await URLSession.shared.data(from: url)
+        let (data, _) = try await URLSession.shared.data(for: LocalBackendAuth.request(url: url))
         let response = try JSONDecoder().decode(ThunkListResponse.self, from: data)
         
         registeredThunks = response.thunks
@@ -193,7 +193,7 @@ class HotReloadClient: ObservableObject {
     /// Register a new thunk (for testing)
     func registerThunk(name: String, address: UInt64) async throws {
         let url = URL(string: "\(baseURL)/api/hotreload/thunk/register")!
-        var request = URLRequest(url: url)
+        var request = LocalBackendAuth.request(url: url)
         request.httpMethod = "POST"
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
         
@@ -212,7 +212,7 @@ class HotReloadClient: ObservableObject {
     func getStateSnapshot() async throws {
         let url = URL(string: "\(baseURL)/api/hotreload/state/snapshot")!
         
-        let (data, _) = try await URLSession.shared.data(from: url)
+        let (data, _) = try await URLSession.shared.data(for: LocalBackendAuth.request(url: url))
         let response = try JSONDecoder().decode(StateSnapshotResponse.self, from: data)
         
         stateSnapshot = response.snapshot
@@ -221,7 +221,7 @@ class HotReloadClient: ObservableObject {
     /// Clear all state
     func clearState() async throws {
         let url = URL(string: "\(baseURL)/api/hotreload/state/clear")!
-        var request = URLRequest(url: url)
+        var request = LocalBackendAuth.request(url: url)
         request.httpMethod = "POST"
         
         let (_, _) = try await URLSession.shared.data(for: request)
@@ -234,7 +234,7 @@ class HotReloadClient: ObservableObject {
     func getEngineInfo() async throws {
         let url = URL(string: "\(baseURL)/api/hotreload/version")!
         
-        let (data, _) = try await URLSession.shared.data(from: url)
+        let (data, _) = try await URLSession.shared.data(for: LocalBackendAuth.request(url: url))
         engineInfo = try JSONDecoder().decode(HotReloadVersionInfo.self, from: data)
     }
     

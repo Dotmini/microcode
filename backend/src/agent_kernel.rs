@@ -1162,6 +1162,71 @@ pub async fn cancel(AxumPath(id): AxumPath<String>) -> Result<Json<KernelRespons
     Ok(Json(AGENT_KERNEL.cancel(&id).await?))
 }
 
+/// Recommend the best provider + model for a given task description.
+/// Maps task complexity and type to optimal provider/model combinations.
+pub fn recommend_model_for_task(description: &str, tools: &[String]) -> crate::models::ModelRecommendation {
+    let desc_lower = description.to_lowercase();
+    
+    // Security/architecture analysis → thinking model
+    if desc_lower.contains("security") || desc_lower.contains("audit") 
+        || desc_lower.contains("architect") || desc_lower.contains("design")
+        || desc_lower.contains("review") {
+        return crate::models::ModelRecommendation {
+            provider: "anthropic".to_string(),
+            model: "claude-sonnet-4".to_string(),
+            reason: "Deep analysis tasks benefit from strong reasoning models".to_string(),
+        };
+    }
+    
+    // Fast code search/exploration → flash model
+    if desc_lower.contains("search") || desc_lower.contains("find") 
+        || desc_lower.contains("explore") || desc_lower.contains("grep")
+        || desc_lower.contains("list") || desc_lower.contains("look") {
+        return crate::models::ModelRecommendation {
+            provider: "gemini".to_string(),
+            model: "gemini-2.5-flash".to_string(),
+            reason: "Fast search/exploration tasks benefit from low-latency models".to_string(),
+        };
+    }
+    
+    // Testing/verification → balanced model
+    if desc_lower.contains("test") || desc_lower.contains("verify")
+        || desc_lower.contains("check") || desc_lower.contains("validate") {
+        return crate::models::ModelRecommendation {
+            provider: "openai".to_string(),
+            model: "gpt-4o".to_string(),
+            reason: "Testing tasks benefit from balanced reasoning and speed".to_string(),
+        };
+    }
+    
+    // Code generation/refactoring → strong coding model
+    if desc_lower.contains("implement") || desc_lower.contains("refactor")
+        || desc_lower.contains("write") || desc_lower.contains("create")
+        || desc_lower.contains("build") || desc_lower.contains("fix") {
+        return crate::models::ModelRecommendation {
+            provider: "anthropic".to_string(),
+            model: "claude-sonnet-4".to_string(),
+            reason: "Code generation benefits from strong coding models".to_string(),
+        };
+    }
+    
+    // Device/mobile automation → fast model
+    if tools.iter().any(|t| t.contains("device") || t.contains("adb") || t.contains("simctl")) {
+        return crate::models::ModelRecommendation {
+            provider: "gemini".to_string(),
+            model: "gemini-2.5-flash".to_string(),
+            reason: "Device automation benefits from low-latency responses".to_string(),
+        };
+    }
+    
+    // Default → balanced Gemini
+    crate::models::ModelRecommendation {
+        provider: "gemini".to_string(),
+        model: "gemini-2.5-flash".to_string(),
+        reason: "Default balanced model for general tasks".to_string(),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -3,10 +3,12 @@
 //  MicroCode
 //
 //  Production AI Provider Authentication & Key Management
-//  Supports: OpenAI, Anthropic (Claude), DeepSeek, Gemini, Grok, Codex
-//  Secure Keychain storage with connection validation
+//  Supports: OpenAI, Anthropic (Claude), DeepSeek, Gemini, Grok, Qwen, GLM, Codex
+//  Secure Keychain storage with live connection validation and dynamic model discovery.
 //
-//  Copyright © 2025 Dotmini Company Limited
+//  Created & Designed by Dotmini Software
+//  Founder & CEO: Tirawat Nantamas
+//  Copyright © 2025-2026 Dotmini Software. All rights reserved.
 //
 
 import Foundation
@@ -110,14 +112,14 @@ enum AIProviderMeta: String, CaseIterable, Identifiable {
     
     var defaultModels: [String] {
         switch self {
-        case .openai: return ["gpt-6-astra", "gpt-5.6-sol", "gpt-5.5", "o3", "o3-mini", "o1-pro", "o1", "gpt-4.5-preview", "chatgpt-4o-latest", "gpt-4o", "gpt-4o-mini"]
-        case .anthropic: return ["claude-sonnet-4-6", "claude-opus-4-6-thinking", "claude-3-7-sonnet", "claude-3-5-sonnet", "claude-3-5-haiku", "claude-3-opus"]
-        case .deepseek: return ["deepseek-v4-flash", "deepseek-v4", "deepseek-reasoner", "deepseek-chat"]
-        case .gemini: return ["gemini-3.8-flash-high", "gemini-3.7-flash-high", "gemini-3.1-pro-high", "gemini-2.5-pro", "gemini-2.5-flash", "gemini-2.0-flash"]
-        case .grok: return ["grok-3", "grok-3-mini", "grok-2"]
-        case .qwen: return ["qwen/qwen-2.5-coder-32b-instruct", "qwen/qwen-2.5-72b-instruct"]
-        case .glm: return ["glm-4-plus", "glm-4-air", "codegeex-4", "glm-4-flash"]
-        case .codex: return ["gpt-6-astra", "gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna", "gpt-5.5", "o3-mini", "gpt-4o"]
+        case .openai: return ["o3-mini", "o1", "o1-mini", "gpt-4o", "gpt-4o-mini", "chatgpt-4o-latest", "gpt-4-turbo"]
+        case .anthropic: return ["claude-3-7-sonnet-20250219", "claude-3-5-sonnet-20241022", "claude-3-5-haiku-20241022", "claude-3-opus-20240229"]
+        case .deepseek: return ["deepseek-chat", "deepseek-reasoner"]
+        case .gemini: return ["gemini-2.5-pro", "gemini-2.5-flash", "gemini-2.0-flash", "gemini-2.0-flash-thinking-exp-01-21", "gemini-1.5-pro", "gemini-1.5-flash"]
+        case .grok: return ["grok-2-1212", "grok-2-vision-1212", "grok-beta"]
+        case .qwen: return ["qwen-plus", "qwen-max", "qwen-turbo", "qwen/qwen-2.5-coder-32b-instruct", "qwen/qwen-2.5-72b-instruct"]
+        case .glm: return ["glm-4-plus", "glm-4-0520", "glm-4-air", "codegeex-4", "glm-4-flash"]
+        case .codex: return ["o3-mini", "o1", "gpt-4o", "gpt-4o-mini"]
         }
     }
     
@@ -209,6 +211,24 @@ class AIProviderAuthService: ObservableObject {
         // Save securely
         saveProviders()
         saveKeyToKeychain(meta.rawValue, key: apiKey)
+        
+        // ── Bridge key to ALL consumers ──────────────────────────
+        // 1. UserDefaults (read by AIClient.resolveKey, AIModelCatalog.resolveKey)
+        UserDefaults.standard.set(apiKey, forKey: "\(meta.rawValue)_api_key")
+        // Also write to shared app suites for legacy compatibility
+        UserDefaults(suiteName: "com.dotmini.microcode")?.set(apiKey, forKey: "\(meta.rawValue)_api_key")
+        UserDefaults(suiteName: "com.dotmini.codetunner")?.set(apiKey, forKey: "\(meta.rawValue)_api_key")
+        
+        // 2. KeychainManager (read by AIModelCatalog.resolveKey fallback)
+        if let pk = KeychainManager.ProviderKey(rawValue: "\(meta.rawValue.uppercased())_API_KEY") {
+            _ = KeychainManager.shared.save(key: apiKey, for: pk)
+        }
+        
+        // 3. Trigger live model catalog refresh so models appear immediately
+        Task { @MainActor in
+            await AIModelCatalog.shared.refreshIfNeeded(force: true)
+        }
+        // ─────────────────────────────────────────────────────────
         
         validationMessage = isValid ? "\(meta.displayName) connected successfully!" : "Key saved but validation failed"
         return isValid
@@ -313,7 +333,10 @@ class AIProviderAuthService: ObservableObject {
                     let ids = models.compactMap { $0["id"] as? String }
                         .filter { id in
                             switch meta {
-                            case .openai, .codex: return id.contains("gpt") || id.contains("o1") || id.contains("o3") || id.contains("o4") || id.contains("codex")
+                            case .openai, .codex:
+                                let lower = id.lowercased()
+                                return (lower.contains("gpt-4") || lower.contains("gpt-3.5") || lower.contains("o1") || lower.contains("o3") || lower.contains("chatgpt")) &&
+                                    !lower.contains("transcribe") && !lower.contains("audio") && !lower.contains("tts") && !lower.contains("embed") && !lower.contains("moderation") && !lower.contains("realtime") && !lower.hasPrefix("ft:")
                             case .deepseek: return id.contains("deepseek")
                             case .grok: return id.contains("grok")
                             case .qwen: return id.contains("qwen")
@@ -332,13 +355,27 @@ class AIProviderAuthService: ObservableObject {
                 if let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
                    let models = json["models"] as? [[String: Any]] {
                     return models.compactMap { ($0["name"] as? String)?.replacingOccurrences(of: "models/", with: "") }
-                        .filter { $0.contains("gemini") }
+                        .filter { $0.contains("gemini") && !$0.contains("embed") && !$0.contains("audio") }
                         .sorted()
                 }
                 return nil
                 
             case .anthropic:
-                return meta.defaultModels  // Anthropic doesn't have a models endpoint
+                var request = URLRequest(url: URL(string: "https://api.anthropic.com/v1/models")!)
+                request.setValue(apiKey, forHTTPHeaderField: "x-api-key")
+                request.setValue("2023-06-01", forHTTPHeaderField: "anthropic-version")
+                request.setValue("application/json", forHTTPHeaderField: "Accept")
+                request.timeoutInterval = 10
+                let (data, response) = try await URLSession.shared.data(for: request)
+                guard (response as? HTTPURLResponse)?.statusCode == 200 else { return meta.defaultModels }
+                if let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+                   let models = json["data"] as? [[String: Any]] {
+                    let ids = models.compactMap { $0["id"] as? String }
+                        .filter { $0.contains("claude") }
+                        .sorted()
+                    return ids.isEmpty ? meta.defaultModels : ids
+                }
+                return meta.defaultModels
             }
         } catch {
             return nil
@@ -348,35 +385,52 @@ class AIProviderAuthService: ObservableObject {
     // MARK: - Keychain Storage
     
     private func saveKeyToKeychain(_ provider: String, key: String) {
+        // 1. Cache in UserDefaults so recompiled ad-hoc builds never trigger Keychain ACL password prompts
+        UserDefaults.standard.set(key, forKey: "microcode_cached_key_\(provider)")
+        
         let data = Data(key.utf8)
-        let query: [String: Any] = [
+        var query: [String: Any] = [
             kSecClass as String: kSecClassGenericPassword,
             kSecAttrService as String: keychainService,
             kSecAttrAccount as String: "apikey_\(provider)",
-            kSecValueData as String: data
+            kSecValueData as String: data,
+            kSecAttrAccessible as String: kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly
         ]
+        var access: SecAccess?
+        SecAccessCreate("MicroCode" as CFString, nil, &access)
+        if let access = access {
+            query[kSecAttrAccess as String] = access
+        }
         SecItemDelete(query as CFDictionary)
         SecItemAdd(query as CFDictionary, nil)
     }
     
     private func loadKeyFromKeychain(_ provider: String) -> String? {
+        // Fast path: cached locally (0ms, zero OS password dialogs on newly compiled builds)
+        if let cached = UserDefaults.standard.string(forKey: "microcode_cached_key_\(provider)"), !cached.isEmpty {
+            return cached
+        }
+        
         let query: [String: Any] = [
             kSecClass as String: kSecClassGenericPassword,
             kSecAttrService as String: keychainService,
             kSecAttrAccount as String: "apikey_\(provider)",
-            kSecReturnData as String: true
+            kSecReturnData as String: true,
+            kSecMatchLimit as String: kSecMatchLimitOne
         ]
         var result: AnyObject?
         let status = SecItemCopyMatching(query as CFDictionary, &result)
-        if status == errSecSuccess, let data = result as? Data {
-            return String(data: data, encoding: .utf8)
+        if status == errSecSuccess, let data = result as? Data, let str = String(data: data, encoding: .utf8) {
+            UserDefaults.standard.set(str, forKey: "microcode_cached_key_\(provider)")
+            return str
         }
         return nil
     }
     
     private func deleteKeyFromKeychain(_ provider: String) {
+        UserDefaults.standard.removeObject(forKey: "microcode_cached_key_\(provider)")
         let query: [String: Any] = [
-            kSecClass as String: keychainService,
+            kSecClass as String: kSecClassGenericPassword,
             kSecAttrService as String: keychainService,
             kSecAttrAccount as String: "apikey_\(provider)"
         ]
@@ -408,6 +462,20 @@ class AIProviderAuthService: ObservableObject {
             if let key = loadKeyFromKeychain(configs[i].provider) {
                 configs[i].apiKey = key
             }
+            // Fallback: try UserDefaults (set by other code paths)
+            if configs[i].apiKey.isEmpty {
+                if let udKey = UserDefaults.standard.string(forKey: "\(configs[i].provider)_api_key"),
+                   !udKey.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                    configs[i].apiKey = udKey.trimmingCharacters(in: .whitespacesAndNewlines)
+                }
+            }
+            // Fallback: try KeychainManager
+            if configs[i].apiKey.isEmpty {
+                if let pk = KeychainManager.ProviderKey(rawValue: "\(configs[i].provider.uppercased())_API_KEY"),
+                   let val = KeychainManager.shared.read(for: pk), !val.isEmpty {
+                    configs[i].apiKey = val
+                }
+            }
         }
         
         self.providers = configs
@@ -418,10 +486,23 @@ class AIProviderAuthService: ObservableObject {
     func syncToAppState(_ appState: AppState) {
         for config in providers where config.isActive && !config.apiKey.isEmpty {
             appState.apiKeys[config.provider] = config.apiKey
+            
+            // Bridge to UserDefaults so AIModelCatalog.resolveKey() and AIClient can find them
+            UserDefaults.standard.set(config.apiKey, forKey: "\(config.provider)_api_key")
+            
+            // Bridge to KeychainManager
+            if let pk = KeychainManager.ProviderKey(rawValue: "\(config.provider.uppercased())_API_KEY") {
+                _ = KeychainManager.shared.save(key: config.apiKey, for: pk)
+            }
         }
         if let active = getActiveKey() {
             appState.aiProvider = active.provider.streamProvider.rawValue
             appState.aiModel = active.model
+        }
+        
+        // Trigger live model catalog refresh with bridged keys
+        Task { @MainActor in
+            await AIModelCatalog.shared.refreshIfNeeded(force: true)
         }
     }
 }

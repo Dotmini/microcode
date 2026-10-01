@@ -425,6 +425,19 @@ class MCPServer: ObservableObject {
                 ]
             ],
             [
+                "name": "execute_code",
+                "description": "Execute code directly in Python, Bash, Swift, or other languages and return execution output.",
+                "inputSchema": [
+                    "type": "object",
+                    "properties": [
+                        "code": ["type": "string", "description": "Code content to execute"],
+                        "language": ["type": "string", "description": "Language of code: python, bash, swift, etc."],
+                        "stdin": ["type": "string", "description": "Optional standard input"]
+                    ],
+                    "required": ["code"]
+                ]
+            ],
+            [
                 "name": "microcode_open_snippet",
                 "description": "Open a code snippet from Omni AI directly in the MicroCode IDE editor and optionally execute it.",
                 "inputSchema": [
@@ -526,8 +539,10 @@ class MCPServer: ObservableObject {
                 result = try await executeGitStatus(args, sandbox: sandbox)
             case "get_diagnostics":
                 result = try await executeGetDiagnostics(args)
-            case "microcode_run_cell":
+            case "microcode_run_cell", "cell_run":
                 result = try await executeRunCell(args, sandbox: sandbox)
+            case "execute_code", "playground_run", "microcode_run_playground":
+                result = try await executeRunPlayground(args)
             case "device_runtime":
                 let op = args["operation"] as? String ?? "status"
                 let devId = args["device_id"] as? String

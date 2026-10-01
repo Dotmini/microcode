@@ -88,6 +88,7 @@ let package = Package(
                 "Views/AI/PlatformCompatibilityInspectorView.swift",
                 "Views/AI/AgentEcosystemConfigView.swift",
                 "Views/AI/AgentConnectionsView.swift",
+                "Views/AI/TaskLogsView.swift",
                 "Views/TeamTasksView.swift",
                 "Views/ScienceModeView.swift",
                 "Services/ScienceService.swift",
@@ -140,6 +141,7 @@ let package = Package(
                 "Views/OpenVSXMarketplaceView.swift",
                 "Models/AICodeReport.swift",
                 "Services/AgentCore/AgentToolBox.swift",
+                "Services/AgentCore/ToolScope.swift",
                 "Services/AgentCore/AgentPrivacyGuard.swift",
                 "Services/AgentCore/AppleVisionEngine.swift",
                 "Services/AgentCore/MultiPlatformRulesEngine.swift",
@@ -171,6 +173,7 @@ let package = Package(
                 "Views/Tasks/GitHistoryView.swift", // New Phase 10
                 "Views/Notebook/SASProcedureView.swift", // New Phase 12
                 "Views/Notebook/NotebookAIPanel.swift", // Cell Mode AI Agent
+                "Views/Notebook/GoogleColabSheetView.swift", // Google Colab Management Sheet
                 "Models/DesignModels.swift", // Design Engine
                 "Services/DesignStore.swift",
                 "Services/Design/DesignCodeGenerator.swift",
@@ -210,6 +213,9 @@ let package = Package(
                 "Services/CICDService.swift",
                 "Services/LocalPipelineRunner.swift",
                 "Services/AgentService.swift",
+                "Services/WorkspacePathPolicy.swift",
+                "Services/LocalBackendAuth.swift",
+                "Services/JupyterCredentialStore.swift",
                 "Services/AgentKernelClient.swift",
                 "Services/AgentTranscriptStore.swift",
                 "Services/TeamTaskService.swift",
@@ -234,6 +240,8 @@ let package = Package(
                 "Kernel/RemoteGPUService.swift",
                 "Kernel/RemoteProviderService.swift",
                 "Kernel/CloudGPUService.swift",
+                "Kernel/GoogleColabService.swift",
+                "Kernel/GoogleColabKernel.swift",
                 "Views/CloudGPUView.swift",
                 "Views/Settings/AgentSkillsView.swift",
                 "Views/Design/AIDesignPanel.swift",
@@ -331,12 +339,43 @@ let package = Package(
                 "Models/ImplementationPlanModels.swift",
                 "Views/AI/InlineSubAgentViews.swift",
                 "Views/AI/SubAgentDetailSheet.swift",
+                // P5: BYOK + Cost Dashboard + Model Routing
+                "Services/AIUsageTracker.swift",
+                "Services/AIModelRouter.swift",
+                "Views/AI/CostDashboardView.swift",
+                // P2: Sovereign Flight Recorder
+                "Services/FlightRecorder.swift",
+                // P1: Native Device Loop - Visual Regression
+                "Services/VisualRegressionService.swift",
+                "Views/AI/VisualRegressionDashboardView.swift",
+                // P3: Elastic Compute Fabric
+                "Services/ElasticComputeFabric.swift",
+                // P2: Flight Recorder UI
+                "Views/AI/FlightRecorderView.swift",
+                // Phase 1: Dual-Agent Consensus Engine
+                "Services/ConsensusEngine.swift",
+                "Views/AI/ConsensusEngineView.swift",
+                // Phase 2: Local SLM Router
+                "Services/SLMRouter.swift",
+                // Phase 1: Shadow Workspace Verification Pipeline
+                "Services/ShadowWorkspaceService.swift",
+                "Services/HierarchicalContextCompiler.swift",
+                "Services/AgentCore/ToolScope.swift",
+                // Phase 3: Telemetry-in-the-Loop
+                "Services/TelemetryIngestionService.swift",
+                // Phase 4: Datasheet-to-Code
+                "Services/HardwareRAGService.swift",
             ],
             resources: [
                 // .process("Views/Metal/Shaders.metal")
             ],
             swiftSettings: [
                 .unsafeFlags(["-strict-concurrency=minimal"])
+            ],
+            linkerSettings: [
+                .linkedLibrary("bz2"),
+                .linkedLibrary("lzma"),
+                .linkedLibrary("z")
             ]
         ),
         .target(

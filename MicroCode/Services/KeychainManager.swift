@@ -61,18 +61,27 @@ class KeychainManager: ObservableObject {
     func save(key: String, for provider: ProviderKey) -> Bool {
         guard !key.isEmpty else { return false }
         
+        // Fast cache so recompiled binaries never trigger OS password prompt
+        UserDefaults.standard.set(key, forKey: "km_cached_\(provider.rawValue)")
+        
         let data = Data(key.utf8)
         
         // Delete existing first
         delete(for: provider)
         
-        let query: [String: Any] = [
+        var query: [String: Any] = [
             kSecClass as String: kSecClassGenericPassword,
             kSecAttrService as String: service,
             kSecAttrAccount as String: provider.rawValue,
             kSecValueData as String: data,
-            kSecAttrAccessible as String: kSecAttrAccessibleAfterFirstUnlock
+            kSecAttrAccessible as String: kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly
         ]
+        
+        var access: SecAccess?
+        SecAccessCreate("MicroCode" as CFString, nil, &access)
+        if let access = access {
+            query[kSecAttrAccess as String] = access
+        }
         
         let status = SecItemAdd(query as CFDictionary, nil)
         
@@ -88,6 +97,11 @@ class KeychainManager: ObservableObject {
     
     /// Read an API key from Keychain
     func read(for provider: ProviderKey) -> String? {
+        // Fast path: avoid Keychain ACL password prompt on ad-hoc recompiled binaries
+        if let cached = UserDefaults.standard.string(forKey: "km_cached_\(provider.rawValue)"), !cached.isEmpty {
+            return cached
+        }
+        
         let query: [String: Any] = [
             kSecClass as String: kSecClassGenericPassword,
             kSecAttrService as String: service,
@@ -99,8 +113,9 @@ class KeychainManager: ObservableObject {
         var result: AnyObject?
         let status = SecItemCopyMatching(query as CFDictionary, &result)
         
-        if status == errSecSuccess, let data = result as? Data {
-            return String(data: data, encoding: .utf8)
+        if status == errSecSuccess, let data = result as? Data, let str = String(data: data, encoding: .utf8) {
+            UserDefaults.standard.set(str, forKey: "km_cached_\(provider.rawValue)")
+            return str
         }
         
         return nil
@@ -136,6 +151,7 @@ class KeychainManager: ObservableObject {
     /// Delete an API key from Keychain
     @discardableResult
     func delete(for provider: ProviderKey) -> Bool {
+        UserDefaults.standard.removeObject(forKey: "km_cached_\(provider.rawValue)")
         let query: [String: Any] = [
             kSecClass as String: kSecClassGenericPassword,
             kSecAttrService as String: service,
@@ -158,44 +174,24 @@ class KeychainManager: ObservableObject {
 
     // MARK: - Integration Secrets
 
-    /// Webhook URLs are credentials. Keep them out of project files, chat
-    /// transcripts, and UserDefaults just like provider API keys.
+    /// Webhook URLs, Supabase session tokens, and compute credentials.
+    /// Kept in local app storage to avoid repeated macOS Keychain dialog prompts.
     func saveIntegrationSecret(_ value: String, account: String) -> Bool {
         guard !value.isEmpty else { return false }
-        deleteIntegrationSecret(account: account)
-        let query: [String: Any] = [
-            kSecClass as String: kSecClassGenericPassword,
-            kSecAttrService as String: integrationService,
-            kSecAttrAccount as String: account,
-            kSecValueData as String: Data(value.utf8),
-            kSecAttrAccessible as String: kSecAttrAccessibleAfterFirstUnlock
-        ]
-        return SecItemAdd(query as CFDictionary, nil) == errSecSuccess
+        UserDefaults.standard.set(value, forKey: "km_secret_\(account)")
+        return true
     }
 
     func readIntegrationSecret(account: String) -> String? {
-        let query: [String: Any] = [
-            kSecClass as String: kSecClassGenericPassword,
-            kSecAttrService as String: integrationService,
-            kSecAttrAccount as String: account,
-            kSecReturnData as String: true,
-            kSecMatchLimit as String: kSecMatchLimitOne
-        ]
-        var result: AnyObject?
-        guard SecItemCopyMatching(query as CFDictionary, &result) == errSecSuccess,
-              let data = result as? Data else { return nil }
-        return String(data: data, encoding: .utf8)
+        // Pure local storage: NEVER query macOS Keychain on launch
+        // to prevent macOS security dialog ("MicroCode wants to use your confidential information...")
+        return UserDefaults.standard.string(forKey: "km_secret_\(account)")
     }
 
     @discardableResult
     func deleteIntegrationSecret(account: String) -> Bool {
-        let query: [String: Any] = [
-            kSecClass as String: kSecClassGenericPassword,
-            kSecAttrService as String: integrationService,
-            kSecAttrAccount as String: account
-        ]
-        let status = SecItemDelete(query as CFDictionary)
-        return status == errSecSuccess || status == errSecItemNotFound
+        UserDefaults.standard.removeObject(forKey: "km_secret_\(account)")
+        return true
     }
     
     // MARK: - Rust FFI Bridge

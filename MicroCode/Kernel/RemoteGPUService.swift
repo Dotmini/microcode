@@ -243,7 +243,7 @@ final class RemoteGPUService: ObservableObject {
                    code == 200 || code == 403 {
                     // Hand the tunneled server to the existing Jupyter kernel.
                     UserDefaults.standard.set(base, forKey: "hpcEndpoint")
-                    UserDefaults.standard.set(token, forKey: "hpcToken")
+                    JupyterCredentialStore.token = token
                     localURL = base
                     status = .connected
                     CrashReporter.shared.breadcrumb("RemoteGPU.connected → \(base) (hpcEndpoint/hpcToken set)")

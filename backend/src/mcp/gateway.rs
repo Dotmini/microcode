@@ -35,7 +35,7 @@ pub struct McpGatewayState {
     /// Connected MicroCode desktop IDE tunnels: token -> sender
     pub desktop_tunnels: Arc<RwLock<HashMap<String, mpsc::Sender<Value>>>>,
     /// Pending response waiting for desktop reply: call_id -> sender
-    pub pending_calls: Arc<RwLock<HashMap<u64, oneshot::Sender<Value>>>>,
+    pub pending_calls: Arc<RwLock<HashMap<u64, (String, oneshot::Sender<Value>)>>>,
     /// Monotonic call ID generator
     pub next_call_id: AtomicU64,
 }
@@ -154,7 +154,7 @@ pub async fn mcp_sse_handler(
     let init_event = Event::default().event("endpoint").data(endpoint_url);
     let _ = tx.send(init_event).await;
 
-    info!("⚡ [MCP Gateway] New SSE connection established (session: {}, token: {})", session_id, token);
+    info!("[MCP Gateway] SSE connection established");
 
     let stream = ReceiverStream::new(rx).map(Ok);
     Sse::new(stream).keep_alive(KeepAlive::new().interval(Duration::from_secs(15)).text("ping"))
@@ -206,7 +206,7 @@ pub async fn mcp_tunnel_ws_handler(
 }
 
 async fn handle_desktop_tunnel(mut socket: WebSocket, gateway: Arc<McpGatewayState>, token: String) {
-    info!("🔗 [MCP Gateway] MicroCode Desktop IDE connected via Tunnel (token: {})", token);
+    info!("[MCP Gateway] Desktop tunnel connected");
     let (tx, mut rx) = mpsc::channel::<Value>(64);
 
     gateway.desktop_tunnels.write().await.insert(token.clone(), tx);
@@ -226,14 +226,16 @@ async fn handle_desktop_tunnel(mut socket: WebSocket, gateway: Arc<McpGatewaySta
     // Inbound reader task
     let gateway_clone = gateway.clone();
     let token_clone = token.clone();
+    let disconnect_token = token.clone();
     let mut read_task = tokio::spawn(async move {
         while let Some(Ok(msg)) = receiver.next().await {
             if let Message::Text(txt) = msg {
                 if let Ok(json_val) = serde_json::from_str::<Value>(&txt) {
                     // Check if this is a response to a pending tool call
                     if let Some(id) = json_val.get("id").and_then(|v| v.as_u64()) {
-                        if let Some(pending_tx) = gateway_clone.pending_calls.write().await.remove(&id) {
-                            let _ = pending_tx.send(json_val);
+                        let mut pending = gateway_clone.pending_calls.write().await;
+                        if pending.get(&id).map(|(owner, _)| owner == &token_clone).unwrap_or(false) {
+                            if let Some((_, pending_tx)) = pending.remove(&id) { let _ = pending_tx.send(json_val); }
                         }
                     }
                 }
@@ -246,8 +248,10 @@ async fn handle_desktop_tunnel(mut socket: WebSocket, gateway: Arc<McpGatewaySta
         _ = (&mut read_task) => {},
     }
 
-    gateway.desktop_tunnels.write().await.remove(&token_clone);
-    info!("🔌 [MCP Gateway] MicroCode Desktop IDE disconnected (token: {})", token_clone);
+    write_task.abort();
+    read_task.abort();
+    gateway.desktop_tunnels.write().await.remove(&disconnect_token);
+    info!("[MCP Gateway] Desktop tunnel disconnected");
 }
 
 // MARK: - JSON-RPC Dispatcher
@@ -307,7 +311,7 @@ async fn process_jsonrpc_request(gateway: &Arc<McpGatewayState>, token: &str, re
                 let call_id = gateway.next_call_id.fetch_add(1, Ordering::SeqCst);
                 let (reply_tx, reply_rx) = oneshot::channel();
 
-                gateway.pending_calls.write().await.insert(call_id, reply_tx);
+                gateway.pending_calls.write().await.insert(call_id, (token.to_string(), reply_tx));
 
                 let forward_req = json!({
                     "jsonrpc": "2.0",
@@ -323,14 +327,14 @@ async fn process_jsonrpc_request(gateway: &Arc<McpGatewayState>, token: &str, re
                     // Await response with 60 second timeout
                     match tokio::time::timeout(Duration::from_secs(60), reply_rx).await {
                         Ok(Ok(response)) => {
-                            let result = response.get("result").cloned().unwrap_or(json!({
-                                "content": [{ "type": "text", "text": "Execution completed on Mac" }]
-                            }));
-                            return json!({
-                                "jsonrpc": "2.0",
-                                "id": id,
-                                "result": result
-                            });
+                            if let Some(error) = response.get("error") {
+                                return json!({"jsonrpc": "2.0", "id": id, "error": error});
+                            }
+                            if let Some(result) = response.get("result") {
+                                return json!({"jsonrpc": "2.0", "id": id, "result": result});
+                            }
+                            return json!({"jsonrpc": "2.0", "id": id,
+                                "error": {"code": -32603, "message": "Desktop returned an invalid tool response"}});
                         },
                         _ => {
                             gateway.pending_calls.write().await.remove(&call_id);
@@ -342,9 +346,10 @@ async fn process_jsonrpc_request(gateway: &Arc<McpGatewayState>, token: &str, re
                         }
                     }
                 }
+                gateway.pending_calls.write().await.remove(&call_id);
             }
 
-            // Fallback: Local Cloud Execution Engine
+            // No host execution is available when the desktop is disconnected.
             execute_cloud_fallback(id, tool_name, arguments).await
         },
 
@@ -356,130 +361,48 @@ async fn process_jsonrpc_request(gateway: &Arc<McpGatewayState>, token: &str, re
     }
 }
 
-async fn execute_cloud_fallback(id: Value, tool_name: &str, args: Value) -> Value {
-    match tool_name {
-        "run_cell" => {
-            let code = args.get("code").and_then(|c| c.as_str()).unwrap_or("");
-            let lang = args.get("language").and_then(|l| l.as_str()).unwrap_or("python");
-            
-            // Execute locally on server
-            let output = execute_code_process(code, lang).await;
-            json!({
-                "jsonrpc": "2.0",
-                "id": id,
-                "result": {
-                    "content": [{ "type": "text", "text": output }]
-                }
-            })
-        },
-        "ardium_run" => {
-            let code = args.get("code").and_then(|c| c.as_str()).unwrap_or("");
-            let output = execute_code_process(code, "ardium").await;
-            json!({
-                "jsonrpc": "2.0",
-                "id": id,
-                "result": {
-                    "content": [{ "type": "text", "text": output }]
-                }
-            })
-        },
-        "ardium_compile" => {
-            let code = args.get("code").and_then(|c| c.as_str()).unwrap_or("");
-            json!({
-                "jsonrpc": "2.0",
-                "id": id,
-                "result": {
-                    "content": [{ "type": "text", "text": format!("✓ Ardium syntax validated ({} bytes)", code.len()) }]
-                }
-            })
-        },
-        "cloud_gpu_status" => {
-            json!({
-                "jsonrpc": "2.0",
-                "id": id,
-                "result": {
-                    "content": [{
-                        "type": "text",
-                        "text": "Dotmini Cloud GPU: Ready (RunPod / LANTA available, NVIDIA A100/H100)"
-                    }]
-                }
-            })
-        },
-        _ => json!({
-            "jsonrpc": "2.0",
-            "id": id,
-            "result": {
-                "content": [{ "type": "text", "text": format!("Tool '{}' executed on Dotmini Cloud", tool_name) }]
-            }
-        }),
-    }
+async fn execute_cloud_fallback(id: Value, tool_name: &str, _args: Value) -> Value {
+    // This desktop gateway has no authenticated cloud execution/health adapter.
+    // Never fabricate completion or run arbitrary code on the gateway host.
+    json!({
+        "jsonrpc": "2.0", "id": id,
+        "error": { "code": -32601, "message": format!("Tool '{}' requires a connected desktop; cloud fallback is unavailable", tool_name) }
+    })
 }
 
-async fn execute_code_process(code: &str, lang: &str) -> String {
-    let tmp_dir = std::env::temp_dir();
-    let file_id = Uuid::new_v4().to_string();
+#[cfg(test)]
+mod tests {
+    use super::*;
 
-    match lang.to_lowercase().as_str() {
-        "python" | "py" => {
-            let file_path = tmp_dir.join(format!("mc_{}.py", file_id));
-            if tokio::fs::write(&file_path, code).await.is_err() {
-                return "Error writing code".to_string();
-            }
-            let output = tokio::process::Command::new("python3")
-                .arg(&file_path)
-                .output()
-                .await;
-            let _ = tokio::fs::remove_file(&file_path).await;
-            match output {
-                Ok(out) => {
-                    let mut s = String::from_utf8_lossy(&out.stdout).to_string();
-                    if !out.stderr.is_empty() {
-                        s.push_str(&format!("\n{}", String::from_utf8_lossy(&out.stderr)));
-                    }
-                    if s.trim().is_empty() { "(Executed with no output)".to_string() } else { s }
-                },
-                Err(e) => format!("Execution failed: {}", e),
-            }
-        },
-        "ardium" | "ar" => {
-            let file_path = tmp_dir.join(format!("mc_{}.ar", file_id));
-            if tokio::fs::write(&file_path, code).await.is_err() {
-                return "Error writing code".to_string();
-            }
-            let output = tokio::process::Command::new("/usr/local/bin/ardium")
-                .arg("run")
-                .arg(&file_path)
-                .output()
-                .await;
-            let _ = tokio::fs::remove_file(&file_path).await;
-            match output {
-                Ok(out) => {
-                    let mut s = String::from_utf8_lossy(&out.stdout).to_string();
-                    if !out.stderr.is_empty() {
-                        s.push_str(&format!("\n{}", String::from_utf8_lossy(&out.stderr)));
-                    }
-                    if s.trim().is_empty() { "(Executed with no output)".to_string() } else { s }
-                },
-                Err(_) => "Ardium runtime not available on this server".to_string(),
-            }
-        },
-        "bash" | "sh" => {
-            let output = tokio::process::Command::new("bash")
-                .arg("-c")
-                .arg(code)
-                .output()
-                .await;
-            match output {
-                Ok(out) => {
-                    let mut s = String::from_utf8_lossy(&out.stdout).to_string();
-                    if !out.stderr.is_empty() {
-                        s.push_str(&format!("\n{}", String::from_utf8_lossy(&out.stderr)));
-                    }
-                    if s.trim().is_empty() { "(Executed with no output)".to_string() } else { s }
-                },
-                Err(e) => format!("Execution failed: {}", e),
-            }
-        },
-        _ => format!("Language '{}' not supported for cloud execution", lang),
+    #[tokio::test]
+    async fn disconnected_tools_never_report_success() {
+        let gateway = Arc::new(McpGatewayState::new());
+        let response = process_jsonrpc_request(&gateway, "test", json!({
+            "id": 1, "method": "tools/call", "params": {"name": "cloud_gpu_status"}
+        })).await;
+        assert!(response.get("error").is_some());
+        assert!(response.get("result").is_none());
+    }
+
+    #[tokio::test]
+    async fn desktop_error_is_preserved_and_failed_send_is_cleaned_up() {
+        let gateway = Arc::new(McpGatewayState::new());
+        let (tx, mut rx) = mpsc::channel::<Value>(1);
+        gateway.desktop_tunnels.write().await.insert("test".into(), tx);
+        let responder = gateway.clone();
+        let task = tokio::spawn(async move {
+            let request = rx.recv().await.unwrap();
+            let id = request["id"].as_u64().unwrap();
+            let (_, reply) = responder.pending_calls.write().await.remove(&id).unwrap();
+            reply.send(json!({"error": {"code": -32001, "message": "Permission denied"}})).unwrap();
+        });
+        let request = json!({"id": 7, "method": "tools/call", "params": {"name": "run_cell"}});
+        let response = process_jsonrpc_request(&gateway, "test", request.clone()).await;
+        task.await.unwrap();
+        assert_eq!(response["error"]["code"], -32001);
+        assert!(response.get("result").is_none());
+        let response = process_jsonrpc_request(&gateway, "test", request).await;
+        assert!(response.get("error").is_some());
+        assert!(gateway.pending_calls.read().await.is_empty());
     }
 }

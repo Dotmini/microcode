@@ -50,7 +50,8 @@ final class AgentTranscriptStore {
         var known = Dictionary(uniqueKeysWithValues: current.entries.map { ($0.id, $0) })
 
         for message in messages {
-            guard let data = try? encoder.encode(message) else { continue }
+            guard let encoded = try? encoder.encode(message),
+                  let data = try? AgentPrivacyGuard.sanitizeJSON(encoded) else { continue }
             let destination = messageURL(messageID: message.id, chatID: chatID, scope: scope)
             do {
                 try fileManager.createDirectory(at: destination.deletingLastPathComponent(), withIntermediateDirectories: true)

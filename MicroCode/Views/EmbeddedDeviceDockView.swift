@@ -38,6 +38,7 @@ struct EmbeddedDeviceDockView: View {
                                         Text(tab.title)
                                             .font(.system(size: 11, weight: isActive ? .semibold : .medium))
                                             .lineLimit(1)
+                                            .fixedSize()
                                     }
                                     .contentShape(Rectangle())
                                 }
@@ -199,24 +200,28 @@ struct EmbeddedDeviceDockView: View {
                     }
                 }
 
+                Divider()
+                    .frame(height: 14)
+                    .padding(.horizontal, 2)
+
                 // Standard macOS Human Interface Close Button [✕] at top-right
                 Button {
                     withAnimation(.easeInOut(duration: 0.16)) {
                         appState.hidePreviewInspector()
-                        if deviceRuntime.embeddedDockMode == .ios {
-                            Task { await ServeSimService.shared.stop() }
-                        }
+                        dockService.hideDock()
                     }
                 } label: {
                     Image(systemName: "xmark")
-                        .font(.system(size: 9, weight: .bold))
+                        .font(.system(size: 10, weight: .bold))
                         .foregroundColor(.secondary)
-                        .frame(width: 18, height: 18)
-                        .background(Color.primary.opacity(0.06))
-                        .clipShape(Circle())
+                        .frame(width: 22, height: 22)
+                        .background(Color.primary.opacity(0.08))
+                        .clipShape(RoundedRectangle(cornerRadius: 5, style: .continuous))
+                        .contentShape(Rectangle())
                 }
                 .buttonStyle(.plain)
-                .help("Close Preview Dock")
+                .help("Close Preview Dock (⌘I)")
+                .layoutPriority(10)
             }
             .padding(.horizontal, 8)
             .padding(.vertical, 5)
@@ -332,29 +337,39 @@ struct EmbeddedDeviceDockView: View {
 struct DevicePreviewHeaderMenu: View {
     @EnvironmentObject var appState: AppState
     @ObservedObject private var deviceRuntime = DeviceRuntimeService.shared
+    @ObservedObject private var dockService = PreviewDockService.shared
+
+    private var isPreviewShowing: Bool {
+        deviceRuntime.showingEmbeddedDeviceDock || dockService.isDockVisible || (appState.agenticContextVisible && appState.selectedInspectorTab == .preview)
+    }
 
     var body: some View {
         HStack(spacing: 2) {
             Button {
                 withAnimation(.easeInOut(duration: 0.18)) {
-                    deviceRuntime.showingEmbeddedDeviceDock.toggle()
+                    if isPreviewShowing {
+                        appState.hidePreviewInspector()
+                        dockService.hideDock()
+                    } else {
+                        appState.showPreviewInspector()
+                    }
                 }
             } label: {
                 HStack(spacing: 4) {
                     Image(systemName: deviceRuntime.showingEmbeddedAppleDock ? "iphone" : "candybarphone")
                         .font(.system(size: 10))
-                        .foregroundColor(deviceRuntime.showingEmbeddedDeviceDock ? .accentColor : .secondary)
+                        .foregroundColor(isPreviewShowing ? .accentColor : .secondary)
                     
                     Text("Preview")
-                        .font(.system(size: 11, weight: deviceRuntime.showingEmbeddedDeviceDock ? .semibold : .medium))
-                        .foregroundColor(deviceRuntime.showingEmbeddedDeviceDock ? .primary : .secondary)
+                        .font(.system(size: 11, weight: isPreviewShowing ? .semibold : .medium))
+                        .foregroundColor(isPreviewShowing ? .primary : .secondary)
                 }
                 .padding(.leading, 8)
                 .padding(.trailing, 2)
                 .padding(.vertical, 4)
             }
             .buttonStyle(.plain)
-            .help(deviceRuntime.showingEmbeddedDeviceDock ? "Hide Simulator / Preview" : "Show Simulator / Preview")
+            .help(isPreviewShowing ? "Hide Simulator / Preview" : "Show Simulator / Preview")
             
             Menu {
                 Button("Choose Device & Run…") {
@@ -420,11 +435,12 @@ struct DevicePreviewHeaderMenu: View {
                     Task { await deviceRuntime.refresh(workspace: appState.workspaceFolder) }
                 }
                 
-                if deviceRuntime.showingEmbeddedDeviceDock {
+                if isPreviewShowing {
                     Divider()
                     Button("Close Preview") {
                         withAnimation {
-                            deviceRuntime.showingEmbeddedDeviceDock = false
+                            appState.hidePreviewInspector()
+                            dockService.hideDock()
                         }
                     }
                 }

@@ -58,6 +58,8 @@ final class AndroidStreamService: ObservableObject {
     
     // MARK: - Start Streaming
     
+    private var isConnecting = false
+
     /// Start H.264 streaming from an Android device
     /// - Parameters:
     ///   - serial: ADB device serial number
@@ -65,6 +67,10 @@ final class AndroidStreamService: ObservableObject {
     ///   - maxFPS: Maximum frame rate (default 60)
     ///   - maxSize: Max dimension in pixels (0 = device native)
     func startStreaming(serial: String, adbPath: String? = nil, maxFPS: Int = 60, maxSize: Int = 1280) async {
+        guard !isConnecting else { return }
+        isConnecting = true
+        defer { isConnecting = false }
+
         stopStreaming()
         hasReceivedFirstFrame = false
         latestPixelBuffer = nil
@@ -127,11 +133,15 @@ final class AndroidStreamService: ObservableObject {
     }
     
     func stopStreaming() {
+        isConnecting = false
         connection?.cancel()
         connection = nil
         controlConnection?.cancel()
         controlConnection = nil
-        serverProcess?.terminate()
+        if let proc = serverProcess, proc.isRunning {
+            proc.terminate()
+            kill(proc.processIdentifier, SIGKILL)
+        }
         serverProcess = nil
         if !activeSerial.isEmpty, let adb = resolvedAdbPath {
             let serial = activeSerial
@@ -696,6 +706,10 @@ final class AndroidStreamService: ObservableObject {
                 guard !isResumed else { return }
                 isResumed = true
                 process.terminate()
+                if process.isRunning {
+                    kill(process.processIdentifier, SIGKILL)
+                }
+                try? pipe.fileHandleForReading.close()
                 continuation.resume(throwing: StreamError.adbFailed("Timed out after \(timeoutSeconds)s: \(args.joined(separator: " "))"))
             }
             timer.resume()
@@ -706,7 +720,8 @@ final class AndroidStreamService: ObservableObject {
                 defer { lock.unlock() }
                 guard !isResumed else { return }
                 isResumed = true
-                let data = pipe.fileHandleForReading.readDataToEndOfFile()
+                let data = (try? pipe.fileHandleForReading.readDataToEndOfFile()) ?? Data()
+                try? pipe.fileHandleForReading.close()
                 let output = String(decoding: data, as: UTF8.self)
                 if proc.terminationStatus == 0 {
                     continuation.resume(returning: output)
@@ -722,6 +737,7 @@ final class AndroidStreamService: ObservableObject {
                 defer { lock.unlock() }
                 guard !isResumed else { return }
                 isResumed = true
+                try? pipe.fileHandleForReading.close()
                 continuation.resume(throwing: error)
             }
         }

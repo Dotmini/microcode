@@ -293,22 +293,13 @@ class CloudGPUKernel: ComputeKernel {
         // Platform credentials are managed by a main-actor UI service. Read
         // the current value before entering the nonisolated WebSocket setup
         // below so Cloud GPU can use it without violating actor isolation.
-        let platformToken = await MainActor.run {
-            DotminiPlatformKeyService.shared.authorizationToken
-        }
-        
+        let platformToken = await MainActor.run { DotminiPlatformKeyService.shared.authorizationToken }
+        let refreshedToken = platformToken == nil ? await SupabaseAuthService.shared.refreshAccessTokenIfNeeded() : nil
+        let token = platformToken ?? refreshedToken ?? ""
+
         return try await withCheckedThrowingContinuation { continuation in
             let url = URL(string: "wss://api.dotmini.net/v1/compute/cloud")!
-            
-            // Pass an actual account token. A local license label is only a
-            // fallback for legacy deployments and must never win over a JWT.
             var headers: [String: String]? = nil
-            let token = platformToken
-                ?? UserDefaults.standard.string(forKey: "cloudGPUAuthToken")
-                ?? UserDefaults.standard.string(forKey: "microRentToken")
-                ?? UserDefaults.standard.string(forKey: "apiKey")
-                ?? ""
-            
             if !token.isEmpty {
                 headers = ["Authorization": "Bearer \(token)"]
             } else {
@@ -360,7 +351,7 @@ class CustomHPCKernel: ComputeKernel {
         return UserDefaults.standard.string(forKey: "hpcEndpoint") ?? ""
     }
     var agentToken: String {
-        return UserDefaults.standard.string(forKey: "hpcToken") ?? ""
+        return JupyterCredentialStore.token
     }
     
     private var streamManager = WebSocketStreamManager()
@@ -1034,7 +1025,7 @@ class ComputeKernelRouter {
         // Jupyter kernel as customHPC instead of the retired generic socket.
         if target == .cloudPremium {
             let endpoint = UserDefaults.standard.string(forKey: "hpcEndpoint") ?? ""
-            let token = UserDefaults.standard.string(forKey: "hpcToken") ?? ""
+            let token = JupyterCredentialStore.token
             if (endpoint.hasPrefix("https://") || endpoint.hasPrefix("http://")), !token.isEmpty {
                 return getKernel(for: .customHPC)
             }
@@ -1049,6 +1040,8 @@ class ComputeKernelRouter {
             kernel = LocalProcessKernel(target: target)
         case .localNvidia:
             kernel = LocalNvidiaKernel()
+        case .googleColab:
+            kernel = GoogleColabKernel()
         case .cloudPremium:
             kernel = CloudGPUKernel()
         case .customHPC:

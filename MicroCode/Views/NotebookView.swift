@@ -673,14 +673,31 @@ final class NotebookViewModel: ObservableObject {
                     if effectiveTarget == .customHPC {
                         try await CloudGPUService.shared.ensureManagedSession()
                     }
+                    if effectiveTarget == .googleColab {
+                        if !GoogleColabService.shared.status.isConnected {
+                            // Check if Colab session is already in clipboard before erroring out
+                            if GoogleColabService.shared.checkAndConnectFromClipboardIfValid() {
+                                for _ in 0..<8 {
+                                    if GoogleColabService.shared.status.isConnected { break }
+                                    try? await Task.sleep(nanoseconds: 500_000_000)
+                                }
+                            }
+                        }
+                    }
                     let kernel = ComputeKernelRouter.shared.getKernel(for: effectiveTarget)
                     try await kernel.start()
                     
-                    let result = try await kernel.execute(code: cell.content, language: cell.language.rawValue) { _ in }
+                    let result = try await kernel.execute(code: cell.content, language: cell.language.rawValue) { chunk in
+                        DispatchQueue.main.async {
+                            cell.appendOutput(chunk)
+                        }
+                    }
                     
                     DispatchQueue.main.async {
                         let clean = result.trimmingCharacters(in: .whitespacesAndNewlines)
-                        cell.output = clean.isEmpty ? "(Executed with no output)" : clean
+                        if cell.output.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                            cell.output = clean.isEmpty ? "(Executed with no output)" : clean
+                        }
                         cell.isExecuting = false
                         self.kernelStatus = "Idle"
                         cell.executionCount = (cell.executionCount ?? 0) + 1
@@ -688,6 +705,9 @@ final class NotebookViewModel: ObservableObject {
                     }
                 } catch {
                     DispatchQueue.main.async {
+                        if effectiveTarget == .googleColab {
+                            NotificationCenter.default.post(name: NSNotification.Name("MicroCodeOpenColabSheet"), object: nil)
+                        }
                         cell.appendOutput("❌ Kernel Error: \(error.localizedDescription)\n")
                         cell.isExecuting = false
                         self.kernelStatus = "Error"
@@ -2428,11 +2448,13 @@ struct NotebookView: View {
     @ObservedObject private var pythonEnvManager = PythonEnvManager.shared
     @ObservedObject private var cloudGPU = CloudGPUService.shared
     @ObservedObject private var sharedMemory = SharedMemoryService.shared
+    @ObservedObject private var colabService = GoogleColabService.shared
     @State private var isReady = false
     @State private var showAIPanel = false
     @State private var showingHPCSettings = false
+    @State private var showingColabSettings = false
     @State private var showingExportPopover = false
-    private let notebookHeaderHeight: CGFloat = 34
+    private let notebookHeaderHeight: CGFloat = 28
     
     private var panelBackground: Color {
         appState.appTheme.isGlass ? Color.white.opacity(0.05) : Color(nsColor: appState.appTheme.panelBackground)
@@ -2525,6 +2547,51 @@ struct NotebookView: View {
                 }
                 appState.aiExportedCode = nil // Clear after consuming
                 print("🚀 NotebookView: Loaded code from AI Agent into new cell")
+            }
+            
+            // Check if notebook URL was requested from Editor ipynb convert
+            if let notebookURL = appState.pendingNotebookURL {
+                viewModel.loadNotebook(from: notebookURL)
+                appState.pendingNotebookURL = nil
+                print("🚀 NotebookView: Loaded notebook from pendingNotebookURL: \(notebookURL.path)")
+            }
+        }
+        .onReceive(appState.$pendingNotebookURL) { url in
+            if let url = url {
+                viewModel.loadNotebook(from: url)
+                appState.pendingNotebookURL = nil
+                print("🚀 NotebookView: Received notebook from pendingNotebookURL: \(url.path)")
+            }
+        }
+        .onReceive(NotificationCenter.default.publisher(for: NSNotification.Name("ImportNotebookFile"))) { notification in
+            if let info = notification.userInfo,
+               let path = info["path"] as? String {
+                let url = URL(fileURLWithPath: path)
+                viewModel.loadNotebook(from: url)
+                print("🚀 NotebookView: Imported ipynb from Editor convert: \(path)")
+            }
+        }
+        .onReceive(NotificationCenter.default.publisher(for: NSNotification.Name("ImportScriptToNotebook"))) { notification in
+            if let info = notification.userInfo,
+               let code = info["code"] as? String,
+               let ext = info["extension"] as? String {
+                // Map extension to notebook language
+                let langMap: [String: CellLanguage] = [
+                    "py": .python, "r": .r, "jl": .julia, "sql": .sql,
+                    "go": .go, "rs": .rust, "cpp": .cpp, "c": .cpp,
+                    "swift": .python, "rb": .python, "js": .python, "ts": .python
+                ]
+                let lang = langMap[ext] ?? .python
+                let filename = info["filename"] as? String ?? "Imported"
+                
+                // Create a new notebook with the script as a cell
+                let notebook = NotebookModel(name: filename)
+                let cell = NotebookCellModel(type: .code, language: lang)
+                cell.content = code
+                notebook.cells = [cell]
+                viewModel.notebooks.append(notebook)
+                viewModel.activeNotebookId = notebook.id
+                print("🚀 NotebookView: Created notebook from \(ext) script: \(filename)")
             }
         }
         .onChange(of: appState.workspaceFolder?.path) { _ in
@@ -3112,9 +3179,136 @@ struct NotebookView: View {
                 .buttonStyle(.plain)
             }
             
+            Divider().frame(height: 14)
+            
+            // Python version
+            pythonVersionMenu
+            
+            // Add Cell
+            Menu {
+                Text("Code Cells")
+                    .font(.caption)
+                    .foregroundColor(.secondary)
+                
+                Button { viewModel.addCell(type: .code, language: .python) } label: {
+                    Label("Python", systemImage: "p.circle.fill")
+                }
+                Button { viewModel.addCell(type: .code, language: .r) } label: {
+                    Label("R", systemImage: "r.circle.fill")
+                }
+                Button { viewModel.addCell(type: .code, language: .julia) } label: {
+                    Label("Julia", systemImage: "j.circle.fill")
+                }
+                Button { viewModel.addCell(type: .code, language: .sql) } label: {
+                    Label("SQL", systemImage: "cylinder.fill")
+                }
+                
+                Divider()
+                
+                Text("Compiled")
+                    .font(.caption)
+                    .foregroundColor(.secondary)
+                
+                Button { viewModel.addCell(type: .code, language: .ardium) } label: {
+                    Label("Ardium", systemImage: "sparkles")
+                }
+                Button { viewModel.addCell(type: .code, language: .rust) } label: {
+                    Label("Rust", systemImage: "gearshape.fill")
+                }
+                Button { viewModel.addCell(type: .code, language: .go) } label: {
+                    Label("Go", systemImage: "g.circle.fill")
+                }
+                Button { viewModel.addCell(type: .code, language: .cpp) } label: {
+                    Label("C++", systemImage: "c.circle.fill")
+                }
+                Button { viewModel.addCell(type: .code, language: .objc) } label: {
+                    Label("Objective-C", systemImage: "apple.logo")
+                }
+                
+                Divider()
+                
+                Text("Documents")
+                    .font(.caption)
+                    .foregroundColor(.secondary)
+                
+                Button { viewModel.addCell(type: .code, language: .rmarkdown) } label: {
+                    Label("R Markdown", systemImage: "doc.richtext.fill")
+                }
+                Button { viewModel.addCell(type: .code, language: .latex) } label: {
+                    Label("LaTeX", systemImage: "function")
+                }
+                
+                Divider()
+                
+                Button("Markdown") { viewModel.addCell(type: .markdown) }
+                Button("Raw") { viewModel.addCell(type: .raw) }
+                
+                Divider()
+                
+                Button { viewModel.addCell(type: .procedure) } label: {
+                    Label("SAS Procedure", systemImage: "tablecells.fill")
+                }
+            } label: {
+                Image(systemName: "plus")
+                    .font(.system(size: 12))
+            }
+            .menuIndicator(.hidden)
+            .help("Add Cell")
+            
+            // Run Selected
+            Button(action: { viewModel.runSelectedCell(computeTarget: appState.currentComputeTarget) }) {
+                Image(systemName: "play.fill")
+                    .font(.system(size: 11))
+            }
+            .disabled(viewModel.selectedCellId == nil)
+            .help("Run Selected Cell")
+            
+            // Run All
+            Menu {
+                Button(action: { viewModel.runAllCells(computeTarget: appState.currentComputeTarget) }) {
+                    Label("Run All Cells", systemImage: "forward.fill")
+                }
+                
+                Divider()
+                
+                let usedColors = viewModel.getUsedColors().filter { $0 != .none }
+                if !usedColors.isEmpty {
+                    Menu("Run by Color") {
+                        ForEach(usedColors) { theme in
+                            Button {
+                                viewModel.runCellsByColor(theme, computeTarget: appState.currentComputeTarget)
+                            } label: {
+                                HStack {
+                                    Circle().fill(theme.iconColor).frame(width: 8, height: 8)
+                                    Text(theme.rawValue.capitalized)
+                                }
+                            }
+                        }
+                    }
+                }
+
+                let usedTags = viewModel.getUsedTags()
+                if !usedTags.isEmpty {
+                    Menu("Run by Tag") {
+                        ForEach(usedTags, id: \.self) { t in
+                            Button {
+                                viewModel.runCellsByTag(t, computeTarget: appState.currentComputeTarget)
+                            } label: { Label(t, systemImage: "tag.fill") }
+                        }
+                    }
+                }
+            } label: {
+                Image(systemName: "forward.fill")
+                    .font(.system(size: 11))
+            } primaryAction: {
+                viewModel.runAllCells(computeTarget: appState.currentComputeTarget)
+            }
+            .menuIndicator(.hidden)
+            .help("Run All")
+            
             Spacer()
             
-            // --- Right side: compact icon buttons ---
+            // --- Right side: compute, open, export, count, AI ---
             
             // Compute Engine Selector
             Menu {
@@ -3144,6 +3338,9 @@ struct NotebookView: View {
                     if appState.currentComputeTarget == .yourCloud {
                         Text("Your Cloud")
                             .font(.system(size: 11, weight: .medium))
+                    } else if appState.currentComputeTarget == .googleColab {
+                        Text("Google Colab")
+                            .font(.system(size: 11, weight: .medium))
                     }
                     Image(systemName: "chevron.down")
                         .font(.system(size: 8))
@@ -3152,6 +3349,39 @@ struct NotebookView: View {
             }
             .menuIndicator(.hidden)
             .help("Select Compute Engine: \(appState.currentComputeTarget.displayName)")
+            
+            // Google Colab Cloud GPU Status & Settings
+            if appState.currentComputeTarget == .googleColab {
+                Button(action: { showingColabSettings = true }) {
+                    HStack(spacing: 5) {
+                        Circle()
+                            .fill(colabService.status.statusColor)
+                            .frame(width: 6, height: 6)
+                        
+                        Text(colabService.status.isConnected ? colabService.detectedGPU : "Colab Runtime")
+                            .font(.system(size: 11, weight: .medium, design: .monospaced))
+                            .foregroundColor(colabService.status.isConnected ? .green : .primary)
+                        
+                        Image(systemName: "slider.horizontal.3")
+                            .font(.system(size: 9))
+                            .foregroundColor(.secondary)
+                    }
+                    .padding(.horizontal, 7)
+                    .padding(.vertical, 3)
+                    .background(Color(nsColor: .controlBackgroundColor))
+                    .cornerRadius(5)
+                    .overlay(RoundedRectangle(cornerRadius: 5).stroke(Color(nsColor: .separatorColor), lineWidth: 0.5))
+                }
+                .buttonStyle(.plain)
+                .help("Google Colab Cloud Compute & Runtime Bridge Settings")
+                .popover(isPresented: $showingColabSettings, arrowEdge: .bottom) {
+                    GoogleColabSheetView()
+                        .environmentObject(appState)
+                }
+                .onReceive(NotificationCenter.default.publisher(for: NSNotification.Name("MicroCodeOpenColabSheet"))) { _ in
+                    showingColabSettings = true
+                }
+            }
             
             // Your Cloud SSH Server Selector (Auto-synced with Remote Explorer)
             if appState.currentComputeTarget == .yourCloud {
@@ -3248,135 +3478,6 @@ struct NotebookView: View {
                 Divider().frame(height: 14)
             }
             
-            // Python version (icon-only)
-            pythonVersionMenu
-            
-            // Add Cell
-            Menu {
-                Text("Code Cells")
-                    .font(.caption)
-                    .foregroundColor(.secondary)
-                
-                Button { viewModel.addCell(type: .code, language: .python) } label: {
-                    Label("Python", systemImage: "p.circle.fill")
-                }
-                Button { viewModel.addCell(type: .code, language: .r) } label: {
-                    Label("R", systemImage: "r.circle.fill")
-                }
-                Button { viewModel.addCell(type: .code, language: .julia) } label: {
-                    Label("Julia", systemImage: "j.circle.fill")
-                }
-                Button { viewModel.addCell(type: .code, language: .sql) } label: {
-                    Label("SQL", systemImage: "cylinder.fill")
-                }
-                
-                Divider()
-                
-                Text("Compiled")
-                    .font(.caption)
-                    .foregroundColor(.secondary)
-                
-                Button { viewModel.addCell(type: .code, language: .ardium) } label: {
-                    Label("Ardium", systemImage: "sparkles")
-                }
-                Button { viewModel.addCell(type: .code, language: .rust) } label: {
-                    Label("Rust", systemImage: "gearshape.fill")
-                }
-                Button { viewModel.addCell(type: .code, language: .go) } label: {
-                    Label("Go", systemImage: "g.circle.fill")
-                }
-                Button { viewModel.addCell(type: .code, language: .cpp) } label: {
-                    Label("C++", systemImage: "c.circle.fill")
-                }
-                Button { viewModel.addCell(type: .code, language: .objc) } label: {
-                    Label("Objective-C", systemImage: "apple.logo")
-                }
-                
-                Divider()
-                
-                Text("Documents")
-                    .font(.caption)
-                    .foregroundColor(.secondary)
-                
-                Button { viewModel.addCell(type: .code, language: .rmarkdown) } label: {
-                    Label("R Markdown", systemImage: "doc.richtext.fill")
-                }
-                Button { viewModel.addCell(type: .code, language: .latex) } label: {
-                    Label("LaTeX", systemImage: "function")
-                }
-                
-                Divider()
-                
-                Button("Markdown") { viewModel.addCell(type: .markdown) }
-                Button("Raw") { viewModel.addCell(type: .raw) }
-                
-                Divider()
-                
-                Button { viewModel.addCell(type: .procedure) } label: {
-                    Label("SAS Procedure", systemImage: "tablecells.fill")
-                }
-            } label: {
-                Image(systemName: "plus")
-                    .font(.system(size: 12))
-            }
-            .menuIndicator(.hidden)
-            .help("Add Cell")
-            
-            Divider().frame(height: 14)
-            
-            // Run
-            Button(action: { viewModel.runSelectedCell(computeTarget: appState.currentComputeTarget) }) {
-                Image(systemName: "play.fill")
-                    .font(.system(size: 11))
-            }
-            .disabled(viewModel.selectedCellId == nil)
-            .help("Run Selected Cell")
-            
-            // Run All
-            Menu {
-                Button(action: { viewModel.runAllCells(computeTarget: appState.currentComputeTarget) }) {
-                    Label("Run All Cells", systemImage: "forward.fill")
-                }
-                
-                Divider()
-                
-                let usedColors = viewModel.getUsedColors().filter { $0 != .none }
-                if !usedColors.isEmpty {
-                    Menu("Run by Color") {
-                        ForEach(usedColors) { theme in
-                            Button {
-                                viewModel.runCellsByColor(theme, computeTarget: appState.currentComputeTarget)
-                            } label: {
-                                HStack {
-                                    Circle().fill(theme.iconColor).frame(width: 8, height: 8)
-                                    Text(theme.rawValue.capitalized)
-                                }
-                            }
-                        }
-                    }
-                }
-
-                let usedTags = viewModel.getUsedTags()
-                if !usedTags.isEmpty {
-                    Menu("Run by Tag") {
-                        ForEach(usedTags, id: \.self) { t in
-                            Button {
-                                viewModel.runCellsByTag(t, computeTarget: appState.currentComputeTarget)
-                            } label: { Label(t, systemImage: "tag.fill") }
-                        }
-                    }
-                }
-            } label: {
-                Image(systemName: "forward.fill")
-                    .font(.system(size: 11))
-            } primaryAction: {
-                viewModel.runAllCells(computeTarget: appState.currentComputeTarget)
-            }
-            .menuIndicator(.hidden)
-            .help("Run All")
-            
-            Divider().frame(height: 14)
-            
             // Open
             Button(action: { openNotebookFile() }) {
                 Image(systemName: "folder")
@@ -3420,6 +3521,13 @@ struct NotebookView: View {
                     }
                     Button(action: { viewModel.exportPlainPythonScript() }) {
                         Label("Export as Git-Clean Script (.py # %%)", systemImage: "doc.text.fill")
+                    }
+                    Button(action: {
+                        if let nb = viewModel.activeNotebook {
+                            colabService.openColabInBrowser(notebook: nb)
+                        }
+                    }) {
+                        Label("Open in Google Colab", systemImage: "sparkles.rectangle.stack")
                     }
                     Divider()
                     Text(viewModel.lastAutoSave.map { "Autosaved \($0.formatted(date: .omitted, time: .standard))" } ?? "Autosave on")
@@ -4349,6 +4457,37 @@ struct CellSelfHealingBanner: View {
             }
             
             Spacer()
+            
+            // Colab One-Click Resolvers
+            if cell.output.contains("Colab") || cell.output.contains("Google Colab") {
+                Button {
+                    cell.computeTargetOverride = .localCPU
+                    onRun()
+                } label: {
+                    HStack(spacing: 3) {
+                        Image(systemName: "laptopcomputer")
+                            .font(.system(size: 9))
+                        Text("Run on Local Mac")
+                    }
+                    .font(.system(size: 10, weight: .semibold))
+                }
+                .buttonStyle(.borderedProminent)
+                .controlSize(.small)
+                .help("Execute this cell immediately on your local Mac processor")
+                
+                Button {
+                    NotificationCenter.default.post(name: NSNotification.Name("MicroCodeOpenColabSheet"), object: nil)
+                } label: {
+                    HStack(spacing: 3) {
+                        Image(systemName: "bolt.fill")
+                            .font(.system(size: 9))
+                        Text("Connect Colab")
+                    }
+                    .font(.system(size: 10))
+                }
+                .buttonStyle(.bordered)
+                .controlSize(.small)
+            }
             
             // 1. AI Agent Auto-Fix Button (Monochrome / Theme-matching)
             Button {

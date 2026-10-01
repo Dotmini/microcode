@@ -382,9 +382,9 @@ class ACPAgentSession: ObservableObject, Identifiable {
     private func buildAGYArgs(task: String, model: String? = nil) -> [String] {
         var args = [
             "--output-format", "stream-json",
-            "--dangerously-skip-permissions",
             "--disable-slash-commands"
         ]
+        if config.permissionMode == .fullAuto { args.append("--dangerously-skip-permissions") }
         
         if let model = model, !model.isEmpty {
             args += ["--model", model]

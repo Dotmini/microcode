@@ -24,7 +24,7 @@ class SharedMemoryService: ObservableObject {
         guard let url = URL(string: "\(baseURL)/list") else { return }
         
         do {
-            let (data, _) = try await URLSession.shared.data(from: url)
+            let (data, _) = try await URLSession.shared.data(for: LocalBackendAuth.request(url: url))
             if let json = try? JSONSerialization.jsonObject(with: data) as? [String: [String]],
                let names = json["names"] {
                 DispatchQueue.main.async {
@@ -41,15 +41,27 @@ class SharedMemoryService: ObservableObject {
         import pandas as pd
         import io
         import requests
+        import os
+        from urllib.parse import urlparse
 
         class MicroCodeSHM:
             def __init__(self, base_url="http://127.0.0.1:3000/api/data"):
-                self.base_url = base_url
-                
+                self.base_url = base_url.rstrip("/")
+
+            def _request(self, method, path, **kwargs):
+                endpoint = urlparse(self.base_url)
+                headers = {}
+                if endpoint.scheme == "http" and endpoint.hostname in ("127.0.0.1", "localhost", "::1") and endpoint.port == 3000:
+                    token = os.environ.get("MICROCODE_LOCAL_API_TOKEN", "")
+                    if not token:
+                        raise RuntimeError("Run this bridge in a MicroCode local kernel or provide MICROCODE_LOCAL_API_TOKEN to the local process")
+                    headers["X-MicroCode-Token"] = token
+                return requests.request(method, f"{self.base_url}{path}", headers=headers, timeout=20, allow_redirects=False, **kwargs)
+
             def get(self, name):
                 # Try optimized SHM path first
                 try:
-                    r = requests.get(f"{self.base_url}/shm/get/{name}")
+                    r = self._request("GET", f"/shm/get/{name}")
                     if r.status_code == 200:
                         path = r.json().get("path")
                         if path:
@@ -58,7 +70,7 @@ class SharedMemoryService: ObservableObject {
                     pass
                     
                 # Fallback to standard HTTP
-                r = requests.get(f"{self.base_url}/get/{name}")
+                r = self._request("GET", f"/get/{name}")
                 if r.status_code == 200:
                     return pd.read_parquet(io.BytesIO(r.content))
                 raise Exception(f"Failed to get {name}: {r.status_code} {r.text}")
@@ -68,7 +80,7 @@ class SharedMemoryService: ObservableObject {
                 try:
                     path = f"/tmp/{name}.shm"
                     df.to_parquet(path)
-                    r = requests.post(f"{self.base_url}/shm/store/{name}")
+                    r = self._request("POST", f"/shm/store/{name}")
                     if r.status_code == 200: return
                 except:
                     pass # Fallback if SHM fails
@@ -76,12 +88,12 @@ class SharedMemoryService: ObservableObject {
                 # Fallback to standard HTTP
                 buf = io.BytesIO()
                 df.to_parquet(buf)
-                r = requests.post(f"{self.base_url}/store/{name}", data=buf.getvalue())
+                r = self._request("POST", f"/store/{name}", data=buf.getvalue())
                 if r.status_code != 200:
                     raise Exception(f"Failed to store {name}: {r.status_code} {r.text}")
                     
             def list(self):
-                return requests.get(f"{self.base_url}/list").json().get("names", [])
+                return self._request("GET", "/list").json().get("names", [])
 
         shm = MicroCodeSHM()
         """

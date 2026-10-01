@@ -796,6 +796,8 @@ class AppState: ObservableObject {
 
     @Published var consoleOutput: String = ""
     @Published var isExecuting: Bool = false
+    @Published var consensusEnabled: Bool = false
+    @Published var consensusThreshold: Int = 2
 
     @Published var workspaceFolder: URL?
     @Published var showingFirstLaunchWelcome: Bool = true
@@ -869,7 +871,9 @@ class AppState: ObservableObject {
     
     // Custom HPC Configuration
     @AppStorage("hpcEndpoint") var hpcEndpoint: String = "ws://127.0.0.1:8080/v1/agent"
-    @AppStorage("hpcToken") var hpcToken: String = ""
+    @Published var hpcToken: String = JupyterCredentialStore.token {
+        didSet { JupyterCredentialStore.token = hpcToken }
+    }
 
     @Published var fontSize: CGFloat = 16
     @Published var fontFamily: String = "SF Mono"
@@ -895,6 +899,14 @@ class AppState: ObservableObject {
     
     // AI Code Export - used to pass code from AI Agent to Playground/Notebook
     @Published var aiExportedCode: String? = nil
+    
+    // Pending ipynb conversion — set by Editor banner, consumed by NotebookView (Cell Mode) or PlaygroundView onAppear
+    @Published var pendingNotebookURL: URL? = nil
+    @Published var pendingIPYNBCells: [[String: String]]? = nil
+    @Published var pendingIPYNBLanguage: String? = nil
+    @Published var pendingIPYNBPath: String? = nil
+    @Published var pendingPlaygroundCode: String? = nil
+    @Published var pendingPlaygroundLanguage: String? = nil
 
     @Published var showingRefactorDialog: Bool = false
     @Published var showingRefactorProWindow: Bool = false
@@ -1249,12 +1261,12 @@ class AppState: ObservableObject {
             defaults.set(aiModel, forKey: "aiModel")
         } else if hasDeepSeek {
             aiProvider = "deepseek"
-            aiModel = (savedModel?.contains("deepseek") == true) ? savedModel! : "deepseek-v4-flash"
+            aiModel = (savedModel?.contains("deepseek") == true) ? savedModel! : "deepseek-chat"
             defaults.set("deepseek", forKey: "aiProvider")
             defaults.set(aiModel, forKey: "aiModel")
         } else if hasOpenAI {
             aiProvider = "openai"
-            aiModel = (savedModel?.contains("gpt") == true || savedModel?.contains("o1") == true || savedModel?.contains("o3") == true) ? savedModel! : "gpt-6-astra"
+            aiModel = (savedModel?.contains("gpt") == true || savedModel?.contains("o1") == true || savedModel?.contains("o3") == true) ? savedModel! : "gpt-4o"
             defaults.set("openai", forKey: "aiProvider")
             defaults.set(aiModel, forKey: "aiModel")
         } else if hasAnthropic {
@@ -1285,15 +1297,9 @@ class AppState: ObservableObject {
             }
         }
 
-        // MicroRent AI Proxy setup
-        let microToken = defaults.string(forKey: "microRentToken") ?? ""
-        if !microToken.isEmpty {
-            setenv("MICRORENT_TOKEN", microToken, 1)
-            setenv("USE_MICRORENT_PROXY", "1", 1)
-        } else {
-            unsetenv("MICRORENT_TOKEN")
-            setenv("USE_MICRORENT_PROXY", "0", 1)
-        }
+        defaults.removeObject(forKey: "microRentToken")
+        unsetenv("MICRORENT_TOKEN")
+        unsetenv("USE_MICRORENT_PROXY")
 
         // Load GitHub Settings
         githubOwner = defaults.string(forKey: "githubOwner") ?? ""
@@ -1389,9 +1395,7 @@ class AppState: ObservableObject {
                 if let mail = suiteDefaults.string(forKey: "dotminiUserEmail"), !mail.isEmpty, defaults.string(forKey: "dotminiUserEmail")?.isEmpty ?? true {
                     defaults.set(mail, forKey: "dotminiUserEmail")
                 }
-                if let rent = suiteDefaults.string(forKey: "microRentToken"), !rent.isEmpty, defaults.string(forKey: "microRentToken")?.isEmpty ?? true {
-                    defaults.set(rent, forKey: "microRentToken")
-                }
+
             }
             
             // Directly read plist file on disk in case suite wasn't registered in sandbox
@@ -1416,9 +1420,7 @@ class AppState: ObservableObject {
                 if let mail = plist["dotminiUserEmail"] as? String, !mail.isEmpty, defaults.string(forKey: "dotminiUserEmail")?.isEmpty ?? true {
                     defaults.set(mail, forKey: "dotminiUserEmail")
                 }
-                if let rent = plist["microRentToken"] as? String, !rent.isEmpty, defaults.string(forKey: "microRentToken")?.isEmpty ?? true {
-                    defaults.set(rent, forKey: "microRentToken")
-                }
+
             }
         }
         
@@ -3094,11 +3096,20 @@ class AppState: ObservableObject {
                 let keyMode = UserDefaults.standard.string(forKey: "aiKeyMode") ?? "cloud"
                 let agentAPIKey: String?
                 if keyMode == "cloud" {
-                    // The local agent backend forwards model calls through the
-                    // Dotmini proxy, so it needs the same cloud credential as
-                    // AIClient (not the provider's direct API key).
-                    agentAPIKey = UserDefaults.standard.string(forKey: "dotminiLicenseKey")
-                        ?? UserDefaults.standard.string(forKey: "microRentToken")
+                    if let key = DotminiPlatformKeyService.shared.authorizationToken {
+                        agentAPIKey = key
+                    } else {
+                        agentAPIKey = await SupabaseAuthService.shared.refreshAccessTokenIfNeeded()
+                    }
+                    guard agentAPIKey?.isEmpty == false else {
+                        aiChatMessages.append(ChatMessage(role: .assistant, content: "Sign in to Dotmini or add a Platform key before using Cloud Agent.", timestamp: Date()))
+                        isLoading = false
+                        return
+                    }
+                } else if keyMode == "subscription" {
+                    aiChatMessages.append(ChatMessage(role: .assistant, content: "Use the native Agent panel for Copilot subscriptions or the provider's CLI agent in Connections.", timestamp: Date()))
+                    isLoading = false
+                    return
                 } else {
                     agentAPIKey = apiKeys[aiProvider]
                 }
@@ -3116,7 +3127,8 @@ class AppState: ObservableObject {
                     provider: aiProvider,
                     model: aiModel,
                     api_key: agentAPIKey,
-                    auto_execute: true
+                    auto_execute: true,
+                    cloud_base_url: keyMode == "cloud" ? StreamableAIProvider.cloudProxyURL : nil
                 )
                 
                 var assistantMessage = ChatMessage(
@@ -4285,8 +4297,22 @@ class AppState: ObservableObject {
     }
 
     func toggleAgenticContext() {
-        agenticContextVisible.toggle()
-        saveSettings()
+        let isAnyInspectorVisible = agenticContextVisible || PreviewDockService.shared.isDockVisible || DeviceRuntimeService.shared.showingEmbeddedDeviceDock || showingPreviewView
+        if isAnyInspectorVisible {
+            hidePreviewInspector()
+        } else {
+            agenticContextVisible = true
+            saveSettings()
+        }
+    }
+
+    func togglePreviewInspector(tab: String? = nil) {
+        let isAnyInspectorVisible = agenticContextVisible || PreviewDockService.shared.isDockVisible || DeviceRuntimeService.shared.showingEmbeddedDeviceDock || showingPreviewView
+        if isAnyInspectorVisible {
+            hidePreviewInspector()
+        } else {
+            showPreviewInspector(tab: tab)
+        }
     }
 
     func showPreviewInspector(tab: String? = nil) {
@@ -4310,6 +4336,7 @@ class AppState: ObservableObject {
         DeviceRuntimeService.shared.showingEmbeddedDeviceDock = false
         DeviceRuntimeService.shared.stopEmbeddedAndroid()
         AppleSimulatorCaptureService.shared.stop()
+        Task { await ServeSimService.shared.stop() }
         PreviewDockService.shared.isDockVisible = false
         saveSettings()
     }
@@ -4566,35 +4593,39 @@ class AppState: ObservableObject {
 
         switch ext {
         case "py": return "python"
-        case "js": return "javascript"
-        case "ts": return "typescript"
+        case "js", "jsx", "mjs", "cjs": return "javascript"
+        case "ts", "tsx", "mts", "cts": return "typescript"
         case "rs": return "rust"
         case "swift": return "swift"
         case "go": return "go"
         case "rb": return "ruby"
         case "java": return "java"
-        case "kt", "kts": return "kotlin" // ADDED: Kotlin
-        case "cpp", "cc", "cxx", "c++": return "cpp"
+        case "kt", "kts": return "kotlin"
+        case "cpp", "cc", "cxx", "c++", "hpp", "hxx", "hh": return "cpp"
         case "m": return "objective-c"
         case "mm": return "objective-cpp"
-        case "c": return "c"
-        case "h", "hpp": return "cpp"
-        case "json": return "json"
-        case "xml": return "xml"
-        case "html": return "html"
+        case "c", "h": return "c"
+        case "json", "jsonc": return "json"
+        case "xml", "svg", "xhtml": return "xml"
+        case "html", "htm": return "html"
+        case "vue": return "vue"
+        case "svelte": return "svelte"
         case "css": return "css"
-        case "md": return "markdown"
-        case "sh", "zsh", "bash": return "shell"
+        case "scss", "sass", "less": return "css"
+        case "md", "mdown", "markdown": return "markdown"
+        case "sh", "zsh", "bash", "fish": return "shell"
         case "yaml", "yml": return "yaml"
+        case "toml", "ini", "conf", "config", "env", "properties": return "toml"
         case "ar": return "ardium"
         case "dart": return "dart"
-        case "php": return "php"
+        case "php", "phtml", "php8": return "php"
         case "cs": return "csharp"
         case "lua": return "lua"
         case "pl", "pm": return "perl"
         case "r": return "r"
         case "jl": return "julia"
-        case "sql": return "sql"
+        case "sql", "pgsql", "mysql", "sqlite": return "sql"
+        case "graphql", "gql": return "graphql"
         case "ml", "mli": return "ocaml"
         case "hs": return "haskell"
         case "zig": return "zig"

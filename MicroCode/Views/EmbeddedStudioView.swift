@@ -85,37 +85,29 @@ enum HardwareBoardTarget: String, CaseIterable, Identifiable {
 }
 
 enum StudioCategory: String, CaseIterable, Identifiable {
-    case code = "CODE & FIRMWARE"
-    case telemetry = "TELEMETRY & LOGGING"
-    case silicon = "SILICON & SCHEMATIC"
-    case provision = "PROVISION & DEBUG"
+    case develop = "DEVELOP"
+    case hardware = "HARDWARE"
     
     var id: String { rawValue }
     
     var code: String {
         switch self {
-        case .code: return "01"
-        case .telemetry: return "02"
-        case .silicon: return "03"
-        case .provision: return "04"
+        case .develop: return "01"
+        case .hardware: return "02"
         }
     }
     
     var shortTitle: String {
         switch self {
-        case .code: return "CODE"
-        case .telemetry: return "TELEMETRY"
-        case .silicon: return "SILICON"
-        case .provision: return "PROVISION"
+        case .develop: return "DEVELOP"
+        case .hardware: return "HARDWARE"
         }
     }
     
     var icon: String {
         switch self {
-        case .code: return "chevron.left.forwardslash.chevron.right"
-        case .telemetry: return "waveform.path.ecg"
-        case .silicon: return "cpu"
-        case .provision: return "wrench.and.screwdriver"
+        case .develop: return "chevron.left.forwardslash.chevron.right"
+        case .hardware: return "cpu"
         }
     }
 }
@@ -134,14 +126,10 @@ enum StudioTool: Int, CaseIterable, Identifiable {
     
     var category: StudioCategory {
         switch self {
-        case .sketchEditor:
-            return .code
-        case .serialMonitor, .sensorPlotter:
-            return .telemetry
-        case .pinoutDiagram, .flashPartitions:
-            return .silicon
-        case .toolchainFlasher, .crashDecoder, .wirelessOTA:
-            return .provision
+        case .sketchEditor, .serialMonitor, .sensorPlotter:
+            return .develop
+        case .pinoutDiagram, .flashPartitions, .toolchainFlasher, .crashDecoder, .wirelessOTA:
+            return .hardware
         }
     }
     
@@ -387,11 +375,7 @@ struct EmbeddedStudioView: View {
     @State private var isOtaFlashing: Bool = false
     @State private var otaLog: String = ""
     @State private var selectedOtaNode: WirelessOtaNode? = nil
-    @State private var otaDiscoveredNodes: [WirelessOtaNode] = [
-        WirelessOtaNode(name: "esp32s3-telemetry-node", ip: "192.168.1.142", port: 3232, board: "ESP32-S3 DevKit", rssi: -56, status: "Ready"),
-        WirelessOtaNode(name: "picow-sensor-pod-02", ip: "192.168.1.189", port: 8266, board: "Raspberry Pi Pico W", rssi: -68, status: "Idle"),
-        WirelessOtaNode(name: "stm32-iot-gateway", ip: "192.168.1.205", port: 3232, board: "STM32 Nucleo WiFi", rssi: -74, status: "Standby")
-    ]
+    @State private var otaDiscoveredNodes: [WirelessOtaNode] = [] // Populated by real mDNS discovery when implemented
     
     // MARK: - Embedded Sketch & IDE State
     @State private var editorLanguage: EmbeddedSourceLanguage = .cpp
@@ -533,6 +517,52 @@ struct EmbeddedStudioView: View {
         .onDisappear {
             disconnectRealSerial()
         }
+        // MARK: Embedded Studio Keyboard Shortcuts (⌘1-5 for tool switching)
+        .background(
+            Button("") { selectedTool = .sketchEditor }
+                .keyboardShortcut("1", modifiers: .command)
+                .hidden()
+        )
+        .background(
+            Button("") { selectedTool = .serialMonitor }
+                .keyboardShortcut("2", modifiers: .command)
+                .hidden()
+        )
+        .background(
+            Button("") { selectedTool = .pinoutDiagram }
+                .keyboardShortcut("3", modifiers: .command)
+                .hidden()
+        )
+        .background(
+            Button("") { selectedTool = .toolchainFlasher }
+                .keyboardShortcut("4", modifiers: .command)
+                .hidden()
+        )
+        .background(
+            Button("") { selectedTool = .crashDecoder }
+                .keyboardShortcut("5", modifiers: .command)
+                .hidden()
+        )
+        // ⌘⇧L: Toggle left sidebar
+        .background(
+            Button("") {
+                withAnimation(.easeInOut(duration: 0.2)) {
+                    showLeftSidebar.toggle()
+                }
+            }
+            .keyboardShortcut("l", modifiers: [.command, .shift])
+            .hidden()
+        )
+        // ⌘⇧A: Toggle AI Agent Panel
+        .background(
+            Button("") {
+                withAnimation(.easeInOut(duration: 0.2)) {
+                    showAIAgentPanel.toggle()
+                }
+            }
+            .keyboardShortcut("a", modifiers: [.command, .shift])
+            .hidden()
+        )
     }
     
     // MARK: - Left Sidebar (Monochrome)
@@ -699,6 +729,47 @@ struct EmbeddedStudioView: View {
                                         selectedPort = port
                                     }
                                 }
+                            }
+                        }
+                    }
+                    
+                    // SECTION: COMPACT PROJECT FILES (Embedded-relevant only)
+                    if !embeddedProjectFiles.isEmpty {
+                        VStack(alignment: .leading, spacing: 4) {
+                            sectionHeader(title: "PROJECT FILES", icon: "doc.text")
+                            
+                            ForEach(embeddedProjectFiles.prefix(15), id: \.path) { file in
+                                Button(action: {
+                                    Task {
+                                        await appState.loadFile(url: URL(fileURLWithPath: file.path))
+                                    }
+                                    selectedTool = .sketchEditor
+                                }) {
+                                    HStack(spacing: 6) {
+                                        Image(systemName: embeddedFileIcon(for: file.name))
+                                            .font(.system(size: 10))
+                                            .frame(width: 14)
+                                            .foregroundColor(isDark ? Color(white: 0.5) : Color(white: 0.45))
+                                        
+                                        Text(file.name)
+                                            .font(.system(size: 10, design: .monospaced))
+                                            .foregroundColor(isDark ? Color(white: 0.7) : Color(white: 0.3))
+                                            .lineLimit(1)
+                                        
+                                        Spacer()
+                                    }
+                                    .padding(.horizontal, 8)
+                                    .padding(.vertical, 4)
+                                    .contentShape(Rectangle())
+                                }
+                                .buttonStyle(.plain)
+                            }
+                            
+                            if embeddedProjectFiles.count > 15 {
+                                Text("+ \(embeddedProjectFiles.count - 15) more files")
+                                    .font(.system(size: 8, design: .monospaced))
+                                    .foregroundColor(isDark ? Color(white: 0.4) : Color(white: 0.5))
+                                    .padding(.horizontal, 8)
                             }
                         }
                     }
@@ -5476,5 +5547,89 @@ struct EmbeddedStudioView: View {
             PinDefinition(physicalPin: 2, name: "PC9", gpioIndex: 9, category: "GPIO", padName: "PC9", primaryFunction: "TIM3_CH4 / TIM8_CH4", multiplexedFunctions: ["TIM3 CH4", "TIM8 CH4", "SDIO D1"], strappingNote: nil, electricalNotes: "General timer I/O."),
             PinDefinition(physicalPin: 1, name: "PC8", gpioIndex: 8, category: "GPIO", padName: "PC8", primaryFunction: "TIM3_CH3 / TIM8_CH3", multiplexedFunctions: ["TIM3 CH3", "TIM8 CH3", "SDIO D0"], strappingNote: nil, electricalNotes: "General timer I/O.")
         ]
+    }
+    
+    // MARK: - Embedded Project File Helpers
+    
+    /// Lightweight file entry for the compact embedded project file list.
+    struct EmbeddedFileEntry: Identifiable {
+        let id = UUID()
+        let name: String
+        let path: String
+    }
+    
+    /// File extensions relevant to embedded / firmware development.
+    private static let embeddedExtensions: Set<String> = [
+        "ino", "c", "cpp", "h", "hpp", "cc", "cxx",  // C/C++
+        "ar",                                           // Ardium
+        "s", "S",                                       // Assembly
+        "ld",                                           // Linker scripts
+        "rs",                                           // Rust
+        "py",                                           // MicroPython
+    ]
+    
+    /// Special filenames relevant to embedded build systems.
+    private static let embeddedBuildFiles: Set<String> = [
+        "CMakeLists.txt", "platformio.ini", "Makefile",
+        "sdkconfig", "partitions.csv", "Cargo.toml",
+    ]
+    
+    /// Recursively collects embedded-relevant files from the workspace file tree.
+    private var embeddedProjectFiles: [EmbeddedFileEntry] {
+        guard let _ = appState.workspaceFolder else { return [] }
+        
+        var results: [EmbeddedFileEntry] = []
+        collectEmbeddedFiles(from: appState.fileTree, into: &results)
+        return results.sorted { $0.name.localizedCaseInsensitiveCompare($1.name) == .orderedAscending }
+    }
+    
+    private func collectEmbeddedFiles(from nodes: [FileNode], into results: inout [EmbeddedFileEntry]) {
+        for node in nodes {
+            if node.isDirectory {
+                // Skip hidden dirs and build output
+                let dirName = (node.name as NSString).lastPathComponent
+                if !dirName.hasPrefix(".") && dirName != "build" && dirName != "node_modules" {
+                    collectEmbeddedFiles(from: node.children, into: &results)
+                }
+            } else {
+                let ext = (node.name as NSString).pathExtension.lowercased()
+                let filename = (node.name as NSString).lastPathComponent
+                
+                if Self.embeddedExtensions.contains(ext) || Self.embeddedBuildFiles.contains(filename) {
+                    results.append(EmbeddedFileEntry(
+                        name: filename,
+                        path: node.path
+                    ))
+                }
+            }
+        }
+    }
+    
+    /// Returns an appropriate SF Symbol icon name for an embedded file type.
+    private func embeddedFileIcon(for filename: String) -> String {
+        let ext = (filename as NSString).pathExtension.lowercased()
+        switch ext {
+        case "c", "cpp", "cc", "cxx", "h", "hpp":
+            return "c.square"
+        case "ino":
+            return "cpu"
+        case "ar":
+            return "a.square"
+        case "rs":
+            return "r.square"
+        case "py":
+            return "p.square"
+        case "s", "S":
+            return "memorychip"
+        case "ld":
+            return "link"
+        default:
+            if filename == "CMakeLists.txt" || filename == "Makefile" {
+                return "hammer"
+            } else if filename == "platformio.ini" || filename == "sdkconfig" {
+                return "gearshape"
+            }
+            return "doc.text"
+        }
     }
 }

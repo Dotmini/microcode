@@ -49,6 +49,11 @@ struct MicroCodeApp: App {
                 .onOpenURL { url in
                     handleIncomingDeepLink(url)
                 }
+                .onReceive(NotificationCenter.default.publisher(for: Notification.Name("MicroCodeOAuthCallback"))) { notification in
+                    if let url = notification.object as? URL {
+                        handleIncomingDeepLink(url)
+                    }
+                }
                 .onReceive(NotificationCenter.default.publisher(for: NSNotification.Name("MicroCodeOpenOmniAISnippet"))) { notif in
                     if let info = notif.userInfo,
                        let code = info["code"] as? String {
@@ -154,6 +159,21 @@ struct MicroCodeApp: App {
             return
         }
         
+        // Google Colab Cloud GPU Deep Link (e.g. microcode://colab?endpoint=https://...&token=mc_...)
+        if (url.scheme?.lowercased() == "microcode" || url.scheme?.lowercased() == "codetuner"),
+           (url.host?.lowercased() == "colab" || url.host?.lowercased() == "colab-connect" || url.host?.lowercased() == "colab_connect") {
+            if let components = URLComponents(url: url, resolvingAgainstBaseURL: true) {
+                let queryItems = components.queryItems ?? []
+                let endpoint = queryItems.first(where: { $0.name.lowercased() == "endpoint" || $0.name.lowercased() == "url" })?.value ?? ""
+                let token = queryItems.first(where: { $0.name.lowercased() == "token" })?.value ?? ""
+                Task { @MainActor in
+                    await GoogleColabService.shared.connectToColab(endpoint: endpoint, token: token)
+                    AppState.shared?.currentComputeTarget = .googleColab
+                }
+            }
+            return
+        }
+        
         guard let components = URLComponents(url: url, resolvingAgainstBaseURL: true) else { return }
         let host = components.host ?? url.path
         let queryItems = components.queryItems ?? []
@@ -162,18 +182,9 @@ struct MicroCodeApp: App {
             return queryItems.first(where: { $0.name.lowercased() == key.lowercased() })?.value
         }
         
-        // Account Sync & License
-        if let email = queryValue(for: "email"), !email.isEmpty {
-            let token = queryValue(for: "token") ?? ""
-            let name = queryValue(for: "name") ?? queryValue(for: "display_name") ?? ""
-            // Legacy web pages can still open snippets, but account/session
-            // tokens are accepted only through Supabase's OAuth callback.
-            let key = ""
-            UserDefaults.standard.set(email, forKey: "dotminiUserEmail")
-            appState.syncGoogleOrDotminiAccount(email: email, token: token, displayName: name)
-            NotificationCenter.default.post(name: NSNotification.Name("MicroCodeAccountLoggedIn"), object: nil, userInfo: ["email": email, "key": key])
-        }
-        
+        // Account identity is accepted only through the correlated Supabase
+        // authorization-code callback above. Legacy snippet links cannot sign in.
+
         // Universal Preview Dock Deep Link
         if host == "preview" || host == "preview_dock" || host == "preview-dock" {
             if let path = queryValue(for: "path"), !path.isEmpty {

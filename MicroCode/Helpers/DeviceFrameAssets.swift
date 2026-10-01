@@ -50,6 +50,19 @@ public enum DeviceFrameAssets {
             return img
         }
 
+        // 6. Try installed app bundle in ~/Applications or /Applications
+        let fallbackPaths = [
+            NSHomeDirectory() + "/Applications/MicroCode.app/Contents/Resources/\(name).\(fileExtension)",
+            "/Applications/MicroCode.app/Contents/Resources/\(name).\(fileExtension)",
+            "/Users/dotmini/Documents/SX/codetunner-native/MicroCode/Resources/\(name).\(fileExtension)"
+        ]
+        for path in fallbackPaths {
+            if FileManager.default.fileExists(atPath: path),
+               let img = NSImage(contentsOfFile: path) {
+                return img
+            }
+        }
+
         return nil
     }
 

@@ -215,7 +215,7 @@ struct WebSubscriptionLoginSheet: View {
                                 .foregroundColor(.green.opacity(0.9))
                         }
                         
-                        Text("Your \(provider.displayName) subscription is now active and ready to use in MicroCode.")
+                        Text(provider == .copilot ? "Copilot access verified. Your credential is saved in Keychain." : "Session saved in Keychain. Use the provider’s CLI agent in Connections; a web session does not verify API or subscription access.")
                             .font(.system(size: 12))
                             .foregroundColor(.white.opacity(0.8))
                             .multilineTextAlignment(.center)

@@ -68,92 +68,46 @@ struct ScreenClipShape: Shape {
 // MARK: - Viewports & Device Options
 
 enum WebAppViewport: String, CaseIterable, Identifiable {
-    case responsive = "Fluid Responsive"
-    case mobileS = "Mobile S (320)"
-    case mobile = "Mobile (375)"
-    case iphone = "iPhone 16 (393)"
-    case mobileMax = "Max (430)"
-    case tablet = "iPad (768)"
-    case laptop = "Laptop (1024)"
-    case desktop = "MacBook (1280)"
-    case desktopWide = "Desktop (1440)"
+    case responsive = "Responsive"
+    case iphone = "iPhone"
+    case tablet = "iPad"
+    case macbook = "MacBook"
     
     var id: String { rawValue }
     
-    var shortLabel: String {
+    var icon: String {
         switch self {
-        case .responsive: return "Fluid"
-        case .mobileS: return "320"
-        case .mobile: return "375"
-        case .iphone: return "393"
-        case .mobileMax: return "430"
-        case .tablet: return "768"
-        case .laptop: return "1024"
-        case .desktop: return "1280"
-        case .desktopWide: return "1440"
+        case .responsive: return "arrow.left.and.right"
+        case .iphone: return "iphone"
+        case .tablet: return "ipad"
+        case .macbook: return "laptopcomputer"
         }
     }
     
     var defaultWidth: CGFloat? {
         switch self {
         case .responsive: return nil
-        case .mobileS: return 320.0
-        case .mobile: return 375.0
-        case .iphone: return 393.0
-        case .mobileMax: return 430.0
-        case .tablet: return 768.0
-        case .laptop: return 1024.0
-        case .desktop: return 1280.0
-        case .desktopWide: return 1440.0
+        case .iphone: return 447.0
+        case .tablet: return 646.0
+        case .macbook: return 802.0
         }
     }
     
     var defaultHeight: CGFloat? {
         switch self {
         case .responsive: return nil
-        case .mobileS: return 568.0
-        case .mobile: return 667.0
-        case .iphone: return 852.0
-        case .mobileMax: return 932.0
-        case .tablet: return 1024.0
-        case .laptop: return 768.0
-        case .desktop: return 800.0
-        case .desktopWide: return 900.0
-        }
-    }
-    
-    var icon: String {
-        switch self {
-        case .responsive: return "arrow.up.left.and.arrow.down.right"
-        case .mobileS: return "iphone"
-        case .mobile: return "iphone"
-        case .iphone: return "iphone.gen3"
-        case .mobileMax: return "iphone"
-        case .tablet: return "ipad"
-        case .laptop: return "laptopcomputer"
-        case .desktop: return "display"
-        case .desktopWide: return "display.2"
+        case .iphone: return 972.0
+        case .tablet: return 938.0
+        case .macbook: return 503.0
         }
     }
     
     var subtitle: String {
         switch self {
-        case .responsive: return "Fluid Full Width • Reflows with dock"
-        case .mobileS: return "320 × 568 • Compact Mobile"
-        case .mobile: return "375 × 667 • Standard Mobile"
-        case .iphone: return "393 × 852 • iPhone 16 Pro"
-        case .mobileMax: return "430 × 932 • iPhone 16 Pro Max"
-        case .tablet: return "768 × 1024 • iPad / Tablet"
-        case .laptop: return "1024 × 768 • Laptop Display"
-        case .desktop: return "1280 × 800 • MacBook Retina"
-        case .desktopWide: return "1440 × 900 • 2K Desktop Canvas"
-        }
-    }
-    
-    var hasBezel: Bool {
-        switch self {
-        case .iphone, .tablet, .desktop: return true
-        default: return false
+        case .responsive: return "Fluid Responsive • Drag handles to resize freely"
+        case .iphone: return "iPhone 16 Pro • Official Apple Bezel Frame"
+        case .tablet: return "iPad Pro • Official Apple Bezel Frame"
+        case .macbook: return "MacBook Pro • Official Apple Bezel Frame"
         }
     }
     
@@ -162,60 +116,23 @@ enum WebAppViewport: String, CaseIterable, Identifiable {
         case .responsive:
             return nil
             
-        case .mobileS:
-            let w: CGFloat = isLandscape ? 568.0 : 320.0
-            let h: CGFloat = isLandscape ? 320.0 : 568.0
-            return DeviceFrameSpec(
-                name: "Mobile Small",
-                frameSize: CGSize(width: w, height: h),
-                screenSize: CGSize(width: w, height: h),
-                screenOffset: .zero,
-                cornerRadius: 14.0,
-                isMacBook: false
-            )
-            
-        case .mobile:
-            let w: CGFloat = isLandscape ? 667.0 : 375.0
-            let h: CGFloat = isLandscape ? 375.0 : 667.0
-            return DeviceFrameSpec(
-                name: "Mobile Standard",
-                frameSize: CGSize(width: w, height: h),
-                screenSize: CGSize(width: w, height: h),
-                screenOffset: .zero,
-                cornerRadius: 16.0,
-                isMacBook: false
-            )
-            
         case .iphone:
             if isLandscape {
                 return DeviceFrameSpec(
                     name: "iPhone 16 Pro (Landscape)",
-                    frameSize: CGSize(width: 852.0, height: 393.0),
-                    screenSize: CGSize(width: 852.0, height: 393.0),
-                    screenOffset: .zero,
-                    cornerRadius: 36.0,
+                    frameSize: CGSize(width: 1024.0, height: 490.0),
+                    screenSize: CGSize(width: 972.0, height: 447.0),
+                    screenOffset: CGPoint(x: 26.0, y: 22.0),
+                    cornerRadius: 46.0,
                     isMacBook: false
                 )
             }
-            let scale: CGFloat = 393.0 / 447.0
             return DeviceFrameSpec(
                 name: "iPhone 16 Pro",
-                frameSize: CGSize(width: 490.0 * scale, height: 1024.0 * scale),
-                screenSize: CGSize(width: 393.0, height: 972.0 * scale),
-                screenOffset: CGPoint(x: 22.0 * scale, y: 26.0 * scale),
+                frameSize: CGSize(width: 490.0, height: 1024.0),
+                screenSize: CGSize(width: 447.0, height: 972.0),
+                screenOffset: CGPoint(x: 22.0, y: 26.0),
                 cornerRadius: 46.0,
-                isMacBook: false
-            )
-            
-        case .mobileMax:
-            let w: CGFloat = isLandscape ? 932.0 : 430.0
-            let h: CGFloat = isLandscape ? 430.0 : 932.0
-            return DeviceFrameSpec(
-                name: "Mobile Max",
-                frameSize: CGSize(width: w, height: h),
-                screenSize: CGSize(width: w, height: h),
-                screenOffset: .zero,
-                cornerRadius: 38.0,
                 isMacBook: false
             )
             
@@ -223,64 +140,41 @@ enum WebAppViewport: String, CaseIterable, Identifiable {
             if isLandscape {
                 return DeviceFrameSpec(
                     name: "iPad Pro (Landscape)",
-                    frameSize: CGSize(width: 1024.0, height: 768.0),
-                    screenSize: CGSize(width: 1024.0, height: 768.0),
-                    screenOffset: .zero,
+                    frameSize: CGSize(width: 1024.0, height: 729.0),
+                    screenSize: CGSize(width: 938.0, height: 646.0),
+                    screenOffset: CGPoint(x: 43.0, y: 42.0),
                     cornerRadius: 18.0,
                     isMacBook: false
                 )
             }
-            let scale: CGFloat = 768.0 / 647.0
             return DeviceFrameSpec(
-                name: "iPad",
-                frameSize: CGSize(width: 729.0 * scale, height: 1024.0 * scale),
-                screenSize: CGSize(width: 768.0, height: 938.0 * scale),
-                screenOffset: CGPoint(x: 41.0 * scale, y: 43.0 * scale),
+                name: "iPad Pro",
+                frameSize: CGSize(width: 729.0, height: 1024.0),
+                screenSize: CGSize(width: 646.0, height: 938.0),
+                screenOffset: CGPoint(x: 42.0, y: 43.0),
                 cornerRadius: 18.0,
                 isMacBook: false
             )
             
-        case .laptop:
-            return DeviceFrameSpec(
-                name: "Laptop",
-                frameSize: CGSize(width: 1024.0, height: 768.0),
-                screenSize: CGSize(width: 1024.0, height: 768.0),
-                screenOffset: .zero,
-                cornerRadius: 10.0,
-                isMacBook: true
-            )
-            
-        case .desktop:
-            let scale: CGFloat = 1280.0 / 802.0
+        case .macbook:
             return DeviceFrameSpec(
                 name: "MacBook Pro",
-                frameSize: CGSize(width: 1024.0 * scale, height: 673.0 * scale),
-                screenSize: CGSize(width: 1280.0, height: 520.0 * scale),
-                screenOffset: CGPoint(x: 111.0 * scale, y: 77.0 * scale),
+                frameSize: CGSize(width: 1024.0, height: 673.0),
+                screenSize: CGSize(width: 802.0, height: 503.0),
+                screenOffset: CGPoint(x: 111.0, y: 94.0),
                 cornerRadius: 10.0,
                 isMacBook: true
-            )
-            
-        case .desktopWide:
-            return DeviceFrameSpec(
-                name: "Desktop Wide",
-                frameSize: CGSize(width: 1440.0, height: 900.0),
-                screenSize: CGSize(width: 1440.0, height: 900.0),
-                screenOffset: .zero,
-                cornerRadius: 8.0,
-                isMacBook: false
             )
         }
     }
     
     func bezelImage(isLandscape: Bool = false) -> NSImage? {
-        if isLandscape { return nil }
         switch self {
         case .iphone:
             return DeviceFrameAssets.loadIPhoneProBezel()
         case .tablet:
             return DeviceFrameAssets.loadIPadProBezel()
-        case .desktop:
+        case .macbook:
             return DeviceFrameAssets.loadMacBookProBezel()
         default:
             return nil
@@ -289,14 +183,16 @@ enum WebAppViewport: String, CaseIterable, Identifiable {
 }
 
 enum DeviceZoomMode: String, CaseIterable, Identifiable {
-    case fit = "Fit to Window"
-    case actual = "100% (Actual)"
+    case fit = "Fit Window"
+    case fitWidth = "Fit Width"
+    case actual = "100%"
     
     var id: String { rawValue }
     
     var icon: String {
         switch self {
         case .fit: return "arrow.down.right.and.arrow.up.left"
+        case .fitWidth: return "arrow.left.and.right"
         case .actual: return "viewfinder"
         }
     }
@@ -318,12 +214,12 @@ struct EmbeddedWebAppPreviewView: View {
     @State private var goBackTrigger: Bool = false
     @State private var goForwardTrigger: Bool = false
     
-    // FResponsive States
+    // Viewport & Device States
     @State private var selectedViewport: WebAppViewport = .responsive
     @State private var customWidth: CGFloat? = nil
     @State private var isDraggingHandle: Bool = false
     @State private var dragInitialWidth: CGFloat = 0
-    @State private var showDeviceBezel: Bool = false
+    @State private var showDeviceBezel: Bool = true
     @State private var isLandscape: Bool = false
     @State private var zoomMode: DeviceZoomMode = .fit
     @State private var isLiveReloadEnabled: Bool = true
@@ -332,165 +228,202 @@ struct EmbeddedWebAppPreviewView: View {
     
     var body: some View {
         VStack(spacing: 0) {
-            // MARK: - 1. FResponsive Quick Switcher Bar (Fully Scrollable & Adaptive)
+            // MARK: - 1. Viewport & Device Selection Bar (Clean & Professional)
             ScrollView(.horizontal, showsIndicators: false) {
                 HStack(spacing: 6) {
-                    // FResponsive Brand Pill
-                    HStack(spacing: 3) {
-                        Image(systemName: "bolt.horizontal.fill")
-                            .font(.system(size: 9, weight: .bold))
-                            .foregroundColor(.accentColor)
-                        Text("FResponsive")
-                            .font(.system(size: 10, weight: .bold))
-                            .foregroundColor(.accentColor)
-                    }
-                    .padding(.horizontal, 6)
-                    .padding(.vertical, 3)
-                    .background(Color.accentColor.opacity(0.12))
-                    .cornerRadius(4)
-                    
-                    // Viewport Preset Switchers
+                    // Device Viewport Switcher: Responsive, iPhone, iPad, MacBook
                     HStack(spacing: 2) {
                         ForEach(WebAppViewport.allCases) { vp in
-                            let isSelected = (selectedViewport == vp && customWidth == vp.defaultWidth) || (vp == .responsive && customWidth == nil)
+                            let isSelected = selectedViewport == vp
                             Button {
                                 withAnimation(.easeInOut(duration: 0.16)) {
                                     selectedViewport = vp
-                                    customWidth = vp.defaultWidth
+                                    if vp == .responsive {
+                                        // Keep responsive mode
+                                    } else {
+                                        showDeviceBezel = true
+                                        customWidth = nil
+                                    }
                                 }
                             } label: {
-                                HStack(spacing: 3) {
+                                HStack(spacing: 4) {
                                     Image(systemName: vp.icon)
-                                        .font(.system(size: 9))
-                                    Text(vp.shortLabel)
                                         .font(.system(size: 10, weight: isSelected ? .bold : .medium))
+                                    Text(vp.rawValue)
+                                        .font(.system(size: 11, weight: isSelected ? .bold : .medium))
+                                        .lineLimit(1)
+                                        .fixedSize(horizontal: true, vertical: false)
                                 }
-                                .padding(.horizontal, 6)
-                                .padding(.vertical, 3)
+                                .padding(.horizontal, 8)
+                                .padding(.vertical, 4)
                                 .background(
-                                    RoundedRectangle(cornerRadius: 4, style: .continuous)
+                                    RoundedRectangle(cornerRadius: 6, style: .continuous)
                                         .fill(isSelected ? Color.accentColor : Color.primary.opacity(0.06))
                                 )
                                 .foregroundColor(isSelected ? .white : .primary)
                             }
                             .buttonStyle(.plain)
+                            .fixedSize(horizontal: true, vertical: false)
                             .help(vp.subtitle)
                         }
                     }
                     
-                    // Orientation Switch (Portrait / Landscape)
-                    if selectedViewport != .responsive || customWidth != nil {
+                    // Mode-Specific Controls
+                    if selectedViewport == .responsive {
+                        // Quick Preset / Dimension Dropdown Pill
+                        Menu {
+                            Button("Fluid (100% Full Width)") {
+                                withAnimation(.easeInOut(duration: 0.15)) {
+                                    customWidth = nil
+                                }
+                            }
+                            Divider()
+                            Button("Mobile S (320 px)") { withAnimation { customWidth = 320 } }
+                            Button("Mobile M (375 px)") { withAnimation { customWidth = 375 } }
+                            Button("Mobile L (430 px)") { withAnimation { customWidth = 430 } }
+                            Button("Tablet (768 px)") { withAnimation { customWidth = 768 } }
+                            Button("Laptop (1024 px)") { withAnimation { customWidth = 1024 } }
+                            Button("Desktop (1280 px)") { withAnimation { customWidth = 1280 } }
+                            Button("Wide (1440 px)") { withAnimation { customWidth = 1440 } }
+                        } label: {
+                            HStack(spacing: 4) {
+                                Image(systemName: "arrow.left.and.right")
+                                    .font(.system(size: 8))
+                                if let w = customWidth {
+                                    Text("\(Int(w)) px")
+                                        .font(.system(size: 10, weight: .semibold, design: .monospaced))
+                                        .lineLimit(1)
+                                        .fixedSize(horizontal: true, vertical: false)
+                                } else {
+                                    Text("Fluid 100%")
+                                        .font(.system(size: 10, weight: .medium))
+                                        .lineLimit(1)
+                                        .fixedSize(horizontal: true, vertical: false)
+                                }
+                                Image(systemName: "chevron.down")
+                                    .font(.system(size: 7))
+                            }
+                            .foregroundColor(customWidth != nil ? .accentColor : .secondary)
+                            .padding(.horizontal, 7)
+                            .padding(.vertical, 4)
+                            .background(customWidth != nil ? Color.accentColor.opacity(0.12) : Color.primary.opacity(0.06))
+                            .cornerRadius(5)
+                        }
+                        .menuStyle(.borderlessButton)
+                        .fixedSize(horizontal: true, vertical: false)
+                        .help("Drag preview handles to resize freely, or click to pick standard breakpoint")
+                        
+                        if customWidth != nil {
+                            Button {
+                                withAnimation(.easeInOut(duration: 0.15)) {
+                                    customWidth = nil
+                                }
+                            } label: {
+                                Image(systemName: "xmark.circle.fill")
+                                    .font(.system(size: 10))
+                                    .foregroundColor(.secondary)
+                            }
+                            .buttonStyle(.plain)
+                            .help("Reset to Fluid 100% Full Width")
+                        }
+                    } else {
+                        // Official Hardware Frame Toggle Button
                         Button {
-                            withAnimation(.easeInOut(duration: 0.2)) {
-                                isLandscape.toggle()
+                            withAnimation(.easeInOut(duration: 0.18)) {
+                                showDeviceBezel.toggle()
+                            }
+                        } label: {
+                            HStack(spacing: 4) {
+                                Image(systemName: showDeviceBezel ? "checkmark.shield.fill" : "rectangle")
+                                    .font(.system(size: 9))
+                                Text(showDeviceBezel ? "Official Frame" : "Frameless")
+                                    .font(.system(size: 10, weight: .medium))
+                                    .lineLimit(1)
+                                    .fixedSize(horizontal: true, vertical: false)
+                            }
+                            .padding(.horizontal, 7)
+                            .padding(.vertical, 4)
+                            .background(showDeviceBezel ? Color.accentColor.opacity(0.16) : Color.primary.opacity(0.06))
+                            .foregroundColor(showDeviceBezel ? .accentColor : .secondary)
+                            .cornerRadius(5)
+                        }
+                        .buttonStyle(.plain)
+                        .fixedSize(horizontal: true, vertical: false)
+                        .help(showDeviceBezel ? "Showing authentic Apple hardware chassis frame. Click for frameless." : "Showing frameless viewport. Click for authentic Apple hardware chassis frame.")
+                        
+                        // Rotate Orientation (iPhone & iPad)
+                        if selectedViewport != .macbook {
+                            Button {
+                                withAnimation(.easeInOut(duration: 0.2)) {
+                                    isLandscape.toggle()
+                                }
+                            } label: {
+                                HStack(spacing: 3) {
+                                    Image(systemName: isLandscape ? "iphone.landscape" : "iphone")
+                                        .font(.system(size: 9))
+                                    Text(isLandscape ? "Landscape" : "Portrait")
+                                        .font(.system(size: 10, weight: .medium))
+                                        .lineLimit(1)
+                                        .fixedSize(horizontal: true, vertical: false)
+                                }
+                                .padding(.horizontal, 6)
+                                .padding(.vertical, 4)
+                                .background(Color.primary.opacity(0.06))
+                                .cornerRadius(5)
+                            }
+                            .buttonStyle(.plain)
+                            .fixedSize(horizontal: true, vertical: false)
+                            .help("Rotate device orientation")
+                        }
+                        
+                        // Zoom Mode (Fit Window / Fit Width / 100%)
+                        Button {
+                            switch zoomMode {
+                            case .fit: zoomMode = .fitWidth
+                            case .fitWidth: zoomMode = .actual
+                            case .actual: zoomMode = .fit
                             }
                         } label: {
                             HStack(spacing: 3) {
-                                Image(systemName: isLandscape ? "iphone.landscape" : "iphone")
+                                Image(systemName: zoomMode.icon)
                                     .font(.system(size: 9))
-                                Text(isLandscape ? "Landscape" : "Portrait")
-                                    .font(.system(size: 9, weight: .medium))
+                                Text(zoomMode.rawValue)
+                                    .font(.system(size: 10, weight: .medium))
+                                    .lineLimit(1)
+                                    .fixedSize(horizontal: true, vertical: false)
                             }
-                            .padding(.horizontal, 5)
-                            .padding(.vertical, 3)
+                            .padding(.horizontal, 6)
+                            .padding(.vertical, 4)
                             .background(Color.primary.opacity(0.06))
-                            .cornerRadius(4)
+                            .foregroundColor(.secondary)
+                            .cornerRadius(5)
                         }
                         .buttonStyle(.plain)
-                        .help("Toggle Portrait / Landscape Orientation")
-                    }
-                    
-                    // Mode Toggle: Clean Screen vs Realistic Bezel
-                    Button {
-                        withAnimation(.easeInOut(duration: 0.18)) {
-                            showDeviceBezel.toggle()
-                        }
-                    } label: {
-                        HStack(spacing: 3) {
-                            Image(systemName: showDeviceBezel ? "iphone.badge.play" : "display")
-                                .font(.system(size: 9))
-                            Text(showDeviceBezel ? "Bezel" : "Clean")
-                                .font(.system(size: 9, weight: .medium))
-                        }
-                        .padding(.horizontal, 6)
-                        .padding(.vertical, 3)
-                        .background(showDeviceBezel ? Color.accentColor.opacity(0.16) : Color.primary.opacity(0.06))
-                        .foregroundColor(showDeviceBezel ? .accentColor : .secondary)
-                        .cornerRadius(4)
-                    }
-                    .buttonStyle(.plain)
-                    .help(showDeviceBezel ? "Showing realistic device chassis. Click for Clean Screen." : "Clean frameless screen. Click for realistic device chassis.")
-                    
-                    // Live Dimension Badge
-                    Menu {
-                        Button("Fluid (100% Full Width)") {
-                            withAnimation(.easeInOut(duration: 0.15)) {
-                                selectedViewport = .responsive
-                                customWidth = nil
-                            }
-                        }
-                        Divider()
-                        Button("320 × 568 (Mobile S)") { customWidth = 320; selectedViewport = .mobileS }
-                        Button("375 × 667 (Mobile M)") { customWidth = 375; selectedViewport = .mobile }
-                        Button("393 × 852 (iPhone 16 Pro)") { customWidth = 393; selectedViewport = .iphone }
-                        Button("430 × 932 (iPhone 16 Pro Max)") { customWidth = 430; selectedViewport = .mobileMax }
-                        Button("768 × 1024 (iPad)") { customWidth = 768; selectedViewport = .tablet }
-                        Button("1024 × 768 (Laptop)") { customWidth = 1024; selectedViewport = .laptop }
-                        Button("1280 × 800 (Desktop)") { customWidth = 1280; selectedViewport = .desktop }
-                        Button("1440 × 900 (Wide)") { customWidth = 1440; selectedViewport = .desktopWide }
-                    } label: {
-                        HStack(spacing: 3) {
-                            if let w = effectiveActiveWidth() {
-                                Text("\(Int(w)) px")
-                                    .font(.system(size: 9, design: .monospaced))
-                            } else {
-                                Text("Fluid 100%")
-                                    .font(.system(size: 9, design: .monospaced))
-                            }
-                            Image(systemName: "chevron.down")
-                                .font(.system(size: 7))
-                        }
-                        .foregroundColor(.secondary)
-                        .padding(.horizontal, 5)
-                        .padding(.vertical, 2)
-                        .background(Color.primary.opacity(0.05))
-                        .cornerRadius(4)
-                    }
-                    .menuStyle(.borderlessButton)
-                    .help("Current Viewport Width. Click to jump to common breakpoints.")
-                    
-                    // Display Zoom Toggle (Fit / 100%)
-                    if selectedViewport != .responsive || customWidth != nil {
-                        Button {
-                            zoomMode = (zoomMode == .fit) ? .actual : .fit
-                        } label: {
-                            Image(systemName: zoomMode.icon)
-                                .font(.system(size: 10))
-                                .foregroundColor(.secondary)
-                                .padding(3)
-                        }
-                        .buttonStyle(.plain)
-                        .help(zoomMode.rawValue)
+                        .fixedSize(horizontal: true, vertical: false)
+                        .help("Zoom Mode: \(zoomMode.rawValue). Click to cycle.")
                     }
                     
                     // Live Reload Indicator
                     Button {
                         isLiveReloadEnabled.toggle()
                     } label: {
-                        HStack(spacing: 2) {
+                        HStack(spacing: 3) {
                             Circle()
                                 .fill(isLiveReloadEnabled ? Color.green : Color.secondary)
                                 .frame(width: 6, height: 6)
                             Text("Live")
-                                .font(.system(size: 9, weight: .semibold))
+                                .font(.system(size: 10, weight: .semibold))
                                 .foregroundColor(isLiveReloadEnabled ? .primary : .secondary)
+                                .lineLimit(1)
+                                .fixedSize(horizontal: true, vertical: false)
                         }
-                        .padding(.horizontal, 5)
-                        .padding(.vertical, 2)
+                        .padding(.horizontal, 6)
+                        .padding(.vertical, 3)
                         .background(Color.primary.opacity(0.05))
                         .cornerRadius(4)
                     }
                     .buttonStyle(.plain)
+                    .fixedSize(horizontal: true, vertical: false)
                     .help(isLiveReloadEnabled ? "Live Reload Active (reloads on file save)" : "Live Reload Paused")
                 }
                 .padding(.horizontal, 8)
@@ -663,10 +596,17 @@ struct EmbeddedWebAppPreviewView: View {
                     
                     if showDeviceBezel, let spec = selectedViewport.frameSpec(isLandscape: isLandscape) {
                         // MARK: Authentic Hardware Bezel Mode
-                        let maxW = max(60, availW - 40)
-                        let maxH = max(60, availH - 40)
-                        let fitScale = min(1.0, min(maxW / spec.frameSize.width, maxH / spec.frameSize.height))
-                        let activeScale = (zoomMode == .fit) ? fitScale : 1.0
+                        let maxW = max(60, availW - 16)
+                        let maxH = max(60, availH - 16)
+                        let fitScale = min(maxW / spec.frameSize.width, maxH / spec.frameSize.height)
+                        let fitWidthScale = maxW / spec.frameSize.width
+                        let activeScale: CGFloat = {
+                            switch zoomMode {
+                            case .fit: return fitScale
+                            case .fitWidth: return fitWidthScale
+                            case .actual: return 1.0
+                            }
+                        }()
                         
                         let deviceView = ZStack {
                             // 1. Screen backdrop
@@ -698,16 +638,31 @@ struct EmbeddedWebAppPreviewView: View {
                             
                             // 3. Authentic Hardware Bezel Overlay
                             if let bezel = selectedViewport.bezelImage(isLandscape: isLandscape) {
-                                Image(nsImage: bezel)
-                                    .resizable()
-                                    .interpolation(.high)
-                                    .aspectRatio(contentMode: .fit)
-                                    .frame(width: spec.frameSize.width, height: spec.frameSize.height)
-                                    .position(
-                                        x: spec.frameSize.width / 2,
-                                        y: spec.frameSize.height / 2
-                                    )
-                                    .allowsHitTesting(false)
+                                if isLandscape && selectedViewport != .macbook {
+                                    Image(nsImage: bezel)
+                                        .resizable()
+                                        .interpolation(.high)
+                                        .aspectRatio(contentMode: .fit)
+                                        .frame(width: spec.frameSize.height, height: spec.frameSize.width)
+                                        .rotationEffect(.degrees(-90))
+                                        .frame(width: spec.frameSize.width, height: spec.frameSize.height)
+                                        .position(
+                                            x: spec.frameSize.width / 2,
+                                            y: spec.frameSize.height / 2
+                                        )
+                                        .allowsHitTesting(false)
+                                } else {
+                                    Image(nsImage: bezel)
+                                        .resizable()
+                                        .interpolation(.high)
+                                        .aspectRatio(contentMode: .fit)
+                                        .frame(width: spec.frameSize.width, height: spec.frameSize.height)
+                                        .position(
+                                            x: spec.frameSize.width / 2,
+                                            y: spec.frameSize.height / 2
+                                        )
+                                        .allowsHitTesting(false)
+                                }
                             } else {
                                 ScreenClipShape(cornerRadius: spec.cornerRadius, isMacBook: spec.isMacBook)
                                     .stroke(Color.primary.opacity(0.2), lineWidth: 4)
@@ -722,9 +677,12 @@ struct EmbeddedWebAppPreviewView: View {
                         .frame(width: spec.frameSize.width, height: spec.frameSize.height)
                         .shadow(color: Color.black.opacity(0.28), radius: 20, x: 0, y: 10)
                         
-                        if zoomMode == .actual {
+                        if zoomMode == .fitWidth || zoomMode == .actual {
                             ScrollView([.horizontal, .vertical]) {
-                                deviceView.padding(32)
+                                deviceView
+                                    .scaleEffect(activeScale)
+                                    .frame(width: spec.frameSize.width * activeScale, height: spec.frameSize.height * activeScale)
+                                    .padding(.vertical, 16)
                             }
                             .frame(width: availW, height: availH)
                         } else {
@@ -735,11 +693,11 @@ struct EmbeddedWebAppPreviewView: View {
                     } else if let activeW = effectiveActiveWidth() {
                         // MARK: Clean Responsive Screen Mode with Bilateral Drag Handles
                         let targetW = activeW
-                        let isWiderThanDock = targetW > (availW - 32)
-                        let fitScale = isWiderThanDock ? min(1.0, (availW - 32) / targetW) : 1.0
+                        let isWiderThanDock = targetW > (availW - 36)
+                        let fitScale = isWiderThanDock ? min(1.0, (availW - 36) / targetW) : 1.0
                         let activeScale = (zoomMode == .fit) ? fitScale : 1.0
                         
-                        let cleanView = ZStack(alignment: .trailing) {
+                        let cleanView = ZStack {
                             // The Web Content Viewport Card
                             VStack(spacing: 0) {
                                 // Subtle top status header with live dimension readout
@@ -748,7 +706,7 @@ struct EmbeddedWebAppPreviewView: View {
                                     Circle().fill(Color.yellow.opacity(0.6)).frame(width: 7, height: 7)
                                     Circle().fill(Color.green.opacity(0.6)).frame(width: 7, height: 7)
                                     Spacer()
-                                    Text("\(Int(targetW)) px • \(selectedViewport.shortLabel)")
+                                    Text("↔ \(Int(targetW)) px • \(selectedViewport.rawValue)")
                                         .font(.system(size: 9, weight: .semibold, design: .monospaced))
                                         .foregroundColor(.secondary)
                                     Spacer()
@@ -793,41 +751,75 @@ struct EmbeddedWebAppPreviewView: View {
                             )
                             .shadow(color: Color.black.opacity(0.18), radius: 12, x: 0, y: 6)
                             
-                            // Interactive Right Drag Handle (Resize Grip)
-                            ZStack {
-                                Rectangle()
-                                    .fill(Color.clear)
-                                    .frame(width: 16)
-                                    .contentShape(Rectangle())
-                                
-                                Capsule()
-                                    .fill(isDraggingHandle || isHoveringHandle ? Color.accentColor : Color.secondary.opacity(0.45))
-                                    .frame(width: 4, height: 36)
-                            }
-                            .offset(x: 8)
-                            .onHover { inside in
-                                isHoveringHandle = inside
-                                if inside {
-                                    NSCursor.resizeLeftRight.push()
-                                } else {
-                                    NSCursor.pop()
+                            // Left & Right Interactive Drag Handles
+                            HStack {
+                                // Left Drag Handle
+                                ZStack {
+                                    Rectangle()
+                                        .fill(Color.clear)
+                                        .frame(width: 20)
+                                        .contentShape(Rectangle())
+                                    
+                                    Capsule()
+                                        .fill(isDraggingHandle || isHoveringHandle ? Color.accentColor : Color.secondary.opacity(0.4))
+                                        .frame(width: 4, height: 44)
                                 }
-                            }
-                            .gesture(
-                                DragGesture(minimumDistance: 1)
-                                    .onChanged { val in
-                                        if !isDraggingHandle {
-                                            isDraggingHandle = true
-                                            dragInitialWidth = targetW
+                                .offset(x: -10)
+                                .onHover { inside in
+                                    isHoveringHandle = inside
+                                    if inside { NSCursor.resizeLeftRight.push() } else { NSCursor.pop() }
+                                }
+                                .gesture(
+                                    DragGesture(minimumDistance: 1)
+                                        .onChanged { val in
+                                            if !isDraggingHandle {
+                                                isDraggingHandle = true
+                                                dragInitialWidth = targetW
+                                            }
+                                            let newWidth = max(280, dragInitialWidth - val.translation.width * 2)
+                                            customWidth = newWidth
                                         }
-                                        let newWidth = max(280, dragInitialWidth + val.translation.width * 2)
-                                        customWidth = newWidth
-                                    }
-                                    .onEnded { _ in
-                                        isDraggingHandle = false
-                                        dragInitialWidth = 0
-                                    }
-                            )
+                                        .onEnded { _ in
+                                            isDraggingHandle = false
+                                            dragInitialWidth = 0
+                                        }
+                                )
+                                
+                                Spacer()
+                                
+                                // Right Drag Handle
+                                ZStack {
+                                    Rectangle()
+                                        .fill(Color.clear)
+                                        .frame(width: 20)
+                                        .contentShape(Rectangle())
+                                    
+                                    Capsule()
+                                        .fill(isDraggingHandle || isHoveringHandle ? Color.accentColor : Color.secondary.opacity(0.4))
+                                        .frame(width: 4, height: 44)
+                                }
+                                .offset(x: 10)
+                                .onHover { inside in
+                                    isHoveringHandle = inside
+                                    if inside { NSCursor.resizeLeftRight.push() } else { NSCursor.pop() }
+                                }
+                                .gesture(
+                                    DragGesture(minimumDistance: 1)
+                                        .onChanged { val in
+                                            if !isDraggingHandle {
+                                                isDraggingHandle = true
+                                                dragInitialWidth = targetW
+                                            }
+                                            let newWidth = max(280, dragInitialWidth + val.translation.width * 2)
+                                            customWidth = newWidth
+                                        }
+                                        .onEnded { _ in
+                                            isDraggingHandle = false
+                                            dragInitialWidth = 0
+                                        }
+                                )
+                            }
+                            .frame(width: targetW)
                         }
                         
                         if zoomMode == .actual && isWiderThanDock {
@@ -857,16 +849,16 @@ struct EmbeddedWebAppPreviewView: View {
                             .frame(maxWidth: .infinity, maxHeight: .infinity)
                             .background(Color.white)
                             
-                            // Right Drag Inward Handle (Seamlessly drag into custom breakpoint)
+                            // Right Drag Inward Handle (Seamlessly drag into custom responsive width)
                             ZStack {
                                 Rectangle()
                                     .fill(Color.clear)
-                                    .frame(width: 14)
+                                    .frame(width: 16)
                                     .contentShape(Rectangle())
                                 
                                 Capsule()
-                                    .fill(isDraggingHandle || isHoveringHandle ? Color.accentColor : Color.secondary.opacity(0.3))
-                                    .frame(width: 3, height: 32)
+                                    .fill(isDraggingHandle || isHoveringHandle ? Color.accentColor : Color.secondary.opacity(0.35))
+                                    .frame(width: 4, height: 40)
                             }
                             .onHover { inside in
                                 isHoveringHandle = inside
@@ -915,17 +907,17 @@ struct EmbeddedWebAppPreviewView: View {
                 selectedViewport = .responsive
                 customWidth = nil
             } else if key.contains("macbook") || key.contains("desktop") || key.contains("pc") || key.contains("laptop") {
-                selectedViewport = .desktop
-                customWidth = selectedViewport.defaultWidth
+                selectedViewport = .macbook
+                showDeviceBezel = true
             } else if key.contains("ipad") || key.contains("tablet") {
                 selectedViewport = .tablet
-                customWidth = selectedViewport.defaultWidth
+                showDeviceBezel = true
             } else if key.contains("iphone") || key.contains("mobile") || key.contains("phone") {
                 selectedViewport = .iphone
-                customWidth = selectedViewport.defaultWidth
-            } else if let match = WebAppViewport.allCases.first(where: { $0.rawValue.lowercased() == key || $0.shortLabel == key }) {
+                showDeviceBezel = true
+            } else if let match = WebAppViewport.allCases.first(where: { $0.rawValue.lowercased() == key }) {
                 selectedViewport = match
-                customWidth = match.defaultWidth
+                if match != .responsive { showDeviceBezel = true }
             }
         }
         .onChange(of: runtime.lastDetectedDevServerPort) { newPort in

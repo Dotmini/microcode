@@ -31,7 +31,10 @@ struct SessionRegressionTests {
         precondition(!valid.isExpired)
         let encoded = String(data: try JSONEncoder().encode(valid), encoding: .utf8)!
         KeychainManager.shared.values["supabase.session.v1"] = encoded
-        let restored = SupabaseAuthService.shared.session
+        let suiteName = "microcode.tests.session.\(UUID().uuidString)"
+        let defaults = UserDefaults(suiteName: suiteName)!
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+        let restored = SupabaseAuthService(defaults: defaults).session
         precondition(restored == valid, "Restore must retain expiry, user ID, and refresh token")
         print("PASS: unknown expiry, expired session, valid session, complete session restore")
     }

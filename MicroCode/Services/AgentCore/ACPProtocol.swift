@@ -474,7 +474,7 @@ struct AGYStreamParser {
         case "init":
             let initData = json["init"] as? [String: Any] ?? [:]
             let sessionId = json["conversation_id"] as? String ?? UUID().uuidString
-            let model = json["model"] as? String ?? "gemini-3.8-flash-high"
+            let model = json["model"] as? String ?? "gemini-2.0-flash"
             return .sessionInit(ACPSessionInit(sessionId: sessionId, model: model, tools: [], capabilities: []))
             
         case "step_update":

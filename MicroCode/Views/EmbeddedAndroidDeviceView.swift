@@ -43,14 +43,6 @@ struct EmbeddedAndroidDeviceView: View {
             .frame(maxWidth: .infinity, maxHeight: .infinity)
         }
         .background(effectiveCanvasColor)
-        .onAppear {
-            if (!streamService.isStreaming && runtime.embeddedAndroidImage == nil) ||
-               (streamService.isStreaming && !streamService.hasReceivedFirstFrame && streamService.latestPixelBuffer == nil) {
-                Task {
-                    await runtime.startPreferredEmbeddedAndroid()
-                }
-            }
-        }
     }
 }
 

@@ -2,9 +2,14 @@
 //  LocalEcosystemDiscovery.swift
 //  MicroCode
 //
+//  Created and Designed by Dotmini Software
+//  Founder & CEO: Tirawat Nantamas
+//  Copyright © 2025-2026 Dotmini Software. All rights reserved.
+//
+//  Description:
 //  Discovers real, installed AI engines and models dynamically from disk and CLI tools:
 //  1. OpenAI Codex: ~/.codex/models_cache.json, ~/.codex/config.toml, ~/.codex/auth.json
-//  2. Google Antigravity (AGY): \`agy models\` CLI and local configuration
+//  2. Google Antigravity (AGY): `agy models` CLI and local configuration
 //  3. Anthropic Claude Code: ~/.claude/settings.json and CLI binary
 //  4. Zed / ZCode Assistant: ~/.config/zed/settings.json
 //
@@ -123,20 +128,12 @@ final class LocalEcosystemDiscovery: ObservableObject {
         // Fallback/verified live models if CLI took long or offline
         if models.isEmpty {
             models = [
-                AIModelDefinition(id: "gemini-3.8-flash-high", name: "Gemini 3.8 Flash (High)", provider: "agy", badge: "HIGH REASONING"),
-                AIModelDefinition(id: "gemini-3.8-flash-medium", name: "Gemini 3.8 Flash (Medium)", provider: "agy", badge: "MEDIUM"),
-                AIModelDefinition(id: "gemini-3.8-flash-low", name: "Gemini 3.8 Flash (Low)", provider: "agy", badge: "FAST"),
-                AIModelDefinition(id: "gemini-3.7-flash-high", name: "Gemini 3.7 Flash (High)", provider: "agy", badge: "HIGH"),
-                AIModelDefinition(id: "gemini-3.7-flash-medium", name: "Gemini 3.7 Flash (Medium)", provider: "agy", badge: "BALANCED"),
-                AIModelDefinition(id: "gemini-3.7-flash-low", name: "Gemini 3.7 Flash (Low)", provider: "agy", badge: "FAST"),
-                AIModelDefinition(id: "gemini-3.6-flash-high", name: "Gemini 3.6 Flash (High)", provider: "agy", badge: "HIGH"),
-                AIModelDefinition(id: "gemini-3.6-flash-medium", name: "Gemini 3.6 Flash (Medium)", provider: "agy", badge: "BALANCED"),
-                AIModelDefinition(id: "gemini-3.6-flash-low", name: "Gemini 3.6 Flash (Low)", provider: "agy", badge: "FAST"),
-                AIModelDefinition(id: "gemini-3.1-pro-high", name: "Gemini 3.1 Pro (High)", provider: "agy", badge: "PRO HIGH"),
-                AIModelDefinition(id: "gemini-3.1-pro-low", name: "Gemini 3.1 Pro (Low)", provider: "agy", badge: "PRO"),
-                AIModelDefinition(id: "claude-sonnet-4-6", name: "Claude Sonnet 4.6 (Thinking)", provider: "agy", badge: "SONNET 4.6"),
-                AIModelDefinition(id: "claude-opus-4-6-thinking", name: "Claude Opus 4.6 (Thinking)", provider: "agy", badge: "OPUS 4.6"),
-                AIModelDefinition(id: "gpt-oss-120b-medium", name: "GPT-OSS 120B (Medium)", provider: "agy", badge: "OPEN SOURCE")
+                AIModelDefinition(id: "gemini-2.0-flash", name: "Gemini 2.0 Flash", provider: "agy", badge: "FLAGSHIP"),
+                AIModelDefinition(id: "gemini-2.0-flash-thinking-exp", name: "Gemini 2.0 Flash Thinking", provider: "agy", badge: "THINKING"),
+                AIModelDefinition(id: "gemini-1.5-pro", name: "Gemini 1.5 Pro", provider: "agy", badge: "PRO"),
+                AIModelDefinition(id: "gemini-1.5-flash", name: "Gemini 1.5 Flash", provider: "agy", badge: "FAST"),
+                AIModelDefinition(id: "claude-3-7-sonnet", name: "Claude 3.7 Sonnet (Thinking)", provider: "agy", badge: "HYBRID"),
+                AIModelDefinition(id: "claude-3-5-sonnet", name: "Claude 3.5 Sonnet", provider: "agy", badge: "WORKHORSE")
             ]
         }
         
@@ -147,9 +144,9 @@ final class LocalEcosystemDiscovery: ObservableObject {
             binaryPath: path,
             isInstalled: isInstalled,
             isAuthenticated: isInstalled,
-            activeModel: "gemini-3.8-flash-high",
+            activeModel: "gemini-2.0-flash",
             models: models,
-            details: "Official Antigravity CLI engine with Gemini 3.8 Flash, Gemini 3.7, Claude Sonnet 4.6 Thinking"
+            details: "Official Antigravity CLI engine with Gemini 2.0 Flash and Claude 3.7 Sonnet Thinking"
         )
     }
     
@@ -336,11 +333,10 @@ final class LocalEcosystemDiscovery: ObservableObject {
         
         if models.isEmpty {
             models = [
-                AIModelDefinition(id: "gpt-6-astra", name: "GPT-6-Astra", provider: "codex", badge: "ACTIVE • FLAGSHIP"),
-                AIModelDefinition(id: "gpt-5.6-sol", name: "GPT-5.6-Sol", provider: "codex", badge: "HIGH PERF"),
-                AIModelDefinition(id: "gpt-5.6-terra", name: "GPT-5.6-Terra", provider: "codex", badge: "BALANCED"),
-                AIModelDefinition(id: "gpt-5.6-luna", name: "GPT-5.6-Luna", provider: "codex", badge: "FAST"),
-                AIModelDefinition(id: "gpt-5.5", name: "GPT-5.5", provider: "codex", badge: "STABLE")
+                AIModelDefinition(id: "gpt-4o", name: "GPT-4o", provider: "codex", badge: "FLAGSHIP"),
+                AIModelDefinition(id: "gpt-4o-mini", name: "GPT-4o Mini", provider: "codex", badge: "FAST"),
+                AIModelDefinition(id: "o1", name: "o1", provider: "codex", badge: "PRO REASONING"),
+                AIModelDefinition(id: "o3-mini", name: "o3-mini", provider: "codex", badge: "STEM REASONING")
             ]
         }
         
@@ -351,7 +347,7 @@ final class LocalEcosystemDiscovery: ObservableObject {
             binaryPath: binaryPath,
             isInstalled: isInstalled,
             isAuthenticated: isAuthenticated,
-            activeModel: activeModel ?? "gpt-6-astra",
+            activeModel: activeModel ?? "gpt-4o",
             models: models,
             details: isInstalled ? (isAuthenticated ? "OpenAI Codex CLI ready" : "Codex installed, needs ChatGPT Plus login") : "Codex CLI not installed"
         )
@@ -402,8 +398,8 @@ final class LocalEcosystemDiscovery: ObservableObject {
         let zedSettings = home.appendingPathComponent(".config/zed/settings.json")
         let isInstalled = path != nil || FileManager.default.fileExists(atPath: zedSettings.path)
         
-        var defaultModel = "deepseek-v4-flash"
-        var inlineModel = "gpt-5.2"
+        var defaultModel = "deepseek-chat"
+        var inlineModel = "gpt-4o-mini"
         
         if let rawText = try? String(contentsOf: zedSettings, encoding: .utf8) {
             // Clean JSONC comments
@@ -434,10 +430,16 @@ final class LocalEcosystemDiscovery: ObservableObject {
                 badge: "ZED INLINE"
             ),
             AIModelDefinition(
-                id: "deepseek-v4-pro",
-                name: "DeepSeek V4 Pro (Reasoner)",
+                id: "deepseek-reasoner",
+                name: "DeepSeek R1 (Reasoner)",
                 provider: "zed",
                 badge: "REASONER"
+            ),
+            AIModelDefinition(
+                id: "deepseek-chat",
+                name: "DeepSeek V3 (Chat)",
+                provider: "zed",
+                badge: "CHAT"
             )
         ]
         
@@ -549,22 +551,14 @@ final class LocalEcosystemDiscovery: ObservableObject {
                 binaryPath: resolveBinaryFast("agy"),
                 isInstalled: resolveBinaryFast("agy") != nil,
                 isAuthenticated: true,
-                activeModel: "gemini-3.8-flash-high",
+                activeModel: "gemini-2.0-flash",
                 models: [
-                    AIModelDefinition(id: "gemini-3.8-flash-high", name: "Gemini 3.8 Flash (High)", provider: "agy", badge: "HIGH REASONING"),
-                    AIModelDefinition(id: "gemini-3.8-flash-medium", name: "Gemini 3.8 Flash (Medium)", provider: "agy", badge: "MEDIUM"),
-                    AIModelDefinition(id: "gemini-3.8-flash-low", name: "Gemini 3.8 Flash (Low)", provider: "agy", badge: "FAST"),
-                    AIModelDefinition(id: "gemini-3.7-flash-high", name: "Gemini 3.7 Flash (High)", provider: "agy", badge: "HIGH"),
-                    AIModelDefinition(id: "gemini-3.7-flash-medium", name: "Gemini 3.7 Flash (Medium)", provider: "agy", badge: "BALANCED"),
-                    AIModelDefinition(id: "gemini-3.7-flash-low", name: "Gemini 3.7 Flash (Low)", provider: "agy", badge: "FAST"),
-                    AIModelDefinition(id: "gemini-3.6-flash-high", name: "Gemini 3.6 Flash (High)", provider: "agy", badge: "HIGH"),
-                    AIModelDefinition(id: "gemini-3.6-flash-medium", name: "Gemini 3.6 Flash (Medium)", provider: "agy", badge: "BALANCED"),
-                    AIModelDefinition(id: "gemini-3.6-flash-low", name: "Gemini 3.6 Flash (Low)", provider: "agy", badge: "FAST"),
-                    AIModelDefinition(id: "gemini-3.1-pro-high", name: "Gemini 3.1 Pro (High)", provider: "agy", badge: "PRO HIGH"),
-                    AIModelDefinition(id: "gemini-3.1-pro-low", name: "Gemini 3.1 Pro (Low)", provider: "agy", badge: "PRO"),
-                    AIModelDefinition(id: "claude-sonnet-4-6", name: "Claude Sonnet 4.6 (Thinking)", provider: "agy", badge: "SONNET 4.6"),
-                    AIModelDefinition(id: "claude-opus-4-6-thinking", name: "Claude Opus 4.6 (Thinking)", provider: "agy", badge: "OPUS 4.6"),
-                    AIModelDefinition(id: "gpt-oss-120b-medium", name: "GPT-OSS 120B (Medium)", provider: "agy", badge: "OPEN SOURCE")
+                    AIModelDefinition(id: "gemini-2.0-flash", name: "Gemini 2.0 Flash", provider: "agy", badge: "FLAGSHIP"),
+                    AIModelDefinition(id: "gemini-2.0-flash-thinking-exp", name: "Gemini 2.0 Flash Thinking", provider: "agy", badge: "THINKING"),
+                    AIModelDefinition(id: "gemini-1.5-pro", name: "Gemini 1.5 Pro", provider: "agy", badge: "PRO"),
+                    AIModelDefinition(id: "gemini-1.5-flash", name: "Gemini 1.5 Flash", provider: "agy", badge: "FAST"),
+                    AIModelDefinition(id: "claude-3-7-sonnet", name: "Claude 3.7 Sonnet (Thinking)", provider: "agy", badge: "HYBRID"),
+                    AIModelDefinition(id: "claude-3-5-sonnet", name: "Claude 3.5 Sonnet", provider: "agy", badge: "WORKHORSE")
                 ],
                 details: "Antigravity CLI models cached"
             ),
@@ -591,13 +585,12 @@ final class LocalEcosystemDiscovery: ObservableObject {
                 binaryPath: resolveBinaryFast("codex"),
                 isInstalled: resolveBinaryFast("codex") != nil,
                 isAuthenticated: false,
-                activeModel: "gpt-6-astra",
+                activeModel: "gpt-4o",
                 models: [
-                    AIModelDefinition(id: "gpt-6-astra", name: "GPT-6-Astra", provider: "codex", badge: "ACTIVE • FLAGSHIP"),
-                    AIModelDefinition(id: "gpt-5.6-sol", name: "GPT-5.6-Sol", provider: "codex", badge: "HIGH PERF"),
-                    AIModelDefinition(id: "gpt-5.6-terra", name: "GPT-5.6-Terra", provider: "codex", badge: "BALANCED"),
-                    AIModelDefinition(id: "gpt-5.6-luna", name: "GPT-5.6-Luna", provider: "codex", badge: "FAST"),
-                    AIModelDefinition(id: "gpt-5.5", name: "GPT-5.5", provider: "codex", badge: "STABLE")
+                    AIModelDefinition(id: "gpt-4o", name: "GPT-4o", provider: "codex", badge: "FLAGSHIP"),
+                    AIModelDefinition(id: "gpt-4o-mini", name: "GPT-4o Mini", provider: "codex", badge: "FAST"),
+                    AIModelDefinition(id: "o1", name: "o1", provider: "codex", badge: "PRO REASONING"),
+                    AIModelDefinition(id: "o3-mini", name: "o3-mini", provider: "codex", badge: "STEM REASONING")
                 ],
                 details: "OpenAI Codex models cached"
             ),
@@ -608,11 +601,11 @@ final class LocalEcosystemDiscovery: ObservableObject {
                 binaryPath: resolveBinaryFast("claude"),
                 isInstalled: resolveBinaryFast("claude") != nil,
                 isAuthenticated: true,
-                activeModel: "haiku",
+                activeModel: "claude-3-7-sonnet",
                 models: [
-                    AIModelDefinition(id: "haiku", name: "Claude 3.5 Haiku", provider: "claude_code", badge: "ACTIVE • FAST"),
-                    AIModelDefinition(id: "sonnet", name: "Claude 3.7 Sonnet (Hybrid)", provider: "claude_code", badge: "HYBRID"),
-                    AIModelDefinition(id: "opus", name: "Claude 3.5 Opus", provider: "claude_code", badge: "REASONING"),
+                    AIModelDefinition(id: "claude-3-7-sonnet", name: "Claude 3.7 Sonnet (Hybrid)", provider: "claude_code", badge: "HYBRID"),
+                    AIModelDefinition(id: "claude-3-5-sonnet", name: "Claude 3.5 Sonnet", provider: "claude_code", badge: "WORKHORSE"),
+                    AIModelDefinition(id: "claude-3-5-haiku", name: "Claude 3.5 Haiku", provider: "claude_code", badge: "FAST"),
                     AIModelDefinition(id: "auto", name: "Claude Code Auto", provider: "claude_code", badge: "DYNAMIC")
                 ],
                 details: "Claude Code CLI models cached"
@@ -624,10 +617,12 @@ final class LocalEcosystemDiscovery: ObservableObject {
                 binaryPath: resolveBinaryFast("zed"),
                 isInstalled: resolveBinaryFast("zed") != nil,
                 isAuthenticated: true,
-                activeModel: "deepseek-v4-flash",
+                activeModel: "deepseek-chat",
                 models: [
-                    AIModelDefinition(id: "deepseek-v4-flash", name: "Zed: deepseek-v4-flash (Thinking)", provider: "zed", badge: "ZED DEFAULT"),
-                    AIModelDefinition(id: "gpt-5.2", name: "Zed: gpt-5.2 (Inline)", provider: "zed", badge: "ZED INLINE")
+                    AIModelDefinition(id: "deepseek-chat", name: "Zed: deepseek-chat", provider: "zed", badge: "DEFAULT"),
+                    AIModelDefinition(id: "deepseek-reasoner", name: "Zed: deepseek-reasoner", provider: "zed", badge: "REASONER"),
+                    AIModelDefinition(id: "gpt-4o", name: "Zed: gpt-4o", provider: "zed", badge: "OPENAI"),
+                    AIModelDefinition(id: "claude-3-5-sonnet", name: "Zed: claude-3-5-sonnet", provider: "zed", badge: "ANTHROPIC")
                 ],
                 details: "Zed assistant models cached"
             )

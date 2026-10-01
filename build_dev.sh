@@ -19,22 +19,30 @@ done
 
 # 1. Build Swift (assuming Rust is built or handled separately/before)
 echo "🏗️ Building Swift frontend..."
-export TMPDIR="${TMPDIR:-/tmp}"
+if [ -d "/Volumes/MAC" ]; then
+    export TMPDIR="/Volumes/MAC/CodeTunerBuild/tmp"
+elif [ -d "/Volumes/MicroCodeBuild" ]; then
+    export TMPDIR="/Volumes/MicroCodeBuild/tmp"
+else
+    export TMPDIR="${TMPDIR:-/tmp}"
+fi
 mkdir -p "$TMPDIR"
 
 # Collect potential Rust library directories
 RUST_LINK_FLAGS=()
 for libdir in \
+    "/Volumes/MAC/CodeTunerBuild/cargo-target/debug" \
+    "/Volumes/MAC/CodeTunerBuild/cargo-target/release" \
+    "/Volumes/MicroCodeBuild/cargo-target/release" \
+    "/Volumes/MicroCodeBuild/cargo-target/debug" \
+    "${CODETUNER_BUILD_ROOT:-}/cargo-target/release" \
+    "${CODETUNER_BUILD_ROOT:-}/cargo-target/debug" \
     "backend/target/debug" \
     "backend/target/release" \
     ".build/cargo-target/debug" \
     ".build/cargo-target/release" \
     "build/cargo-target/debug" \
     "build/cargo-target/release" \
-    "${CODETUNER_BUILD_ROOT:-}/cargo-target/release" \
-    "${CODETUNER_BUILD_ROOT:-}/cargo-target/debug" \
-    "/Volumes/MicroCodeBuild/cargo-target/release" \
-    "/Volumes/MicroCodeBuild/cargo-target/debug" \
     "microcode_core/target/release" \
     "microcode_core/target/debug" \
     "microcode_core/target/aarch64-apple-darwin/release" \
@@ -49,6 +57,9 @@ swift build -c debug \
     "${RUST_LINK_FLAGS[@]}" \
     -Xlinker -lmicrocode_embedded \
     -Xlinker -lmicrocode_core \
+    -Xlinker -lbz2 \
+    -Xlinker -llzma \
+    -Xlinker -lz \
     -Xlinker -framework -Xlinker SystemConfiguration \
     -Xlinker -framework -Xlinker Security \
     -Xlinker -framework -Xlinker CoreFoundation \

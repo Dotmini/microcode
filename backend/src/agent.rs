@@ -1,9 +1,12 @@
 // AI Agent Core Module
 // Production-level AI Agent with file system access and context understanding
 // Unique Rust-native implementation for MicroCode IDE
+// Enhanced with AGY SDK-inspired policy engine, lifecycle hooks, and multi-provider subagent routing
 
 use crate::error::{AppError, Result};
-use crate::models::AIConfig;
+use crate::hooks::{HookPipeline, HookResult as AgentHookResult, AuditLogHook, BudgetEnforcementHook};
+use crate::models::{AIConfig, BudgetConfig, StopReason, SubAgentConfig, ModelRecommendation};
+use crate::policy::{PolicyEngine, PolicyDecision};
 use async_stream::stream;
 use chrono::{DateTime, Utc};
 use futures::stream::{self, BoxStream, StreamExt};
@@ -13,8 +16,7 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, RwLock as StdRwLock};
 use tokio::fs;
-use tokio::sync::RwLock as TokioRwLock; // Requires adding to Cargo.toml if not present, but checked and added earlier.
-                                        // Actually I added async-stream to backend/Cargo.toml in step 6112.
+use tokio::sync::RwLock as TokioRwLock;
 
 // Streaming Event Definition
 // Streaming Event Definition
@@ -46,6 +48,45 @@ static AGENT_SESSIONS: Lazy<Arc<StdRwLock<HashMap<String, AgentSession>>>> =
 
 static FILE_OPERATION_LOG: Lazy<Arc<StdRwLock<Vec<FileOperation>>>> =
     Lazy::new(|| Arc::new(StdRwLock::new(Vec::new())));
+
+/// Global safety policy engine (default: deny destructive tools, allow all others).
+/// Can be reconfigured at runtime via API.
+static POLICY_ENGINE: Lazy<Arc<StdRwLock<PolicyEngine>>> =
+    Lazy::new(|| Arc::new(StdRwLock::new(PolicyEngine::default_safe())));
+
+/// Global lifecycle hook pipeline with audit logging.
+static HOOK_PIPELINE: Lazy<Arc<tokio::sync::RwLock<HookPipeline>>> =
+    Lazy::new(|| {
+        let mut pipeline = HookPipeline::new();
+        pipeline.add_hook(Arc::new(AuditLogHook));
+        Arc::new(tokio::sync::RwLock::new(pipeline))
+    });
+
+// ==========================================
+// SubAgent Routing Helpers
+// ==========================================
+
+/// Resolve a SubAgentConfig into a concrete AIConfig by inheriting from parent
+/// where the subagent doesn't specify its own values.
+pub fn resolve_subagent_config(subagent: &SubAgentConfig, parent: &AIConfig) -> AIConfig {
+    AIConfig {
+        provider: subagent.provider.clone().unwrap_or_else(|| parent.provider.clone()),
+        model: subagent.model.clone().unwrap_or_else(|| parent.model.clone()),
+        api_key: subagent.api_key.clone().unwrap_or_else(|| parent.api_key.clone()),
+        temperature: parent.temperature,
+        max_tokens: parent.max_tokens,
+        use_microrent_proxy: parent.use_microrent_proxy,
+        microrent_token: parent.microrent_token.clone(),
+        proxy_base_url: parent.proxy_base_url.clone(),
+    }
+}
+
+/// Evaluate the global policy engine for a tool call.
+/// Returns Ok(()) if allowed, or creates a PendingChange / returns error if denied.
+fn evaluate_tool_policy(tool_name: &str, args: &serde_json::Value) -> PolicyDecision {
+    let engine = POLICY_ENGINE.read().unwrap();
+    engine.evaluate(tool_name, args)
+}
 
 // Keep agent state bounded while allowing deep, long-running autonomous tasks (24/7).
 // Large repositories are discovered and queried incrementally.
@@ -361,6 +402,8 @@ pub struct ChatRequest {
     pub provider: Option<String>,
     pub model: Option<String>,
     pub api_key: Option<String>,
+    #[serde(default)]
+    pub cloud_base_url: Option<String>,
     pub auto_execute: bool, // Auto-execute tools or ask for confirmation
 }
 
@@ -375,6 +418,9 @@ pub struct ChatResponse {
     pub pending_changes: Vec<PendingChange>,
     pub suggestions: Vec<String>,
     pub plan: Option<ExecutionPlan>,
+    /// Why the agent stopped executing (completed, budget, policy, etc.)
+    #[serde(default)]
+    pub stop_reason: Option<StopReason>,
 }
 
 /// Execution plan for multi-step tasks
@@ -942,6 +988,18 @@ pub async fn execute_tool(
     tool_name: &str,
     arguments: &serde_json::Value,
 ) -> Result<ToolResult> {
+    let effective_arguments = match HOOK_PIPELINE.read().await.run_pre_tool_call(tool_name, arguments).await {
+        AgentHookResult::Allow => arguments.clone(),
+        AgentHookResult::Modify(arguments) => arguments,
+        AgentHookResult::Deny(reason) => return Err(AppError::ValidationError(reason)),
+    };
+    let arguments = &effective_arguments;
+    match evaluate_tool_policy(tool_name, arguments) {
+        PolicyDecision::Allow => {},
+        PolicyDecision::Deny(reason) | PolicyDecision::AskUser(reason) => {
+            return Err(AppError::ValidationError(reason));
+        }
+    }
     let session = get_session(session_id)
         .ok_or_else(|| AppError::NotFound("Session not found".to_string()))?;
 
@@ -969,6 +1027,7 @@ pub async fn execute_tool(
         _ => Err(AppError::NotFound(format!("Unknown tool: {}", tool_name))),
     };
 
+    HOOK_PIPELINE.read().await.run_post_tool_call(tool_name, arguments, "", result.is_ok()).await;
     let tool_call_id = uuid::Uuid::new_v4().to_string();
 
     match result {
@@ -1487,6 +1546,7 @@ async fn secure_execute_command(
     let child = tokio::process::Command::new("sh")
         .args(["-c", command])
         .current_dir(workspace)
+        .kill_on_drop(true)
         .env_clear()
         .env("PATH", "/usr/local/bin:/usr/bin:/bin:/opt/homebrew/bin")
         .env("HOME", dirs::home_dir().unwrap_or_default())
@@ -1510,7 +1570,7 @@ async fn secure_execute_command(
             let stdout = if stdout_raw.len() > MAX_OUTPUT {
                 format!(
                     "{}\n... [truncated, {} bytes total]",
-                    &stdout_raw[..MAX_OUTPUT],
+                    compact_prompt_text(&stdout_raw, MAX_OUTPUT),
                     stdout_raw.len()
                 )
             } else {
@@ -1520,7 +1580,7 @@ async fn secure_execute_command(
             let stderr = if stderr_raw.len() > MAX_OUTPUT {
                 format!(
                     "{}\n... [truncated, {} bytes total]",
-                    &stderr_raw[..MAX_OUTPUT],
+                    compact_prompt_text(&stderr_raw, MAX_OUTPUT),
                     stderr_raw.len()
                 )
             } else {
@@ -2002,10 +2062,10 @@ REMEMBER: You are building the future of coding. Make it look magic."#,
     // When the desktop app has configured the Dotmini cloud proxy, use the
     // OpenAI-compatible gateway for the agent's model calls while keeping all
     // file and command tools local to this backend.
-    if std::env::var("DOTMINI_API_BASE_URL").is_ok() && !actual_config.api_key.is_empty() {
-        actual_config.use_microrent_proxy = true;
-        actual_config.microrent_token = Some(actual_config.api_key.clone());
-    }
+    actual_config.use_microrent_proxy = request.cloud_base_url.is_some();
+        actual_config.proxy_base_url = request.cloud_base_url.clone();
+        actual_config.microrent_token = request.cloud_base_url.as_ref().map(|_| actual_config.api_key.clone());
+        if actual_config.use_microrent_proxy { actual_config.provider = "openai".into(); }
 
     let provider = crate::ai::get_provider(&actual_config.provider)?;
 
@@ -2110,6 +2170,12 @@ REMEMBER: You are building the future of coding. Make it look magic."#,
 
     let final_session = get_session(&request.session_id).unwrap_or(session);
 
+    let stop_reason = if loop_count >= max_loops {
+        Some(StopReason::MaxLoopsReached)
+    } else {
+        Some(StopReason::Completed)
+    };
+
     Ok(ChatResponse {
         message_id: uuid::Uuid::new_v4().to_string(),
         content: final_assistant_content,
@@ -2119,6 +2185,7 @@ REMEMBER: You are building the future of coding. Make it look magic."#,
         pending_changes,
         suggestions: vec![],
         plan: final_session.current_plan,
+        stop_reason,
     })
 }
 
@@ -2214,10 +2281,10 @@ INSTRUCTIONS:
             actual_config.api_key = k.clone();
         }
 
-        if std::env::var("DOTMINI_API_BASE_URL").is_ok() && !actual_config.api_key.is_empty() {
-            actual_config.use_microrent_proxy = true;
-            actual_config.microrent_token = Some(actual_config.api_key.clone());
-        }
+        actual_config.use_microrent_proxy = request.cloud_base_url.is_some();
+        actual_config.proxy_base_url = request.cloud_base_url.clone();
+        actual_config.microrent_token = request.cloud_base_url.as_ref().map(|_| actual_config.api_key.clone());
+        if actual_config.use_microrent_proxy { actual_config.provider = "openai".into(); }
 
         let provider = match crate::ai::get_provider(&actual_config.provider) {
             Ok(p) => p,
@@ -2390,15 +2457,12 @@ INSTRUCTIONS:
 }
 
 fn is_destructive_tool(name: &str) -> bool {
-    matches!(
-        name,
-        "write_file"
-            | "edit_file"
-            | "delete_file"
-            | "run_command"
-            | "git_commit"
-            | "create_project"
-    )
+    // Use the policy engine for evaluation — if the policy denies or asks,
+    // treat as destructive. This makes tool safety configurable.
+    match evaluate_tool_policy(name, &serde_json::Value::Null) {
+        PolicyDecision::Allow => false,
+        PolicyDecision::Deny(_) | PolicyDecision::AskUser(_) => true,
+    }
 }
 
 // ==========================================
@@ -2832,4 +2896,75 @@ async fn tool_execute_command(workspace: &Path, args: &serde_json::Value) -> Res
 
     // Reuse the same secure execution path
     secure_execute_command(workspace, command, description).await
+}
+
+// ==========================================
+// SubAgent Execution Engine
+// ==========================================
+
+/// Execute a subagent with its own provider/model/tool configuration.
+/// Creates an isolated session, resolves the subagent's AI config (inheriting
+/// from parent where not specified), and runs the agent loop.
+pub async fn execute_subagent(
+    state: Arc<TokioRwLock<crate::state::AppState>>,
+    parent_session_id: &str,
+    subagent_config: &SubAgentConfig,
+    task: &str,
+    parent_ai_config: &AIConfig,
+) -> Result<ChatResponse> {
+    // 1. Resolve the subagent's own AIConfig
+    let subagent_ai_config = resolve_subagent_config(subagent_config, parent_ai_config);
+
+    // 2. Get parent workspace
+    let workspace = get_session(parent_session_id)
+        .map(|s| s.workspace_path.clone())
+        .ok_or_else(|| AppError::NotFound("Parent session not found".to_string()))?;
+
+    // 3. Create isolated subagent session
+    let subagent_session_id = format!("{}_sub_{}", parent_session_id, subagent_config.name);
+    let _ = ensure_session_exists_sync(&subagent_session_id, &workspace);
+
+    // 4. Build the subagent request with role-specific system prompt
+    let system_prompt = subagent_config.system_prompt.clone()
+        .unwrap_or_else(|| format!(
+            "You are a specialized {} agent. Your role: {}. Execute the given task efficiently.",
+            subagent_config.role, subagent_config.name
+        ));
+    let full_task = format!("{}\n\nTask: {}", system_prompt, task);
+
+    let request = ChatRequest {
+        session_id: subagent_session_id.clone(),
+        message: full_task,
+        editor_context: None,
+        provider: Some(subagent_ai_config.provider.clone()),
+        model: Some(subagent_ai_config.model.clone()),
+        api_key: Some(subagent_ai_config.api_key.clone()),
+        cloud_base_url: subagent_ai_config.proxy_base_url.clone(),
+        auto_execute: true,
+    };
+
+    // 5. Run the agent loop with the subagent's resolved config
+    let response = enhanced_chat(state, request, &subagent_ai_config).await?;
+
+    tracing::info!(
+        "SubAgent '{}' completed: provider={}, model={}, tools={}, stop={:?}",
+        subagent_config.name,
+        subagent_ai_config.provider,
+        subagent_ai_config.model,
+        response.tool_calls.len(),
+        response.stop_reason,
+    );
+
+    Ok(response)
+}
+
+/// Update the global policy engine at runtime.
+pub fn update_policy_engine(engine: PolicyEngine) {
+    let mut global = POLICY_ENGINE.write().unwrap();
+    *global = engine;
+}
+
+/// Get a model recommendation for a task description.
+pub fn get_model_recommendation(description: &str, tools: &[String]) -> ModelRecommendation {
+    crate::agent_kernel::recommend_model_for_task(description, tools)
 }

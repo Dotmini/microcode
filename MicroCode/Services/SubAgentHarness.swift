@@ -31,56 +31,72 @@ public final class SubAgentHarness: ObservableObject {
                 role: "System & Architecture Planner",
                 description: "Analyzes project structure, evaluates dependencies, defines contracts, and designs technical architecture.",
                 systemPrompt: "You are an expert Software Architect. Analyze project architecture, design modular interfaces, establish conventions, and provide high-level implementation blueprints.",
-                allowedTools: ["file_read", "multi_file_read", "list_directory_tree", "grep_search", "find_symbol", "inspect_image", "extract_pdf", "mcp"]
+                allowedTools: ["file_read", "multi_file_read", "list_directory_tree", "grep_search", "find_symbol", "inspect_image", "extract_pdf", "mcp"],
+                preferredProvider: "anthropic",
+                preferredModel: "claude-sonnet-4"
             ),
             SubAgentDefinition(
                 name: "frontend_engineer",
                 role: "Frontend Specialist",
                 description: "Builds modern, responsive UI interfaces with React, Vue, Svelte, Tailwind CSS, Vite, or SwiftUI.",
                 systemPrompt: "You are a master Frontend Engineer. Build production-grade, highly responsive, beautiful UI components with clean separation of concerns, modern CSS/Tailwind styling, and solid accessibility.",
-                allowedTools: ["file_read", "file_write", "replace_in_file", "patch_file", "list_directory_tree", "shell", "preview_control", "inspect_image", "extract_pdf", "mcp"]
+                allowedTools: ["file_read", "file_write", "replace_in_file", "patch_file", "list_directory_tree", "shell", "preview_control", "inspect_image", "extract_pdf", "mcp"],
+                preferredProvider: nil,
+                preferredModel: nil
             ),
             SubAgentDefinition(
                 name: "backend_engineer",
                 role: "Backend & Database Specialist",
                 description: "Implements robust APIs, database schemas, microservices, and server logic with Rust, Go, Python, Node, or .NET.",
                 systemPrompt: "You are a senior Backend Engineer. Implement high-throughput, secure REST/gRPC endpoints, clean database schemas, and rock-solid business logic with defensive error handling.",
-                allowedTools: ["file_read", "file_write", "replace_in_file", "patch_file", "list_directory_tree", "shell", "extract_pdf", "mcp"]
+                allowedTools: ["file_read", "file_write", "replace_in_file", "patch_file", "list_directory_tree", "shell", "extract_pdf", "mcp"],
+                preferredProvider: nil,
+                preferredModel: nil
             ),
             SubAgentDefinition(
                 name: "bug_hunter",
                 role: "Autonomous Bug Hunter & Healer",
                 description: "Performs root cause analysis, compiler error diagnostics, crash report inspection, and automated code patching.",
                 systemPrompt: "You are an expert Code Debugger and Diagnostician. Trace errors to their exact source, analyze stack traces, identify edge-case faults, and generate surgical fixes.",
-                allowedTools: ["file_read", "multi_file_read", "grep_search", "find_symbol", "replace_in_file", "patch_file", "shell", "inspect_image", "extract_pdf", "mcp"]
+                allowedTools: ["file_read", "multi_file_read", "grep_search", "find_symbol", "replace_in_file", "patch_file", "shell", "inspect_image", "extract_pdf", "mcp"],
+                preferredProvider: "gemini",
+                preferredModel: "gemini-2.5-flash"
             ),
             SubAgentDefinition(
                 name: "test_runner",
                 role: "QA & Unit Test Specialist",
                 description: "Writes comprehensive unit, integration, and property-based test suites and verifies pass rates.",
                 systemPrompt: "You are a Test Automation Specialist. Write rigorous unit and integration tests covering edge cases, assertions, and mocks.",
-                allowedTools: ["file_read", "file_write", "replace_in_file", "patch_file", "shell", "mcp"]
+                allowedTools: ["file_read", "file_write", "replace_in_file", "patch_file", "shell", "mcp"],
+                preferredProvider: "gemini",
+                preferredModel: "gemini-2.5-flash"
             ),
             SubAgentDefinition(
                 name: "security_auditor",
                 role: "Security & Performance Auditor",
                 description: "Audits source code for vulnerabilities, injection vectors, memory safety issues, and performance bottlenecks.",
                 systemPrompt: "You are a Cyber Security and Performance Auditor. Review code for security flaws, unsanitized inputs, auth bypasses, resource leaks, and unoptimized queries.",
-                allowedTools: ["file_read", "multi_file_read", "grep_search", "find_symbol", "extract_pdf", "mcp"]
+                allowedTools: ["file_read", "multi_file_read", "grep_search", "find_symbol", "extract_pdf", "mcp"],
+                preferredProvider: "anthropic",
+                preferredModel: "claude-sonnet-4"
             ),
             SubAgentDefinition(
                 name: "mobile_device_controller",
                 role: "Mobile Device & Simulator Controller",
                 description: "Controls and interacts with real Android devices, Android Emulators, and iOS Simulators via ADB and simctl to perform automated testing, UI walkthroughs, gesture actions, and app debugging.",
                 systemPrompt: "You are an expert Mobile QA and Automation Engineer. Control real Android phones, emulators, and iOS simulators using `device_runtime` (tap, swipe, type, keyevent, screenshot, app launch/install, adb_shell). Verify every step visually or through device logs.",
-                allowedTools: ["device_runtime", "file_read", "file_write", "replace_in_file", "patch_file", "shell", "inspect_image", "extract_pdf", "get_diagnostics", "mcp"]
+                allowedTools: ["device_runtime", "file_read", "file_write", "replace_in_file", "patch_file", "shell", "inspect_image", "extract_pdf", "get_diagnostics", "mcp"],
+                preferredProvider: "gemini",
+                preferredModel: "gemini-2.5-flash"
             ),
             SubAgentDefinition(
                 name: "autonomous_loop",
                 role: "Autonomous Build-Test-Fix Agent",
                 description: "Runs iterative build→test→analyze→fix loops autonomously until all tests pass or max iterations reached.",
                 systemPrompt: "You are an Autonomous Build-Test-Fix Agent. Run build and test commands, analyze failures, generate surgical code fixes, and iterate until all tests pass. Report progress after each iteration.",
-                allowedTools: ["file_read", "file_write", "replace_in_file", "patch_file", "multi_file_read", "grep_search", "find_symbol", "shell", "mcp"]
+                allowedTools: ["file_read", "file_write", "replace_in_file", "patch_file", "multi_file_read", "grep_search", "find_symbol", "shell", "mcp"],
+                preferredProvider: nil,
+                preferredModel: nil
             )
         ]
         
@@ -97,7 +113,10 @@ public final class SubAgentHarness: ObservableObject {
         description: String,
         systemPrompt: String,
         allowedTools: [String] = [],
-        model: String = "inherit"
+        model: String = "inherit",
+        preferredProvider: String? = nil,
+        preferredModel: String? = nil,
+        budget: BudgetConfig? = nil
     ) -> SubAgentDefinition {
         let def = SubAgentDefinition(
             name: name,
@@ -105,7 +124,10 @@ public final class SubAgentHarness: ObservableObject {
             description: description,
             systemPrompt: systemPrompt,
             allowedTools: allowedTools,
-            model: model
+            model: model,
+            preferredProvider: preferredProvider,
+            preferredModel: preferredModel,
+            budget: budget
         )
         registeredDefinitions[name] = def
         log("Defined new SubAgent archetype: [\(name)] - \(role)")
@@ -178,7 +200,17 @@ public final class SubAgentHarness: ObservableObject {
         activeSubagents[idx].stateDetail = "Executing task..."
         activeSubagents[idx].logMessages.append("Started execution at \(Date())")
         
+        // Native adapters do not yet report authoritative total-token usage.
+        // Do not silently ignore a requested hard token ceiling.
+        if definition.budget?.maxTotalTokens != nil {
+            updateSubagentState(instanceId: instanceId, state: .waitingForInput,
+                                detail: "A hard token budget requires provider usage accounting. Use model/tool call budgets for this adapter.")
+            runningTasks.removeValue(forKey: instanceId)
+            return
+        }
+
         let toolbox = AgentToolBox.shared
+        let executionWorkspace = workspacePath ?? toolbox.workspaceRoot
         // AgentToolBox is shared by the primary agent and all subagents. Never
         // repoint it from a background task: concurrent agents would otherwise
         // read and write each other's workspaces.
@@ -206,7 +238,7 @@ public final class SubAgentHarness: ObservableObject {
         let toolSchemas = toolbox.toolSchemas().filter { dict in
             let name = dict["name"] as? String ?? ""
             // All MicroCode SubAgents have access to MCP tools in addition to role-specific tools
-            if name.hasPrefix("mcp__") { return true }
+            if name.hasPrefix("mcp__") { return definition.allowedTools.contains("mcp") || definition.allowedTools.contains("*") || definition.allowedTools.contains(name) }
             if definition.allowedTools.contains("mcp") || definition.allowedTools.contains("*") { return true }
             return definition.allowedTools.contains(name)
         }
@@ -215,6 +247,11 @@ public final class SubAgentHarness: ObservableObject {
             [("_role", "user"), ("text", taskPrompt)]
         ]
         
+        let permittedTools = Set(toolSchemas.compactMap { $0["name"] as? String })
+        let maximumModelCalls = max(0, definition.budget?.maxModelCalls ?? 100)
+        let maximumToolCalls = max(0, definition.budget?.maxToolCalls ?? 300)
+        var toolAttempts = 0
+        defer { runningTasks.removeValue(forKey: instanceId) }
         var iteration = 0
         var finalSummary = ""
         
@@ -222,9 +259,13 @@ public final class SubAgentHarness: ObservableObject {
         // invocation explicitly names a model. This keeps agent, settings and
         // usage reports aligned rather than silently forcing one model.
         let configuredModel = UserDefaults.standard.string(forKey: "aiModel") ?? StreamableAIProvider.omni.defaultModel
-        let requestedModel = preferredModel ?? (definition.model == "inherit" ? configuredModel : definition.model)
         let configuredProvider = UserDefaults.standard.string(forKey: "aiProvider") ?? "omni"
-        let selection = AIModelCatalog.shared.normalizedSelection(provider: configuredProvider, model: requestedModel)
+        
+        let baseModel = definition.preferredModel ?? (definition.model == "inherit" ? configuredModel : definition.model)
+        let requestedModel = preferredModel ?? baseModel
+        let requestedProvider = definition.preferredProvider ?? configuredProvider
+        
+        let selection = AIModelCatalog.shared.normalizedSelection(provider: requestedProvider, model: requestedModel)
         let model = selection.model
         let provider = StreamableAIProvider(rawValue: selection.provider) ?? StreamableAIProvider.detect(from: model)
         let actualKey = apiKey ?? ""
@@ -251,6 +292,10 @@ public final class SubAgentHarness: ObservableObject {
             if Task.isCancelled {
                 if kernelOnline { await AgentKernelClient.shared.cancel(runID: kernelRunID) }
                 updateSubagentState(instanceId: instanceId, state: .killed, detail: "Task cancelled")
+                return
+            }
+            guard iteration < maximumModelCalls else {
+                updateSubagentState(instanceId: instanceId, state: .waitingForInput, detail: "Model-call budget exhausted")
                 return
             }
             iteration += 1
@@ -338,6 +383,17 @@ public final class SubAgentHarness: ObservableObject {
                     updateSubagentState(instanceId: instanceId, state: .running, detail: "Running \(toolName)...", currentTool: toolName)
                     
                     do {
+                        guard permittedTools.contains(toolName) else {
+                            throw ToolBoxError.executionFailed("Tool is not authorized for this subagent")
+                        }
+                        guard toolbox.workspaceRoot == executionWorkspace else {
+                            throw ToolBoxError.executionFailed("Subagent workspace is no longer active")
+                        }
+                        guard toolAttempts < maximumToolCalls else {
+                            updateSubagentState(instanceId: instanceId, state: .waitingForInput, detail: "Tool-call budget exhausted")
+                            return
+                        }
+                        toolAttempts += 1
                         let toolOutput = try await toolbox.execute(toolName, params: toolCall.arguments)
                         let logEntry = "✓ \(toolName): \(toolOutput.prefix(80))"
                         if let idx = activeSubagents.firstIndex(where: { $0.id == instanceId }) {

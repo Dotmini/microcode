@@ -266,6 +266,7 @@ final class DeviceRuntimeService: ObservableObject {
     private var applicationProcess: Process?
     private var applicationInputHandle: FileHandle?
     private var androidMirrorProcess: Process?
+    private var androidConnectionTask: Task<Void, Never>?
     private var androidMirrorReadHandle: FileHandle?
     private var androidPNGBuffer = Data()
     private var pendingAndroidFrame: Data?
@@ -863,6 +864,8 @@ final class DeviceRuntimeService: ObservableObject {
     }
 
     func stopEmbeddedAndroid() {
+        androidConnectionTask?.cancel()
+        androidConnectionTask = nil
         AndroidStreamService.shared.stopStreaming()
         stopAndroidMirrorTransport()
         stopAndroidInputChannel()
@@ -961,45 +964,55 @@ final class DeviceRuntimeService: ObservableObject {
         }
         updateActiveAndroidSkin()
         
-        Task { [weak self] in
+        androidConnectionTask?.cancel()
+        androidConnectionTask = Task { [weak self] in
             guard let self else { return }
+            if Task.isCancelled { return }
             
             // Check device state via ADB
             if let adb = try? self.androidTool("adb"),
                let check = try? await self.command(adb, ["-s", serial, "get-state"], directory: nil) {
+                if Task.isCancelled { return }
                 let st = check.output.trimmingCharacters(in: .whitespacesAndNewlines)
                 if st != "device" {
                     await MainActor.run {
+                        guard !Task.isCancelled else { return }
                         self.embeddedAndroidStatus = "Device \(serial) is \(st). Click Attach / Retry."
                     }
                     return
                 }
             }
+            if Task.isCancelled { return }
             
             // 1. High-speed 60 FPS Metal GPU streaming via VideoToolbox H.264
             await AndroidStreamService.shared.startStreaming(serial: serial)
+            if Task.isCancelled { return }
             if AndroidStreamService.shared.isStreaming {
                 await MainActor.run {
+                    guard !Task.isCancelled else { return }
                     self.embeddedAndroidStatus = "Live (60 FPS Native GPU)"
                 }
                 
                 // Watchdog: If no frames decode within 3.5s, fall back to screencap
                 try? await Task.sleep(nanoseconds: 3_500_000_000)
+                if Task.isCancelled { return }
                 let hasFrame = await MainActor.run {
                     self.embeddedAndroidImage != nil ||
                     AndroidStreamService.shared.hasReceivedFirstFrame ||
                     AndroidStreamService.shared.latestPixelBuffer != nil
                 }
-                if !hasFrame {
+                if !hasFrame && !Task.isCancelled {
                     print("[DeviceRuntime] Video stream idle after 3.5s; initiating native screencap fallback...")
                     await MainActor.run {
+                        guard !Task.isCancelled else { return }
                         AndroidStreamService.shared.stopStreaming()
                         self.startAndroidScreencapFallback(serial: serial, deviceName: deviceName)
                     }
                 }
-            } else {
+            } else if !Task.isCancelled {
                 // 2. Compatibility fallback: ADB screencap loop
                 await MainActor.run {
+                    guard !Task.isCancelled else { return }
                     self.startAndroidScreencapFallback(serial: serial, deviceName: deviceName)
                 }
             }
@@ -1115,7 +1128,10 @@ final class DeviceRuntimeService: ObservableObject {
         androidMirrorReadHandle?.readabilityHandler = nil
         androidMirrorReadHandle?.closeFile()
         androidMirrorReadHandle = nil
-        if androidMirrorProcess?.isRunning == true { androidMirrorProcess?.terminate() }
+        if let proc = androidMirrorProcess, proc.isRunning {
+            proc.terminate()
+            kill(proc.processIdentifier, SIGKILL)
+        }
         androidMirrorProcess = nil
         androidPNGBuffer.removeAll(keepingCapacity: false)
         pendingAndroidFrame = nil

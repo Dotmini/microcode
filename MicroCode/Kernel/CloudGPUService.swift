@@ -4,14 +4,15 @@
 //
 //  Managed, zero-config Cloud GPU. The user picks a GPU (Titan RTX / A100 /
 //  B200), MicroCode's gateway (gpu.microcode.net) provisions it behind our
-//  own reverse-proxy and returns a Jupyter WSS endpoint + short-lived token.
+//  own reverse-proxy and returns a Jupyter WSS endpoint + runtime token.
 //  The user never sees SSH / IP / provider / token. Pay-as-you-go from a
 //  Wallet that is SEPARATE from the Pro subscription.
 //
 //  ── CLIENT ⇄ GATEWAY API CONTRACT (backend implements this; deployed
 //     separately at https://gpu.microcode.net/v1, NOT in this repo) ──────────
 //
-//   All requests: Authorization: Bearer <user JWT>.  All money in integer
+//   Authenticated requests: Authorization: Bearer <Supabase JWT or mci-live key>.
+//   All money in integer
 //   minor units (satang/cents) to avoid float drift.
 //
 //   GET  /catalog
@@ -45,11 +46,11 @@ import Combine
 final class CloudGPUService: ObservableObject {
     static let shared = CloudGPUService()
 
-    /// Dedicated Cloud GPU gateway — its OWN Railway service/host, separate
-    /// from the AI proxy at api.dotmini.net. Override via UserDefaults
+    /// Dedicated Cloud GPU gateway on Coolify, separate from the AI proxy
+    /// at api.dotmini.net. Override via UserDefaults
     /// ("cloudGPUBaseURL") — exposed in Settings → Connections.
     private var baseURL: String {
-        let configured = (UserDefaults.standard.string(forKey: "cloudGPUBaseURL") ?? "")
+        let configured = (defaults.string(forKey: "cloudGPUBaseURL") ?? "")
             .trimmingCharacters(in: .whitespacesAndNewlines)
         let value = configured.isEmpty ? "https://gpu.dotmini.net/gpu/v1" : configured
         return value.trimmingCharacters(in: CharacterSet(charactersIn: "/"))
@@ -78,9 +79,9 @@ final class CloudGPUService: ObservableObject {
 
     static let defaultTopupPackages: [TopupPackage] = [
         TopupPackage(id: "gpu_150", name: "Starter", amountTHB: 150, bonusTHB: 0, badge: nil),
-        TopupPackage(id: "gpu_500", name: "Data Scientist", amountTHB: 500, bonusTHB: 25, badge: "Popular"),
-        TopupPackage(id: "gpu_1500", name: "AI Pro Researcher", amountTHB: 1500, bonusTHB: 100, badge: "Best Value"),
-        TopupPackage(id: "gpu_5000", name: "Enterprise Cluster", amountTHB: 5000, bonusTHB: 500, badge: "Team")
+        TopupPackage(id: "gpu_500", name: "Data Scientist", amountTHB: 500, bonusTHB: 0, badge: "Popular"),
+        TopupPackage(id: "gpu_1500", name: "AI Pro Researcher", amountTHB: 1500, bonusTHB: 0, badge: nil),
+        TopupPackage(id: "gpu_5000", name: "Enterprise Cluster", amountTHB: 5000, bonusTHB: 0, badge: "Team")
     ]
 
     static let defaultCatalog: [GPUType] = [
@@ -91,7 +92,7 @@ final class CloudGPUService: ObservableObject {
         GPUType(id: "b200", label: "NVIDIA B200 192GB", vramGB: 192, pricePerMinute: 480, available: true)
     ]
 
-    struct Session: Equatable {
+    struct Session: Codable, Equatable {
         let sessionId: String
         let wssURL: String
         let jupyterToken: String
@@ -153,6 +154,11 @@ final class CloudGPUService: ObservableObject {
     @Published var activeSessionCostSatang: Int = 0
     @Published var gatewayMessage: String = ""
 
+    private let defaults: UserDefaults
+    private let network: URLSession
+    private let sessionAccount = "cloud-gpu.managed-session.v1"
+    private var connectTask: Task<Void, Never>?
+    private var stopping = false
     private var pollTask: Task<Void, Never>?
     private var sessionTimerTask: Task<Void, Never>?
 
@@ -160,17 +166,12 @@ final class CloudGPUService: ObservableObject {
     // ComputeKernel to call api.dotmini.net — NOT a separate "authToken").
 
     private var authToken: String? {
-        if let platformKey = DotminiPlatformKeyService.shared.authorizationToken {
-            return platformKey
+        if let session = SupabaseAuthService.shared.session, !session.isExpired {
+            return session.accessToken
         }
-        let d = UserDefaults.standard
-        // The managed gateway verifies an account JWT. A human-readable
-        // mc_live_* license is deliberately not sent as a bearer credential.
-        for k in ["cloudGPUAuthToken", "microRentToken"] {
-            if let v = d.string(forKey: k)?.trimmingCharacters(in: .whitespacesAndNewlines),
-               !v.isEmpty { return v }
-        }
-        return nil
+        guard let platformKey = DotminiPlatformKeyService.shared.authorizationToken,
+              platformKey.hasPrefix("mci-live-") else { return nil }
+        return platformKey
     }
 
     /// Supabase access tokens are refreshed through the app's single account
@@ -200,14 +201,28 @@ final class CloudGPUService: ObservableObject {
     var balanceText: String { money(walletBalance) }
 
     private func restoreInitialBalance() {
-        let saved = UserDefaults.standard.integer(forKey: "gpuWalletBalanceSatang")
+        let saved = defaults.integer(forKey: "gpuWalletBalanceSatang")
         if saved > 0 {
             walletBalance = saved
         }
     }
 
-    private init() {
+    init(network: URLSession = .shared, defaults: UserDefaults = .standard) {
+        self.defaults = defaults
+        self.network = network
         restoreInitialBalance()
+        if let encoded = KeychainManager.shared.readIntegrationSecret(account: sessionAccount),
+           let data = encoded.data(using: .utf8), let restored = try? JSONDecoder().decode(Session.self, from: data) {
+            activeSession = restored
+            status = .failed("Recovering the previous GPU session. Stop it here if no longer needed.")
+            startPolling(restored.sessionId)
+        }
+    }
+
+    private func persistSession(_ session: Session) {
+        if let data = try? JSONEncoder().encode(session) {
+            _ = KeychainManager.shared.saveIntegrationSecret(String(decoding: data, as: UTF8.self), account: sessionAccount)
+        }
     }
 
     // MARK: - Catalog & Wallet
@@ -258,7 +273,7 @@ final class CloudGPUService: ObservableObject {
             return
         }
         do {
-            let (data, resp) = try await URLSession.shared.data(for: req)
+            let (data, resp) = try await network.data(for: req)
             guard (resp as? HTTPURLResponse)?.statusCode == 200 else {
                 lastError = serverMessage(data: data, response: resp, fallback: "Couldn't load Cloud GPU catalog")
                 if catalog.isEmpty { catalog = CloudGPUService.defaultCatalog }
@@ -290,7 +305,7 @@ final class CloudGPUService: ObservableObject {
             return
         }
         do {
-            let (data, resp) = try await URLSession.shared.data(for: req)
+            let (data, resp) = try await network.data(for: req)
             guard (resp as? HTTPURLResponse)?.statusCode == 200,
                   let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
                   let balance = integer(json, keys: ["balance"]) else {
@@ -300,7 +315,7 @@ final class CloudGPUService: ObservableObject {
             // Zero is a real wallet balance and must replace stale cache.
             walletBalance = max(0, balance)
             currency = (json["currency"] as? String) ?? currency
-            UserDefaults.standard.set(walletBalance, forKey: "gpuWalletBalanceSatang")
+            defaults.set(walletBalance, forKey: "gpuWalletBalanceSatang")
             lastError = ""
             return
         } catch {
@@ -315,7 +330,11 @@ final class CloudGPUService: ObservableObject {
     /// The IDE provisions a managed session on first cloud-cell run. Users
     /// never need to paste an SSH command, Jupyter URL, or token.
     func ensureManagedSession() async throws {
+        if let connectTask { await connectTask.value }
         if activeSession != nil, status == .running { return }
+        if activeSession != nil {
+            throw NSError(domain: "CloudGPUService", code: 409, userInfo: [NSLocalizedDescriptionKey: "An existing GPU session needs recovery or a confirmed stop before starting another."])
+        }
         await refresh()
         guard authToken?.isEmpty == false else {
             throw NSError(domain: "CloudGPUService", code: 401, userInfo: [NSLocalizedDescriptionKey: "Sign in to MicroCode once, then run the cell again. Cloud GPU is configured automatically after sign-in."])
@@ -333,6 +352,18 @@ final class CloudGPUService: ObservableObject {
     }
 
     func connect(gpu: GPUType, onNeedTopUp: @escaping () -> Void) async {
+        if let connectTask { await connectTask.value; return }
+        guard activeSession == nil else {
+            lastError = "Stop the existing GPU session before starting another."
+            return
+        }
+        let task = Task { await self.performConnect(gpu: gpu, onNeedTopUp: onNeedTopUp) }
+        connectTask = task
+        await task.value
+        connectTask = nil
+    }
+
+    private func performConnect(gpu: GPUType, onNeedTopUp: @escaping () -> Void) async {
         await refreshCloudIdentityIfPossible()
         guard authToken?.isEmpty == false else {
             let message = "Sign in first to use Cloud GPU. Your account token is missing."
@@ -358,7 +389,7 @@ final class CloudGPUService: ObservableObject {
         // (2-4 min). 20s default would time out → bump for this call only.
         req.timeoutInterval = 360
         do {
-            let (data, resp) = try await URLSession.shared.data(for: req)
+            let (data, resp) = try await network.data(for: req)
             let code = (resp as? HTTPURLResponse)?.statusCode ?? -1
             if code == 409 {
                 lastError = serverMessage(data: data, response: resp, fallback: "GPU wallet has insufficient credit")
@@ -378,12 +409,13 @@ final class CloudGPUService: ObservableObject {
                             gpuLabel: response.gpuLabel ?? gpu.label,
                             pricePerMinute: response.pricePerMinute ?? gpu.pricePerMinute)
             activeSession = s
+            persistSession(s)
             activeSessionElapsedSeconds = 0
             activeSessionCostSatang = 0
             // Reuse the hardened Jupyter kernel path using its HTTP base.
             let jupyterBase = jupyterHTTPBase(from: s.wssURL)
-            UserDefaults.standard.set(jupyterBase, forKey: "hpcEndpoint")
-            UserDefaults.standard.set(s.jupyterToken, forKey: "hpcToken")
+            defaults.set(jupyterBase, forKey: "hpcEndpoint")
+            JupyterCredentialStore.token = s.jupyterToken
             status = .running
             gatewayMessage = "\(s.gpuLabel) is ready. Notebook cells now use its Jupyter kernel."
             CrashReporter.shared.breadcrumb("CloudGPU.session \(s.sessionId) \(s.gpuLabel) → \(jupyterBase)")
@@ -400,17 +432,19 @@ final class CloudGPUService: ObservableObject {
         pollTask?.cancel()
         pollTask = Task { [weak self] in
             while !Task.isCancelled {
-                try? await Task.sleep(nanoseconds: 15_000_000_000)
-                guard let self, let req = self.request("/sessions/\(sid)") else { return }
-                if let (data, response) = try? await URLSession.shared.data(for: req),
+                do { try await Task.sleep(nanoseconds: 15_000_000_000) } catch { return }
+                guard let self, self.activeSession?.sessionId == sid else { return }
+                await self.refreshCloudIdentityIfPossible()
+                guard !Task.isCancelled, let req = self.request("/sessions/\(sid)") else { return }
+                if let (data, response) = try? await network.data(for: req),
                    let http = response as? HTTPURLResponse,
                    let j = try? JSONSerialization.jsonObject(with: data) as? [String: Any] {
                     guard (200...299).contains(http.statusCode) else {
                         let message = self.serverMessage(data: data, response: response, fallback: "Lost Cloud GPU session status")
                         self.lastError = message
                         self.status = .failed(message)
-                        self.clearManagedSession()
-                        return
+                        // An auth/network/server error does not prove the paid resource stopped.
+                        continue
                     }
                     let st = (j["status"] as? String) ?? "running"
                     if let elapsed = self.integer(j, keys: ["elapsedSeconds", "elapsed_seconds"]) {
@@ -419,7 +453,11 @@ final class CloudGPUService: ObservableObject {
                     if let cost = self.integer(j, keys: ["costSoFar", "cost_so_far", "cost"]) {
                         self.activeSessionCostSatang = max(0, cost)
                     }
-                    if st == "stopped" || st == "error" {
+                    if st == "running" {
+                        self.status = .running
+                        self.lastError = ""
+                    }
+                    if st == "stopped" {
                         let message = st == "error"
                             ? ((j["error"] as? String) ?? "Cloud GPU session ended on the server.")
                             : "Cloud GPU session stopped."
@@ -452,12 +490,13 @@ final class CloudGPUService: ObservableObject {
     }
 
     private func clearManagedSession() {
+        KeychainManager.shared.deleteIntegrationSecret(account: sessionAccount)
         pollTask?.cancel()
         sessionTimerTask?.cancel()
         if let session = activeSession,
-           UserDefaults.standard.string(forKey: "hpcToken") == session.jupyterToken {
-            UserDefaults.standard.removeObject(forKey: "hpcEndpoint")
-            UserDefaults.standard.removeObject(forKey: "hpcToken")
+           JupyterCredentialStore.token == session.jupyterToken {
+            defaults.removeObject(forKey: "hpcEndpoint")
+            JupyterCredentialStore.token = ""
         }
         activeSession = nil
         activeSessionElapsedSeconds = 0
@@ -501,7 +540,7 @@ final class CloudGPUService: ObservableObject {
             "content": data.base64EncodedString()
         ]
         r.httpBody = try? JSONSerialization.data(withJSONObject: body)
-        guard let (_, resp) = try? await URLSession.shared.data(for: r),
+        guard let (_, resp) = try? await network.data(for: r),
               let code = (resp as? HTTPURLResponse)?.statusCode else {
             return "Network error during upload."
         }
@@ -519,7 +558,7 @@ final class CloudGPUService: ObservableObject {
         var r = URLRequest(url: qURL)
         r.timeoutInterval = 120
         r.setValue("token \(base.token)", forHTTPHeaderField: "Authorization")
-        guard let (d, resp) = try? await URLSession.shared.data(for: r),
+        guard let (d, resp) = try? await network.data(for: r),
               let code = (resp as? HTTPURLResponse)?.statusCode else {
             return "Network error during download."
         }
@@ -540,39 +579,54 @@ final class CloudGPUService: ObservableObject {
     }
 
     func stop() async {
-        let session = activeSession
-        pollTask?.cancel()
-        sessionTimerTask?.cancel()
-        if let sid = activeSession?.sessionId, let req = request("/sessions/\(sid)", method: "DELETE") {
-            if let (data, response) = try? await URLSession.shared.data(for: req),
-               let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] {
-                if let balance = integer(json, keys: ["balance"]) {
-                    walletBalance = max(0, balance)
-                    UserDefaults.standard.set(walletBalance, forKey: "gpuWalletBalanceSatang")
-                } else if !(200...299).contains((response as? HTTPURLResponse)?.statusCode ?? -1) {
-                    lastError = serverMessage(data: data, response: response, fallback: "Couldn't stop Cloud GPU session")
-                }
+        if let connectTask { await connectTask.value }
+        guard !stopping, let session = activeSession else { return }
+        stopping = true
+        defer { stopping = false }
+        await refreshCloudIdentityIfPossible()
+        guard let req = request("/sessions/\(session.sessionId)", method: "DELETE") else {
+            lastError = "Could not build the GPU stop request. The session is still retained."
+            return
+        }
+        do {
+            let (data, response) = try await network.data(for: req)
+            guard let http = response as? HTTPURLResponse else { throw URLError(.badServerResponse) }
+            // 202 is only acceptance, not confirmation that billing/resource use stopped.
+            guard http.statusCode == 200 || http.statusCode == 204 else {
+                lastError = serverMessage(data: data, response: response, fallback: "GPU stop is not confirmed. Retry; charges may continue")
+                status = .failed(lastError)
+                return
             }
+            let payload = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any]
+            if http.statusCode == 200, payload?["status"] as? String != "stopped", payload?["finalCost"] == nil {
+                lastError = "The gateway has not confirmed GPU termination. Retry; charges may continue."
+                status = .failed(lastError)
+                return
+            }
+            guard activeSession?.sessionId == session.sessionId else { return }
+            if let json = payload,
+               let balance = integer(json, keys: ["balance"]) {
+                walletBalance = max(0, balance)
+                defaults.set(walletBalance, forKey: "gpuWalletBalanceSatang")
+            }
+            clearManagedSession()
+            status = .stopped
+            lastError = ""
+            gatewayMessage = "Cloud GPU stop confirmed."
+        } catch {
+            lastError = "GPU stop is not confirmed: \(error.localizedDescription). Retry; charges may continue."
+            status = .failed(lastError)
         }
-        if let session, UserDefaults.standard.string(forKey: "hpcToken") == session.jupyterToken {
-            UserDefaults.standard.removeObject(forKey: "hpcEndpoint")
-            UserDefaults.standard.removeObject(forKey: "hpcToken")
-        }
-        activeSession = nil
-        activeSessionElapsedSeconds = 0
-        activeSessionCostSatang = 0
-        status = .stopped
-        gatewayMessage = "Cloud GPU disconnected."
-        await loadWallet()
     }
 
     // MARK: - Wallet top-up (separate from subscription)
 
     func topUp(packageId: String) async -> (url: URL?, error: String?) {
+        await refreshCloudIdentityIfPossible()
         guard let req = request("/wallet/topup", method: "POST", body: ["packageId": packageId]) else {
             return (nil, "Could not build request.")
         }
-        guard let (data, resp) = try? await URLSession.shared.data(for: req) else {
+        guard let (data, resp) = try? await network.data(for: req) else {
             return (nil, "Can't reach the Cloud GPU service. Check your connection.")
         }
         let code = (resp as? HTTPURLResponse)?.statusCode ?? -1
@@ -587,10 +641,13 @@ final class CloudGPUService: ObservableObject {
     }
 
     func topUpCustom(amountTHB: Int) async -> (url: URL?, error: String?) {
-        guard let req = request("/wallet/topup", method: "POST", body: ["amount": amountTHB * 100]) else {
+        await refreshCloudIdentityIfPossible()
+        guard amountTHB >= 100 else { return (nil, "Minimum top-up is ฿100.") }
+        // The Dotmini Cloud gateway accepts baht here and converts to satang.
+        guard let req = request("/wallet/topup", method: "POST", body: ["amountBaht": amountTHB]) else {
             return (nil, "Could not build request.")
         }
-        guard let (data, resp) = try? await URLSession.shared.data(for: req) else {
+        guard let (data, resp) = try? await network.data(for: req) else {
             return (nil, "Can't reach the Cloud GPU service. Check your connection.")
         }
         let code = (resp as? HTTPURLResponse)?.statusCode ?? -1
@@ -658,7 +715,7 @@ final class CloudGPUService: ObservableObject {
         guard let url = contentsURL(remotePath), let base = jupyterBase() else { return [] }
         var r = URLRequest(url: url)
         r.setValue("token \(base.token)", forHTTPHeaderField: "Authorization")
-        guard let (data, resp) = try? await URLSession.shared.data(for: r),
+        guard let (data, resp) = try? await network.data(for: r),
               (resp as? HTTPURLResponse)?.statusCode == 200,
               let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
               let content = json["content"] as? [[String: Any]] else { return [] }

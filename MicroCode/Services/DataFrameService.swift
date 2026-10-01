@@ -11,7 +11,7 @@ class DataFrameService: ObservableObject {
         let url = URL(string: "\(baseURL)/load")!
         let body = ["path": path]
         let requestData = try JSONSerialization.data(withJSONObject: body)
-        var request = URLRequest(url: url)
+        var request = LocalBackendAuth.request(url: url)
         request.httpMethod = "POST"
         request.httpBody = requestData
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
@@ -30,7 +30,7 @@ class DataFrameService: ObservableObject {
         let url = URL(string: "\(baseURL)/schema")!
         let body = ["id": id]
         let requestData = try JSONSerialization.data(withJSONObject: body)
-        var request = URLRequest(url: url)
+        var request = LocalBackendAuth.request(url: url)
         request.httpMethod = "POST"
         request.httpBody = requestData
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
@@ -50,7 +50,7 @@ class DataFrameService: ObservableObject {
         let url = URL(string: "\(baseURL)/slice")!
         let body: [String: Any] = ["id": id, "offset": offset, "limit": limit]
         let requestData = try JSONSerialization.data(withJSONObject: body)
-        var request = URLRequest(url: url)
+        var request = LocalBackendAuth.request(url: url)
         request.httpMethod = "POST"
         request.httpBody = requestData
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")

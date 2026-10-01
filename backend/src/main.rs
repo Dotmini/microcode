@@ -18,7 +18,7 @@ use std::convert::Infallible;
 use std::net::SocketAddr;
 use std::sync::Arc;
 use tokio::sync::RwLock;
-use tower_http::cors::{Any, CorsLayer};
+
 use tracing::{info, Level};
 use tracing_subscriber;
 
@@ -41,9 +41,11 @@ mod error;
 mod ftp;
 mod git;
 mod hot_reload;
+mod hooks;
 mod indexer;
 mod kernel;
 mod live_preview;
+mod local_auth;
 pub mod llm;
 /// Unified LLM Provider (Anthropic, Gemini, OpenAI)
 pub mod mcp;
@@ -52,12 +54,15 @@ mod models;
 mod network;
 mod nodejs;
 mod pipeline;
+mod policy;
 mod preview_v2;
 mod project;
 mod rag;
 mod remote;
 mod rosetta;
+mod rules;
 mod runner;
+mod shadow;
 pub mod arrow_cdata;
 pub mod arrow_flight;
 pub mod polyglot;
@@ -328,6 +333,19 @@ async fn main() -> Result<()> {
             "/api/agent/reject-change/:change_id",
             post(handlers::agent_reject_change),
         )
+        // SubAgent Management routes
+        .route(
+            "/api/agent/subagent/invoke",
+            post(handlers::agent_invoke_subagent),
+        )
+        .route(
+            "/api/agent/model/recommend",
+            post(handlers::agent_recommend_model),
+        )
+        .route(
+            "/api/agent/rules/:session_id",
+            get(handlers::agent_get_active_rules),
+        )
         // Scenario Automation routes
         .route("/api/scenario/execute", post(handlers::scenario_execute))
         .route(
@@ -443,13 +461,6 @@ async fn main() -> Result<()> {
         )
         // WebSocket for real-time updates
         .route("/ws", get(ws_handler))
-        // CORS layer
-        .layer(
-            CorsLayer::new()
-                .allow_origin(Any)
-                .allow_methods(Any)
-                .allow_headers(Any),
-        )
         .with_state(state);
 
     // Dotmini Cloud MCP Gateway Router (Gemini Spark, Claude Web, Desktop Tunnel)
@@ -461,7 +472,11 @@ async fn main() -> Result<()> {
         .route("/tunnel", get(crate::mcp::gateway::mcp_tunnel_ws_handler))
         .with_state(mcp_gateway);
 
-    let app = app.nest("/v1/mcp", mcp_router);
+    let local_token = std::env::var("MICROCODE_LOCAL_API_TOKEN")
+        .ok().filter(|value| value.len() >= 32)
+        .ok_or_else(|| crate::error::AppError::ValidationError("MICROCODE_LOCAL_API_TOKEN must contain at least 32 characters".into()))?;
+    let app = app.nest("/v1/mcp", mcp_router)
+        .layer(axum::middleware::from_fn_with_state(Arc::new(local_token), local_auth::require_local_token));
 
     // Start server on port 3000 (matches Swift services)
     let addr = SocketAddr::from(([127, 0, 0, 1], 3000));
@@ -1182,6 +1197,136 @@ mod handlers {
             Err(e) => {
                 (axum::http::StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response()
             }
+        }
+    }
+
+    /// Invoke a subagent with independent provider/model configuration.
+    pub async fn agent_invoke_subagent(
+        State(state): State<Arc<RwLock<AppState>>>,
+        Json(req): Json<serde_json::Value>,
+    ) -> impl IntoResponse {
+        let parent_session_id = req["session_id"].as_str().unwrap_or("");
+        let task = req["task"].as_str().unwrap_or("");
+
+        // Parse SubAgentConfig from request
+        let subagent_config: crate::models::SubAgentConfig = match serde_json::from_value(
+            req["subagent"].clone(),
+        ) {
+            Ok(c) => c,
+            Err(e) => {
+                return Json(json!({
+                    "success": false,
+                    "error": format!("Invalid subagent config: {}", e)
+                }))
+                .into_response();
+            }
+        };
+
+        // Build parent AI config from env/request
+        let parent_config = build_ai_config_from_env();
+
+        match crate::agent::execute_subagent(
+            state,
+            parent_session_id,
+            &subagent_config,
+            task,
+            &parent_config,
+        )
+        .await
+        {
+            Ok(response) => Json(json!({
+                "success": true,
+                "response": response,
+            }))
+            .into_response(),
+            Err(e) => Json(json!({
+                "success": false,
+                "error": e.to_string(),
+            }))
+            .into_response(),
+        }
+    }
+
+    /// Get a model recommendation for a given task description.
+    pub async fn agent_recommend_model(
+        Json(req): Json<serde_json::Value>,
+    ) -> impl IntoResponse {
+        let description = req["description"].as_str().unwrap_or("");
+        let tools: Vec<String> = req["tools"]
+            .as_array()
+            .map(|arr| {
+                arr.iter()
+                    .filter_map(|v| v.as_str().map(|s| s.to_string()))
+                    .collect()
+            })
+            .unwrap_or_default();
+
+        let recommendation = crate::agent::get_model_recommendation(description, &tools);
+        Json(json!({
+            "provider": recommendation.provider,
+            "model": recommendation.model,
+            "reason": recommendation.reason,
+        }))
+    }
+
+    /// Get active scoped rules for a session's workspace.
+    pub async fn agent_get_active_rules(
+        Path(session_id): Path<String>,
+    ) -> impl IntoResponse {
+        let workspace = crate::agent::get_session(&session_id)
+            .map(|s| s.workspace_path.clone());
+
+        let workspace = match workspace {
+            Some(w) => w,
+            None => {
+                return Json(json!({
+                    "rules": [],
+                    "error": "Session not found"
+                }))
+                .into_response();
+            }
+        };
+
+        match crate::rules::RuleEngine::load_from_workspace(&workspace).await {
+            Ok(engine) => {
+                let rules: Vec<_> = engine.rules().iter().map(|r| {
+                    json!({
+                        "name": r.name,
+                        "globs": r.globs,
+                        "always_active": r.always_active,
+                        "description": r.description,
+                        "content_length": r.content.len(),
+                    })
+                }).collect();
+                Json(json!({ "rules": rules })).into_response()
+            }
+            Err(e) => {
+                Json(json!({
+                    "rules": [],
+                    "error": e.to_string(),
+                }))
+                .into_response()
+            }
+        }
+    }
+
+    /// Build AIConfig from environment variables (helper for handlers).
+    fn build_ai_config_from_env() -> crate::models::AIConfig {
+        crate::models::AIConfig {
+            provider: std::env::var("AI_PROVIDER").unwrap_or_else(|_| "gemini".to_string()),
+            model: std::env::var("AI_MODEL")
+                .unwrap_or_else(|_| "gemini-2.5-flash".to_string()),
+            api_key: std::env::var("GEMINI_API_KEY")
+                .or_else(|_| std::env::var("OPENAI_API_KEY"))
+                .or_else(|_| std::env::var("ANTHROPIC_API_KEY"))
+                .unwrap_or_default(),
+            temperature: 0.7,
+            max_tokens: 4096,
+            use_microrent_proxy: std::env::var("USE_DOTMINI_PROXY")
+                .map(|v| v == "1")
+                .unwrap_or(false),
+            microrent_token: std::env::var("DOTMINI_API_TOKEN").ok(),
+            proxy_base_url: std::env::var("DOTMINI_API_BASE_URL").ok(),
         }
     }
     pub async fn list_files(

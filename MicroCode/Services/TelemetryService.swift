@@ -114,9 +114,7 @@ final class TelemetryService {
     }
 
     private var cloudToken: String? {
-        let defaults = UserDefaults.standard
-        return defaults.string(forKey: "dotminiLicenseKey")
-            ?? defaults.string(forKey: "microRentToken")
+        return DotminiPlatformKeyService.shared.authorizationToken ?? SupabaseAuthService.shared.accessToken
     }
 
     private var appVersion: String {

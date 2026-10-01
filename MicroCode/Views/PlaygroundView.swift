@@ -128,7 +128,50 @@ struct PlaygroundView: View {
                 code = exportedCode
                 appState.aiExportedCode = nil // Clear after consuming
                 print("🚀 PlaygroundView: Loaded code from AI Agent")
-            } else if let saved = UserDefaults.standard.string(forKey: "microcode_playground_code_\(language)"),
+            }
+            // Check if ipynb was sent for Cell Mode conversion
+            else if let pendingCells = appState.pendingIPYNBCells, !pendingCells.isEmpty {
+                let lang = appState.pendingIPYNBLanguage ?? "Python"
+                let path = appState.pendingIPYNBPath ?? "unknown"
+                let langKey = lang.lowercased().contains("python") ? "Python" :
+                              lang.lowercased().contains("r") ? "R" :
+                              lang.lowercased().contains("julia") ? "Julia" : lang
+                language = langKey
+                
+                var newCells: [PlaygroundCellModel] = []
+                for cellData in pendingCells {
+                    let cellCode = cellData["code"] ?? ""
+                    let cellType = cellData["type"] ?? "code"
+                    let finalCode: String
+                    if cellType == "markdown" {
+                        finalCode = cellCode.split(separator: "\n", omittingEmptySubsequences: false)
+                            .map { "# \($0)" }.joined(separator: "\n")
+                    } else {
+                        finalCode = cellCode
+                    }
+                    newCells.append(PlaygroundCellModel(code: finalCode, colorTheme: .none))
+                }
+                if !newCells.isEmpty {
+                    cells = newCells
+                    isCellMode = true
+                    output = "📖 Loaded \(newCells.count) cell(s) from \(URL(fileURLWithPath: path).lastPathComponent)\n"
+                }
+                // Clear after consuming
+                appState.pendingIPYNBCells = nil
+                appState.pendingIPYNBLanguage = nil
+                appState.pendingIPYNBPath = nil
+                print("🚀 PlaygroundView: Loaded \(newCells.count) cells from ipynb → Cell Mode")
+            }
+            // Check if code was sent for Playground mode
+            else if let pendingCode = appState.pendingPlaygroundCode, !pendingCode.isEmpty {
+                code = pendingCode
+                language = appState.pendingPlaygroundLanguage ?? "Python"
+                isCellMode = false
+                appState.pendingPlaygroundCode = nil
+                appState.pendingPlaygroundLanguage = nil
+                print("🚀 PlaygroundView: Loaded code from ipynb → Playground")
+            }
+            else if let saved = UserDefaults.standard.string(forKey: "microcode_playground_code_\(language)"),
                       !saved.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
                 // Restore the user's last Playground work (autosave) so it is
                 // never lost between launches.
@@ -154,6 +197,50 @@ struct PlaygroundView: View {
             }
             runtimeManager.detectAll()
         }
+        .onReceive(NotificationCenter.default.publisher(for: NSNotification.Name("LoadPlaygroundCode"))) { notification in
+            if let info = notification.userInfo,
+               let newCode = info["code"] as? String,
+               let lang = info["language"] as? String {
+                code = newCode
+                language = lang
+                isCellMode = false
+                print("🚀 PlaygroundView: Loaded code from Editor convert (\(lang))")
+            }
+        }
+        .onReceive(NotificationCenter.default.publisher(for: NSNotification.Name("LoadIPYNBToCellMode"))) { notification in
+            if let info = notification.userInfo,
+               let cellsData = info["cells"] as? [[String: String]],
+               let lang = info["language"] as? String {
+                // Map language name to playground language key
+                let langKey = lang.lowercased().contains("python") ? "Python" :
+                              lang.lowercased().contains("r") ? "R" :
+                              lang.lowercased().contains("julia") ? "Julia" : lang
+                language = langKey
+                
+                // Convert ipynb cells to PlaygroundCellModel
+                var newCells: [PlaygroundCellModel] = []
+                for cellData in cellsData {
+                    let cellCode = cellData["code"] ?? ""
+                    let cellType = cellData["type"] ?? "code"
+                    // For markdown cells, prefix with comment
+                    let finalCode: String
+                    if cellType == "markdown" {
+                        finalCode = cellCode.split(separator: "\n").map { "# \($0)" }.joined(separator: "\n")
+                    } else {
+                        finalCode = cellCode
+                    }
+                    newCells.append(PlaygroundCellModel(code: finalCode, colorTheme: .none))
+                }
+                
+                if !newCells.isEmpty {
+                    cells = newCells
+                    isCellMode = true
+                    let path = info["path"] as? String ?? "unknown"
+                    output = "📖 Loaded \(newCells.count) cell(s) from \(URL(fileURLWithPath: path).lastPathComponent)\n"
+                    print("🚀 PlaygroundView: Loaded \(newCells.count) cells from ipynb into Cell Mode")
+                }
+            }
+        }
         .onChange(of: isDocumentPiP) { newValue in
             if newValue && showDocumentMode {
                 PiPWindowManager.shared.show(documentURL: documentURL, onClose: {
@@ -165,6 +252,47 @@ struct PlaygroundView: View {
         }
         .sheet(isPresented: $showingEnvManager) {
             PythonEnvSheet()
+        }
+        .onReceive(appState.$pendingIPYNBCells) { newCells in
+            guard let pendingCells = newCells, !pendingCells.isEmpty else { return }
+            let lang = appState.pendingIPYNBLanguage ?? "Python"
+            let path = appState.pendingIPYNBPath ?? "unknown"
+            let langKey = lang.lowercased().contains("python") ? "Python" :
+                          lang.lowercased().contains("r") ? "R" :
+                          lang.lowercased().contains("julia") ? "Julia" : lang
+            language = langKey
+            
+            var newPlayCells: [PlaygroundCellModel] = []
+            for cellData in pendingCells {
+                let cellCode = cellData["code"] ?? ""
+                let cellType = cellData["type"] ?? "code"
+                let finalCode: String
+                if cellType == "markdown" {
+                    finalCode = cellCode.split(separator: "\n", omittingEmptySubsequences: false)
+                        .map { "# \($0)" }.joined(separator: "\n")
+                } else {
+                    finalCode = cellCode
+                }
+                newPlayCells.append(PlaygroundCellModel(code: finalCode, colorTheme: .none))
+            }
+            if !newPlayCells.isEmpty {
+                cells = newPlayCells
+                isCellMode = true
+                output = "📖 Loaded \(newPlayCells.count) cell(s) from \(URL(fileURLWithPath: path).lastPathComponent)\n"
+            }
+            appState.pendingIPYNBCells = nil
+            appState.pendingIPYNBLanguage = nil
+            appState.pendingIPYNBPath = nil
+            print("🚀 PlaygroundView: onReceive loaded \(newPlayCells.count) cells from ipynb")
+        }
+        .onReceive(appState.$pendingPlaygroundCode) { newCode in
+            guard let pendingCode = newCode, !pendingCode.isEmpty else { return }
+            code = pendingCode
+            language = appState.pendingPlaygroundLanguage ?? "Python"
+            isCellMode = false
+            appState.pendingPlaygroundCode = nil
+            appState.pendingPlaygroundLanguage = nil
+            print("🚀 PlaygroundView: onReceive loaded code from ipynb → Playground")
         }
     }
     
@@ -216,7 +344,7 @@ struct PlaygroundView: View {
     // MARK: - Toolbar
     
     private var playgroundToolbar: some View {
-        HStack(spacing: 8) {
+        HStack(spacing: 4) {
             // Language Selector
             Menu {
                 ForEach(supportedLanguages, id: \.self) { lang in
@@ -236,10 +364,12 @@ struct PlaygroundView: View {
                         .foregroundColor(.accentColor)
                     Text(language.capitalized)
                         .font(.system(size: 12, weight: .semibold))
+                        .lineLimit(1)
                     Image(systemName: "chevron.down")
                         .font(.system(size: 9, weight: .bold))
                         .foregroundColor(.secondary)
                 }
+                .fixedSize()
                 .padding(.horizontal, 10)
                 .padding(.vertical, 5)
                 .background(
@@ -333,6 +463,51 @@ struct PlaygroundView: View {
             .pickerStyle(.segmented)
             .frame(width: 140)
             
+            // Cell Mode inline actions
+            if isCellMode {
+                Text("\(cells.count) cells")
+                    .font(.system(size: 10, weight: .medium))
+                    .foregroundColor(.secondary)
+                    .fixedSize()
+                
+                Button(action: { runAllCells() }) {
+                    HStack(spacing: 3) {
+                        Image(systemName: "play.fill")
+                        Text("Run All")
+                    }
+                    .font(.system(size: 10, weight: .semibold))
+                    .foregroundColor(.white)
+                    .padding(.horizontal, 6)
+                    .padding(.vertical, 4)
+                    .background(
+                        RoundedRectangle(cornerRadius: 4)
+                            .fill(Color.accentColor.opacity(0.8))
+                    )
+                }
+                .buttonStyle(.plain)
+                .fixedSize()
+                
+                Button(action: {
+                    let newCell = PlaygroundCellModel(code: "# New Cell\n", colorTheme: .none)
+                    cells.append(newCell)
+                }) {
+                    HStack(spacing: 3) {
+                        Image(systemName: "plus")
+                        Text("Add")
+                    }
+                    .font(.system(size: 10, weight: .semibold))
+                    .foregroundColor(.primary)
+                    .padding(.horizontal, 6)
+                    .padding(.vertical, 4)
+                    .background(
+                        RoundedRectangle(cornerRadius: 4)
+                            .fill(controlBackground)
+                    )
+                }
+                .buttonStyle(.plain)
+                .fixedSize()
+            }
+            
             // Open .microplay
             Button(action: { openMicroplayFile() }) {
                 HStack(spacing: 4) {
@@ -341,7 +516,7 @@ struct PlaygroundView: View {
                 }
                 .font(.system(size: 11, weight: .medium))
                 .foregroundColor(.secondary)
-                .padding(.horizontal, 7)
+                .padding(.horizontal, 5)
                 .padding(.vertical, 5)
                 .background(
                     RoundedRectangle(cornerRadius: 6, style: .continuous)
@@ -349,6 +524,7 @@ struct PlaygroundView: View {
                 )
             }
             .buttonStyle(.plain)
+            .fixedSize()
             .help("Open .microplay file")
             
             // Save .microplay
@@ -359,7 +535,7 @@ struct PlaygroundView: View {
                 }
                 .font(.system(size: 11, weight: .medium))
                 .foregroundColor(.secondary)
-                .padding(.horizontal, 7)
+                .padding(.horizontal, 5)
                 .padding(.vertical, 5)
                 .background(
                     RoundedRectangle(cornerRadius: 6, style: .continuous)
@@ -367,6 +543,7 @@ struct PlaygroundView: View {
                 )
             }
             .buttonStyle(.plain)
+            .fixedSize()
             .help("Save as .microplay file")
             
             // Document Mode Toggle Button
@@ -377,7 +554,7 @@ struct PlaygroundView: View {
                 }
                 .font(.system(size: 11, weight: .medium))
                 .foregroundColor(showDocumentMode ? .white : .secondary)
-                .padding(.horizontal, 8)
+                .padding(.horizontal, 5)
                 .padding(.vertical, 5)
                 .background(
                     RoundedRectangle(cornerRadius: 6, style: .continuous)
@@ -389,6 +566,7 @@ struct PlaygroundView: View {
                 )
             }
             .buttonStyle(.plain)
+            .fixedSize()
             
             Spacer()
             
@@ -400,7 +578,7 @@ struct PlaygroundView: View {
                 }
                 .font(.system(size: 11, weight: .medium))
                 .foregroundColor(showDataFiles ? .white : .secondary)
-                .padding(.horizontal, 8)
+                .padding(.horizontal, 5)
                 .padding(.vertical, 5)
                 .background(
                     RoundedRectangle(cornerRadius: 6, style: .continuous)
@@ -412,6 +590,7 @@ struct PlaygroundView: View {
                 )
             }
             .buttonStyle(.plain)
+            .fixedSize()
             
             // Output Toggle
             Button(action: { showOutput.toggle() }) {
@@ -421,7 +600,7 @@ struct PlaygroundView: View {
                 }
                 .font(.system(size: 11, weight: .medium))
                 .foregroundColor(showOutput ? .white : .secondary)
-                .padding(.horizontal, 8)
+                .padding(.horizontal, 5)
                 .padding(.vertical, 5)
                 .background(
                     RoundedRectangle(cornerRadius: 6, style: .continuous)
@@ -433,6 +612,7 @@ struct PlaygroundView: View {
                 )
             }
             .buttonStyle(.plain)
+            .fixedSize()
             
             // GUI Preview Toggle
             Button(action: { showGUIPreview.toggle() }) {
@@ -442,7 +622,7 @@ struct PlaygroundView: View {
                 }
                 .font(.system(size: 11, weight: .medium))
                 .foregroundColor(showGUIPreview ? .white : .secondary)
-                .padding(.horizontal, 8)
+                .padding(.horizontal, 5)
                 .padding(.vertical, 5)
                 .background(
                     RoundedRectangle(cornerRadius: 6, style: .continuous)
@@ -454,6 +634,7 @@ struct PlaygroundView: View {
                 )
             }
             .buttonStyle(.plain)
+            .fixedSize()
             
             Divider()
                 .frame(height: 16)
@@ -463,6 +644,7 @@ struct PlaygroundView: View {
                 .font(.system(size: 11))
                 .toggleStyle(.switch)
                 .controlSize(.small)
+                .fixedSize()
             
             // Live Preview (Hot Reload) toggle
             Button(action: { HotReloadService.shared.toggle() }) {
@@ -472,7 +654,7 @@ struct PlaygroundView: View {
                 }
                 .font(.system(size: 11, weight: .medium))
                 .foregroundColor(HotReloadService.shared.isEnabled ? .white : .secondary)
-                .padding(.horizontal, 8)
+                .padding(.horizontal, 5)
                 .padding(.vertical, 5)
                 .background(
                     RoundedRectangle(cornerRadius: 6, style: .continuous)
@@ -484,6 +666,7 @@ struct PlaygroundView: View {
                 )
             }
             .buttonStyle(.plain)
+            .fixedSize()
             
             // Execution stats
             if executionTime > 0 {
@@ -496,7 +679,7 @@ struct PlaygroundView: View {
                         .foregroundColor(.secondary)
                 }
                 .padding(.horizontal, 6)
-                .padding(.vertical, 4)
+                .padding(.vertical, 5)
                 .background(
                     RoundedRectangle(cornerRadius: 4, style: .continuous)
                         .fill(controlBackground)
@@ -598,59 +781,6 @@ struct PlaygroundView: View {
     
     private var cellModeContent: some View {
         VStack(spacing: 0) {
-            // Cell Mode Action Header
-            HStack {
-                Text("Cell Mode (\(cells.count) cells)")
-                    .font(.system(size: 11, weight: .semibold))
-                    .foregroundColor(.secondary)
-                
-                Spacer()
-                
-                Button(action: { runAllCells() }) {
-                    HStack(spacing: 4) {
-                        Image(systemName: "play.fill")
-                        Text("Run All")
-                    }
-                    .font(.system(size: 10, weight: .semibold))
-                    .foregroundColor(.white)
-                    .padding(.horizontal, 8)
-                    .padding(.vertical, 4)
-                    .background(
-                        RoundedRectangle(cornerRadius: 4)
-                            .fill(Color(white: 0.14))
-                            .overlay(
-                                RoundedRectangle(cornerRadius: 4)
-                                    .stroke(Color.white.opacity(0.2), lineWidth: 0.5)
-                            )
-                    )
-                }
-                .buttonStyle(.plain)
-                
-                Button(action: {
-                    let newCell = PlaygroundCellModel(code: "# New Cell\n", colorTheme: .none)
-                    cells.append(newCell)
-                }) {
-                    HStack(spacing: 4) {
-                        Image(systemName: "plus")
-                        Text("Add Cell")
-                    }
-                    .font(.system(size: 10, weight: .semibold))
-                    .foregroundColor(.primary)
-                    .padding(.horizontal, 8)
-                    .padding(.vertical, 4)
-                    .background(
-                        RoundedRectangle(cornerRadius: 4)
-                            .fill(controlBackground)
-                    )
-                }
-                .buttonStyle(.plain)
-            }
-            .padding(.horizontal, 16)
-            .padding(.vertical, 8)
-            .background(panelBackground)
-            
-            Divider()
-            
             ScrollView {
                 LazyVStack(spacing: 8) {
                     ForEach(cells) { cell in
@@ -2091,10 +2221,12 @@ struct PlaygroundView: View {
                     .foregroundColor(Color(red: 0.12, green: 0.72, blue: 0.42))
                 Text(currentPythonDisplay)
                     .font(.system(size: 12, weight: .medium))
+                    .lineLimit(1)
                 Image(systemName: "chevron.down")
                     .font(.system(size: 9, weight: .bold))
                     .foregroundColor(.secondary)
             }
+            .fixedSize()
             .padding(.horizontal, 10)
             .padding(.vertical, 5)
             .background(
@@ -2158,10 +2290,12 @@ struct PlaygroundView: View {
                 Text(runtime.icon)
                 Text(activePath.map { URL(fileURLWithPath: $0).lastPathComponent } ?? runtime.rawValue)
                     .font(.system(size: 12, weight: .medium))
+                    .lineLimit(1)
                 Image(systemName: "chevron.down")
                     .font(.system(size: 9, weight: .bold))
                     .foregroundColor(.secondary)
             }
+            .fixedSize()
             .padding(.horizontal, 10)
             .padding(.vertical, 5)
             .background(RoundedRectangle(cornerRadius: 6, style: .continuous).fill(controlBackground))
@@ -3140,6 +3274,8 @@ struct PlaygroundView: View {
         panel.title = "Open Playground Document"
         panel.allowedContentTypes = [
             UTType(filenameExtension: "microplay") ?? .json,
+            UTType(filenameExtension: "ipynb") ?? .json,
+            UTType(filenameExtension: "mic") ?? .json,
             UTType.json
         ]
         panel.allowsMultipleSelection = false
@@ -3147,7 +3283,74 @@ struct PlaygroundView: View {
         panel.canChooseFiles = true
         
         if panel.runModal() == .OK, let selectedURL = panel.url {
-            loadMicroplay(from: selectedURL)
+            let ext = selectedURL.pathExtension.lowercased()
+            if ext == "ipynb" {
+                loadIPYNBFile(from: selectedURL)
+            } else {
+                loadMicroplay(from: selectedURL)
+            }
+        }
+    }
+    func loadIPYNBFile(from url: URL) {
+        do {
+            let data = try Data(contentsOf: url)
+            guard let json = try JSONSerialization.jsonObject(with: data) as? [String: Any],
+                  let ipynbCells = json["cells"] as? [[String: Any]] else {
+                self.output = "❌ Invalid .ipynb format\n"
+                return
+            }
+            
+            // Detect language from metadata
+            if let metadata = json["metadata"] as? [String: Any],
+               let kernelspec = metadata["kernelspec"] as? [String: Any],
+               let langName = kernelspec["language"] as? String {
+                let langMap = ["python": "Python", "r": "R", "julia": "Julia", "sql": "SQL"]
+                self.language = langMap[langName.lowercased()] ?? langName.capitalized
+            }
+            
+            // Convert ipynb cells to PlaygroundCellModel
+            var newCells: [PlaygroundCellModel] = []
+            for cell in ipynbCells {
+                guard let cellType = cell["cell_type"] as? String,
+                      let source = cell["source"] as? [String] else { continue }
+                let code = source.joined()
+                if code.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty { continue }
+                
+                let finalCode: String
+                if cellType == "markdown" {
+                    // Convert markdown to commented code
+                    finalCode = code.split(separator: "\n", omittingEmptySubsequences: false)
+                        .map { "# \($0)" }.joined(separator: "\n")
+                } else {
+                    finalCode = code
+                }
+                
+                // Check for output
+                var cellOutput = ""
+                if let outputs = cell["outputs"] as? [[String: Any]] {
+                    for out in outputs {
+                        if let text = out["text"] as? [String] {
+                            cellOutput += text.joined()
+                        } else if let outData = out["data"] as? [String: Any],
+                                  let textPlain = outData["text/plain"] as? [String] {
+                            cellOutput += textPlain.joined()
+                        }
+                    }
+                }
+                
+                newCells.append(PlaygroundCellModel(code: finalCode, output: cellOutput, colorTheme: .none))
+            }
+            
+            if !newCells.isEmpty {
+                self.cells = newCells
+                self.isCellMode = true
+                self.output = "📖 Loaded \(newCells.count) cell(s) from \(url.lastPathComponent)\n"
+                print("🚀 PlaygroundView: Loaded ipynb \(url.lastPathComponent) → \(newCells.count) cells")
+            } else {
+                self.output = "⚠️ No cells found in \(url.lastPathComponent)\n"
+            }
+        } catch {
+            self.output = "❌ Failed to load .ipynb: \(error.localizedDescription)\n"
         }
     }
 

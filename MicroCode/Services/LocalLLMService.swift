@@ -2,10 +2,12 @@
 //  LocalLLMService.swift
 //  MicroCode
 //
-//  Auto-detect and connect to Local LLM servers
-//  Supports: LM Studio, Ollama, text-generation-webui, LocalAI
+//  Auto-detect and connect to Local LLM servers (LM Studio, Ollama, MLX, LocalAI)
+//  Probes local ports and exposes OpenAI-compatible inference endpoints.
 //
-//  Copyright © 2025 Dotmini Software. All rights reserved.
+//  Created & Designed by Dotmini Software
+//  Founder & CEO: Tirawat Nantamas
+//  Copyright © 2025-2026 Dotmini Software. All rights reserved.
 //
 
 import Foundation
@@ -137,6 +139,13 @@ class LocalLLMService: ObservableObject {
     
     nonisolated(unsafe) static var cachedEndpoint: String = "http://127.0.0.1:1234/v1"
     nonisolated(unsafe) static var cachedModel: String = "local-model"
+    
+    private init() {
+        Task { @MainActor [weak self] in
+            try? await Task.sleep(nanoseconds: 600_000_000)
+            await self?.scanForServers()
+        }
+    }
     
     let modelCatalog: [DownloadableModel] = [
         DownloadableModel(id: "mlx-qwen-coder", name: "Qwen 2.5 Coder", provider: "MLX Community", description: "Incredibly fast coding model natively optimized for Apple Silicon (MLX).", params: "7B", sizeGB: 4.2, capabilities: ["Code", "Reasoning", "MLX"], ollamaTag: "mlx-community/Qwen2.5-Coder-7B-Instruct-4bit"),

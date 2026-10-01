@@ -41,8 +41,8 @@ class BackendService {
             print("⚠️ Backend binary not found at \(backendURL.path).")
             print("   Checking if backend is already running...")
             // Backend might be running manually - try health check
-            try? await healthCheck()
-            print("   Backend appears to be running externally")
+            try await healthCheck()
+            print("   Authenticated external backend is ready")
             return
         }
         
@@ -57,6 +57,7 @@ class BackendService {
         process.arguments = []
         var env = ProcessInfo.processInfo.environment
         env["RUST_LOG"] = "info"
+        env["MICROCODE_LOCAL_API_TOKEN"] = LocalBackendAuth.token
         // Hand the backend our PID so it can self-exit if we die (the Rust
         // side also watches for re-parenting to launchd as a backstop).
         env["MICROCODE_PARENT_PID"] = String(ProcessInfo.processInfo.processIdentifier)
@@ -66,24 +67,12 @@ class BackendService {
         let home = FileManager.default.homeDirectoryForCurrentUser.path
         env["HOME"] = home
 
-        // Agent tools execute locally, but model calls should use the same
-        // OpenAI-compatible Dotmini proxy as the native AI client.
-        let defaults = UserDefaults.standard
-        let proxyBaseURL = defaults.string(forKey: "dotminiProxyURL") ?? "https://api.dotmini.net/v1"
-        let proxyToken = defaults.string(forKey: "cloudGPUAuthToken")
-            ?? defaults.string(forKey: "microRentToken")
-            ?? defaults.string(forKey: "dotminiLicenseKey")
-            ?? ""
-        let keyMode = defaults.string(forKey: "aiKeyMode") ?? "cloud"
-        if keyMode == "cloud" {
-            env["DOTMINI_API_BASE_URL"] = proxyBaseURL
-            env["USE_MICRORENT_PROXY"] = "1"
-            env["MICRORENT_PROXY_URL"] = "\(proxyBaseURL)/chat/completions"
+        // Inference mode and credentials are supplied per request, never via
+        // a process-start snapshot that can outlive account or mode changes.
+        for key in ["DOTMINI_API_BASE_URL", "DOTMINI_API_TOKEN", "USE_DOTMINI_PROXY", "USE_MICRORENT_PROXY", "MICRORENT_PROXY_URL", "MICRORENT_TOKEN"] {
+            env.removeValue(forKey: key)
         }
-        if keyMode == "cloud" && !proxyToken.isEmpty {
-            env["MICRORENT_TOKEN"] = proxyToken
-        }
-        
+
         let currentPath = env["PATH"] ?? "/usr/bin:/bin:/usr/sbin:/sbin"
         let extraPaths = [
             "\(home)/.cargo/bin",
@@ -176,7 +165,7 @@ class BackendService {
 
     func healthCheck() async throws -> [String: Any] {
         let url = URL(string: "\(baseURL)/health")!
-        let (data, _) = try await session.data(from: url)
+        let (data, _) = try await session.data(for: LocalBackendAuth.request(url: url))
         return try JSONSerialization.jsonObject(with: data) as? [String: Any] ?? [:]
     }
 
@@ -254,7 +243,7 @@ class BackendService {
             let task = Task {
                 do {
                     let url = URL(string: "\(baseURL)/api/ai/refactor/stream")!
-                    var request = URLRequest(url: url)
+                    var request = LocalBackendAuth.request(url: url)
                     request.httpMethod = "POST"
                     request.setValue("application/json", forHTTPHeaderField: "Content-Type")
                     request.setValue("text/event-stream", forHTTPHeaderField: "Accept")
@@ -292,7 +281,7 @@ class BackendService {
 
     func generateRefactorReport(request: AIRefactorReportRequest) async throws -> Data {
         let url = URL(string: "\(baseURL)/api/ai/refactor/report")!
-        var urlRequest = URLRequest(url: url)
+        var urlRequest = LocalBackendAuth.request(url: url)
         urlRequest.httpMethod = "POST"
         urlRequest.setValue("application/json", forHTTPHeaderField: "Content-Type")
         urlRequest.httpBody = try JSONEncoder().encode(request)
@@ -329,7 +318,7 @@ class BackendService {
 
     func listAIModels() async throws -> [AIModel] {
         let url = URL(string: "\(baseURL)/api/ai/models")!
-        let (data, _) = try await session.data(from: url)
+        let (data, _) = try await session.data(for: LocalBackendAuth.request(url: url))
         let response = try JSONDecoder().decode(AIModelsResponse.self, from: data)
         return response.models
     }
@@ -344,7 +333,7 @@ class BackendService {
             let task = Task {
                 do {
                     let url = URL(string: "\(baseURL)/api/agent/enhanced-chat/stream")!
-                    var urlRequest = URLRequest(url: url)
+                    var urlRequest = LocalBackendAuth.request(url: url)
                     urlRequest.httpMethod = "POST"
                     urlRequest.setValue("application/json", forHTTPHeaderField: "Content-Type")
                     urlRequest.setValue("text/event-stream", forHTTPHeaderField: "Accept")
@@ -442,7 +431,7 @@ class BackendService {
             let task = Task {
                 do {
                     let url = URL(string: "\(baseURL)/api/run/stream")!
-                    var request = URLRequest(url: url)
+                    var request = LocalBackendAuth.request(url: url)
                     request.httpMethod = "POST"
                     request.setValue("application/json", forHTTPHeaderField: "Content-Type")
                     request.setValue("text/event-stream", forHTTPHeaderField: "Accept")
@@ -526,7 +515,7 @@ class BackendService {
 
     func getShmVariables(sessionId: String) async throws -> [ShmVariable] {
         let url = URL(string: "\(baseURL)/api/shm/variables?session_id=\(sessionId)")!
-        let (data, _) = try await session.data(from: url)
+        let (data, _) = try await session.data(for: LocalBackendAuth.request(url: url))
         let response = try JSONDecoder().decode(ShmVariablesResponse.self, from: data)
         return response.variables
     }
@@ -632,7 +621,7 @@ class BackendService {
 
     func listNodeVersions() async throws -> [NodeVersion] {
         let url = URL(string: "\(baseURL)/api/node/versions")!
-        let (data, _) = try await session.data(from: url)
+        let (data, _) = try await session.data(for: LocalBackendAuth.request(url: url))
         let response = try JSONDecoder().decode(ListNodeVersionsResponse.self, from: data)
         return response.versions
     }
@@ -647,7 +636,7 @@ class BackendService {
 
     func getDerivedDataInfo() async throws -> DerivedDataInfo {
         let url = URL(string: "\(baseURL)/api/cache/derived_data")!
-        let (data, response) = try await session.data(from: url)
+        let (data, response) = try await session.data(for: LocalBackendAuth.request(url: url))
         
         guard let httpResponse = response as? HTTPURLResponse else {
             throw BackendError.invalidResponse
@@ -682,7 +671,7 @@ class BackendService {
     // MARK: - HTTP Helpers
 
     private func post<T: Encodable, R: Decodable>(url: URL, body: T) async throws -> R {
-        var request = URLRequest(url: url)
+        var request = LocalBackendAuth.request(url: url)
         request.httpMethod = "POST"
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
 
@@ -1207,6 +1196,7 @@ struct AgentChatRequest: Codable {
     let model: String?
     let api_key: String?
     let auto_execute: Bool
+    var cloud_base_url: String? = nil
 }
 
 struct ActiveEditorContext: Codable {

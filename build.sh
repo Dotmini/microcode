@@ -91,7 +91,7 @@ done
 if [ -n "$CUSTOM_BUILD_ROOT" ]; then
     BUILD_ROOT="$CUSTOM_BUILD_ROOT"
     echo -e "${BLUE}ℹ Custom build root specified: $BUILD_ROOT${NC}"
-elif [ "$USE_EXTERNAL_SSD" = true ] || [ -n "${CODETUNER_BUILD_ROOT:-}" ]; then
+elif [ "$USE_EXTERNAL_SSD" = true ] || [ -n "${CODETUNER_BUILD_ROOT:-}" ] || [ -d "/Volumes/MAC" ] || [ -d "/Volumes/MicroCodeBuild" ]; then
     # Maintainer / External SSD Mode
     if [ -n "${CODETUNER_BUILD_ROOT:-}" ]; then
         BUILD_ROOT="$CODETUNER_BUILD_ROOT"
@@ -156,6 +156,11 @@ fi
 
 echo -e "${GREEN}✓ Rust $(rustc --version)${NC}"
 echo -e "${GREEN}✓ Cargo $(cargo --version)${NC}"
+CARGO_HOST_TARGET=$(rustc -vV | awk '/^host: / { print $2 }')
+if [ -z "$CARGO_HOST_TARGET" ]; then
+    echo -e "${RED}Error: Could not determine the Rust host target${NC}"
+    exit 1
+fi
 if [ "$USE_EXTERNAL_SSD" = true ] || [ -n "${CODETUNER_BUILD_ROOT:-}" ]; then
     echo -e "${GREEN}✓ Mode: External SSD ($BUILD_ROOT)${NC}"
 else
@@ -180,7 +185,7 @@ if [ "$FRONTEND_ONLY" = false ]; then
     # AppleDouble files. Some native crates (notably ring 0.16) reject unknown
     # files while scanning their source tree, so fetch first and remove only
     # this generated metadata from Cargo's cache.
-    cargo fetch
+    cargo fetch --target "$CARGO_HOST_TARGET"
     [ -n "${CARGO_HOME:-}" ] && [ -d "$CARGO_HOME" ] && find "$CARGO_HOME" -type f -name '._*' -delete 2>/dev/null || true
 
     if [ "$CLEAN" = true ]; then
@@ -190,11 +195,11 @@ if [ "$FRONTEND_ONLY" = false ]; then
 
     if [ "$BUILD_TYPE" = "release" ]; then
         echo -e "${YELLOW}Building backend in release mode...${NC}"
-        cargo build --release
+        cargo build --release --bin microcode-backend --lib
         BACKEND_PATH="$CARGO_TARGET_DIR/release/microcode-backend"
     else
         echo -e "${YELLOW}Building backend in debug mode...${NC}"
-        cargo build
+        cargo build --bin microcode-backend --lib
         BACKEND_PATH="$CARGO_TARGET_DIR/debug/microcode-backend"
     fi
 
@@ -293,16 +298,16 @@ elif [ -f "Package.swift" ]; then
 
         if [ "$FRONTEND_ONLY" = false ] || [ ! -f "$EMBEDDED_LIB_PATH" ] || [ ! -f "$CORE_LIB_PATH" ]; then
             echo -e "${YELLOW}Building Rust FFI libraries...${NC}"
-            cargo fetch --manifest-path backend/Cargo.toml
-            cargo fetch --manifest-path microcode_core/Cargo.toml
+            cargo fetch --manifest-path backend/Cargo.toml --target "$CARGO_HOST_TARGET"
+            cargo fetch --manifest-path microcode_core/Cargo.toml --target "$CARGO_HOST_TARGET"
             [ -n "${CARGO_HOME:-}" ] && [ -d "$CARGO_HOME" ] && find "$CARGO_HOME" -type f -name '._*' -delete 2>/dev/null || true
 
             if [ "$CONFIG" = "release" ]; then
-                cargo build --manifest-path backend/Cargo.toml --release
+                cargo build --manifest-path backend/Cargo.toml --release --lib
                 cargo build --manifest-path microcode_core/Cargo.toml --release
                 RUST_LIB_DIR="$CARGO_TARGET_DIR/release"
             else
-                cargo build --manifest-path backend/Cargo.toml
+                cargo build --manifest-path backend/Cargo.toml --lib
                 cargo build --manifest-path microcode_core/Cargo.toml
                 RUST_LIB_DIR="$CARGO_TARGET_DIR/debug"
             fi
@@ -313,6 +318,9 @@ elif [ -f "Package.swift" ]; then
         swift build -c "$CONFIG" --scratch-path "$SWIFT_SCRATCH_PATH" \
             -Xlinker "$EMBEDDED_LIB_PATH" \
             -Xlinker "$CORE_LIB_PATH" \
+            -Xlinker -lbz2 \
+            -Xlinker -llzma \
+            -Xlinker -lz \
             -Xlinker -framework -Xlinker SystemConfiguration \
             -Xlinker -framework -Xlinker Security \
             -Xlinker -framework -Xlinker CoreFoundation
@@ -406,8 +414,12 @@ elif [ -f "Package.swift" ]; then
         # Strip local symbols after linking. The backend is an executable (not
         # an FFI library) and has been smoke-tested with /health after this
         # pass; the app executable retains externally visible Swift symbols.
-        xcrun strip "$APP_BUNDLE/Contents/MacOS/microcode-backend"
-        xcrun strip -x "$APP_BUNDLE/Contents/MacOS/MicroCode"
+        if [ -f "$APP_BUNDLE/Contents/MacOS/microcode-backend" ]; then
+            xcrun strip "$APP_BUNDLE/Contents/MacOS/microcode-backend"
+        fi
+        if [ -f "$APP_BUNDLE/Contents/MacOS/MicroCode" ]; then
+            xcrun strip -x "$APP_BUNDLE/Contents/MacOS/MicroCode"
+        fi
 
         cat > "$APP_BUNDLE/Contents/Info.plist" <<EOF
 <?xml version="1.0" encoding="UTF-8"?>

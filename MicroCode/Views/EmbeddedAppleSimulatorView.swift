@@ -36,25 +36,97 @@ struct EmbeddedAppleSimulatorView: View {
                 }
 
                 if serveSim.previewURL == nil || serveSim.connectionState != .ready {
-                    VStack(spacing: 10) {
-                        Image(systemName: previewUnavailable ? "exclamationmark.triangle" : "arrow.triangle.2.circlepath")
-                            .font(.system(size: 22, weight: .medium))
-                            .foregroundColor(previewUnavailable ? .orange : .secondary)
-                        Text(previewUnavailable ? "\(previewTitle) preview is unavailable" : "Opening \(previewTitle)…")
-                            .font(.system(size: 12, weight: .medium))
-                        Text(serveSim.statusMessage)
-                            .font(.system(size: 10)).foregroundColor(.secondary)
-                            .multilineTextAlignment(.center).frame(maxWidth: 280)
-                        if previewUnavailable {
-                            Button("Retry Preview") {
-                                Task { await serveSim.retryLastSimulator() }
+                    VStack(spacing: 12) {
+                        switch serveSim.connectionState {
+                        case .idle:
+                            Image(systemName: "iphone")
+                                .font(.system(size: 26, weight: .light))
+                                .foregroundColor(.secondary)
+                            Text("\(previewTitle) Preview")
+                                .font(.system(size: 13, weight: .semibold))
+                            Text("Interactive iOS Simulator preview is currently idle.")
+                                .font(.system(size: 10.5))
+                                .foregroundColor(.secondary)
+                                .multilineTextAlignment(.center)
+                                .frame(maxWidth: 260)
+
+                            HStack(spacing: 8) {
+                                Button("Start Simulator") {
+                                    Task { await runtime.startEmbeddedAppleSimulator() }
+                                }
+                                .buttonStyle(.borderedProminent)
+                                .controlSize(.small)
+
+                                Button("Switch to Web Preview") {
+                                    PreviewDockService.shared.selectTab(id: "web")
+                                }
+                                .buttonStyle(.bordered)
+                                .controlSize(.small)
                             }
-                            .buttonStyle(.borderedProminent)
-                            .controlSize(.small)
+                            .padding(.top, 4)
+
+                        case .connecting:
+                            ProgressView()
+                                .controlSize(.small)
+                            Text("Connecting to \(previewTitle)…")
+                                .font(.system(size: 12, weight: .medium))
+                            Text(serveSim.statusMessage)
+                                .font(.system(size: 10))
+                                .foregroundColor(.secondary)
+                                .multilineTextAlignment(.center)
+                                .frame(maxWidth: 260)
+
+                            HStack(spacing: 8) {
+                                Button("Cancel") {
+                                    Task { await serveSim.stop() }
+                                }
+                                .buttonStyle(.bordered)
+                                .controlSize(.small)
+
+                                Button("Open WebApp Instead") {
+                                    Task { await serveSim.stop() }
+                                    PreviewDockService.shared.selectTab(id: "web")
+                                }
+                                .buttonStyle(.bordered)
+                                .controlSize(.small)
+                            }
+                            .padding(.top, 4)
+
+                        case .failed:
+                            Image(systemName: "exclamationmark.triangle.fill")
+                                .font(.system(size: 24))
+                                .foregroundColor(.orange)
+                            Text("\(previewTitle) Unavailable")
+                                .font(.system(size: 12, weight: .semibold))
+                            Text(serveSim.statusMessage)
+                                .font(.system(size: 10))
+                                .foregroundColor(.secondary)
+                                .multilineTextAlignment(.center)
+                                .frame(maxWidth: 260)
+
+                            HStack(spacing: 8) {
+                                Button("Retry") {
+                                    Task { await serveSim.retryLastSimulator() }
+                                }
+                                .buttonStyle(.borderedProminent)
+                                .controlSize(.small)
+
+                                Button("Switch to Web Preview") {
+                                    Task { await serveSim.stop() }
+                                    PreviewDockService.shared.selectTab(id: "web")
+                                }
+                                .buttonStyle(.bordered)
+                                .controlSize(.small)
+                            }
+                            .padding(.top, 4)
+
+                        case .ready:
+                            EmptyView()
                         }
                     }
-                    .padding(18)
+                    .padding(20)
                     .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 12))
+                    .overlay(RoundedRectangle(cornerRadius: 12).stroke(Color.primary.opacity(0.08), lineWidth: 0.8))
                 }
             }
         }

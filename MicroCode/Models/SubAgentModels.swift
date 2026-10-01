@@ -47,6 +47,20 @@ public enum SubAgentLifecycleState: String, Codable, CaseIterable {
     }
 }
 
+// MARK: - Budget Config
+
+public struct BudgetConfig: Codable, Hashable {
+    public var maxModelCalls: Int?
+    public var maxToolCalls: Int?
+    public var maxTotalTokens: Int?
+    
+    public init(maxModelCalls: Int? = nil, maxToolCalls: Int? = nil, maxTotalTokens: Int? = nil) {
+        self.maxModelCalls = maxModelCalls
+        self.maxToolCalls = maxToolCalls
+        self.maxTotalTokens = maxTotalTokens
+    }
+}
+
 // MARK: - SubAgent Definition (Template)
 
 public struct SubAgentDefinition: Identifiable, Codable, Hashable {
@@ -57,6 +71,9 @@ public struct SubAgentDefinition: Identifiable, Codable, Hashable {
     public let systemPrompt: String
     public let allowedTools: [String]
     public let model: String // "inherit" or specific model ID
+    public var preferredProvider: String?
+    public var preferredModel: String?
+    public var budget: BudgetConfig?
     public let createdAt: Date
     
     public init(
@@ -66,6 +83,9 @@ public struct SubAgentDefinition: Identifiable, Codable, Hashable {
         systemPrompt: String,
         allowedTools: [String] = [],
         model: String = "inherit",
+        preferredProvider: String? = nil,
+        preferredModel: String? = nil,
+        budget: BudgetConfig? = nil,
         createdAt: Date = Date()
     ) {
         self.name = name
@@ -74,6 +94,9 @@ public struct SubAgentDefinition: Identifiable, Codable, Hashable {
         self.systemPrompt = systemPrompt
         self.allowedTools = allowedTools
         self.model = model
+        self.preferredProvider = preferredProvider
+        self.preferredModel = preferredModel
+        self.budget = budget
         self.createdAt = createdAt
     }
 }

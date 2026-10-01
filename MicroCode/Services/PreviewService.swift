@@ -479,7 +479,7 @@ class HotReloadService: ObservableObject {
             throw URLError(.badURL)
         }
         
-        var request = URLRequest(url: url)
+        var request = LocalBackendAuth.request(url: url)
         request.httpMethod = "POST"
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
         
