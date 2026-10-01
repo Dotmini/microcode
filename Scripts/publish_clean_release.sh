@@ -53,25 +53,35 @@ git tag -a "$TAG" -m "$TITLE"
 git push origin "$TAG"
 
 echo ""
-echo "📦 Step 4: Verifying release artifacts (DMG / PKG)..."
-DMG_FILE=$(find "$DIST_DIR" -maxdepth 1 -name "*.dmg" -type f | sort -r | head -n 1)
-PKG_FILE=$(find "$DIST_DIR" -maxdepth 1 -name "*.pkg" -type f | sort -r | head -n 1)
+echo "📦 Step 4: Preparing release artifacts (DMG / PKG)..."
+SRC_DMG="Dist/DeveloperPreview/MicroCode-2.3.1-DeveloperPreview.dmg"
+SRC_PKG="Dist/DeveloperPreview/MicroCode-2.3.1-DeveloperPreview.pkg"
 
-if [ -z "$DMG_FILE" ] || [ -z "$PKG_FILE" ]; then
-    echo "   ⚠️ Artifacts not found in $DIST_DIR, building them now..."
+if [ ! -f "$SRC_DMG" ] || [ ! -f "$SRC_PKG" ]; then
+    echo "   ⚠️ Artifacts not found, building them now..."
     APP_PATH="/Volumes/MAC/CodeTunerBuild/apps/MicroCode.app" ./Scripts/build_developer_preview.sh
-    DMG_FILE=$(find "$DIST_DIR" -maxdepth 1 -name "*.dmg" -type f | sort -r | head -n 1)
-    PKG_FILE=$(find "$DIST_DIR" -maxdepth 1 -name "*.pkg" -type f | sort -r | head -n 1)
 fi
 
-echo "   Found DMG: $DMG_FILE"
-echo "   Found PKG: $PKG_FILE"
+DMG_FILE="$DIST_DIR/MicroCode-${TAG}.dmg"
+PKG_FILE="$DIST_DIR/MicroCode-${TAG}.pkg"
+
+cp -f "$SRC_DMG" "$DMG_FILE"
+cp -f "$SRC_PKG" "$PKG_FILE"
+
+# Generate SHA256 checksums for release assets
+(cd "$DIST_DIR" && shasum -a 256 "MicroCode-${TAG}.dmg" "MicroCode-${TAG}.pkg" > "SHA256SUMS-${TAG}.txt")
+SUMS_FILE="$DIST_DIR/SHA256SUMS-${TAG}.txt"
+
+echo "   Ready DMG: $DMG_FILE ($(du -h "$DMG_FILE" | cut -f1))"
+echo "   Ready PKG: $PKG_FILE ($(du -h "$PKG_FILE" | cut -f1))"
+echo "   Ready Checksums: $SUMS_FILE"
 
 echo ""
 echo "🎉 Step 5: Publishing new Release to GitHub ($TAG)..."
 gh release create "$TAG" \
     "$DMG_FILE" \
     "$PKG_FILE" \
+    "$SUMS_FILE" \
     --repo "$REPO" \
     --title "$TITLE" \
     --notes "## What's New in MicroCode $TAG
@@ -83,8 +93,11 @@ gh release create "$TAG" \
 - **Hardware Integration**: Metal-accelerated UI, Apple Silicon SIMD rendering, and responsive multi-window dock.
 
 ### 📥 Downloads
-- **macOS Installer (PKG)**: $(basename "$PKG_FILE")
-- **Disk Image (DMG)**: $(basename "$DMG_FILE")
+| File | Size | Description |
+|:---|:---:|:---|
+| 💿 [MicroCode-${TAG}.dmg](https://github.com/$REPO/releases/download/$TAG/MicroCode-${TAG}.dmg) | $(du -h "$DMG_FILE" | cut -f1) | Native macOS Disk Image Installer |
+| 📦 [MicroCode-${TAG}.pkg](https://github.com/$REPO/releases/download/$TAG/MicroCode-${TAG}.pkg) | $(du -h "$PKG_FILE" | cut -f1) | macOS Standard Component Package |
+| 📄 [SHA256SUMS-${TAG}.txt](https://github.com/$REPO/releases/download/$TAG/SHA256SUMS-${TAG}.txt) | - | Cryptographic Checksums |
 
 ---
 *Dotmini Company Limited — Founder & CEO: Tirawat Nantamas*" \
