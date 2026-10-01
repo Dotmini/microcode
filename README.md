@@ -35,6 +35,7 @@ Every contribution directly funds engineering time, Apple Developer infrastructu
 </p>
 
 <p align="center">
+  <a href="https://microcode.dotmini.net"><img src="https://img.shields.io/badge/Official_Website-microcode.dotmini.net-007AFF?style=flat-square&logo=safari&logoColor=white" alt="Official Website" /></a>
   <img src="https://img.shields.io/badge/Platform-macOS_13+-black?style=flat-square&logo=apple&logoColor=white" />
   <img src="https://img.shields.io/badge/Swift-5.9-F05138?style=flat-square&logo=swift&logoColor=white" />
   <img src="https://img.shields.io/badge/Rust-1.75+-DEA584?style=flat-square&logo=rust&logoColor=white" />
@@ -45,6 +46,7 @@ Every contribution directly funds engineering time, Apple Developer infrastructu
 </p>
 
 <p align="center">
+  <a href="https://microcode.dotmini.net"><strong>🌐 Official Website</strong></a> ·
   <a href="https://github.com/Dotmini/microcode/releases/tag/v2.5.25"><strong>Download v2.5.25 (Latest Release)</strong></a> ·
   <a href="#operational-modes"><strong>Operational Modes</strong></a> ·
   <a href="#features"><strong>Features</strong></a> ·
@@ -404,7 +406,7 @@ flowchart TB
 
 ### Install from Release
 
-Download the latest verified release from [**GitHub Releases (v2.5.25)**](https://github.com/Dotmini/microcode/releases/tag/v2.5.25):
+Download directly from our official portal at [**microcode.dotmini.net**](https://microcode.dotmini.net) or from [**GitHub Releases (v2.5.25)**](https://github.com/Dotmini/microcode/releases/tag/v2.5.25):
 
 | Package | Size | Architecture | Direct Download Link |
 |:---|:---:|:---:|:---|
@@ -412,7 +414,8 @@ Download the latest verified release from [**GitHub Releases (v2.5.25)**](https:
 | 📦 **Component Installer (PKG)** | 64 MB | Apple Silicon (ARM64) | [**Download MicroCode-v2.5.25.pkg**](https://github.com/Dotmini/microcode/releases/download/v2.5.25/MicroCode-v2.5.25.pkg) |
 | 📄 **Cryptographic Checksums** | 176 B | All | [**View SHA256SUMS-v2.5.25.txt**](https://github.com/Dotmini/microcode/releases/download/v2.5.25/SHA256SUMS-v2.5.25.txt) |
 
-> **System Requirements**: macOS 13.0 (Ventura) or later · Native on Apple Silicon (M1/M2/M3/M4/M5).
+> **System Requirements**: macOS 13.0 (Ventura) or later · Native on Apple Silicon (M1/M2/M3/M4/M5).  
+> **Official Portal & Updates**: [https://microcode.dotmini.net](https://microcode.dotmini.net)
 
 ### Build from Source
 
@@ -527,7 +530,8 @@ We welcome contributions! Please:
     <td align="center">
       <strong>Tirawat Nantamas (ถิรวัฒน์ นันตมาศ)</strong><br/>
       <em>Founder & CEO</em><br/>
-      Dotmini Company Limited (บริษัท ดอทมินิ จำกัด)
+      <a href="https://dotmini.net">Dotmini Company Limited (บริษัท ดอทมินิ จำกัด)</a><br/>
+      🌐 <a href="https://microcode.dotmini.net"><strong>microcode.dotmini.net</strong></a>
     </td>
   </tr>
 </table>
@@ -563,7 +567,7 @@ We welcome contributions! Please:
 ---
 
 <p align="center">
-  <sub>Developed by Dotmini Company Limited</sub><br/>
+  <sub>Developed by <a href="https://dotmini.net">Dotmini Company Limited</a> · Official Portal: <a href="https://microcode.dotmini.net">microcode.dotmini.net</a></sub><br/>
   <sub>Copyright © 2024-2026 Tirawat Nantamas — Dotmini Company Limited (บริษัท ดอทมินิ จำกัด). All rights reserved.</sub>
 </p>
 
