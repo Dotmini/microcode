@@ -45,7 +45,7 @@ Every contribution directly funds engineering time, Apple Developer infrastructu
 </p>
 
 <p align="center">
-  <a href="https://github.com/Dotmini/microcode/releases/latest"><strong>Download Latest Release</strong></a> ·
+  <a href="https://github.com/Dotmini/microcode/releases/tag/v2.5.25"><strong>Download v2.5.25 (Latest Release)</strong></a> ·
   <a href="#operational-modes"><strong>Operational Modes</strong></a> ·
   <a href="#features"><strong>Features</strong></a> ·
   <a href="#architecture"><strong>Architecture</strong></a> ·
@@ -312,7 +312,15 @@ flowchart TD
 
 ### Install from Release
 
-Download the latest `.dmg` or `.pkg` from [**Releases**](https://github.com/Dotmini/microcode/releases/latest).
+Download the latest verified release from [**GitHub Releases (v2.5.25)**](https://github.com/Dotmini/microcode/releases/tag/v2.5.25):
+
+| Package | Size | Architecture | Direct Download Link |
+|:---|:---:|:---:|:---|
+| 💿 **macOS Disk Image (DMG)** | 137 MB | Apple Silicon (ARM64) | [**Download MicroCode-v2.5.25.dmg**](https://github.com/Dotmini/microcode/releases/download/v2.5.25/MicroCode-v2.5.25.dmg) |
+| 📦 **Component Installer (PKG)** | 64 MB | Apple Silicon (ARM64) | [**Download MicroCode-v2.5.25.pkg**](https://github.com/Dotmini/microcode/releases/download/v2.5.25/MicroCode-v2.5.25.pkg) |
+| 📄 **Cryptographic Checksums** | 176 B | All | [**View SHA256SUMS-v2.5.25.txt**](https://github.com/Dotmini/microcode/releases/download/v2.5.25/SHA256SUMS-v2.5.25.txt) |
+
+> **System Requirements**: macOS 13.0 (Ventura) or later · Native on Apple Silicon (M1/M2/M3/M4/M5).
 
 ### Build from Source
 
@@ -373,30 +381,39 @@ microcode/
 
 ---
 
-## Security
+## Security & Code Integrity
 
-MicroCode takes security seriously:
+MicroCode is engineered with enterprise-grade defense-in-depth:
 
-- **Source integrity** — SHA256 checksums verified on every push via CI
-- **Sandboxed commands** — AI agent commands run with 30s timeout, 1MB output limit, restricted PATH
-- **Path traversal protection** — All file operations validated against workspace boundary
-- **No telemetry** — Zero data collection, fully offline capable
+- **100-Step Deep Security & Secret Leak Audit**: All tracked source code, commit history, and release packages pass our exhaustive 100-step credential scan. Zero hardcoded API keys, JWTs, or private keys.
+- **Strict Sandbox Isolation**: AI agent file edits and terminal commands are constrained to the active workspace directory with strict path boundary validation.
+- **Human-in-the-Loop (`⌘↵`) Gate**: High-risk tool calls (writing files, executing shell scripts, running git commands) are paused until explicitly authorized by the developer.
+- **Cryptographic Source Integrity**: 444 source files verified with SHA256 checksums (`CHECKSUMS.sha256`) checked in CI.
+- **macOS Keychain Storage**: User API keys and sessions are stored in the secure macOS Keychain (Apple Security Framework), never in plain-text project files.
 
 ---
 
-## AI Provider Setup
+## AI Provider Setup & Real-Time Dynamic Model Discovery
 
-MicroCode supports 7 AI providers out of the box. Configure via **Settings → AI Providers**:
+MicroCode features a **100% Real-Time Model Discovery Engine**. Unlike legacy tools that hardcode or mock model names, MicroCode connects directly to official provider APIs (`/v1/models`) to fetch available models live with zero hardcoding. When providers release new models, they instantly appear in your model picker.
 
-| Provider | Models | API Key Env |
-|----------|--------|-------------|
-| **Gemini** | 3.1 Pro, 2.5 Pro, 2.5 Flash | `GEMINI_API_KEY` |
-| **OpenAI** | GPT-5, GPT-4o, o3, o4-mini | `OPENAI_API_KEY` |
-| **Claude** | 4.7 Opus, Sonnet 4, 3.5 Haiku | `ANTHROPIC_API_KEY` |
-| **DeepSeek** | V4, Chat, Coder | `DEEPSEEK_API_KEY` |
-| **Grok** | grok-3, grok-3-mini | `GROK_API_KEY` |
-| **Qwen** | qwen-max, qwen-turbo | `QWEN_API_KEY` |
-| **GLM** | glm-4-plus | `GLM_API_KEY` |
+### Supported Providers (BYOK — Bring Your Own Key)
+
+| Provider | Model Discovery | Local / Cloud | Environment Variable | Configuration View |
+|:---|:---|:---:|:---|:---|
+| **Google Gemini** | Real-time via Gemini API v1beta | Cloud | `GEMINI_API_KEY` | Settings → AI Providers → Gemini |
+| **OpenAI** | Real-time via `/v1/models` | Cloud | `OPENAI_API_KEY` | Settings → AI Providers → OpenAI |
+| **Anthropic Claude** | Real-time live endpoint | Cloud | `ANTHROPIC_API_KEY` | Settings → AI Providers → Anthropic |
+| **DeepSeek** | Real-time via OpenAI-compat API | Cloud | `DEEPSEEK_API_KEY` | Settings → AI Providers → DeepSeek |
+| **xAI Grok** | Real-time via `/v1/models` | Cloud | `GROK_API_KEY` | Settings → AI Providers → Grok |
+| **Apple MLX** | On-device Apple Silicon server | **Local** | None (Local socket) | Settings → AI Providers → Local LLM |
+| **Ollama** | Automatic local port detection (`11434`) | **Local** | None (Local daemon) | Settings → AI Providers → Ollama |
+| **Alibaba Qwen** | Real-time DashScope endpoint | Cloud | `QWEN_API_KEY` | Settings → AI Providers → Qwen |
+| **Zhipu GLM** | Real-time BigModel endpoint | Cloud | `GLM_API_KEY` | Settings → AI Providers → GLM |
+| **Dotmini Omni** | Sovereign AI (0.8B / 3B MoE) | **Local / Cloud** | `DOTMINI_PLATFORM_KEY` | Settings → AI Providers → Dotmini |
+
+> [!TIP]
+> **Zero Middleman Markup**: Your API requests travel directly between your Mac and the AI provider endpoint via low-latency streaming SSE (Server-Sent Events). MicroCode never proxies, stores, or marks up your token usage.
 
 ---
 
