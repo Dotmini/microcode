@@ -98,7 +98,7 @@ hdiutil create -volname "$APP_NAME Developer Preview" -srcfolder "$DMG_STAGE" -o
 
 if security find-identity -v -p codesigning | grep -q "Apple Development: business@dotmini.net (A58QB9B355)"; then
   echo "Signing DMG with Apple Development certificate..."
-  codesign --force --sign "Apple Development: business@dotmini.net (A58QB9B355)" "$OUTPUT_DIR/$RELEASE_NAME.dmg"
+  codesign --force --sign "Apple Development: business@dotmini.net (A58QB9B355)" "$OUTPUT_DIR/$RELEASE_NAME.dmg" || codesign --force --sign - "$OUTPUT_DIR/$RELEASE_NAME.dmg" || true
 fi
 
 codesign --verify --deep --strict --verbose=2 "$APP_PATH"
