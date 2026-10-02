@@ -937,9 +937,11 @@ enum ToolBoxError: LocalizedError {
 
 struct FileReadTool: AgentTool {
     let name = "file_read"
-    let description = "Read the contents of a file at the given path (supports code, text, Markdown, PDF, and image metadata)"
+    let description = "Read the contents of a file at the given path (supports code, text, Markdown, PDF, and image metadata). Supports optional start_line and end_line for targeted inspection."
     let parameters = [
-        ToolParameter(name: "path", type: "string", description: "Absolute or relative file path to read", required: true)
+        ToolParameter(name: "path", type: "string", description: "Absolute or relative file path to read", required: true),
+        ToolParameter(name: "start_line", type: "integer", description: "Optional starting line number (1-based) to read a specific slice", required: false),
+        ToolParameter(name: "end_line", type: "integer", description: "Optional ending line number (1-based) to read a specific slice", required: false)
     ]
     
     func execute(params: [String: Any]) async throws -> String {
@@ -1007,21 +1009,57 @@ struct FileReadTool: AgentTool {
         
         do {
             let content = try String(contentsOf: url, encoding: .utf8)
-            // Scaled for 2M token context (up to 2,000,000 chars)
-            if content.count > 2_000_000 {
-                return String(content.prefix(2_000_000)) + "\n\n... (file truncated at 2M chars, total: \(content.count) chars)"
-            }
-            return content
+            return formatFileReadContent(content, params: params, fileName: url.lastPathComponent)
         } catch {
             // Fallback for different encodings
             if let content = try? String(contentsOf: url, encoding: .isoLatin1) {
-                if content.count > 2_000_000 {
-                    return String(content.prefix(2_000_000)) + "\n\n... (file truncated at 2M chars, total: \(content.count) chars)"
-                }
-                return content
+                return formatFileReadContent(content, params: params, fileName: url.lastPathComponent)
             }
             throw error
         }
+    }
+    
+    private func formatFileReadContent(_ content: String, params: [String: Any], fileName: String) -> String {
+        let lines = content.components(separatedBy: "\n")
+        let totalLines = lines.count
+        
+        let startParam = (params["start_line"] as? Int) ?? (params["offset"] as? Int) ?? (params["StartLine"] as? Int)
+        let endParam = (params["end_line"] as? Int) ?? (params["limit"] as? Int) ?? (params["EndLine"] as? Int)
+        
+        if let start = startParam {
+            let startIdx = max(0, start - 1)
+            let endIdx: Int
+            if let end = endParam {
+                endIdx = min(totalLines, max(startIdx, end))
+            } else {
+                endIdx = min(totalLines, startIdx + 250)
+            }
+            if startIdx < totalLines {
+                let slice = lines[startIdx..<endIdx]
+                let formatted = slice.enumerated().map { "\(startIdx + $0.offset + 1): \($0.element)" }.joined(separator: "\n")
+                return "[File: \(fileName) | Lines \(startIdx + 1)-\(endIdx) of \(totalLines)]\n\n\(formatted)"
+            }
+        }
+        
+        // If file is large (> 400 lines) and no slice requested, window it smartly to preserve tokens
+        if totalLines > 400 {
+            let headSlice = lines.prefix(300).enumerated().map { "\($0.offset + 1): \($0.element)" }.joined(separator: "\n")
+            let tailSlice = lines.suffix(60).enumerated().map { "\(totalLines - 60 + $0.offset + 1): \($0.element)" }.joined(separator: "\n")
+            return """
+            [File: \(fileName) | Total \(totalLines) lines. Showing lines 1-300 and \(totalLines - 59)-\(totalLines). Use start_line/end_line to inspect specific sections.]
+            
+            \(headSlice)
+            
+            ... [\(totalLines - 360) lines omitted: lines 301-\(totalLines - 60)] ...
+            
+            \(tailSlice)
+            """
+        }
+        
+        if content.count > 2_000_000 {
+            return String(content.prefix(2_000_000)) + "\n\n... (file truncated at 2M chars, total: \(content.count) chars)"
+        }
+        return content
     }
 }
 

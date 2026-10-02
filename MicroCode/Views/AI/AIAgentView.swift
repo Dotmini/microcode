@@ -6068,6 +6068,30 @@ struct RichMessageRow: View, Equatable {
                 .buttonStyle(.plain)
                 .padding(.top, 4)
             }
+            
+            if message.content.contains("Rate limit reached") || message.content.contains("429") {
+                Button(action: {
+                    Task {
+                        await AgentService.shared.sendMessage("Retry the previous step with pruned context. Proceed with the necessary action.")
+                    }
+                }) {
+                    HStack(spacing: 6) {
+                        Image(systemName: "arrow.clockwise.circle.fill")
+                            .font(.system(size: 13))
+                            .foregroundColor(.yellow)
+                        Text("Retry Now (ลองใหม่อีกครั้ง)")
+                            .font(.system(size: 12, weight: .semibold))
+                            .foregroundColor(.primary)
+                    }
+                    .padding(.horizontal, 14)
+                    .padding(.vertical, 8)
+                    .background(Color.yellow.opacity(0.12))
+                    .overlay(RoundedRectangle(cornerRadius: 8).stroke(Color.yellow.opacity(0.35), lineWidth: 1))
+                    .cornerRadius(8)
+                }
+                .buttonStyle(.plain)
+                .padding(.top, 4)
+            }
         }
     }
     

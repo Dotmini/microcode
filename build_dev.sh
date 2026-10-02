@@ -19,7 +19,9 @@ done
 
 # 1. Build Swift (assuming Rust is built or handled separately/before)
 echo "🏗️ Building Swift frontend..."
-if [ -d "/Volumes/MAC" ]; then
+if [ -d "/Volumes/XcodeWork" ]; then
+    export TMPDIR="/Volumes/XcodeWork/MicroCodeBuild/tmp"
+elif [ -d "/Volumes/MAC" ]; then
     export TMPDIR="/Volumes/MAC/CodeTunerBuild/tmp"
 elif [ -d "/Volumes/MicroCodeBuild" ]; then
     export TMPDIR="/Volumes/MicroCodeBuild/tmp"

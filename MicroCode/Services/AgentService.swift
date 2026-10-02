@@ -303,6 +303,12 @@ class AgentService: ObservableObject {
             - Be direct. No filler. Lead with the most important information.
             - Format code changes as unified diffs when explaining modifications.
             
+            ## Performance & Efficiency Mandate
+            - Fast Convergence: Aim to complete user requests in 3 to 6 iterations. Do not loop reading file after file endlessly.
+            - Batch Independent Tools: Call multiple tools in parallel in a single turn whenever possible (e.g. read multiple related files together).
+            - Targeted Exploration: Use `grep_search` and `find_symbol` first to locate exact lines rather than dumping entire files. Read only relevant sections using `start_line` / `end_line`.
+            - Transition to Action: Limit pure exploration to at most 2-3 turns. Once relevant code is located, immediately proceed to write modifications or provide the verified response.
+            
             ## Rules
             1. Take action — read files, WRITE changes, RUN commands. Don't just describe.
             2. Read a file before modifying it.
@@ -1416,6 +1422,10 @@ class AgentService: ObservableObject {
                         
                         logActivity(.info, "Model call throttled or interrupted; retrying in \(delayMs)ms (attempt \(kernelRecoveryCount)/\(maxRetries))")
                         try? await Task.sleep(nanoseconds: delayMs * 1_000_000)
+                        if isRateLimit {
+                            // Aggressively compress history to fit within provider TPM limit
+                            history = tokenOptimizer.compressIterativeToolHistory(history, budget: 15_000)
+                        }
                         history.append((role: "user", content: "Resume from the last completed checkpoint. Do not repeat completed actions."))
                         continue
                     }
@@ -1937,13 +1947,22 @@ class AgentService: ObservableObject {
                     : "❌ \(r.name) failed: \(r.output)"
             }.joined(separator: "\n\n---\n\n")
             
+            let dynamicInstruction: String
+            if !filesModified.isEmpty {
+                dynamicInstruction = "Files have been modified. Now verify your changes with appropriate build/test commands, or conclude with a clear summary."
+            } else if iteration >= 4 {
+                dynamicInstruction = "You have completed \(iteration) inspection steps. You now have sufficient context. Immediately proceed to implement the requested modifications or deliver your final solution. Avoid repetitive exploratory file reading."
+            } else {
+                dynamicInstruction = "Continue executing the user's request. If the objective requires running commands or modifying code, immediately call the appropriate tool. Batch independent read/search operations together for efficiency."
+            }
+            
             history.append((role: "user", content: """
             Tool execution results:
             
             \(resultsText)
             
             Kernel directive: \(kernelFollowUp ?? "Continue only with the next necessary action. Do not repeat completed calls.")
-            Instruction: Continue executing the user's request. If the objective requires running commands (e.g. `make run`, launch app), modifying code, or testing, IMMEDIATELY call the appropriate tool. Do NOT stop or just describe what to do — execute the actions until the objective is verified.
+            Instruction: \(dynamicInstruction)
             """))
             
             if batchResults.contains(where: { result in
