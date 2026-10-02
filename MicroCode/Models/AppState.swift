@@ -1044,11 +1044,19 @@ class AppState: ObservableObject {
         let apiKey: String
     }
     
+    func resolveApiKey(for provider: String? = nil) -> String {
+        let p = provider ?? aiProvider
+        if let key = apiKeys[p], !key.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            return key.trimmingCharacters(in: .whitespacesAndNewlines)
+        }
+        return AIModelCatalog.resolveKey(p)
+    }
+
     var aiConfig: AIConfig {
         AIConfig(
             provider: aiProvider,
             model: aiModel,
-            apiKey: apiKeys[aiProvider] ?? ""
+            apiKey: resolveApiKey()
         )
     }
 
@@ -3111,7 +3119,7 @@ class AppState: ObservableObject {
                     isLoading = false
                     return
                 } else {
-                    agentAPIKey = apiKeys[aiProvider]
+                    agentAPIKey = resolveApiKey(for: aiProvider)
                 }
 
                 let request = AgentChatRequest(
@@ -3197,7 +3205,7 @@ class AppState: ObservableObject {
                         code: context + "\n\nUser: " + message,
                         provider: aiProvider,
                         model: aiModel,
-                        apiKey: apiKeys[aiProvider] ?? ""
+                        apiKey: resolveApiKey(for: aiProvider)
                     )
                     
                     let assistantMessage = ChatMessage(
@@ -3347,7 +3355,7 @@ class AppState: ObservableObject {
                     instructions: "Expand this code: add proper error handling, add documentation comments, add type annotations where missing, expand any abbreviated variable names to be more descriptive, and add any missing best practices. Keep the same functionality but make it production-ready.",
                     provider: aiProvider,
                     model: aiModel,
-                    apiKey: apiKeys[aiProvider] ?? ""
+                    apiKey: resolveApiKey(for: aiProvider)
                 )
                 updateFileContent(expanded, for: file.id)
                 isLoading = false
@@ -3374,7 +3382,7 @@ class AppState: ObservableObject {
                 instructions: instructions,
                 provider: aiProvider,
                 model: aiModel,
-                apiKey: apiKeys[aiProvider] ?? ""
+                apiKey: resolveApiKey(for: aiProvider)
             )
             updateFileContent(refactored, for: file.id)
         } catch {
@@ -3394,7 +3402,7 @@ class AppState: ObservableObject {
                     code: file.content,
                     provider: aiProvider,
                     model: aiModel,
-                    apiKey: apiKeys[aiProvider] ?? ""
+                    apiKey: resolveApiKey(for: aiProvider)
                 )
                 consoleOutput = "--- Code Explanation ---\n\n\(explanation)\n"
                 consoleVisible = true
@@ -3791,7 +3799,7 @@ class AppState: ObservableObject {
                 context: "You generate one precise Conventional Commit message. Return exactly one line, using a type such as feat:, fix:, refactor:, docs:, test:, or chore:. Do not include markdown, quotes, explanation, credentials, or source code.",
                 provider: aiProvider,
                 model: aiModel,
-                apiKey: apiKeys[aiProvider] ?? ""
+                apiKey: resolveApiKey(for: aiProvider)
             )
             let message = reply
                 .split(separator: "\n")

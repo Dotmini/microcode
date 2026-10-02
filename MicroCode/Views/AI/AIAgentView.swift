@@ -2242,7 +2242,7 @@ struct AIAgentView: View {
         saveTaskFiles()
         let providerString = appState.aiProvider
         let model = appState.aiModel.isEmpty ? "gemini-2.5-flash" : appState.aiModel
-        let apiKey = appState.apiKeys[providerString] ?? ""
+        let apiKey = appState.resolveApiKey(for: providerString)
         
         Task {
             await agent.executeTaskPlan(
@@ -2257,7 +2257,7 @@ struct AIAgentView: View {
         saveTaskFiles()
         let providerString = appState.aiProvider
         let model = appState.aiModel.isEmpty ? "gemini-2.5-flash" : appState.aiModel
-        let apiKey = appState.apiKeys[providerString] ?? ""
+        let apiKey = appState.resolveApiKey(for: providerString)
         
         let directive = """
         Execute this single task step from .microcode/task.md:
@@ -2772,8 +2772,8 @@ struct AIAgentView: View {
         let byokProviders = allProviders.filter { $0.id != "omni" }
         
         // Sort providers that have a configured API key first
-        let withKey = byokProviders.filter { !(appState.apiKeys[$0.id]?.isEmpty ?? true) }
-        let withoutKey = byokProviders.filter { appState.apiKeys[$0.id]?.isEmpty ?? true }
+        let withKey = byokProviders.filter { hasActiveKey($0.id) }
+        let withoutKey = byokProviders.filter { !hasActiveKey($0.id) }
         
         result.append(contentsOf: withKey)
         result.append(contentsOf: withoutKey)
@@ -3477,7 +3477,7 @@ struct AIAgentView: View {
         
         let providerString = appState.aiProvider
         let model = appState.aiModel.isEmpty ? "gemini-2.5-flash" : appState.aiModel
-        let apiKey = appState.apiKeys[providerString] ?? ""
+        let apiKey = appState.resolveApiKey(for: providerString)
         
         if appState.agentMode {
             // Agent Mode: Use AgentService pipeline (tool execution + agentic loop)
@@ -3709,7 +3709,7 @@ struct AIAgentView: View {
             }
         } else {
             // Direct (BYOK)
-            let byok = AIModelCatalog.shared.providers.filter { !["omni", "agy", "codex", "claude_code", "zed", "local"].contains($0.id) && !(appState.apiKeys[$0.id]?.isEmpty ?? true) }
+            let byok = AIModelCatalog.shared.providers.filter { !["omni", "agy", "codex", "claude_code", "zed", "local"].contains($0.id) && hasActiveKey($0.id) }
             if let firstProv = byok.first, let firstM = firstProv.models.first {
                 appState.aiProvider = firstProv.id
                 appState.aiModel = firstM.id
@@ -3792,7 +3792,7 @@ struct AIAgentView: View {
         if provider == "local" {
             return LocalLLMService.shared.activeServer?.isOnline == true
         }
-        return !(appState.apiKeys[provider]?.isEmpty ?? true)
+        return !appState.resolveApiKey(for: provider).isEmpty
     }
     
     @ViewBuilder
@@ -4518,7 +4518,7 @@ struct AgentCellModeView: View {
         let providerString = appState.aiProvider
         let provider: StreamableAIProvider = StreamableAIProvider(rawValue: providerString) ?? .gemini
         let model = appState.aiModel.isEmpty ? provider.defaultModel : appState.aiModel
-        let apiKey = appState.apiKeys[providerString] ?? ""
+        let apiKey = appState.resolveApiKey(for: providerString)
         
         // Guard: no API key configured
         guard !apiKey.isEmpty || providerString == "local" else {
@@ -4890,7 +4890,7 @@ struct MessageContentParser {
     
     // Pre-compiled static regexes to eliminate repeated allocations and compilation on every streamed token
     private static let thoughtRegex: NSRegularExpression? = try? NSRegularExpression(
-        pattern: "<thought>([\\s\\S]*?)</thought>|<thinking>([\\s\\S]*?)</thinking>",
+        pattern: "<thought>([\\s\\S]*?)</thought>|<thinking>([\\s\\S]*?)</thinking>|<think>([\\s\\S]*?)</think>",
         options: [.caseInsensitive]
     )
     private static let latexRegex: NSRegularExpression? = try? NSRegularExpression(
@@ -4936,33 +4936,30 @@ struct MessageContentParser {
     }
     
     private static func findUnclosedThought(in text: String) -> (before: String, thought: String)? {
-        let lower = text.lowercased()
-        var openRange: Range<String.Index>? = nil
-        var tagLength = 0
-        if let r = lower.range(of: "<thought>") {
-            openRange = r
-            tagLength = "<thought>".count
-        } else if let r = lower.range(of: "<thinking>") {
-            openRange = r
-            tagLength = "<thinking>".count
-        }
+        let tags: [(open: String, close: String)] = [
+            ("<thought>", "</thought>"),
+            ("<thinking>", "</thinking>"),
+            ("<think>", "</think>")
+        ]
         
-        guard let r = openRange else { return nil }
-        let afterTag = text[r.upperBound...]
-        let lowerAfter = String(afterTag).lowercased()
-        if lowerAfter.contains("</thought>") || lowerAfter.contains("</thinking>") {
-            return nil // Full match handled by regex
+        for (openTag, closeTag) in tags {
+            if let openRange = text.range(of: openTag, options: .caseInsensitive) {
+                let afterTag = text[openRange.upperBound...]
+                if afterTag.range(of: closeTag, options: .caseInsensitive) != nil {
+                    return nil // Full match handled by regex
+                }
+                let before = String(text[..<openRange.lowerBound])
+                let thought = String(afterTag).trimmingCharacters(in: .whitespacesAndNewlines)
+                return (before: before, thought: thought)
+            }
         }
-        
-        let before = String(text[..<r.lowerBound])
-        let thought = String(afterTag).trimmingCharacters(in: .whitespacesAndNewlines)
-        return (before: before, thought: thought)
+        return nil
     }
     
     private static func doParse(_ content: String) -> [MessageBlock] {
         let remaining = content
         
-        // 0. Extract <thought>...</thought> or <thinking>...</thinking>
+        // 0. Extract <thought>...</thought>, <thinking>...</thinking>, or <think>...</think>
         if let thoughtRegex = thoughtRegex {
             let nsContent = remaining as NSString
             let thoughtMatches = thoughtRegex.matches(in: remaining, options: [], range: NSRange(location: 0, length: nsContent.length))
@@ -4985,6 +4982,8 @@ struct MessageContentParser {
                         thoughtBody = nsContent.substring(with: match.range(at: 1))
                     } else if match.numberOfRanges > 2, match.range(at: 2).location != NSNotFound {
                         thoughtBody = nsContent.substring(with: match.range(at: 2))
+                    } else if match.numberOfRanges > 3, match.range(at: 3).location != NSNotFound {
+                        thoughtBody = nsContent.substring(with: match.range(at: 3))
                     }
                     
                     let clean = thoughtBody.trimmingCharacters(in: .whitespacesAndNewlines)
