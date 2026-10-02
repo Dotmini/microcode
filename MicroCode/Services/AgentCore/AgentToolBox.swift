@@ -1349,13 +1349,111 @@ struct GetDiagnosticsTool: AgentTool {
     }
 }
 
+/// Central registry to track and manage local development servers
+/// (e.g. `npm run dev`, `vite`, `next dev`, `python -m http.server`)
+/// spawned by the AI Agent or user tools in the background.
+public final class DevServerRegistry: @unchecked Sendable {
+    public static let shared = DevServerRegistry()
+    private let lock = NSLock()
+    private var processes: [Int32: (command: String, process: Process, startedAt: Date)] = [:]
+    
+    private init() {}
+    
+    public func register(process: Process, command: String) {
+        lock.lock()
+        defer { lock.unlock() }
+        let pid = process.processIdentifier
+        processes[pid] = (command: command, process: process, startedAt: Date())
+    }
+    
+    public func hasRunningServer() -> Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        processes = processes.filter { $0.value.process.isRunning }
+        return !processes.isEmpty
+    }
+    
+    public func activeServers() -> [(pid: Int32, command: String, uptime: TimeInterval)] {
+        lock.lock()
+        defer { lock.unlock() }
+        processes = processes.filter { $0.value.process.isRunning }
+        let now = Date()
+        return processes.map { (pid: $0.key, command: $0.value.command, uptime: now.timeIntervalSince($0.value.startedAt)) }
+    }
+    
+    public func terminate(pid: Int32) {
+        lock.lock()
+        let item = processes.removeValue(forKey: pid)
+        lock.unlock()
+        if let proc = item?.process, proc.isRunning {
+            proc.terminate()
+            kill(pid, SIGTERM)
+        }
+    }
+    
+    public func terminateAll() {
+        lock.lock()
+        let procs = Array(processes.values)
+        processes.removeAll()
+        lock.unlock()
+        
+        for item in procs {
+            if item.process.isRunning {
+                item.process.terminate()
+                kill(item.process.processIdentifier, SIGTERM)
+            }
+        }
+    }
+}
+
+private final class ProcessOutputCollector: @unchecked Sendable {
+    private let lock = NSLock()
+    private var textBuffer = ""
+    private var dataBuffer = Data()
+    private var isReady = false
+    
+    func appendText(_ chunk: String, readinessMarkers: [String] = []) {
+        lock.lock()
+        defer { lock.unlock() }
+        textBuffer += chunk
+        if !isReady && readinessMarkers.contains(where: { textBuffer.contains($0) }) {
+            isReady = true
+        }
+    }
+    
+    func appendData(_ chunk: Data) {
+        lock.lock()
+        defer { lock.unlock() }
+        dataBuffer.append(chunk)
+    }
+    
+    var text: String {
+        lock.lock()
+        defer { lock.unlock() }
+        return textBuffer
+    }
+    
+    var data: Data {
+        lock.lock()
+        defer { lock.unlock() }
+        return dataBuffer
+    }
+    
+    var ready: Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        return isReady
+    }
+}
+
 struct ShellCommandTool: AgentTool {
     let name = "shell"
     let description = "Execute a shell command in macOS Terminal and the IDE console. Use for building, testing, running CLI commands, or checking project state."
     let parameters = [
         ToolParameter(name: "command", type: "string", description: "Shell command to execute", required: true),
         ToolParameter(name: "cwd", type: "string", description: "Working directory (optional, defaults to active workspace folder)", required: false),
-        ToolParameter(name: "timeout", type: "integer", description: "Timeout in seconds (default 120)", required: false)
+        ToolParameter(name: "timeout", type: "integer", description: "Timeout in seconds (default 120)", required: false),
+        ToolParameter(name: "is_daemon", type: "boolean", description: "Set to true for long-running servers or background daemons (e.g. dev server, file watcher)", required: false)
     ]
     
     /// Strict Safety Guard: Block blind/destructive commands from deleting user files
@@ -1473,11 +1571,80 @@ struct ShellCommandTool: AgentTool {
         process.standardOutput = stdoutPipe
         process.standardError = stderrPipe
         
+        if isDevServerOrDaemon(command: command, params: params) {
+            return try await executeDevServer(process: process, command: command, targetCwd: targetCwd, stdoutPipe: stdoutPipe, stderrPipe: stderrPipe)
+        } else {
+            let timeout = (params["timeout"] as? Int) ?? 120
+            return try await executeStandardCommand(process: process, command: command, targetCwd: targetCwd, timeout: timeout, stdoutPipe: stdoutPipe, stderrPipe: stderrPipe)
+        }
+    }
+    
+    private func isDevServerOrDaemon(command: String, params: [String: Any]) -> Bool {
+        if params["is_daemon"] as? Bool == true || params["background"] as? Bool == true {
+            return true
+        }
+        let lower = command.lowercased().trimmingCharacters(in: .whitespacesAndNewlines)
+        let normalized = lower.replacingOccurrences(of: "'", with: "").replacingOccurrences(of: "\"", with: "")
+        let devPatterns = [
+            "npm run dev", "npm start", "npm run start", "vite", "npx vite",
+            "next dev", "next start", "npx next dev",
+            "yarn dev", "yarn start",
+            "pnpm dev", "pnpm start",
+            "bun dev", "bun run dev",
+            "python -m http.server", "python3 -m http.server",
+            "webpack serve", "webpack-dev-server", "live-server", "http-server",
+            "flutter run -d chrome", "cargo watch", "uvicorn"
+        ]
+        return devPatterns.contains { pattern in
+            normalized == pattern || normalized.contains(pattern)
+        }
+    }
+    
+    private func executeDevServer(
+        process: Process,
+        command: String,
+        targetCwd: String,
+        stdoutPipe: Pipe,
+        stderrPipe: Pipe
+    ) async throws -> String {
+        let stdoutHandle = stdoutPipe.fileHandleForReading
+        let stderrHandle = stderrPipe.fileHandleForReading
+        
+        let collector = ProcessOutputCollector()
+        let readinessMarkers = [
+            "http://localhost:",
+            "http://127.0.0.1:",
+            "http://0.0.0.0:",
+            "Local:",
+            "Network:",
+            "ready in",
+            "Ready on",
+            "compiled successfully",
+            "Serving HTTP",
+            "Server running",
+            "Listening on",
+            "Started server",
+            "press h + enter to show help",
+            "webpack compiled"
+        ]
+        
+        stdoutHandle.readabilityHandler = { handle in
+            let chunk = handle.availableData
+            if let str = String(data: chunk, encoding: .utf8), !str.isEmpty {
+                collector.appendText(str, readinessMarkers: readinessMarkers)
+            }
+        }
+        
+        stderrHandle.readabilityHandler = { handle in
+            let chunk = handle.availableData
+            if let str = String(data: chunk, encoding: .utf8), !str.isEmpty {
+                collector.appendText(str, readinessMarkers: readinessMarkers)
+            }
+        }
+        
         try process.run()
-
-        // Mirror the native macOS command to both the IDE Console and its
-        // interactive Terminal immediately. The command is still executed
-        // by this Process, not simulated in the UI.
+        let pid = process.processIdentifier
+        
         NotificationCenter.default.post(
             name: NSNotification.Name("MicroCodeAgentTerminalCommand"),
             object: nil,
@@ -1488,28 +1655,167 @@ struct ShellCommandTool: AgentTool {
             ]
         )
         
-        // Builds and first dependency installs may take several minutes.
-        // Bounded timeout so runaway commands don't hang forever
-        let timeout = (params["timeout"] as? Int) ?? 120
-        let deadline = DispatchTime.now() + .seconds(timeout)
-        DispatchQueue.global().asyncAfter(deadline: deadline) {
-            if process.isRunning { process.terminate() }
+        // Wait up to 3.5 seconds OR until server signals readiness
+        let startTime = Date()
+        while Date().timeIntervalSince(startTime) < 3.5 {
+            if !process.isRunning {
+                break
+            }
+            if collector.ready && Date().timeIntervalSince(startTime) > 0.8 {
+                break
+            }
+            try? await Task.sleep(nanoseconds: 100_000_000)
         }
         
-        async let stdoutData = Task.detached { stdoutPipe.fileHandleForReading.readDataToEndOfFile() }.value
-        async let stderrData = Task.detached { stderrPipe.fileHandleForReading.readDataToEndOfFile() }.value
+        // If the process exited within startup window, it failed (e.g. port error, syntax error)
+        if !process.isRunning {
+            stdoutHandle.readabilityHandler = nil
+            stderrHandle.readabilityHandler = nil
+            process.waitUntilExit()
+            
+            let exitCode = process.terminationStatus
+            let failOutput = "[exit code: \(exitCode)]\n\(collector.text)"
+            NotificationCenter.default.post(
+                name: NSNotification.Name("MicroCodeAgentTerminalCommand"),
+                object: nil,
+                userInfo: [
+                    "command": command,
+                    "output": failOutput,
+                    "cwd": targetCwd,
+                    "exitCode": Int(exitCode),
+                    "phase": "completed"
+                ]
+            )
+            throw ToolBoxError.executionFailed("Dev server exited immediately with status \(exitCode):\n\(failOutput)")
+        }
         
-        let stdout = String(data: await stdoutData, encoding: .utf8) ?? ""
-        let stderr = String(data: await stderrData, encoding: .utf8) ?? ""
+        // Dev server is healthy and running in background
+        DevServerRegistry.shared.register(process: process, command: command)
         
-        process.waitUntilExit()
+        stdoutHandle.readabilityHandler = nil
+        stderrHandle.readabilityHandler = nil
+        
+        let cleanBanner = collector.text.trimmingCharacters(in: .whitespacesAndNewlines)
+        let resultMsg = """
+        ✅ [Dev Server running in background (PID: \(pid))]
+        \(cleanBanner.isEmpty ? "Server process active." : cleanBanner)
+        
+        The development server has been started in the background and is running.
+        """
+        
+        NotificationCenter.default.post(
+            name: NSNotification.Name("MicroCodeAgentTerminalCommand"),
+            object: nil,
+            userInfo: [
+                "command": command,
+                "output": resultMsg,
+                "cwd": targetCwd,
+                "exitCode": 0,
+                "phase": "completed"
+            ]
+        )
+        return resultMsg
+    }
+    
+    private func executeStandardCommand(
+        process: Process,
+        command: String,
+        targetCwd: String,
+        timeout: Int,
+        stdoutPipe: Pipe,
+        stderrPipe: Pipe
+    ) async throws -> String {
+        let stdoutHandle = stdoutPipe.fileHandleForReading
+        let stderrHandle = stderrPipe.fileHandleForReading
+        
+        let stdoutCollector = ProcessOutputCollector()
+        let stderrCollector = ProcessOutputCollector()
+        
+        stdoutHandle.readabilityHandler = { handle in
+            let chunk = handle.availableData
+            if !chunk.isEmpty {
+                stdoutCollector.appendData(chunk)
+            }
+        }
+        
+        stderrHandle.readabilityHandler = { handle in
+            let chunk = handle.availableData
+            if !chunk.isEmpty {
+                stderrCollector.appendData(chunk)
+            }
+        }
+        
+        try process.run()
+        let pid = process.processIdentifier
+        
+        NotificationCenter.default.post(
+            name: NSNotification.Name("MicroCodeAgentTerminalCommand"),
+            object: nil,
+            userInfo: [
+                "phase": "started",
+                "command": command,
+                "cwd": targetCwd
+            ]
+        )
+        
+        let startTime = Date()
+        var timedOut = false
+        
+        while process.isRunning {
+            if Task.isCancelled {
+                process.terminate()
+                kill(pid, SIGKILL)
+                break
+            }
+            if Date().timeIntervalSince(startTime) > Double(timeout) {
+                timedOut = true
+                process.terminate()
+                DispatchQueue.global().asyncAfter(deadline: .now() + 1.0) {
+                    if process.isRunning {
+                        kill(pid, SIGKILL)
+                    }
+                }
+                break
+            }
+            try? await Task.sleep(nanoseconds: 50_000_000)
+        }
+        
+        if !process.isRunning {
+            process.waitUntilExit()
+        }
+        
+        stdoutHandle.readabilityHandler = nil
+        stderrHandle.readabilityHandler = nil
+        
+        let stdout = String(data: stdoutCollector.data, encoding: .utf8) ?? ""
+        let stderr = String(data: stderrCollector.data, encoding: .utf8) ?? ""
+        
+        try? stdoutHandle.close()
+        try? stderrHandle.close()
         
         var output = stdout
         if !stderr.isEmpty { output += "\n[stderr]\n\(stderr)" }
-        let didSucceed = process.terminationStatus == 0
-        if !didSucceed { output = "[exit code: \(process.terminationStatus)]\n\(output)" }
         
-        // Broadcast to IDE Terminal & Console
+        if timedOut {
+            output = "⏱ [Command timed out after \(timeout)s]\n\(output)"
+            NotificationCenter.default.post(
+                name: NSNotification.Name("MicroCodeAgentTerminalCommand"),
+                object: nil,
+                userInfo: [
+                    "command": command,
+                    "output": output,
+                    "cwd": targetCwd,
+                    "exitCode": -1,
+                    "phase": "completed"
+                ]
+            )
+            throw ToolBoxError.executionFailed(output)
+        }
+        
+        let exitCode = process.terminationStatus
+        let didSucceed = exitCode == 0
+        if !didSucceed { output = "[exit code: \(exitCode)]\n\(output)" }
+        
         NotificationCenter.default.post(
             name: NSNotification.Name("MicroCodeAgentTerminalCommand"),
             object: nil,
@@ -1517,20 +1823,17 @@ struct ShellCommandTool: AgentTool {
                 "command": command,
                 "output": output,
                 "cwd": targetCwd,
-                "exitCode": Int(process.terminationStatus),
+                "exitCode": Int(exitCode),
                 "phase": "completed"
             ]
         )
         
-        // A non-zero command must be a failed tool result.  Previously this
-        // returned ordinary text, so the agent recorded a failed xcodebuild
-        // as success and later tried to complete from prose alone.
         let boundedOutput = output.count > 1_000_000
             ? String(output.suffix(1_000_000)).trimmingCharacters(in: .whitespacesAndNewlines) + "\n... (leading output truncated at 1M chars)"
             : output
         guard didSucceed else {
             throw ToolBoxError.executionFailed(boundedOutput.isEmpty
-                ? "Command exited with status \(process.terminationStatus)."
+                ? "Command exited with status \(exitCode)."
                 : boundedOutput)
         }
         return boundedOutput
