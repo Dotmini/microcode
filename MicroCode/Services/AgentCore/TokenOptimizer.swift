@@ -158,16 +158,37 @@ class TokenOptimizer: ObservableObject {
     func compressHistory(_ messages: [(role: String, content: String)], budget: Int) -> [(role: String, content: String)] {
         guard !messages.isEmpty else { return [] }
         
-        let totalTokens = messages.reduce(0) { $0 + estimateTokens($1.content) }
-        if totalTokens <= budget { return messages }
+        // Strategy 0: Compact any historical tool results to prevent TPM explosion on provider API
+        var sanitizedMessages: [(role: String, content: String)] = []
+        for (idx, msg) in messages.enumerated() {
+            // Keep the very last message verbatim, but compact older tool dumps
+            if idx < messages.count - 1 && msg.content.contains("Tool execution results:") && msg.content.count > 10_000 {
+                let lines = msg.content.components(separatedBy: "\n")
+                let compactLines = lines.filter { line in
+                    let trimmed = line.trimmingCharacters(in: .whitespaces)
+                    return trimmed.hasPrefix("✅") || trimmed.hasPrefix("❌") || trimmed.hasPrefix("⚠️") ||
+                           trimmed.contains("Modified:") || trimmed.contains("Created:")
+                }
+                let summary = compactLines.isEmpty
+                    ? "[Prior tool results completed]"
+                    : "Prior tool summary:\n" + compactLines.prefix(15).joined(separator: "\n") + "\n[Older file content pruned to protect TPM limit]"
+                sanitizedMessages.append((role: msg.role, content: summary))
+            } else {
+                sanitizedMessages.append(msg)
+            }
+        }
+        
+        let totalTokens = sanitizedMessages.reduce(0) { $0 + estimateTokens($1.content) }
+        let effectiveBudget = min(budget, 80_000)
+        if totalTokens <= effectiveBudget { return sanitizedMessages }
         
         var result: [(role: String, content: String)] = []
         let originalTokens = totalTokens
         
         // Strategy 1: Keep recent messages intact, summarize older ones
-        let keepCount = min(6, messages.count) // Keep last 6 messages verbatim
-        let toSummarize = Array(messages.dropLast(keepCount))
-        let recentMessages = Array(messages.suffix(keepCount))
+        let keepCount = min(6, sanitizedMessages.count) // Keep last 6 messages verbatim
+        let toSummarize = Array(sanitizedMessages.dropLast(keepCount))
+        let recentMessages = Array(sanitizedMessages.suffix(keepCount))
         
         // Summarize older messages
         if !toSummarize.isEmpty {

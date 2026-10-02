@@ -645,7 +645,7 @@ final class AIClient: ObservableObject {
         }
         switch error.code {
         case 402: return "Payment required: Your credit balance is insufficient or requires top-up. Check Settings → Wallet."
-        case 429: return "Rate limited — please wait a moment and try again."
+        case 429: return "Rate limited by provider (HTTP 429: Requests/Tokens Per Minute quota exceeded on your API key). Please wait 1-2 minutes for the provider quota window to reset, or check your quota in Google AI Studio / provider console."
         case 401, 403: return "API Key or License is invalid/expired (401). If using BYOK, verify your key in Settings → AI Provider; if using Dotmini Cloud, check your License in Settings → Account."
         case 503, 500: return "AI service temporarily unavailable (500/503). Try again in a moment."
         default: return error.localizedDescription

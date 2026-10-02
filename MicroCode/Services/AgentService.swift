@@ -1423,7 +1423,7 @@ class AgentService: ObservableObject {
                 
                 terminationNotice = response?.directive.reason ?? "Execution stopped: \(errStr)"
                 let userFriendlyNotice = isRateLimit 
-                    ? "⚠️ Rate limit reached for current model provider. Please wait a few moments, switch to another model/provider, or check API quota."
+                    ? "⚠️ Rate limit reached from provider API (HTTP 429: Requests or Tokens Per Minute quota exceeded on your API key). Please wait a moment for the provider quota window to reset, start a new chat, or check your quota in Google AI Studio / provider console."
                     : "⚠️ Execution error: \(errStr)"
                 if finalText.isEmpty { finalText = userFriendlyNotice } else { finalText += "\n\n" + userFriendlyNotice }
                 updateStreamingMessage(finalText, toolResults: allToolResults)
