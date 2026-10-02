@@ -991,6 +991,19 @@ struct FileReadTool: AgentTool {
             return "Error: File '\(url.lastPathComponent)' is a binary archive/media file and cannot be read as text."
         }
         
+        let attr = try? FileManager.default.attributesOfItem(atPath: url.path)
+        let fileSize = (attr?[.size] as? NSNumber)?.int64Value ?? 0
+        if fileSize > 20 * 1024 * 1024 {
+            // Safe chunked reading: file is over 20MB, don't read entire string into memory
+            if let handle = try? FileHandle(forReadingFrom: url) {
+                defer { try? handle.close() }
+                let data = handle.readData(ofLength: 2 * 1024 * 1024)
+                let chunk = String(data: data, encoding: .utf8) ?? String(data: data, encoding: .isoLatin1) ?? ""
+                let formatted = ByteCountFormatter.string(fromByteCount: fileSize, countStyle: .file)
+                return chunk + "\n\n... (file size is \(formatted). Truncated at 2MB preview to prevent memory exhaustion.)"
+            }
+        }
+        
         do {
             let content = try String(contentsOf: url, encoding: .utf8)
             // Scaled for 2M token context (up to 2,000,000 chars)

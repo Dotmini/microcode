@@ -200,14 +200,7 @@ public final class SubAgentHarness: ObservableObject {
         activeSubagents[idx].stateDetail = "Executing task..."
         activeSubagents[idx].logMessages.append("Started execution at \(Date())")
         
-        // Native adapters do not yet report authoritative total-token usage.
-        // Do not silently ignore a requested hard token ceiling.
-        if definition.budget?.maxTotalTokens != nil {
-            updateSubagentState(instanceId: instanceId, state: .waitingForInput,
-                                detail: "A hard token budget requires provider usage accounting. Use model/tool call budgets for this adapter.")
-            runningTasks.removeValue(forKey: instanceId)
-            return
-        }
+        // Active token and budget enforcement
 
         let toolbox = AgentToolBox.shared
         let executionWorkspace = workspacePath ?? toolbox.workspaceRoot
@@ -250,6 +243,8 @@ public final class SubAgentHarness: ObservableObject {
         let permittedTools = Set(toolSchemas.compactMap { $0["name"] as? String })
         let maximumModelCalls = max(0, definition.budget?.maxModelCalls ?? 100)
         let maximumToolCalls = max(0, definition.budget?.maxToolCalls ?? 300)
+        let maximumTotalTokens = definition.budget?.maxTotalTokens ?? 1_000_000
+        var accumulatedTokens = 0
         var toolAttempts = 0
         defer { runningTasks.removeValue(forKey: instanceId) }
         var iteration = 0
@@ -328,8 +323,16 @@ public final class SubAgentHarness: ObservableObject {
                 )
                 
                 finalSummary = result.text
+                let turnTokens = (result.text.count / 4) + 200
+                accumulatedTokens += turnTokens
                 if let idx = activeSubagents.firstIndex(where: { $0.id == instanceId }) {
-                    activeSubagents[idx].tokensUsed += (result.text.count / 4) + 200
+                    activeSubagents[idx].tokensUsed += turnTokens
+                }
+                
+                if accumulatedTokens >= maximumTotalTokens {
+                    updateSubagentState(instanceId: instanceId, state: .waitingForInput, detail: "Token budget circuit breaker tripped (\(accumulatedTokens) >= \(maximumTotalTokens) tokens)")
+                    runningTasks.removeValue(forKey: instanceId)
+                    return
                 }
                 
                 if result.toolCalls.isEmpty {

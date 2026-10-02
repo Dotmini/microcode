@@ -268,11 +268,29 @@ struct InteractiveCodePreviewView: View {
         
         DispatchQueue.global(qos: .userInitiated).async {
             do {
-                let data = try Data(contentsOf: url)
+                let attr = try? FileManager.default.attributesOfItem(atPath: url.path)
+                let fileSize = (attr?[.size] as? NSNumber)?.int64Value ?? 0
+                let isGiant = fileSize > 10 * 1024 * 1024 // > 10MB
+                
+                let data: Data
+                if isGiant {
+                    // Safe chunked preview: Read only first 1MB to prevent macOS beachball freeze
+                    let handle = try FileHandle(forReadingFrom: url)
+                    defer { try? handle.close() }
+                    data = handle.readData(ofLength: 1024 * 1024)
+                } else {
+                    data = try Data(contentsOf: url)
+                }
+                
                 // Try UTF-8 first, fallback to ASCII/Latin-1
-                let string = String(data: data, encoding: .utf8)
+                var string = String(data: data, encoding: .utf8)
                     ?? String(data: data, encoding: .isoLatin1)
                     ?? String(decoding: data, as: UTF8.self)
+                
+                if isGiant {
+                    let formatted = ByteCountFormatter.string(fromByteCount: fileSize, countStyle: .file)
+                    string = "⚠️ [LARGE FILE WARNING: File size is \(formatted). Previewing the first 1 MB in read-only mode to prevent system memory freeze.]\n\n" + string
+                }
                 
                 DispatchQueue.main.async {
                     self.codeContent = string
@@ -317,6 +335,16 @@ struct InteractiveCodePreviewView: View {
                 showProcess.waitUntilExit()
                 let oldData = showPipe.fileHandleForReading.readDataToEndOfFile()
                 let oldText = String(data: oldData, encoding: .utf8) ?? ""
+                
+                let attr = try? FileManager.default.attributesOfItem(atPath: self.url.path)
+                let fileSize = (attr?[.size] as? NSNumber)?.int64Value ?? 0
+                if fileSize > 10 * 1024 * 1024 {
+                    DispatchQueue.main.async {
+                        self.hasGitDiff = false
+                        self.gitDiffContent = nil
+                    }
+                    return
+                }
                 
                 let currentText = (try? String(contentsOf: self.url, encoding: .utf8)) ?? ""
                 

@@ -267,6 +267,9 @@ pub struct BudgetConfig {
     /// Maximum total tokens (prompt + completion) across the session.
     #[serde(default)]
     pub max_total_tokens: Option<usize>,
+    /// Maximum estimated cost in USD across the session.
+    #[serde(default)]
+    pub max_cost_usd: Option<f64>,
 }
 
 impl BudgetConfig {
@@ -283,6 +286,11 @@ impl BudgetConfig {
     /// Check if total tokens exceed the configured limit.
     pub fn tokens_exceeded(&self, count: usize) -> bool {
         self.max_total_tokens.map_or(false, |max| count >= max)
+    }
+
+    /// Check if total estimated cost exceeds the configured limit.
+    pub fn cost_exceeded(&self, cost: f64) -> bool {
+        self.max_cost_usd.map_or(false, |max| cost >= max)
     }
 }
 

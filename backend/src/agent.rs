@@ -36,6 +36,11 @@ pub enum AgentStreamEvent {
     },
     PendingChange(PendingChange),
     Error(String),
+    BudgetAlert {
+        total_tokens: usize,
+        estimated_cost_usd: f64,
+        message: String,
+    },
     Done,
 }
 
@@ -97,6 +102,60 @@ const MAX_AGENT_LOOPS: usize = 1000;
 const MAX_PROJECT_ENTRIES: usize = 100_000;
 const MAX_PROJECT_SYMBOLS: usize = 200_000;
 const MAX_INDEXABLE_FILE_BYTES: u64 = 2 * 1024 * 1024;
+
+/// Default operational circuit breaker limits for 24/7 loops (prevent runaway costs & billing shocks)
+pub const DEFAULT_MAX_BUDGET_TOKENS: usize = 1_000_000; // 1,000,000 tokens ceiling
+pub const DEFAULT_MAX_BUDGET_USD: f64 = 10.0; // $10.00 USD ceiling
+
+/// Estimate token count for a text snippet (~3.8 to 4 characters per token on average)
+pub fn estimate_tokens(text: &str) -> usize {
+    if text.is_empty() {
+        return 0;
+    }
+    let chars = text.chars().count();
+    (chars + 3) / 4
+}
+
+/// Estimate USD cost for tokens based on provider and model
+pub fn estimate_cost_usd(provider: &str, model: &str, prompt_tokens: usize, completion_tokens: usize) -> f64 {
+    let p = provider.to_lowercase();
+    let m = model.to_lowercase();
+
+    // Rates in USD per million tokens: (input, output)
+    let (input_rate, output_rate) = if m.contains("o1-pro") {
+        (150.0, 600.0)
+    } else if m.contains("o1") {
+        (15.0, 60.0)
+    } else if m.contains("o3") || m.contains("gpt-4.1") {
+        (10.0, 40.0)
+    } else if m.contains("gpt-4o-mini") || m.contains("o3-mini") {
+        (0.15, 0.60)
+    } else if m.contains("gpt-4o") {
+        (2.50, 10.0)
+    } else if m.contains("claude-3-opus") {
+        (15.0, 75.0)
+    } else if m.contains("claude-3-7-sonnet") || m.contains("claude-3-5-sonnet") {
+        (3.0, 15.0)
+    } else if m.contains("claude-3-5-haiku") {
+        (0.80, 4.0)
+    } else if m.contains("gemini-1.5-pro") || m.contains("gemini-2.5-pro") {
+        (1.25, 5.0)
+    } else if m.contains("gemini") {
+        (0.10, 0.40)
+    } else if m.contains("deepseek-reasoner") {
+        (0.55, 2.19)
+    } else if m.contains("deepseek") {
+        (0.27, 1.10)
+    } else if p.contains("ollama") || p.contains("local") {
+        (0.0, 0.0)
+    } else {
+        (2.0, 8.0)
+    };
+
+    let in_cost = (prompt_tokens as f64) * input_rate / 1_000_000.0;
+    let out_cost = (completion_tokens as f64) * output_rate / 1_000_000.0;
+    in_cost + out_cost
+}
 
 fn compact_prompt_text(text: &str, limit: usize) -> String {
     if text.len() <= limit {
@@ -503,6 +562,8 @@ pub struct ChatRequest {
     #[serde(default)]
     pub cloud_base_url: Option<String>,
     pub auto_execute: bool, // Auto-execute tools or ask for confirmation
+    #[serde(default)]
+    pub budget: Option<crate::models::BudgetConfig>,
 }
 
 /// Chat response with structured output
@@ -2217,11 +2278,62 @@ REMEMBER: You are building the future of coding. Make it look magic."#,
 
     let provider = crate::ai::get_provider(&actual_config.provider)?;
 
+    let budget = request.budget.clone().unwrap_or_else(|| {
+        let max_tokens = std::env::var("MICROCODE_MAX_BUDGET_TOKENS")
+            .ok()
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(DEFAULT_MAX_BUDGET_TOKENS);
+        let max_cost = std::env::var("MICROCODE_MAX_BUDGET_USD")
+            .ok()
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(DEFAULT_MAX_BUDGET_USD);
+        crate::models::BudgetConfig {
+            max_model_calls: None,
+            max_tool_calls: None,
+            max_total_tokens: Some(max_tokens),
+            max_cost_usd: Some(max_cost),
+        }
+    });
+
+    let mut accumulated_tokens = 0;
+    let mut accumulated_cost_usd = 0.0;
+    let mut circuit_breaker_reason: Option<String> = None;
+
     while loop_count < max_loops {
         loop_count += 1;
 
+        let prompt_tokens = estimate_tokens(&current_prompt);
+
         // Call AI
         let ai_response: String = provider.generate(&current_prompt, &actual_config).await?;
+        let completion_tokens = estimate_tokens(&ai_response);
+        let turn_tokens = prompt_tokens + completion_tokens;
+        let turn_cost = estimate_cost_usd(&actual_config.provider, &actual_config.model, prompt_tokens, completion_tokens);
+
+        accumulated_tokens += turn_tokens;
+        accumulated_cost_usd += turn_cost;
+
+        // Circuit breaker checks: Protect 24/7 loops from runaway expenses
+        if budget.tokens_exceeded(accumulated_tokens) {
+            let reason = format!(
+                "Budget circuit breaker tripped: Token ceiling exceeded ({} >= {} tokens, ${:.3} USD). Paused to prevent runaway costs.",
+                accumulated_tokens,
+                budget.max_total_tokens.unwrap_or(0),
+                accumulated_cost_usd
+            );
+            circuit_breaker_reason = Some(reason);
+            break;
+        }
+        if budget.cost_exceeded(accumulated_cost_usd) {
+            let reason = format!(
+                "Budget circuit breaker tripped: Cost ceiling exceeded (${:.2} >= ${:.2} USD, {} tokens). Paused to prevent runaway costs.",
+                accumulated_cost_usd,
+                budget.max_cost_usd.unwrap_or(0.0),
+                accumulated_tokens
+            );
+            circuit_breaker_reason = Some(reason);
+            break;
+        }
 
         // Parse tool calls from response (multi-format robust extractor)
         let (extracted_calls, turn_content) = extract_tool_calls(&ai_response);
@@ -2299,7 +2411,9 @@ REMEMBER: You are building the future of coding. Make it look magic."#,
 
     let final_session = get_session(&request.session_id).unwrap_or(session);
 
-    let stop_reason = if loop_count >= max_loops {
+    let stop_reason = if let Some(reason) = circuit_breaker_reason {
+        Some(StopReason::BudgetExhausted(reason))
+    } else if loop_count >= max_loops {
         Some(StopReason::MaxLoopsReached)
     } else {
         Some(StopReason::Completed)
@@ -2429,6 +2543,26 @@ INSTRUCTIONS:
         let mut total_tool_results = Vec::new();
         let mut final_content = String::new();
 
+        let budget = request.budget.clone().unwrap_or_else(|| {
+            let max_tokens = std::env::var("MICROCODE_MAX_BUDGET_TOKENS")
+                .ok()
+                .and_then(|s| s.parse().ok())
+                .unwrap_or(DEFAULT_MAX_BUDGET_TOKENS);
+            let max_cost = std::env::var("MICROCODE_MAX_BUDGET_USD")
+                .ok()
+                .and_then(|s| s.parse().ok())
+                .unwrap_or(DEFAULT_MAX_BUDGET_USD);
+            crate::models::BudgetConfig {
+                max_model_calls: None,
+                max_tool_calls: None,
+                max_total_tokens: Some(max_tokens),
+                max_cost_usd: Some(max_cost),
+            }
+        });
+
+        let mut accumulated_tokens = 0;
+        let mut accumulated_cost_usd = 0.0;
+
         while loop_count < max_loops {
             loop_count += 1;
 
@@ -2455,6 +2589,42 @@ INSTRUCTIONS:
                     let _ = tx.send(Err(e)).await;
                     break;
                 }
+            }
+
+            let prompt_tokens = estimate_tokens(&current_prompt);
+            let completion_tokens = estimate_tokens(&turn_full_content);
+            accumulated_tokens += prompt_tokens + completion_tokens;
+            accumulated_cost_usd += estimate_cost_usd(&actual_config.provider, &actual_config.model, prompt_tokens, completion_tokens);
+
+            if budget.tokens_exceeded(accumulated_tokens) {
+                let reason = format!(
+                    "Budget circuit breaker tripped: Token ceiling exceeded ({} >= {} tokens, ${:.3} USD). Runaway loop paused for safety.",
+                    accumulated_tokens,
+                    budget.max_total_tokens.unwrap_or(0),
+                    accumulated_cost_usd
+                );
+                let _ = tx.send(Ok(AgentStreamEvent::BudgetAlert {
+                    total_tokens: accumulated_tokens,
+                    estimated_cost_usd: accumulated_cost_usd,
+                    message: reason.clone(),
+                })).await;
+                let _ = tx.send(Ok(AgentStreamEvent::Error(reason))).await;
+                break;
+            }
+            if budget.cost_exceeded(accumulated_cost_usd) {
+                let reason = format!(
+                    "Budget circuit breaker tripped: Cost ceiling exceeded (${:.2} >= ${:.2} USD, {} tokens). Runaway loop paused for safety.",
+                    accumulated_cost_usd,
+                    budget.max_cost_usd.unwrap_or(0.0),
+                    accumulated_tokens
+                );
+                let _ = tx.send(Ok(AgentStreamEvent::BudgetAlert {
+                    total_tokens: accumulated_tokens,
+                    estimated_cost_usd: accumulated_cost_usd,
+                    message: reason.clone(),
+                })).await;
+                let _ = tx.send(Ok(AgentStreamEvent::Error(reason))).await;
+                break;
             }
 
             // Parse tool calls from the full turn content (multi-format robust extractor)
@@ -2651,11 +2821,28 @@ pub fn run_agent_loop_stream(
             }
         }
 
-        // 4. Agent Loop
+        // 4. Agent Loop with Budget Circuit Breaker
         let mut loop_count = 0;
         let max_loops = MAX_AGENT_LOOPS;
         let mut current_turn_prompt = full_prompt.clone();
         let base_prompt = full_prompt;
+
+        let max_tokens = std::env::var("MICROCODE_MAX_BUDGET_TOKENS")
+            .ok()
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(DEFAULT_MAX_BUDGET_TOKENS);
+        let max_cost = std::env::var("MICROCODE_MAX_BUDGET_USD")
+            .ok()
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(DEFAULT_MAX_BUDGET_USD);
+        let budget = crate::models::BudgetConfig {
+            max_model_calls: None,
+            max_tool_calls: None,
+            max_total_tokens: Some(max_tokens),
+            max_cost_usd: Some(max_cost),
+        };
+        let mut accumulated_tokens = 0;
+        let mut accumulated_cost_usd = 0.0;
 
         // Setup AI Config
         let mut config = crate::models::AIConfig::default();
@@ -2697,6 +2884,42 @@ pub fn run_agent_loop_stream(
                     yield Err(e);
                     break;
                 }
+            }
+
+            let prompt_tokens = estimate_tokens(&current_turn_prompt);
+            let completion_tokens = estimate_tokens(&turn_content);
+            accumulated_tokens += prompt_tokens + completion_tokens;
+            accumulated_cost_usd += estimate_cost_usd(&config.provider, &config.model, prompt_tokens, completion_tokens);
+
+            if budget.tokens_exceeded(accumulated_tokens) {
+                let reason = format!(
+                    "Budget circuit breaker tripped: Token ceiling exceeded ({} >= {} tokens, ${:.3} USD). Paused to prevent runaway costs.",
+                    accumulated_tokens,
+                    budget.max_total_tokens.unwrap_or(0),
+                    accumulated_cost_usd
+                );
+                yield Ok(AgentStreamEvent::BudgetAlert {
+                    total_tokens: accumulated_tokens,
+                    estimated_cost_usd: accumulated_cost_usd,
+                    message: reason.clone(),
+                });
+                yield Ok(AgentStreamEvent::Error(reason));
+                break;
+            }
+            if budget.cost_exceeded(accumulated_cost_usd) {
+                let reason = format!(
+                    "Budget circuit breaker tripped: Cost ceiling exceeded (${:.2} >= ${:.2} USD, {} tokens). Paused to prevent runaway costs.",
+                    accumulated_cost_usd,
+                    budget.max_cost_usd.unwrap_or(0.0),
+                    accumulated_tokens
+                );
+                yield Ok(AgentStreamEvent::BudgetAlert {
+                    total_tokens: accumulated_tokens,
+                    estimated_cost_usd: accumulated_cost_usd,
+                    message: reason.clone(),
+                });
+                yield Ok(AgentStreamEvent::Error(reason));
+                break;
             }
 
             // Parse Tool Calls using robust multi-format extractor
@@ -3043,6 +3266,7 @@ pub async fn execute_subagent(
         api_key: Some(subagent_ai_config.api_key.clone()),
         cloud_base_url: subagent_ai_config.proxy_base_url.clone(),
         auto_execute: true,
+        budget: subagent_config.budget.clone(),
     };
 
     // 5. Run the agent loop with the subagent's resolved config
