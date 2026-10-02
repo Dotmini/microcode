@@ -1,6 +1,19 @@
 #!/bin/bash
 set -euo pipefail
 cd "$(dirname "$0")/../.."
+
+# Auto-detect high-capacity external build volume if mounted
+if [ -d "/Volumes/MAC/CodeTunerBuild" ]; then
+  export TMPDIR="/Volumes/MAC/CodeTunerBuild/tmp"
+  export CARGO_TARGET_DIR="/Volumes/MAC/CodeTunerBuild/cargo-target"
+  export CARGO_HOME="/Volumes/MAC/CodeTunerBuild/cargo-home"
+elif [ -d "/Volumes/MicroCodeBuild" ]; then
+  export TMPDIR="/Volumes/MicroCodeBuild/tmp"
+  export CARGO_TARGET_DIR="/Volumes/MicroCodeBuild/cargo-target"
+  export CARGO_HOME="/Volumes/MicroCodeBuild/cargo-home"
+fi
+mkdir -p "${TMPDIR:-/tmp}" "${CARGO_TARGET_DIR:-}" "${CARGO_HOME:-}" 2>/dev/null || true
+
 audit_test_dir=$(mktemp -d "${TMPDIR:-/tmp}/microcode-hardening.XXXXXX")
 trap 'rm -rf "$audit_test_dir"' EXIT
 swiftc MicroCode/Services/SupabaseAuthService.swift \

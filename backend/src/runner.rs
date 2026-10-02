@@ -1831,7 +1831,7 @@ mod tests {
     #[tokio::test]
     async fn test_python_execution() {
         let code = "print('Hello, World!')";
-        let result = execute(code, "python").await;
+        let result = execute(code, "python", None).await;
         assert!(result.is_ok());
         let output = result.unwrap();
         assert!(output.stdout.contains("Hello, World!"));
@@ -1841,7 +1841,7 @@ mod tests {
     #[tokio::test]
     async fn test_javascript_execution() {
         let code = "console.log('Hello, World!');";
-        let result = execute(code, "javascript").await;
+        let result = execute(code, "javascript", None).await;
         assert!(result.is_ok());
         let output = result.unwrap();
         assert!(output.stdout.contains("Hello, World!"));

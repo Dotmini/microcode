@@ -86,6 +86,13 @@ impl RagEngine {
             if !is_code_file(file_path) {
                 continue;
             }
+
+            // Enterprise guard: Skip files larger than 2MB to prevent OOM
+            if let Ok(meta) = entry.metadata() {
+                if meta.len() > 2 * 1024 * 1024 {
+                    continue;
+                }
+            }
             
             let relative_path = file_path.strip_prefix(&root)
                 .unwrap_or(file_path)
@@ -96,6 +103,12 @@ impl RagEngine {
             if let Ok(content) = std::fs::read_to_string(file_path) {
                 let new_chunks = chunk_code(&relative_path, &content);
                 self.chunks.extend(new_chunks);
+
+                // Enterprise guard: Limit total in-memory chunks to prevent OOM
+                if self.chunks.len() >= 100_000 {
+                    println!("Reached maximum indexing capacity (100,000 chunks) for memory stability.");
+                    break;
+                }
             }
         }
         
