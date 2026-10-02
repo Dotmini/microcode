@@ -184,6 +184,16 @@ else
     echo "   Dev build will use system-installed Node.js/Go/Python via PATH"
 fi
 
+# 6.5 Frameworks & Dynamic Libraries
+mkdir -p "$BUNDLE_NAME/Contents/Frameworks"
+if [ -f "MicrocodeCoreSupport/libmicrocode_core.dylib" ]; then
+    echo "   Copying libmicrocode_core.dylib into Frameworks..."
+    cp "MicrocodeCoreSupport/libmicrocode_core.dylib" "$BUNDLE_NAME/Contents/Frameworks/"
+    install_name_tool -change /Volumes/MAC/CodeTunerBuild/cargo-target/debug/deps/libmicrocode_core.dylib @rpath/libmicrocode_core.dylib "$BUNDLE_NAME/Contents/MacOS/MicroCode" 2>/dev/null || true
+    install_name_tool -change /Users/dotmini/Documents/SX/codetunner-native/microcode_core/target/release/deps/libmicrocode_core.dylib @rpath/libmicrocode_core.dylib "$BUNDLE_NAME/Contents/MacOS/MicroCode" 2>/dev/null || true
+    install_name_tool -add_rpath @executable_path/../Frameworks "$BUNDLE_NAME/Contents/MacOS/MicroCode" 2>/dev/null || true
+fi
+
 # 7. Code Sign Bundle
 echo "🔐 Signing Bundle..."
 xattr -cr "$BUNDLE_NAME"
@@ -202,3 +212,10 @@ echo "✅ Dev Bundle Ready: $BUNDLE_NAME"
 rm -rf "MicroCode.app"
 ln -sfn "$BUNDLE_NAME" "MicroCode.app"
 echo "🔗 Workspace symlink updated: MicroCode.app -> $BUNDLE_NAME"
+
+# Sync to system /Applications folder
+if [ -w "/Applications" ]; then
+    rm -rf "/Applications/MicroCode.app"
+    cp -R "$BUNDLE_NAME" "/Applications/MicroCode.app"
+    echo "📱 System Applications updated: /Applications/MicroCode.app"
+fi
