@@ -214,6 +214,104 @@ pub struct ToolResult {
     pub error: Option<String>,
 }
 
+static RE_CODE_BLOCK: Lazy<regex::Regex> = Lazy::new(|| {
+    regex::Regex::new(r"```(?:json)?\s*([\s\S]*?)\s*```").unwrap()
+});
+static RE_JSON_ARRAY: Lazy<regex::Regex> = Lazy::new(|| {
+    regex::Regex::new(r#"\[\s*\{[\s\S]*?"name"[\s\S]*?\}\s*\]"#).unwrap()
+});
+static RE_JSON_OBJECT: Lazy<regex::Regex> = Lazy::new(|| {
+    regex::Regex::new(r#"\{[\s\S]*?"name"\s*:\s*"[^"]+"[\s\S]*?"arguments"\s*:\s*\{[\s\S]*?\}\s*\}"#).unwrap()
+});
+
+/// Robust Multi-Format Tool Call Extractor for enterprise-grade AI models:
+/// 1. Extracts tool calls from markdown code blocks (```json [ ... ] ``` or ```json { ... } ```)
+/// 2. Extracts raw JSON arrays ([ { "name": ..., "arguments": ... } ])
+/// 3. Extracts raw JSON objects ({ "name": ..., "arguments": ... })
+/// 4. Returns both the parsed ToolCalls and the cleaned non-tool assistant text
+pub fn extract_tool_calls(ai_response: &str) -> (Vec<ToolCall>, String) {
+    let mut tool_calls = Vec::new();
+    let mut cleaned_content = ai_response.to_string();
+
+    // 1. Check for markdown code blocks ```json ... ``` or ``` ... ```
+    for cap in RE_CODE_BLOCK.captures_iter(ai_response) {
+        if let Some(block) = cap.get(1) {
+            let block_str = block.as_str().trim();
+            // Try parsing as array of calls
+            if let Ok(calls) = serde_json::from_str::<Vec<serde_json::Value>>(block_str) {
+                let mut matched = false;
+                for call in calls {
+                    if let (Some(name), Some(args)) = (call["name"].as_str(), call.get("arguments")) {
+                        tool_calls.push(ToolCall {
+                            id: uuid::Uuid::new_v4().to_string(),
+                            name: name.to_string(),
+                            arguments: args.clone(),
+                        });
+                        matched = true;
+                    }
+                }
+                if matched {
+                    if let Some(full_match) = cap.get(0) {
+                        cleaned_content = cleaned_content.replace(full_match.as_str(), "");
+                    }
+                }
+            } else if let Ok(call) = serde_json::from_str::<serde_json::Value>(block_str) {
+                // Try parsing as single object
+                if let (Some(name), Some(args)) = (call["name"].as_str(), call.get("arguments")) {
+                    tool_calls.push(ToolCall {
+                        id: uuid::Uuid::new_v4().to_string(),
+                        name: name.to_string(),
+                        arguments: args.clone(),
+                    });
+                    if let Some(full_match) = cap.get(0) {
+                        cleaned_content = cleaned_content.replace(full_match.as_str(), "");
+                    }
+                }
+            }
+        }
+    }
+
+    // 2. If no tool calls found in markdown blocks, look for raw JSON array: [ { "name": ... } ]
+    if tool_calls.is_empty() {
+        if let Some(mat) = RE_JSON_ARRAY.find(&cleaned_content) {
+            if let Ok(calls) = serde_json::from_str::<Vec<serde_json::Value>>(mat.as_str()) {
+                let mut matched = false;
+                for call in calls {
+                    if let (Some(name), Some(args)) = (call["name"].as_str(), call.get("arguments")) {
+                        tool_calls.push(ToolCall {
+                            id: uuid::Uuid::new_v4().to_string(),
+                            name: name.to_string(),
+                            arguments: args.clone(),
+                        });
+                        matched = true;
+                    }
+                }
+                if matched {
+                    cleaned_content = cleaned_content.replace(mat.as_str(), "");
+                }
+            }
+        }
+    }
+
+    // 3. If still empty, look for raw single JSON object: { "name": ..., "arguments": ... }
+    if tool_calls.is_empty() {
+        if let Some(mat) = RE_JSON_OBJECT.find(&cleaned_content) {
+            if let Ok(call) = serde_json::from_str::<serde_json::Value>(mat.as_str()) {
+                if let (Some(name), Some(args)) = (call["name"].as_str(), call.get("arguments")) {
+                    tool_calls.push(ToolCall {
+                        id: uuid::Uuid::new_v4().to_string(),
+                        name: name.to_string(),
+                        arguments: args.clone(),
+                    });
+                    cleaned_content = cleaned_content.replace(mat.as_str(), "");
+                }
+            }
+        }
+    }
+
+    (tool_calls, cleaned_content.trim().to_string())
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ProjectContext {
     pub root_path: PathBuf,
@@ -1145,13 +1243,26 @@ async fn tool_edit_file(
         .await
         .map_err(|e| AppError::IOError(format!("Failed to read file: {}", e)))?;
 
-    if !old_content.contains(search) {
+    let match_count = old_content.matches(search).count();
+    if match_count == 0 {
         return Err(AppError::ValidationError(
             "Search text not found in file".to_string(),
         ));
     }
 
-    let new_content = old_content.replace(search, replace);
+    let allow_multiple = args.get("allow_multiple").and_then(|v| v.as_bool()).unwrap_or(false);
+    if match_count > 1 && !allow_multiple {
+        return Err(AppError::ValidationError(format!(
+            "Search text was found {} times in {}. To prevent unintended mutations, please provide more surrounding context lines to uniquely target the intended block, or specify allow_multiple: true.",
+            match_count, path_str
+        )));
+    }
+
+    let new_content = if allow_multiple {
+        old_content.replace(search, replace)
+    } else {
+        old_content.replacen(search, replace, 1)
+    };
 
     fs::write(&full_path, &new_content)
         .await
@@ -1435,20 +1546,24 @@ async fn tool_run_command(workspace: &Path, args: &serde_json::Value) -> Result<
     let command = args["command"]
         .as_str()
         .ok_or_else(|| AppError::ValidationError("command is required".to_string()))?;
+    let timeout_secs = args["timeout_seconds"]
+        .as_u64()
+        .or_else(|| args["timeout"].as_u64());
 
-    secure_execute_command(workspace, command, None).await
+    secure_execute_command(workspace, command, None, timeout_secs).await
 }
 
 /// Secure command execution with sandboxing:
 /// - Comprehensive blocklist with pattern matching (not just substring)
-/// - 30-second timeout to prevent hangs
+/// - Adaptive enterprise timeout (default 300s, up to 1800s) for heavy builds & tests
 /// - 1MB output limit to prevent OOM
-/// - Restricted environment variables
+/// - Preserves developer toolchain paths ($HOME/.cargo/bin, $HOME/go/bin, Homebrew)
 /// - Working directory locked to workspace
 async fn secure_execute_command(
     workspace: &Path,
     command: &str,
     description: Option<&str>,
+    custom_timeout_secs: Option<u64>,
 ) -> Result<String> {
     // Normalize command for checking (lowercase, collapse whitespace)
     let cmd_lower = command.to_lowercase();
@@ -1541,17 +1656,50 @@ async fn secure_execute_command(
     }
 
     // === EXECUTE WITH TIMEOUT ===
-    let timeout_duration = std::time::Duration::from_secs(30);
+    // Enterprise default: 300 seconds (5 minutes) for compilation, tests, and heavy tasks
+    // Configurable via `timeout_seconds` or `timeout` argument up to 1800s (30 mins)
+    let timeout_secs = custom_timeout_secs.unwrap_or(300).max(10).min(1800);
+    let timeout_duration = std::time::Duration::from_secs(timeout_secs);
 
-    let child = tokio::process::Command::new("sh")
-        .args(["-c", command])
+    let home = dirs::home_dir().unwrap_or_default();
+    let home_str = home.to_string_lossy();
+    let mut custom_path = format!(
+        "{}/.cargo/bin:{}/go/bin:{}/.local/bin:/opt/homebrew/bin:/opt/homebrew/sbin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin",
+        home_str, home_str, home_str
+    );
+    if let Ok(sys_path) = std::env::var("PATH") {
+        for p in sys_path.split(':') {
+            if !custom_path.contains(p) {
+                custom_path.push(':');
+                custom_path.push_str(p);
+            }
+        }
+    }
+
+    let mut cmd = tokio::process::Command::new("sh");
+    cmd.args(["-c", command])
         .current_dir(workspace)
         .kill_on_drop(true)
         .env_clear()
-        .env("PATH", "/usr/local/bin:/usr/bin:/bin:/opt/homebrew/bin")
-        .env("HOME", dirs::home_dir().unwrap_or_default())
+        .env("PATH", custom_path)
+        .env("HOME", home)
         .env("LANG", "en_US.UTF-8")
-        .env("TERM", "xterm-256color")
+        .env("TERM", "xterm-256color");
+
+    // Inherit build offloading & developer tempdirs if present
+    if Path::new("/Volumes/MAC/CodeTunerBuild/tmp").is_dir() {
+        cmd.env("TMPDIR", "/Volumes/MAC/CodeTunerBuild/tmp");
+        cmd.env("CARGO_TARGET_DIR", "/Volumes/MAC/CodeTunerBuild/cargo-target");
+        cmd.env("CARGO_HOME", "/Volumes/MAC/CodeTunerBuild/cargo-home");
+    } else if Path::new("/Volumes/MicroCodeBuild/tmp").is_dir() {
+        cmd.env("TMPDIR", "/Volumes/MicroCodeBuild/tmp");
+        cmd.env("CARGO_TARGET_DIR", "/Volumes/MicroCodeBuild/cargo-target");
+        cmd.env("CARGO_HOME", "/Volumes/MicroCodeBuild/cargo-home");
+    } else if let Ok(t) = std::env::var("TMPDIR") {
+        cmd.env("TMPDIR", t);
+    }
+
+    let child = cmd
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped())
         .spawn()
@@ -2075,55 +2223,36 @@ REMEMBER: You are building the future of coding. Make it look magic."#,
         // Call AI
         let ai_response: String = provider.generate(&current_prompt, &actual_config).await?;
 
-        // Parse tool calls from response
+        // Parse tool calls from response (multi-format robust extractor)
+        let (extracted_calls, turn_content) = extract_tool_calls(&ai_response);
         let mut turn_tool_calls = Vec::new();
         let mut turn_tool_results = Vec::new();
-        let mut turn_content = ai_response.clone();
 
-        // Try to extract JSON tool calls
-        let json_pattern = regex::Regex::new(r#"\[\s*\{[\s\S]*?"name"[\s\S]*?\}\s*\]"#).ok();
-        if let Some(pattern) = json_pattern {
-            if let Some(captures) = pattern.find(&ai_response) {
-                let json_str = captures.as_str();
-                if let Ok(calls) = serde_json::from_str::<Vec<serde_json::Value>>(json_str) {
-                    for call in calls {
-                        if let (Some(name), Some(args)) =
-                            (call["name"].as_str(), call.get("arguments"))
-                        {
-                            let tc = ToolCall {
-                                id: uuid::Uuid::new_v4().to_string(),
-                                name: name.to_string(),
-                                arguments: args.clone(),
-                            };
-                            turn_tool_calls.push(tc.clone());
+        for tc in extracted_calls {
+            turn_tool_calls.push(tc.clone());
 
-                            // Execute tool or create pending change
-                            if request.auto_execute || !is_destructive_tool(name) {
-                                match execute_tool(state.clone(), &request.session_id, name, args)
-                                    .await
-                                {
-                                    Ok(result) => turn_tool_results.push(result),
-                                    Err(e) => turn_tool_results.push(ToolResult {
-                                        tool_call_id: tc.id.clone(),
-                                        success: false,
-                                        output: String::new(),
-                                        error: Some(e.to_string()),
-                                    }),
-                                }
-                            } else {
-                                if let Some(pc) = create_pending_change(
-                                    &request.session_id,
-                                    &tc,
-                                    &session.workspace_path,
-                                )
-                                .await
-                                {
-                                    pending_changes.push(pc);
-                                }
-                            }
-                        }
-                    }
-                    turn_content = ai_response.replace(json_str, "").trim().to_string();
+            // Execute tool or create pending change
+            if request.auto_execute || !is_destructive_tool(&tc.name) {
+                match execute_tool(state.clone(), &request.session_id, &tc.name, &tc.arguments)
+                    .await
+                {
+                    Ok(result) => turn_tool_results.push(result),
+                    Err(e) => turn_tool_results.push(ToolResult {
+                        tool_call_id: tc.id.clone(),
+                        success: false,
+                        output: String::new(),
+                        error: Some(e.to_string()),
+                    }),
+                }
+            } else {
+                if let Some(pc) = create_pending_change(
+                    &request.session_id,
+                    &tc,
+                    &session.workspace_path,
+                )
+                .await
+                {
+                    pending_changes.push(pc);
                 }
             }
         }
@@ -2328,31 +2457,21 @@ INSTRUCTIONS:
                 }
             }
 
-            // Parse tool calls from the full turn content
-            let json_pattern = regex::Regex::new(r#"\[\s*\{[\s\S]*?"name"[\s\S]*?\}\s*\]"#).ok();
+            // Parse tool calls from the full turn content (multi-format robust extractor)
+            let (extracted_calls, _cleaned_content) = extract_tool_calls(&turn_full_content);
             let mut turn_tool_calls = Vec::new();
             let mut turn_tool_results = Vec::new();
 
-            if let Some(pattern) = json_pattern {
-                if let Some(captures) = pattern.find(&turn_full_content) {
-                    let json_str = captures.as_str();
-                    if let Ok(calls) = serde_json::from_str::<Vec<serde_json::Value>>(json_str) {
-                        for call in calls {
-                            if let (Some(name), Some(args)) =
-                                (call["name"].as_str(), call.get("arguments"))
-                            {
-                                let tc = ToolCall {
-                                    id: uuid::Uuid::new_v4().to_string(),
-                                    name: name.to_string(),
-                                    arguments: args.clone(),
-                                };
-                                turn_tool_calls.push(tc.clone());
-                                let _ = tx
-                                    .send(Ok(AgentStreamEvent::ToolStart {
-                                        name: tc.name.clone(),
-                                        id: tc.id.clone(),
-                                    }))
-                                    .await;
+            for tc in extracted_calls {
+                let name = &tc.name;
+                let args = &tc.arguments;
+                turn_tool_calls.push(tc.clone());
+                let _ = tx
+                    .send(Ok(AgentStreamEvent::ToolStart {
+                        name: tc.name.clone(),
+                        id: tc.id.clone(),
+                    }))
+                    .await;
 
                                 // Execute tool or create pending change
                                 if request.auto_execute || !is_destructive_tool(name) {
@@ -2404,10 +2523,6 @@ INSTRUCTIONS:
                                             tx.send(Ok(AgentStreamEvent::PendingChange(pc))).await;
                                     }
                                 }
-                            }
-                        }
-                    }
-                }
             }
 
             total_tool_calls.extend(turn_tool_calls);
@@ -2584,25 +2699,9 @@ pub fn run_agent_loop_stream(
                 }
             }
 
-            // Parse Tool Calls (Regex for JSON array)
-            // Looking for ```json [ ... ] ``` or just [ ... ]
-            let json_pattern = regex::Regex::new(r#"\[\s*\{[\s\S]*?"name"[\s\S]*?\}\s*\]"#).ok();
-            if let Some(pattern) = json_pattern {
-                if let Some(captures) = pattern.find(&turn_content) {
-                     if let Ok(calls) = serde_json::from_str::<Vec<serde_json::Value>>(captures.as_str()) {
-                         for call in calls {
-                             if let (Some(name), Some(args)) = (call["name"].as_str(), call.get("arguments")) {
-                                 let tc = ToolCall {
-                                     id: uuid::Uuid::new_v4().to_string(),
-                                     name: name.to_string(),
-                                     arguments: args.clone(),
-                                 };
-                                 turn_tool_calls.push(tc);
-                             }
-                         }
-                     }
-                }
-            }
+            // Parse Tool Calls using robust multi-format extractor
+            let (extracted_calls, _cleaned) = extract_tool_calls(&turn_content);
+            turn_tool_calls = extracted_calls;
 
             if turn_tool_calls.is_empty() {
                 // No tools called, we are done
@@ -2893,9 +2992,12 @@ async fn tool_execute_command(workspace: &Path, args: &serde_json::Value) -> Res
         .as_str()
         .ok_or_else(|| AppError::ValidationError("command is required".to_string()))?;
     let description = args["description"].as_str();
+    let timeout_secs = args["timeout_seconds"]
+        .as_u64()
+        .or_else(|| args["timeout"].as_u64());
 
     // Reuse the same secure execution path
-    secure_execute_command(workspace, command, description).await
+    secure_execute_command(workspace, command, description, timeout_secs).await
 }
 
 // ==========================================

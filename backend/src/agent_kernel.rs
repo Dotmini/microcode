@@ -657,6 +657,17 @@ fn evaluate(run: &mut AgentRun, request: &ObserveRequest) -> KernelDirective {
         && request.success == Some(true)
         && plan_is_complete_or_empty(&run.plan)
     {
+        if !has_observed_work(run) {
+            run.state = RunState::Verifying;
+            return KernelDirective {
+                action: "verify".into(),
+                reason: "A natural-language answer is not completion evidence".into(),
+                state: run.state.clone(),
+                retry_after_ms: None,
+                ready_nodes: ready_node_ids(&run.plan),
+                suggested_prompt: Some("Run the deterministic verification criteria for the objective. Mark complete only when they pass.".into()),
+            };
+        }
         run.state = RunState::Completed;
         run.terminal_reason = Some("Objective and verification criteria passed".into());
         return directive_for(
@@ -755,7 +766,21 @@ fn evaluate(run: &mut AgentRun, request: &ObserveRequest) -> KernelDirective {
     }
 
     if request.kind == "final_candidate" || request.kind == "model_no_tool" {
-        if plan_is_complete_or_empty(&run.plan) || has_observed_work(run) || run.no_progress_streak == 0 {
+        let is_launch = run.id.contains("launch") || run.objective.to_lowercase().contains("launch");
+        let has_launch_checkpoint = run.recent_events.iter().any(|e| {
+            let fp = e.fingerprint.as_deref().unwrap_or("").to_lowercase();
+            let sum = e.summary.to_lowercase();
+            e.success == Some(true)
+                && (fp.contains("launch")
+                    || fp.contains("install")
+                    || fp.contains("open ")
+                    || sum.contains("launch")
+                    || sum.contains("install"))
+        });
+
+        let launch_satisfied = !is_launch || has_launch_checkpoint;
+
+        if plan_is_complete_or_empty(&run.plan) && has_observed_work(run) && launch_satisfied {
             run.state = RunState::Completed;
             run.terminal_reason = Some("Objective completed successfully".into());
             return directive_for(
