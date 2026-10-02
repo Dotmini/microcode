@@ -8,8 +8,8 @@
 set -euo pipefail
 
 REPO="Dotmini/microcode"
-TAG="${1:-v2.5.26}"
-TITLE="MicroCode ${TAG} — Autonomous Workstation & Realtime Model Engine"
+TAG="${1:-v2.5.27}"
+TITLE="MicroCode ${TAG} — Multi-Project Isolation & Autonomous Workstation"
 DIST_DIR="Dist/DeveloperPreview"
 
 echo "🚀 MicroCode Release Orchestrator: $TAG"
@@ -28,17 +28,10 @@ else
 fi
 
 echo ""
-echo "🧹 Step 1: Deleting ALL old releases on GitHub ($REPO)..."
-OLD_RELEASES=$(gh release list --repo "$REPO" --limit 100 --json tagName -q '.[].tagName' 2>/dev/null || true)
-
-if [ -n "$OLD_RELEASES" ]; then
-    for old_tag in $OLD_RELEASES; do
-        echo "   🗑️ Deleting release: $old_tag"
-        gh release delete "$old_tag" --repo "$REPO" --yes 2>/dev/null || true
-    done
-    echo "✓ All old releases cleared from GitHub!"
-else
-    echo "✓ No existing releases found on GitHub"
+echo "🧹 Step 1: Checking existing release on GitHub for tag $TAG ($REPO)..."
+if gh release view "$TAG" --repo "$REPO" >/dev/null 2>&1; then
+    echo "   🗑️ Deleting existing release for re-release: $TAG"
+    gh release delete "$TAG" --repo "$REPO" --yes 2>/dev/null || true
 fi
 
 echo ""
@@ -59,7 +52,7 @@ SRC_PKG="Dist/DeveloperPreview/MicroCode-2.3.1-DeveloperPreview.pkg"
 
 if [ ! -f "$SRC_DMG" ] || [ ! -f "$SRC_PKG" ]; then
     echo "   ⚠️ Artifacts not found, building them now..."
-    APP_PATH="/Volumes/MAC/CodeTunerBuild/apps/MicroCode.app" ./Scripts/build_developer_preview.sh
+    APP_PATH="$HOME/Applications/MicroCode.app" ./Scripts/build_developer_preview.sh
 fi
 
 DMG_FILE="$DIST_DIR/MicroCode-${TAG}.dmg"
@@ -87,6 +80,9 @@ gh release create "$TAG" \
     --notes "## What's New in MicroCode $TAG
 
 ### 🌟 Key Highlights
+- **Strict Multi-Project Isolation**: AI agent now strictly isolates chat sessions, semantic memory, open editor tabs, and tool executions per workspace. Working across multiple projects concurrently is completely insulated with zero cross-project hallucination or context bleeding.
+- **BYOK Reasoning Streaming Crash Resolution**: Resolved fatal string index out of bounds in \`MessageContentParser\` during streaming and added native support for \`<think>...</think>\` tags across DeepSeek R1, Qwen 2.5 QwQ, Claude 3.7 Sonnet, and OpenAI o1/o3.
+- **Universal API Key Fallback Engine**: Intelligent fallback through Memory -> Keychain -> UserDefaults Suite -> Process Environment via \`resolveApiKey\` across all model execution pipelines.
 - **Supply-Chain & Dependency Hardening**: Pinned and patched core Rust dependencies in tracked \`Cargo.lock\` (rustls 0.23, openssl 0.10, webpki-roots) eliminating known CVE vulnerabilities.
 - **Enterprise Large File Virtualization**: Intelligent chunked streaming (FileHandle 1MB/2MB) and MainActor guards preventing UI freezes/beachballs when inspecting massive files (>10MB).
 - **Token & Cost Budget Circuit Breaker**: Realtime cost accumulator and automatic runaway-loop circuit breakers across 24/7 autonomous agents and subagents.
