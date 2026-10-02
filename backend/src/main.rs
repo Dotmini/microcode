@@ -19,7 +19,7 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 use tokio::sync::RwLock;
 
-use tracing::{info, Level};
+use tracing::{error, info, Level};
 use tracing_subscriber;
 
 mod agent;
@@ -478,11 +478,25 @@ async fn main() -> Result<()> {
     let app = app.nest("/v1/mcp", mcp_router)
         .layer(axum::middleware::from_fn_with_state(Arc::new(local_token), local_auth::require_local_token));
 
-    // Start server on port 3000 (matches Swift services)
-    let addr = SocketAddr::from(([127, 0, 0, 1], 3000));
+    // Start server on port (default 3000, customizable via PORT or MICROCODE_PORT)
+    let port = std::env::var("PORT")
+        .or_else(|_| std::env::var("MICROCODE_PORT"))
+        .ok()
+        .and_then(|p| p.parse::<u16>().ok())
+        .unwrap_or(3000);
+    let addr = SocketAddr::from(([127, 0, 0, 1], port));
     info!("Backend listening on {}", addr);
 
-    let listener = tokio::net::TcpListener::bind(&addr).await?;
+    let listener = match tokio::net::TcpListener::bind(&addr).await {
+        Ok(l) => l,
+        Err(e) => {
+            error!(
+                "Failed to bind to {}: {}. Another process may already be running on port {}.",
+                addr, e, port
+            );
+            return Err(e.into());
+        }
+    };
     axum::serve(listener, app).await?;
 
     Ok(())

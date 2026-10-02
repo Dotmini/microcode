@@ -153,9 +153,18 @@ class BackendService {
             pk.standardError = FileHandle.nullDevice
             try? pk.run(); pk.waitUntilExit()
         }
+        // Only kill stale port 3000 listeners if they are actually our backend processes!
+        // Never kill arbitrary third-party developer processes (Next.js, Node, Rails, etc.).
         let sh = Process()
         sh.executableURL = URL(fileURLWithPath: "/bin/sh")
-        sh.arguments = ["-c", "pids=$(lsof -ti tcp:3000); [ -n \"$pids\" ] && kill -9 $pids"]
+        sh.arguments = ["-c", """
+            for pid in $(lsof -ti tcp:3000 2>/dev/null); do
+                comm=$(ps -p "$pid" -o comm= 2>/dev/null)
+                if echo "$comm" | grep -qE "microcode-backend|codetunner-backend"; then
+                    kill -9 "$pid" 2>/dev/null || true
+                fi
+            done
+        """]
         sh.standardOutput = FileHandle.nullDevice
         sh.standardError = FileHandle.nullDevice
         try? sh.run(); sh.waitUntilExit()
