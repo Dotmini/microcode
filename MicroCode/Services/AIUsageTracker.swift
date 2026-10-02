@@ -124,14 +124,20 @@ struct ModelPricing {
         "claude-3-opus": ModelPricing(input: 15.00, output: 75.00),
         
         // Google Gemini
-        "gemini-2.0-flash": ModelPricing(input: 0.10, output: 0.40),
-        "gemini-1.5-pro": ModelPricing(input: 1.25, output: 5.00),
-        "gemini-1.5-flash": ModelPricing(input: 0.075, output: 0.30),
+        "gemini-2.5-flash": ModelPricing(input: 0.10, output: 0.40, cached: 0.025),
+        "gemini-2.5-pro": ModelPricing(input: 1.25, output: 5.00, cached: 0.3125),
+        "gemini-2.0-flash": ModelPricing(input: 0.10, output: 0.40, cached: 0.025),
+        "gemini-2.0-flash-thinking": ModelPricing(input: 0.10, output: 0.40, cached: 0.025),
+        "gemini-2.0-pro": ModelPricing(input: 1.25, output: 5.00, cached: 0.3125),
+        "gemini-1.5-pro": ModelPricing(input: 1.25, output: 5.00, cached: 0.3125),
+        "gemini-1.5-flash": ModelPricing(input: 0.075, output: 0.30, cached: 0.01875),
         
         // DeepSeek
-        "deepseek-chat": ModelPricing(input: 0.27, output: 1.10),
-        "deepseek-coder": ModelPricing(input: 0.14, output: 0.28),
-        "deepseek-reasoner": ModelPricing(input: 0.55, output: 2.19),
+        "deepseek-chat": ModelPricing(input: 0.14, output: 0.28, cached: 0.014),
+        "deepseek-coder": ModelPricing(input: 0.14, output: 0.28, cached: 0.014),
+        "deepseek-reasoner": ModelPricing(input: 0.55, output: 2.19, cached: 0.14),
+        "deepseek-r1": ModelPricing(input: 0.55, output: 2.19, cached: 0.14),
+        "deepseek-v3": ModelPricing(input: 0.14, output: 0.28, cached: 0.014),
         
         // Qwen
         "qwen-max": ModelPricing(input: 1.60, output: 6.40),
@@ -173,9 +179,35 @@ struct ModelPricing {
         if normalized.contains("local") || normalized.contains("ollama") || normalized.contains("lmstudio") {
             return ModelPricing(input: 0.0, output: 0.0)
         }
+        if normalized.contains("gemini") {
+            if normalized.contains("pro") {
+                return ModelPricing(input: 1.25, output: 5.00, cached: 0.3125)
+            } else {
+                return ModelPricing(input: 0.10, output: 0.40, cached: 0.025)
+            }
+        }
+        if normalized.contains("claude") {
+            if normalized.contains("haiku") {
+                return ModelPricing(input: 0.80, output: 4.00, cached: 0.08)
+            } else if normalized.contains("opus") {
+                return ModelPricing(input: 15.00, output: 75.00, cached: 1.50)
+            } else {
+                return ModelPricing(input: 3.00, output: 15.00, cached: 0.30)
+            }
+        }
+        if normalized.contains("deepseek") {
+            if normalized.contains("r1") || normalized.contains("reasoner") {
+                return ModelPricing(input: 0.55, output: 2.19, cached: 0.14)
+            } else {
+                return ModelPricing(input: 0.14, output: 0.28, cached: 0.014)
+            }
+        }
+        if normalized.contains("qwen") {
+            return ModelPricing(input: 0.80, output: 3.20)
+        }
         
         // Unknown model — use conservative mid-range estimate
-        return ModelPricing(input: 1.0, output: 4.0)
+        return ModelPricing(input: 0.50, output: 2.0)
     }
 }
 

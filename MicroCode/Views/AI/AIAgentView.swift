@@ -4956,6 +4956,23 @@ struct MessageContentParser {
         return nil
     }
     
+    private static func findOrphanClosingThought(in text: String) -> (thought: String, after: String)? {
+        let closingTags = ["</thought>", "</thinking>", "</think>"]
+        for closeTag in closingTags {
+            if let closeRange = text.range(of: closeTag, options: .caseInsensitive) {
+                let beforeTag = text[..<closeRange.lowerBound]
+                let openTags = ["<thought>", "<thinking>", "<think>"]
+                let hasOpen = openTags.contains(where: { beforeTag.range(of: $0, options: .caseInsensitive) != nil })
+                if !hasOpen {
+                    let thought = String(beforeTag).trimmingCharacters(in: .whitespacesAndNewlines)
+                    let after = String(text[closeRange.upperBound...]).trimmingCharacters(in: .whitespacesAndNewlines)
+                    return (thought: thought, after: after)
+                }
+            }
+        }
+        return nil
+    }
+    
     private static func doParse(_ content: String) -> [MessageBlock] {
         let remaining = content
         
@@ -5002,6 +5019,13 @@ struct MessageContentParser {
                             parsedList.append(contentsOf: parseLatexAndCode(unclosed.before))
                         }
                         parsedList.append(.thought(unclosed.thought, nil))
+                    } else if let orphan = findOrphanClosingThought(in: afterText) {
+                        if !orphan.thought.isEmpty {
+                            parsedList.append(.thought(orphan.thought, max(1, orphan.thought.count / 120)))
+                        }
+                        if !orphan.after.isEmpty {
+                            parsedList.append(contentsOf: parseLatexAndCode(orphan.after))
+                        }
                     } else if !afterText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
                         parsedList.append(contentsOf: parseLatexAndCode(afterText))
                     }
@@ -5009,6 +5033,18 @@ struct MessageContentParser {
                 
                 return parsedList
             }
+        }
+        
+        // Check for orphan closing tag without opening tag (e.g. "Let me start.</thought>")
+        if let orphan = findOrphanClosingThought(in: remaining) {
+            var parsedList: [MessageBlock] = []
+            if !orphan.thought.isEmpty {
+                parsedList.append(.thought(orphan.thought, max(1, orphan.thought.count / 120)))
+            }
+            if !orphan.after.isEmpty {
+                parsedList.append(contentsOf: parseLatexAndCode(orphan.after))
+            }
+            return parsedList
         }
         
         // Check for streaming / unclosed thought without closing tag
@@ -5026,7 +5062,13 @@ struct MessageContentParser {
     
     private static func parseLatexAndCode(_ content: String) -> [MessageBlock] {
         var blocks: [MessageBlock] = []
-        let remaining = content
+        var remaining = content
+        
+        // Sanitize any stray/residual reasoning tags to prevent leaking raw XML into prose
+        let strayTags = ["</thought>", "</thinking>", "</think>", "<thought>", "<thinking>", "<think>"]
+        for tag in strayTags {
+            remaining = remaining.replacingOccurrences(of: tag, with: "")
+        }
         
         // Extract LaTeX blocks ($$...$$ or \[...\])
         if let latexRegex = latexRegex {
@@ -6001,6 +6043,30 @@ struct RichMessageRow: View, Equatable {
             
             if !message.pendingChanges.isEmpty {
                 pendingChangesSection
+            }
+            
+            if message.content.contains("Reached maximum tool iteration safety limit") {
+                Button(action: {
+                    Task {
+                        await AgentService.shared.sendMessage("Continue executing the task from where you left off. Continue immediately with the next necessary step.")
+                    }
+                }) {
+                    HStack(spacing: 6) {
+                        Image(systemName: "play.circle.fill")
+                            .font(.system(size: 13))
+                            .foregroundColor(.orange)
+                        Text("Continue Task (ทำงานต่อ)")
+                            .font(.system(size: 12, weight: .semibold))
+                            .foregroundColor(.primary)
+                    }
+                    .padding(.horizontal, 14)
+                    .padding(.vertical, 8)
+                    .background(Color.orange.opacity(0.12))
+                    .overlay(RoundedRectangle(cornerRadius: 8).stroke(Color.orange.opacity(0.35), lineWidth: 1))
+                    .cornerRadius(8)
+                }
+                .buttonStyle(.plain)
+                .padding(.top, 4)
             }
         }
     }

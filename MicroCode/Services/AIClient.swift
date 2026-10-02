@@ -793,6 +793,7 @@ final class AIClient: ObservableObject {
         }
         
         var isStreamingReasoning = false
+        var latestUsageMetadata: [String: Any]?
         
         for try await line in bytes.lines {
             if Task.isCancelled { break }
@@ -802,21 +803,9 @@ final class AIClient: ObservableObject {
             guard let data = jsonString.data(using: .utf8),
                   let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else { continue }
             
-            // Capture token usage from Gemini usageMetadata
+            // Capture latest token usage from Gemini usageMetadata (record once after stream completes)
             if let usage = json["usageMetadata"] as? [String: Any] {
-                let promptTok = usage["promptTokenCount"] as? Int ?? 0
-                let completionTok = usage["candidatesTokenCount"] as? Int ?? 0
-                let cachedTok = usage["cachedContentTokenCount"] as? Int ?? 0
-                Task { @MainActor in
-                    AIUsageTracker.shared.record(
-                        provider: "gemini",
-                        model: model,
-                        promptTokens: promptTok,
-                        completionTokens: completionTok,
-                        cachedTokens: cachedTok,
-                        taskLabel: "Chat"
-                    )
-                }
+                latestUsageMetadata = usage
             }
             
             guard let candidates = json["candidates"] as? [[String: Any]],
@@ -859,6 +848,23 @@ final class AIClient: ObservableObject {
         if isStreamingReasoning {
             isStreamingReasoning = false
             appendStreamToken("</thought>\n\n", onToken: onToken)
+        }
+        
+        // Record token usage once per stream to prevent multi-counting
+        if let usage = latestUsageMetadata {
+            let promptTok = usage["promptTokenCount"] as? Int ?? 0
+            let completionTok = usage["candidatesTokenCount"] as? Int ?? 0
+            let cachedTok = usage["cachedContentTokenCount"] as? Int ?? 0
+            Task { @MainActor in
+                AIUsageTracker.shared.record(
+                    provider: "gemini",
+                    model: model,
+                    promptTokens: promptTok,
+                    completionTokens: completionTok,
+                    cachedTokens: cachedTok,
+                    taskLabel: "Chat"
+                )
+            }
         }
     }
     

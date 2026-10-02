@@ -524,12 +524,14 @@ class TokenOptimizer: ObservableObject {
     /// while summarizing older tool outputs to avoid context blowup and AI slop.
     func compressIterativeToolHistory(
         _ history: [(role: String, content: String)],
-        budget: Int = 1_500_000
+        budget: Int = 80_000
     ) -> [(role: String, content: String)] {
         guard history.count > 4 else { return history }
         
         let totalTokens = history.reduce(0) { $0 + estimateTokens($1.content) }
-        if totalTokens <= budget { return history }
+        // Trigger compression if over sensible budget OR if any message contains bulky raw output
+        let hasBulkyTurn = history.contains { $0.content.count > 10_000 }
+        if totalTokens <= budget && !hasBulkyTurn { return history }
         
         var optimized: [(role: String, content: String)] = []
         
@@ -538,27 +540,42 @@ class TokenOptimizer: ObservableObject {
             optimized.append(first)
         }
         
-        // 2. Determine slice of older turns vs recent turns
-        let recentCount = min(4, history.count - 1)
+        // 2. Determine slice of older turns vs recent turns (preserve latest 3 turns in full fidelity)
+        let recentCount = min(3, history.count - 1)
         let middleTurns = history.dropFirst().dropLast(recentCount)
         let recentTurns = history.suffix(recentCount)
         
-        // 3. Summarize middle tool turns
+        // 3. Summarize middle tool turns to stop context runaway
         for item in middleTurns {
             if item.role == "user" && item.content.contains("Tool execution results:") {
                 // Compress old tool result
                 let lines = item.content.components(separatedBy: "\n")
-                let compactLines = lines.filter { line in
-                    line.hasPrefix("✅") || line.hasPrefix("❌") || line.contains("Modified:") || line.contains("Created:")
+                var compactLines: [String] = []
+                for line in lines {
+                    let trimmed = line.trimmingCharacters(in: .whitespaces)
+                    if trimmed.hasPrefix("✅") || trimmed.hasPrefix("❌") || trimmed.hasPrefix("⚠️") ||
+                       trimmed.contains("Modified:") || trimmed.contains("Created:") ||
+                       trimmed.contains("Kernel directive:") || trimmed.contains("Instruction:") {
+                        compactLines.append(trimmed)
+                    } else if trimmed.hasPrefix("Tool [") || trimmed.contains("output (") {
+                        compactLines.append(trimmed)
+                    }
                 }
-                let summaryContent = compactLines.isEmpty
-                    ? "[Prior tools completed: \(lines.prefix(3).joined(separator: " "))]"
-                    : "Prior tool summary:\n" + compactLines.joined(separator: "\n")
+                let summaryContent: String
+                if !compactLines.isEmpty {
+                    summaryContent = "Tool execution results (historical checkpoint):\n" + compactLines.joined(separator: "\n") + "\n[Detailed raw content summarized to prevent context inflation]"
+                } else {
+                    summaryContent = "[Prior tools completed: \(lines.prefix(3).joined(separator: " "))]"
+                }
                 optimized.append((role: "user", content: summaryContent))
             } else if item.role == "assistant" {
                 // Compact old thoughts
-                let trimmed = item.content.prefix(300)
-                optimized.append((role: "assistant", content: String(trimmed) + (item.content.count > 300 ? "..." : "")))
+                if item.content.count > 350 {
+                    let trimmed = item.content.prefix(350)
+                    optimized.append((role: "assistant", content: String(trimmed) + "... [historical thought summarized]"))
+                } else {
+                    optimized.append(item)
+                }
             } else {
                 optimized.append(item)
             }
@@ -582,18 +599,22 @@ class TokenOptimizer: ObservableObject {
                 return (2.50, 10.0)
             case _ where model.contains("gpt-4o-mini"):
                 return (0.15, 0.60)
-            case _ where model.contains("claude-3-7-sonnet"):
+            case _ where model.contains("claude-3-7-sonnet") || model.contains("claude-3-5-sonnet"):
                 return (3.0, 15.0)
             case _ where model.contains("claude-3-5-haiku"):
-                return (0.25, 1.25)
-            case _ where model.contains("gemini-2.5-flash"):
-                return (0.15, 0.60)
-            case _ where model.contains("gemini-2.5-pro"):
-                return (1.25, 10.0)
+                return (0.80, 4.00)
+            case _ where model.contains("gemini-2.5-pro") || model.contains("gemini-1.5-pro") || model.contains("gemini-2.0-pro"):
+                return (1.25, 5.0)
+            case _ where model.contains("gemini"):
+                return (0.10, 0.40)
+            case _ where model.contains("deepseek-r1") || model.contains("deepseek-reasoner"):
+                return (0.55, 2.19)
             case _ where model.contains("deepseek"):
                 return (0.14, 0.28)
+            case _ where model.contains("qwen"):
+                return (0.80, 3.20)
             default:
-                return (1.0, 3.0) // Conservative default
+                return (0.50, 2.00) // Realistic default
             }
         }()
         
