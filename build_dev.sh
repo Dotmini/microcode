@@ -60,6 +60,8 @@ swift build -c debug \
     -Xlinker -lbz2 \
     -Xlinker -llzma \
     -Xlinker -lz \
+    -Xlinker -liconv \
+    -Xlinker -framework -Xlinker Virtualization \
     -Xlinker -framework -Xlinker SystemConfiguration \
     -Xlinker -framework -Xlinker Security \
     -Xlinker -framework -Xlinker CoreFoundation \

@@ -133,6 +133,7 @@ struct AuthenticEditor: NSViewRepresentable {
         }
     }
     
+    @MainActor
     public class Coordinator: NSObject, NSTextViewDelegate {
         var parent: AuthenticEditor
         var currentLanguage: String
@@ -231,9 +232,16 @@ struct AuthenticEditor: NSViewRepresentable {
             let resolvedTheme = activeThemeName ?? (parent.isDark ? "dark" : "light")
             engine.themeManager.setActiveTheme(resolvedTheme)
             
+            // Large-file protection: If document is larger than 500KB,
+            // skip heavy syntax regexes and Tree-sitter parsing on the main thread
+            // to avoid spinning beachballs.
+            if textStorage.length > 500_000 {
+                return
+            }
+            
             // Use per-instance engine to avoid shared-state race conditions
             engine.setDocument(textStorage.string, language: currentLanguage)
-            engine.applyHighlighting(to: textStorage, fontSize: parent.font.pointSize, font: parent.font)
+            engine.applyHighlightingAsync(to: textStorage, fontSize: parent.font.pointSize, font: parent.font)
             
             // Apply Hex Colors only in visible range + only for small files (< 50KB)
             if textStorage.length < 50000 {

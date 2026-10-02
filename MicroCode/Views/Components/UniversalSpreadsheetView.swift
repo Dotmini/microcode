@@ -259,7 +259,23 @@ struct UniversalSpreadsheetView: View {
         // CSV / TSV text parsing
         DispatchQueue.global(qos: .userInitiated).async {
             do {
-                let content = try String(contentsOf: self.url, encoding: .utf8)
+                let attr = try? FileManager.default.attributesOfItem(atPath: self.url.path)
+                let fileSize = (attr?[.size] as? NSNumber)?.int64Value ?? 0
+                let isGiant = fileSize > 10 * 1024 * 1024 // > 10MB
+                
+                let content: String
+                if isGiant {
+                    // For massive CSVs/dumps (>10MB), read first 2MB to extract headers and preview rows safely
+                    let handle = try FileHandle(forReadingFrom: self.url)
+                    defer { try? handle.close() }
+                    let data = handle.readData(ofLength: 2 * 1024 * 1024)
+                    content = String(data: data, encoding: .utf8)
+                        ?? String(data: data, encoding: .isoLatin1)
+                        ?? ""
+                } else {
+                    content = try String(contentsOf: self.url, encoding: .utf8)
+                }
+                
                 let delimiter = ext == "tsv" ? "\t" : ","
                 let parsed = Self.parseDelimitedText(content, delimiter: delimiter)
                 

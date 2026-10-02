@@ -42,8 +42,8 @@ backend/target/
 extension-host/target/
 **/target/
 backend/.cargo/
-**/*.rs.bk
 Cargo.lock
+!backend/Cargo.lock
 
 # ----- Node.js -----
 node_modules/
