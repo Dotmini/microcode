@@ -47,7 +47,7 @@ Every contribution directly funds engineering time, Apple Developer infrastructu
 
 <p align="center">
   <a href="https://microcode.dotmini.net"><strong>🌐 Official Website</strong></a> ·
-  <a href="https://github.com/Dotmini/microcode/releases/tag/v2.5.25"><strong>Download v2.5.25 (Latest Release)</strong></a> ·
+  <a href="https://github.com/Dotmini/microcode/releases/tag/v2.5.26"><strong>Download v2.5.26 (Latest Release)</strong></a> ·
   <a href="#operational-modes"><strong>Operational Modes</strong></a> ·
   <a href="#features"><strong>Features</strong></a> ·
   <a href="#architecture"><strong>Architecture</strong></a> ·
@@ -406,13 +406,13 @@ flowchart TB
 
 ### Install from Release
 
-Download directly from our official portal at [**microcode.dotmini.net**](https://microcode.dotmini.net) or from [**GitHub Releases (v2.5.25)**](https://github.com/Dotmini/microcode/releases/tag/v2.5.25):
+Download directly from our official portal at [**microcode.dotmini.net**](https://microcode.dotmini.net) or from [**GitHub Releases (v2.5.26)**](https://github.com/Dotmini/microcode/releases/tag/v2.5.26):
 
 | Package | Size | Architecture | Direct Download Link |
 |:---|:---:|:---:|:---|
-| 💿 **macOS Disk Image (DMG)** | 137 MB | Apple Silicon (ARM64) | [**Download MicroCode-v2.5.25.dmg**](https://github.com/Dotmini/microcode/releases/download/v2.5.25/MicroCode-v2.5.25.dmg) |
-| 📦 **Component Installer (PKG)** | 64 MB | Apple Silicon (ARM64) | [**Download MicroCode-v2.5.25.pkg**](https://github.com/Dotmini/microcode/releases/download/v2.5.25/MicroCode-v2.5.25.pkg) |
-| 📄 **Cryptographic Checksums** | 176 B | All | [**View SHA256SUMS-v2.5.25.txt**](https://github.com/Dotmini/microcode/releases/download/v2.5.25/SHA256SUMS-v2.5.25.txt) |
+| 💿 **macOS Disk Image (DMG)** | 137 MB | Apple Silicon (ARM64) | [**Download MicroCode-v2.5.26.dmg**](https://github.com/Dotmini/microcode/releases/download/v2.5.26/MicroCode-v2.5.26.dmg) |
+| 📦 **Component Installer (PKG)** | 64 MB | Apple Silicon (ARM64) | [**Download MicroCode-v2.5.26.pkg**](https://github.com/Dotmini/microcode/releases/download/v2.5.26/MicroCode-v2.5.26.pkg) |
+| 📄 **Cryptographic Checksums** | 176 B | All | [**View SHA256SUMS-v2.5.26.txt**](https://github.com/Dotmini/microcode/releases/download/v2.5.26/SHA256SUMS-v2.5.26.txt) |
 
 > **System Requirements**: macOS 13.0 (Ventura) or later · Native on Apple Silicon (M1/M2/M3/M4/M5).  
 > **Official Portal & Updates**: [https://microcode.dotmini.net](https://microcode.dotmini.net)
