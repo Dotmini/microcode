@@ -105,11 +105,10 @@ class AgentService: ObservableObject {
     }
     
     // Agent configuration
-    /// Agent turns are checkpointed by the Rust kernel and may be safely
-    /// retried. Runs continuously 24/7 without artificial turn caps until
-    /// objective is completed or conversation context limit is reached.
+    /// Safety iteration ceiling to prevent runaway 24/7 loops and infinite token spend.
+    /// Can be overridden or extended when explicit long-running batch tasks are queued.
     private var maxToolIterations: Int? {
-        nil
+        35
     }
     private let maxHistoryChars = 8_000_000
     private let maxMessageHistoryChars = 4_000_000
@@ -134,6 +133,7 @@ class AgentService: ObservableObject {
             self.aiClient.cancelStream()
             Task { @MainActor in
                 ACPHostService.shared.stopActiveAgent()
+                DevServerRegistry.shared.terminateAll()
             }
             self.isLoading = false
             self.agentPhase = .idle
@@ -1906,6 +1906,15 @@ class AgentService: ObservableObject {
             agentPhase = filesModified.isEmpty ? .thinking : .validating
         }
 
+        if let limit = toolIterationLimit, iteration >= limit, terminationNotice == nil {
+            let detail = "Reached maximum tool iteration safety limit (\(limit) steps). Pausing turn to protect API budget."
+            terminationNotice = detail
+            if !finalText.contains(detail) {
+                finalText += "\n\n⚠️ \(detail)"
+            }
+            logActivity(.info, detail)
+        }
+
         if isCancelled {
             let detail = "Generation was stopped by the user."
             terminationNotice = detail
@@ -2014,9 +2023,25 @@ class AgentService: ObservableObject {
         return false
     }
 
+    private func containsCompletionIndication(_ text: String) -> Bool {
+        let lower = text.lowercased()
+        let completionPhrases = [
+            "เรียบร้อยแล้ว", "เรียบร้อยครับ", "เรียบร้อยค่ะ", "เสร็จสิ้น", "สำเร็จแล้ว",
+            "พร้อมใช้งาน", "กำลังรันปกติ", "กำลังทำงานปกติ", "กำลังรันอยู่ที่", "รันอยู่ที่",
+            "เปิดใช้งานได้ที่", "สามารถเข้าชมได้ที่", "คลิกเปิด", "เสร็จเรียบร้อย", "ทำเสร็จแล้ว",
+            "already running", "is running at", "running at http", "is complete", "has completed",
+            "successfully built", "successfully started", "all set", "ready for use", "ready at",
+            "สรุปการทำงาน", "ผลการทดสอบผ่าน", "เสร็จสมบูรณ์"
+        ]
+        return completionPhrases.contains { lower.contains($0) }
+    }
+
     private func containsUnfinishedActionIntention(_ text: String) -> Bool {
         let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
         if trimmed.isEmpty || trimmed.contains("```") {
+            return false
+        }
+        if containsCompletionIndication(trimmed) {
             return false
         }
         let lower = trimmed.lowercased()
@@ -2206,6 +2231,9 @@ class AgentService: ObservableObject {
     }
 
     private func containsNativeWorkCommitment(_ text: String) -> Bool {
+        if containsCompletionIndication(text) {
+            return false
+        }
         let lower = text.lowercased()
         let commitments = [
             "will build", "will run", "will test", "building", "running", "compile now",
@@ -2213,7 +2241,7 @@ class AgentService: ObservableObject {
             "let me build", "let me run", "let me compile", "let me test", "let me execute",
             "i'll build", "i will build", "i'll run", "i will run", "i'll test", "i will test",
             "will execute with xcodebuild", "build with xcodebuild", "build with cargo", "build with gradle",
-            "จะ build", "จะรัน", "กำลัง build", "กำลังรัน", "เริ่ม build", "เริ่มรัน",
+            "จะ build", "จะรัน", "กำลัง build", "เริ่ม build", "เริ่มรัน",
             "build ทันที", "รันทันที", "ตรวจโครงสร้าง + build", "ตรวจโครงสร้างและ build",
             "ขอลอง build", "ขอลองรัน", "จะทำการ build", "จะทำการรัน"
         ]
@@ -2314,6 +2342,7 @@ class AgentService: ObservableObject {
     /// back to the user as a button.
     private func inferredWorkspaceAction(for content: String) -> AIToolCall? {
         guard let workspace = toolBox.workspaceRoot, !workspace.isEmpty else { return nil }
+        if containsCompletionIndication(content) { return nil }
         let lower = content.lowercased()
 
         let action: ProjectAction?
@@ -2357,6 +2386,16 @@ class AgentService: ObservableObject {
         }
         
         // 2. For WebApp projects, prioritize projectAction (.run) which starts dev server or open web preview
+        if DevServerRegistry.shared.hasRunningServer() {
+            if isWebProject {
+                return AIToolCall(
+                    id: UUID().uuidString,
+                    name: "preview_control",
+                    arguments: ["action": "open", "mode": "web", "url": "http://localhost:5173"]
+                )
+            }
+            return nil
+        }
         if let runAction = projectAction(.run) {
             return runAction
         }
