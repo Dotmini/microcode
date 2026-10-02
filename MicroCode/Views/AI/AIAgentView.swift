@@ -665,21 +665,24 @@ struct AIAgentView: View {
     private var headerBar: some View {
         VStack(spacing: 0) {
             GeometryReader { geo in
-                let isCompact = geo.size.width < 320
+                let isCompact = geo.size.width < 560
+                let isVeryCompact = geo.size.width < 380
                 
-                HStack(spacing: 10) {
+                HStack(spacing: 8) {
                     // Sidebar Toggle
                     if allowsChatSidebar {
                         Button(action: { agent.showChatSidebar.toggle() }) {
                             HStack(spacing: 4) {
                                 Image(systemName: "sidebar.left")
                                     .font(.system(size: 10))
-                                Text("History")
-                                    .font(.system(size: 11, weight: agent.showChatSidebar ? .semibold : .medium))
+                                if !isCompact {
+                                    Text("History")
+                                        .font(.system(size: 11, weight: agent.showChatSidebar ? .semibold : .medium))
+                                }
                             }
                             .foregroundColor(agent.showChatSidebar ? .primary : .secondary)
-                            .padding(.horizontal, 7)
-                            .padding(.vertical, 3.5)
+                            .padding(.horizontal, isCompact ? 6 : 7)
+                            .frame(height: 24)
                             .background(agent.showChatSidebar ? Color.primary.opacity(0.09) : Color.clear)
                             .cornerRadius(5)
                         }
@@ -693,21 +696,23 @@ struct AIAgentView: View {
                         planManager.clearPlan()
                         _ = agent.createNewChat(projectPath: agent.currentWorkspace ?? scopedWorkspacePath)
                     }) {
-                        HStack(spacing: 4) {
+                        HStack(spacing: 3) {
                             Image(systemName: "plus")
                                 .font(.system(size: 9.5, weight: .bold))
-                            Text("New Chat")
-                                .font(.system(size: 11, weight: .medium))
+                            if !isCompact {
+                                Text("New Chat")
+                                    .font(.system(size: 11, weight: .medium))
+                            }
                         }
                         .foregroundColor(.primary)
-                        .padding(.horizontal, 8)
-                        .padding(.vertical, 4)
+                        .padding(.horizontal, isCompact ? 6 : 8)
+                        .frame(height: 24)
                         .background(Color.primary.opacity(0.07))
                         .overlay(
-                            RoundedRectangle(cornerRadius: 6)
+                            RoundedRectangle(cornerRadius: 5)
                                 .stroke(Color.primary.opacity(0.14), lineWidth: 0.8)
                         )
-                        .cornerRadius(6)
+                        .cornerRadius(5)
                     }
                     .buttonStyle(.plain)
                     .help("Create New Chat (⌘N)")
@@ -735,7 +740,7 @@ struct AIAgentView: View {
                         }
                         .font(.system(size: 10, weight: teamIntegrations.teamTasksEnabled && TeamTaskService.shared.selectedTask != nil ? .semibold : .regular))
                         .foregroundColor(teamIntegrations.teamTasksEnabled && TeamTaskService.shared.selectedTask != nil ? .primary : .secondary)
-                        .frame(height: 26)
+                        .frame(height: 24)
                     }
                     .menuStyle(.borderlessButton)
                     .help("Configure Team tasks, Agent context, Slack, and Microsoft Teams") }
@@ -850,26 +855,25 @@ struct AIAgentView: View {
                                 Task { await deviceRuntime.refresh(workspace: appState.workspaceFolder) }
                             }
                         } label: {
-                            HStack(spacing: 4) {
+                            HStack(spacing: 3) {
                                 Image(systemName: "rectangle.portrait")
                                 if !isCompact { Text("Preview") }
                                 Image(systemName: "chevron.down")
-                                    .font(.system(size: 8, weight: .semibold))
+                                    .font(.system(size: 7, weight: .semibold))
                             }
                             .font(.system(size: 10))
                             .foregroundColor(.secondary)
-                            .frame(height: 26)
+                            .frame(height: 24)
                         }
                         .menuStyle(.borderlessButton)
                         .help("Choose an iPhone, iPad, Apple Watch, Apple TV, physical Apple device, or Android Preview")
                     }
                     
-                    Divider().frame(height: 16).padding(.horizontal, 2)
+                    Divider().frame(height: 14).padding(.horizontal, 2)
                     
-                    // Mode Tabs — responsive: icon-only when compact
                     // Mode Tabs — Primary Heroes (Chat, Plan, Task) + Sleek More Dropdown
                     HStack(spacing: 2) {
-                        modePill("Chat", isActive: !isPaperMode && !isCellMode && !isTaskMode && !isWalkthroughMode && !isPlanFullscreen, compact: isCompact) {
+                        modePill("Chat", icon: "bubble.left.and.bubble.right", isActive: !isPaperMode && !isCellMode && !isTaskMode && !isWalkthroughMode && !isPlanFullscreen, compact: isVeryCompact) {
                             withAnimation(.easeInOut(duration: 0.2)) {
                                 isPaperMode = false
                                 isCellMode = false
@@ -878,7 +882,7 @@ struct AIAgentView: View {
                                 isPlanFullscreen = false
                             }
                         }
-                        modePill("Plan", isActive: isPlanMode || planManager.isPlanVisible, compact: isCompact) {
+                        modePill("Plan", icon: "list.bullet.clipboard", isActive: isPlanMode || planManager.isPlanVisible, compact: isVeryCompact) {
                             withAnimation(.easeInOut(duration: 0.2)) {
                                 if isPlanMode || planManager.isPlanVisible {
                                     isPlanMode = false
@@ -897,7 +901,7 @@ struct AIAgentView: View {
                                 }
                             }
                         }
-                        modePill("Task", isActive: isTaskMode && activeTaskTab == 0, compact: isCompact) {
+                        modePill("Task", icon: "checklist", isActive: isTaskMode && activeTaskTab == 0, compact: isVeryCompact) {
                             withAnimation(.easeInOut(duration: 0.2)) {
                                 isTaskMode = true
                                 activeTaskTab = 0
@@ -1147,8 +1151,6 @@ struct AIAgentView: View {
             }
             .frame(height: 36)
             .background(paneColor)
-            
-            Divider()
         }
     }
 
@@ -1182,13 +1184,18 @@ struct AIAgentView: View {
         await deviceRuntime.startSelectedDevice()
     }
     
-    private func modePill(_ label: String, isActive: Bool, compact: Bool = false, action: @escaping () -> Void) -> some View {
+    private func modePill(_ label: String, icon: String? = nil, isActive: Bool, compact: Bool = false, action: @escaping () -> Void) -> some View {
         Button(action: { withAnimation(.easeInOut(duration: 0.2)) { action() } }) {
             HStack(spacing: 4) {
-                Text(compact ? String(label.prefix(1)) : label)
-                    .font(.system(size: 10, weight: isActive ? .semibold : .regular))
-                    .lineLimit(1)
-                    .fixedSize()
+                if let ic = icon, compact {
+                    Image(systemName: ic)
+                        .font(.system(size: 10))
+                } else {
+                    Text(label)
+                        .font(.system(size: 10, weight: isActive ? .semibold : .regular))
+                        .lineLimit(1)
+                        .fixedSize()
+                }
                 if label == "Plan", planManager.currentPlan?.approvalState == .pending {
                     Circle()
                         .fill(Color.orange)
@@ -1204,10 +1211,10 @@ struct AIAgentView: View {
                 }
             }
             .foregroundColor(isActive ? .primary : .secondary)
-            .padding(.horizontal, compact ? 7 : 8)
+            .padding(.horizontal, compact ? 6 : 8)
             .padding(.vertical, 4)
             .background(isActive ? Color.primary.opacity(0.09) : Color.clear)
-            .cornerRadius(3)
+            .cornerRadius(4)
         }
         .buttonStyle(.plain)
         .fixedSize()
@@ -1897,101 +1904,131 @@ struct AIAgentView: View {
     private var taskEditorView: some View {
         VStack(spacing: 0) {
             // Task Control Toolbar
-            HStack(spacing: 6) {
-                taskEditorTab("Checklist (task.md)", idx: 0)
-                taskEditorTab("Spec (agent.md)", idx: 1)
-                taskEditorTab("Walkthrough", idx: 2)
-                taskEditorTab("Diagnostic Logs", idx: 3, badge: agent.activityLog.count)
-                
-                if activeTaskTab == 0 {
-                    Divider().frame(height: 14).padding(.horizontal, 4).opacity(0.3)
-                    
-                    // View Mode Switcher
-                    Button(action: { withAnimation { taskViewMode = 0 } }) {
-                        HStack(spacing: 3) {
-                            Image(systemName: "checklist")
-                            Text("Checklist")
+            HStack(spacing: 8) {
+                // Scrollable Tabs so they never squeeze or overflow
+                ScrollView(.horizontal, showsIndicators: false) {
+                    HStack(spacing: 4) {
+                        taskEditorTab("Checklist", icon: "checklist", idx: 0)
+                        taskEditorTab("Spec", icon: "doc.text", idx: 1)
+                        taskEditorTab("Walkthrough", icon: "sparkles", idx: 2)
+                        taskEditorTab("Logs", icon: "terminal", idx: 3, badge: agent.activityLog.count)
+                        
+                        if activeTaskTab == 4 {
+                            taskEditorTab("Cost", icon: "chart.bar.xaxis", idx: 4)
+                        } else if activeTaskTab == 5 {
+                            taskEditorTab("Audit", icon: "airplane.circle", idx: 5)
+                        } else if activeTaskTab == 6 {
+                            taskEditorTab("Consensus", icon: "shield.checkered", idx: 6)
                         }
-                        .font(.system(size: 10, weight: taskViewMode == 0 ? .semibold : .regular))
-                        .foregroundColor(taskViewMode == 0 ? .primary : .secondary)
-                        .padding(.horizontal, 8)
-                        .padding(.vertical, 4)
-                        .background(taskViewMode == 0 ? Color.primary.opacity(0.08) : Color.clear)
-                        .cornerRadius(4)
                     }
-                    .buttonStyle(.plain)
-                    
-                    Button(action: { withAnimation { taskViewMode = 1 } }) {
-                        HStack(spacing: 3) {
-                            Image(systemName: "doc.plaintext")
-                            Text("Raw Markdown")
-                        }
-                        .font(.system(size: 10, weight: taskViewMode == 1 ? .semibold : .regular))
-                        .foregroundColor(taskViewMode == 1 ? .primary : .secondary)
-                        .padding(.horizontal, 8)
-                        .padding(.vertical, 4)
-                        .background(taskViewMode == 1 ? Color.primary.opacity(0.08) : Color.clear)
-                        .cornerRadius(4)
-                    }
-                    .buttonStyle(.plain)
+                    .padding(.vertical, 2)
                 }
                 
-                Spacer()
+                Spacer(minLength: 4)
                 
-                // Autonomous Execution Action
-                if activeTaskTab < 3 {
-                    if agent.isLoading {
-                        Button(action: { AgentService.shared.stopGeneration() }) {
-                            HStack(spacing: 4) {
-                                Image(systemName: "stop.fill")
-                                    .font(.system(size: 8))
-                                Text("Stop Task")
-                                    .font(.system(size: 10, weight: .medium))
+                // Trailing Action Controls (Fixed Size so they never collapse or distort)
+                HStack(spacing: 6) {
+                    if activeTaskTab == 0 {
+                        // Compact View Mode Switcher (Checklist vs Raw Markdown)
+                        HStack(spacing: 1) {
+                            Button(action: { withAnimation(.easeInOut(duration: 0.15)) { taskViewMode = 0 } }) {
+                                Image(systemName: "checklist")
+                                    .font(.system(size: 11, weight: taskViewMode == 0 ? .semibold : .regular))
+                                    .foregroundColor(taskViewMode == 0 ? .primary : .secondary)
+                                    .frame(width: 24, height: 22)
+                                    .background(taskViewMode == 0 ? Color.primary.opacity(0.12) : Color.clear)
+                                    .cornerRadius(4)
                             }
-                            .foregroundColor(.red.opacity(0.9))
-                            .padding(.horizontal, 8)
-                            .padding(.vertical, 4)
-                            .background(Color.red.opacity(0.12))
-                            .cornerRadius(4)
-                        }
-                        .buttonStyle(.plain)
-                    } else {
-                        Button(action: executeCurrentTaskPlan) {
-                            HStack(spacing: 4) {
-                                Image(systemName: "play.fill")
-                                    .font(.system(size: 8))
-                                Text("Run Task with Agent")
-                                    .font(.system(size: 10, weight: .medium))
+                            .buttonStyle(.plain)
+                            .help("Checklist View")
+                            
+                            Button(action: { withAnimation(.easeInOut(duration: 0.15)) { taskViewMode = 1 } }) {
+                                Image(systemName: "doc.plaintext")
+                                    .font(.system(size: 11, weight: taskViewMode == 1 ? .semibold : .regular))
+                                    .foregroundColor(taskViewMode == 1 ? .primary : .secondary)
+                                    .frame(width: 24, height: 22)
+                                    .background(taskViewMode == 1 ? Color.primary.opacity(0.12) : Color.clear)
+                                    .cornerRadius(4)
                             }
-                            .foregroundColor(.primary)
-                            .padding(.horizontal, 10)
-                            .padding(.vertical, 4)
-                            .background(Color.accentColor.opacity(0.2))
-                            .cornerRadius(4)
-                            .overlay(
-                                RoundedRectangle(cornerRadius: 4)
-                                    .stroke(Color.accentColor.opacity(0.4), lineWidth: 1)
-                            )
+                            .buttonStyle(.plain)
+                            .help("Raw Markdown View")
                         }
-                        .buttonStyle(.plain)
+                        .padding(2)
+                        .background(Color.primary.opacity(0.04))
+                        .cornerRadius(5)
+                        
+                        Divider().frame(height: 14).opacity(0.3)
                     }
                     
-                    // Save button (only for file editor tabs)
-                    Button(action: saveTaskFiles) {
-                        Text("Save")
-                            .font(.system(size: 10, weight: .medium))
+                    if activeTaskTab < 3 {
+                        if agent.isLoading {
+                            Button(action: { AgentService.shared.stopGeneration() }) {
+                                HStack(spacing: 4) {
+                                    Image(systemName: "stop.fill")
+                                        .font(.system(size: 8))
+                                    Text("Stop")
+                                        .font(.system(size: 10, weight: .semibold))
+                                        .lineLimit(1)
+                                }
+                                .foregroundColor(.red.opacity(0.95))
+                                .padding(.horizontal, 8)
+                                .frame(height: 22)
+                                .background(Color.red.opacity(0.12))
+                                .cornerRadius(4)
+                            }
+                            .buttonStyle(.plain)
+                            .fixedSize()
+                            .help("Stop Task Execution")
+                        } else {
+                            Button(action: executeCurrentTaskPlan) {
+                                HStack(spacing: 4) {
+                                    Image(systemName: "play.fill")
+                                        .font(.system(size: 8))
+                                    Text("Run")
+                                        .font(.system(size: 10, weight: .semibold))
+                                        .lineLimit(1)
+                                }
+                                .foregroundColor(.primary)
+                                .padding(.horizontal, 8)
+                                .frame(height: 22)
+                                .background(Color.accentColor.opacity(0.2))
+                                .cornerRadius(4)
+                                .overlay(
+                                    RoundedRectangle(cornerRadius: 4)
+                                        .stroke(Color.accentColor.opacity(0.4), lineWidth: 1)
+                                )
+                            }
+                            .buttonStyle(.plain)
+                            .fixedSize()
+                            .help("Run Task with Agent")
+                        }
+                        
+                        // Save button
+                        Button(action: saveTaskFiles) {
+                            HStack(spacing: 3) {
+                                Image(systemName: "arrow.down.doc")
+                                    .font(.system(size: 8.5))
+                                Text("Save")
+                                    .font(.system(size: 10, weight: .medium))
+                                    .lineLimit(1)
+                            }
                             .foregroundColor(.secondary)
-                            .padding(.horizontal, 8)
-                            .padding(.vertical, 4)
+                            .padding(.horizontal, 7)
+                            .frame(height: 22)
                             .background(Color.primary.opacity(0.06))
                             .cornerRadius(4)
+                        }
+                        .buttonStyle(.plain)
+                        .fixedSize()
+                        .help("Save Markdown Files")
                     }
-                    .buttonStyle(.plain)
                 }
+                .fixedSize()
             }
-            .padding(.horizontal, 12)
-            .padding(.vertical, 6)
+            .padding(.horizontal, 10)
+            .frame(height: 32)
             .background(panelBg)
+            .clipped()
             
             Divider().opacity(0.3)
             
@@ -2242,13 +2279,16 @@ struct AIAgentView: View {
         }
     }
     
-    private func taskEditorTab(_ label: String, idx: Int, badge: Int? = nil) -> some View {
-        Button(action: { withAnimation { activeTaskTab = idx } }) {
+    private func taskEditorTab(_ label: String, icon: String? = nil, idx: Int, badge: Int? = nil) -> some View {
+        Button(action: { withAnimation(.easeInOut(duration: 0.15)) { activeTaskTab = idx } }) {
             HStack(spacing: 4) {
+                if let ic = icon {
+                    Image(systemName: ic)
+                        .font(.system(size: 9))
+                }
                 Text(label)
-                    .font(.system(size: 10, weight: .medium, design: .monospaced))
+                    .font(.system(size: 10, weight: activeTaskTab == idx ? .semibold : .medium))
                     .lineLimit(1)
-                    .fixedSize()
                 if let b = badge, b > 0 {
                     Text("\(b)")
                         .font(.system(size: 8.5, weight: .bold, design: .monospaced))
@@ -2259,12 +2299,14 @@ struct AIAgentView: View {
                 }
             }
             .foregroundColor(activeTaskTab == idx ? .primary : .secondary)
-            .padding(.horizontal, 10)
-            .padding(.vertical, 5)
+            .padding(.horizontal, 8)
+            .frame(height: 22)
             .background(activeTaskTab == idx ? Color.primary.opacity(0.09) : Color.clear)
             .cornerRadius(4)
         }
         .buttonStyle(.plain)
+        .fixedSize()
+        .help("\(label) Tab")
     }
     
     private func loadTaskFiles() {
