@@ -25,8 +25,9 @@ struct MemoryEntry: Codable, Identifiable {
     let topic: String?
     let importance: Float  // 0.0 - 1.0
     let keywords: [String]
+    let projectPath: String?
     
-    init(content: String, chatId: String, role: String, topic: String? = nil, importance: Float = 0.5, embedding: [Float]? = nil) {
+    init(content: String, chatId: String, role: String, topic: String? = nil, importance: Float = 0.5, embedding: [Float]? = nil, projectPath: String? = nil) {
         self.id = UUID().uuidString
         self.content = content
         self.embedding = embedding ?? AgentMemoryService.textToEmbedding(content)
@@ -36,6 +37,7 @@ struct MemoryEntry: Codable, Identifiable {
         self.topic = topic ?? AgentMemoryService.detectTopic(content)
         self.importance = importance
         self.keywords = AgentMemoryService.extractKeywords(content)
+        self.projectPath = projectPath
     }
 }
 
@@ -116,7 +118,7 @@ class AgentMemoryService: ObservableObject {
     
     // MARK: - Store Memory
     
-    func storeMemory(content: String, chatId: String, role: String) {
+    func storeMemory(content: String, chatId: String, role: String, projectPath: String? = nil) {
         guard content.trimmingCharacters(in: .whitespacesAndNewlines).count > 10 else { return }
         let compactContent = boundedMemoryContent(content)
         
@@ -125,7 +127,7 @@ class AgentMemoryService: ObservableObject {
         
         Task {
             let embedding = await fetchEmbeddingFromBackend(compactContent)
-            let entry = MemoryEntry(content: compactContent, chatId: chatId, role: role, importance: importance, embedding: embedding)
+            let entry = MemoryEntry(content: compactContent, chatId: chatId, role: role, importance: importance, embedding: embedding, projectPath: projectPath)
             
             // Deduplicate: check if highly similar memory already exists
             let isDuplicate = memories.suffix(20).contains { existing in
@@ -166,7 +168,7 @@ class AgentMemoryService: ObservableObject {
     
     // MARK: - Recall Memories (Advanced)
     
-    func recallMemories(query: String, queryEmbedding: [Float]? = nil, limit: Int = 5, excludeChatId: String? = nil, includeCurrentChat: Bool = true) -> [MemoryEntry] {
+    func recallMemories(query: String, queryEmbedding: [Float]? = nil, limit: Int = 5, excludeChatId: String? = nil, includeCurrentChat: Bool = true, projectPath: String? = nil) -> [MemoryEntry] {
         guard !memories.isEmpty else { return [] }
         
         let queryVec = queryEmbedding ?? Self.textToEmbedding(query)
@@ -176,6 +178,14 @@ class AgentMemoryService: ObservableObject {
         var scored: [(MemoryEntry, Float)] = memories.compactMap { entry in
             if let excludeId = excludeChatId, entry.chatId == excludeId && !includeCurrentChat {
                 return nil
+            }
+            
+            // STRICT PROJECT ISOLATION:
+            // Do not recall memories belonging to a different project workspace!
+            if let targetProject = projectPath, let entryProject = entry.projectPath, !entryProject.isEmpty {
+                if entryProject != targetProject {
+                    return nil
+                }
             }
             
             // 1. Semantic similarity (cosine)
@@ -207,9 +217,9 @@ class AgentMemoryService: ObservableObject {
     
     // MARK: - Cross-Chat Recall
     
-    /// Recall memories from OTHER chats that might be relevant
-    func recallCrossChatMemories(query: String, queryEmbedding: [Float]? = nil, currentChatId: String, limit: Int = 3) -> [MemoryEntry] {
-        return recallMemories(query: query, queryEmbedding: queryEmbedding, limit: limit, excludeChatId: currentChatId, includeCurrentChat: false)
+    /// Recall memories from OTHER chats that might be relevant (strictly bounded to the same project)
+    func recallCrossChatMemories(query: String, queryEmbedding: [Float]? = nil, currentChatId: String, projectPath: String? = nil, limit: Int = 3) -> [MemoryEntry] {
+        return recallMemories(query: query, queryEmbedding: queryEmbedding, limit: limit, excludeChatId: currentChatId, includeCurrentChat: false, projectPath: projectPath)
     }
     
     /// Fetch high-fidelity BERT embeddings from the Rust backend (with local DJB2 fallback)

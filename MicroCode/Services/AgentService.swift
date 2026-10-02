@@ -371,6 +371,12 @@ class AgentService: ObservableObject {
                - Execute ready nodes with tool calls, and mark complete with `agent_plan(action: "complete")` only after verification passes.
                - Never mark a plan or task complete from prose alone.
             
+            ## Strict Multi-Project Isolation Mandate ("ห้ามมั่วข้าม Project เด็ดขาด")
+            - You are operating strictly inside the CURRENT ACTIVE PROJECT WORKSPACE: `\(toolBox.workspaceRoot ?? "No workspace")`.
+            - You MUST NEVER assume, mention, import, edit, or execute code or files belonging to another project, repository, or previous conversation!
+            - All relative file paths, tools (`file_read`, `replace_in_file`, `patch_file`, `file_write`, `list_directory_tree`, `grep_search`, `shell`), and compilation commands MUST execute exclusively within this project root.
+            - If you notice any reference to another codebase or unfamiliar files in older context, DISREGARD THEM and adhere strictly to the actual files present in this active project workspace.
+            
             ## Workflow: Modify Code
             1. file_read → 2. replace_in_file/patch_file → 3. shell (verify) → 4. Report
             
@@ -400,27 +406,39 @@ class AgentService: ObservableObject {
         // Editor/LSP context belongs only to the software agent. Scientific
         // requests use the scientific workspace index and explicit artifacts.
         if domain == .software, !isChatMode, let ctx = editorContext {
+            let wsRoot = toolBox.workspaceRoot
             var editorInfo = "\n\n## Editor"
-            if let file = ctx.activeFile { editorInfo += "\nFile: \(file)" }
-            if let lang = ctx.language { editorInfo += " (\(lang))" }
-            if let line = ctx.cursorLine { editorInfo += " L\(line)" }
-            if let sel = ctx.selectedText, !sel.isEmpty {
-                let compressed = tokenOptimizer.compressFileContent(sel, query: message, budget: 500)
-                editorInfo += "\nSelected:\n```\n\(compressed)\n```"
+            if let file = ctx.activeFile {
+                // Ensure activeFile belongs to the current workspace to avoid project bleed
+                if wsRoot == nil || file.hasPrefix(wsRoot!) {
+                    editorInfo += "\nFile: \(file)"
+                    if let lang = ctx.language { editorInfo += " (\(lang))" }
+                    if let line = ctx.cursorLine { editorInfo += " L\(line)" }
+                    if let sel = ctx.selectedText, !sel.isEmpty {
+                        let compressed = tokenOptimizer.compressFileContent(sel, query: message, budget: 500)
+                        editorInfo += "\nSelected:\n```\n\(compressed)\n```"
+                    }
+                    
+                    // Auto-inject LSP Diagnostics for the active file
+                    let uri = URL(fileURLWithPath: file).absoluteString
+                    if let diagnostics = LSPManager.shared.fileDiagnostics[uri], !diagnostics.isEmpty {
+                        editorInfo += "\n\n### Current File Diagnostics (LSP)\n"
+                        for diag in diagnostics.prefix(10) { // Limit to top 10 issues
+                            let sev = diag.severity == 1 ? "ERROR" : (diag.severity == 2 ? "WARN" : "INFO")
+                            editorInfo += "- [\(sev)] Line \(diag.range.start.line + 1): \(diag.message)\n"
+                        }
+                    }
+                }
             }
             if !ctx.openFiles.isEmpty {
-                editorInfo += "\nOpen: \(ctx.openFiles.suffix(5).map { URL(fileURLWithPath: $0).lastPathComponent }.joined(separator: ", "))"
-            }
-            
-            // Auto-inject LSP Diagnostics for the active file
-            if let file = ctx.activeFile {
-                let uri = URL(fileURLWithPath: file).absoluteString
-                if let diagnostics = LSPManager.shared.fileDiagnostics[uri], !diagnostics.isEmpty {
-                    editorInfo += "\n\n### Current File Diagnostics (LSP)\n"
-                    for diag in diagnostics.prefix(10) { // Limit to top 10 issues
-                        let sev = diag.severity == 1 ? "ERROR" : (diag.severity == 2 ? "WARN" : "INFO")
-                        editorInfo += "- [\(sev)] Line \(diag.range.start.line + 1): \(diag.message)\n"
-                    }
+                let relevantFiles: [String]
+                if let ws = wsRoot {
+                    relevantFiles = ctx.openFiles.filter { $0.hasPrefix(ws) }
+                } else {
+                    relevantFiles = ctx.openFiles
+                }
+                if !relevantFiles.isEmpty {
+                    editorInfo += "\nOpen: \(relevantFiles.suffix(5).map { URL(fileURLWithPath: $0).lastPathComponent }.joined(separator: ", "))"
                 }
             }
             
@@ -429,7 +447,8 @@ class AgentService: ObservableObject {
         
         // Workspace root is stored per session scope.
         if let root = toolBox.workspaceRoot {
-            prompt += "\n\nWorkspace: \(root)"
+            let projectName = URL(fileURLWithPath: root).lastPathComponent
+            prompt += "\n\n## Active Project Workspace\n- Project Name: \(projectName)\n- Absolute Root Path: \(root)\n- CRITICAL: Ground all operations strictly inside this project directory. Do not reference, assume, or modify other projects."
         }
 
         if domain == .science, let scienceProjectContext {
@@ -441,17 +460,31 @@ class AgentService: ObservableObject {
             prompt += "\n\n## Semantic Context\n\(semanticContext)"
         }
         
-        // Inject relevant memories (with cross-chat recall)
+        // Inject relevant memories (strictly scoped to current project workspace)
         if let chatId = activeChatId {
-            let currentChatMemories = memoryService.recallMemories(query: message, queryEmbedding: queryEmbedding, limit: 2, includeCurrentChat: true)
-            // Research evidence must never pull a remembered coding task (or
-            // another research project) into the current scientific chat.
-            let crossChatMemories = domain == .science
+            let ws = toolBox.workspaceRoot
+            let currentChatMemories = memoryService.recallMemories(
+                query: message,
+                queryEmbedding: queryEmbedding,
+                limit: 2,
+                includeCurrentChat: true,
+                projectPath: ws
+            )
+            // Cross-chat memories MUST strictly stay within the same project workspace!
+            // Never pull memories from another project into this project.
+            let crossChatMemories = (domain == .science || ws == nil)
                 ? []
-                : memoryService.recallCrossChatMemories(query: message, queryEmbedding: queryEmbedding, currentChatId: chatId, limit: 2)
+                : memoryService.recallCrossChatMemories(
+                    query: message,
+                    queryEmbedding: queryEmbedding,
+                    currentChatId: chatId,
+                    projectPath: ws,
+                    limit: 2
+                )
             let allMemories = currentChatMemories + crossChatMemories
             if !allMemories.isEmpty {
-                prompt += "\n\n## Memory\n\(memoryService.formatMemoriesForContext(allMemories, maxTokens: budget.maxContextTokens / 4))"
+                let projName = ws.map { URL(fileURLWithPath: $0).lastPathComponent } ?? "General"
+                prompt += "\n\n## Memory (Project Scope: \(projName))\n\(memoryService.formatMemoriesForContext(allMemories, maxTokens: budget.maxContextTokens / 4))"
             }
             let rollingSummary = memoryService.formatSummariesForContext(
                 chatId: chatId,
@@ -668,7 +701,11 @@ class AgentService: ObservableObject {
 
     func setWorkspace(_ path: String) {
         let didChangeWorkspace = toolBox.workspaceRoot != path
-        if didChangeWorkspace { cachedSemanticContext = nil }
+        if didChangeWorkspace {
+            cachedSemanticContext = nil
+            saveCurrentChatMessages()
+            saveChats()
+        }
         toolBox.workspaceRoot = path
         UserDefaults.standard.set(path, forKey: workspaceStorageKey)
 
@@ -695,6 +732,19 @@ class AgentService: ObservableObject {
         }
         if domain == .science, didChangeWorkspace {
             refreshScienceProjectContext()
+        }
+        
+        // Strict Multi-Project Isolation:
+        // Automatically switch or bind chat sessions to this workspace to prevent cross-project bleeding
+        if didChangeWorkspace && !path.isEmpty && activeScope == .editor {
+            let currentChat = chatSessions.first(where: { $0.id == activeChatId })
+            if currentChat?.projectPath != path {
+                if let matchingChat = chatSessions.first(where: { $0.projectPath == path }) {
+                    switchChat(to: matchingChat.id)
+                } else {
+                    _ = createNewChat(projectPath: path)
+                }
+            }
         }
     }
 
@@ -1062,9 +1112,9 @@ class AgentService: ObservableObject {
             messages.append(userMessage)
         }
         
-        // Store memory
+        // Store memory (strictly bounded to the active workspace)
         if let chatId = activeChatId {
-            memoryService.storeMemory(content: content, chatId: chatId, role: "user")
+            memoryService.storeMemory(content: content, chatId: chatId, role: "user", projectPath: toolBox.workspaceRoot)
             
             // Auto-rename generic task names ("Task X", "New Task") to the actual descriptive prompt
             if let idx = chatSessions.firstIndex(where: { $0.id == chatId }) {
@@ -1981,9 +2031,9 @@ class AgentService: ObservableObject {
             agentPhase = .idle
         }
         
-        // Store memory
+        // Store memory (strictly bounded to the active workspace)
         if let chatId = activeChatId {
-            memoryService.storeMemory(content: finalText, chatId: chatId, role: "assistant")
+            memoryService.storeMemory(content: finalText, chatId: chatId, role: "assistant", projectPath: toolBox.workspaceRoot)
         }
         if activeKernelRunID == kernelRunID, terminationNotice == nil {
             activeKernelRunID = nil
@@ -2794,7 +2844,7 @@ class AgentService: ObservableObject {
         UserDefaults.standard.set(chatId, forKey: activeChatStorageKey)
         
         // Restore project workspace if this chat has a specific projectPath
-        if let chatPath = chat.projectPath, !chatPath.isEmpty {
+        if let chatPath = chat.projectPath, !chatPath.isEmpty, toolBox.workspaceRoot != chatPath {
             setWorkspace(chatPath)
             NotificationCenter.default.post(name: NSNotification.Name("MicroCodeWorkspaceChanged"), object: chatPath)
         }

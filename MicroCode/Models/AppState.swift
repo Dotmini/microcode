@@ -1809,6 +1809,16 @@ class AppState: ObservableObject {
         self.workspaceFolder = url
         UserDefaults.standard.set(url.path, forKey: "lastWorkspacePath")
         Self.recordRecentWorkspace(url: url)
+        
+        // Project Isolation: Clear open files that do not belong to the newly opened project
+        let standardPath = url.standardizedFileURL.path
+        self.openFiles.removeAll { file in
+            !file.path.hasPrefix(standardPath)
+        }
+        if let cur = self.currentFile, !cur.path.hasPrefix(standardPath) {
+            self.currentFile = self.openFiles.first
+        }
+        
         AgentService.shared.setWorkspace(url.path)
         
         // Initialize MicroCode AI Core

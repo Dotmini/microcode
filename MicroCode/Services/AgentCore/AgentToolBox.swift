@@ -258,7 +258,8 @@ class AgentToolBox: ObservableObject {
             throw ToolBoxError.executionFailed("Open a workspace before accessing files")
         }
         guard WorkspacePathPolicy.contains(path, in: root) else {
-            throw ToolBoxError.executionFailed("Path is outside the active workspace. Access denied.")
+            let rootName = URL(fileURLWithPath: root).lastPathComponent
+            throw ToolBoxError.executionFailed("Strict Project Isolation Error: Path '\(path)' is outside the active project workspace '\(rootName)' (\(root)). AI is prohibited from modifying or reading files across different projects.")
         }
     }
 
