@@ -490,6 +490,7 @@ struct CostStatusWidget: View {
                 Text(tracker.formattedSessionCost())
                     .font(.system(size: 10, weight: .medium, design: .monospaced))
                     .foregroundColor(tracker.sessionCostUSD > 1.0 ? .orange.opacity(0.8) : .white.opacity(0.45))
+                    .lineLimit(1)
                 
                 Text("·")
                     .foregroundColor(.white.opacity(0.2))
@@ -497,14 +498,17 @@ struct CostStatusWidget: View {
                 Text(tracker.formattedSessionTokens())
                     .font(.system(size: 10, design: .monospaced))
                     .foregroundColor(.white.opacity(0.35))
+                    .lineLimit(1)
             }
             .padding(.horizontal, 6)
             .padding(.vertical, 2)
+            .frame(height: 20)
             .background(
                 Capsule()
                     .fill(Color(white: 0.08))
                     .overlay(Capsule().strokeBorder(Color.white.opacity(0.06), lineWidth: 0.5))
             )
+            .fixedSize()
             .help("Session: \(tracker.sessionRequests) requests · \(tracker.formattedSessionTokens()) tokens · \(tracker.formattedSessionCost())")
         }
     }
