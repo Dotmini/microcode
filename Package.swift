@@ -42,7 +42,8 @@ let package = Package(
                 "Views/Design/DesignToolbar.swift",
                 "Views/Design/PropertiesInspector.swift",
                 "Views/Design/DesignRulerView.swift",
-                "Services/DeviceMetalShaders.metal"
+                "Services/DeviceMetalShaders.metal",
+                "Services/MicroCore/MicroCore.swift"
             ],
             sources: [
                 "MicroCodeApp.swift",
@@ -360,14 +361,13 @@ let package = Package(
                 // Phase 1: Shadow Workspace Verification Pipeline
                 "Services/ShadowWorkspaceService.swift",
                 "Services/HierarchicalContextCompiler.swift",
-                "Services/AgentCore/ToolScope.swift",
                 // Phase 3: Telemetry-in-the-Loop
                 "Services/TelemetryIngestionService.swift",
                 // Phase 4: Datasheet-to-Code
                 "Services/HardwareRAGService.swift",
             ],
             resources: [
-                // .process("Views/Metal/Shaders.metal")
+                .process("Resources")
             ],
             swiftSettings: [
                 .unsafeFlags(["-strict-concurrency=minimal"])

@@ -31,14 +31,62 @@ pub enum StreamEvent {
 }
 
 use std::pin::Pin;
+use std::sync::Arc;
 use std::task::{Context, Poll};
 use tokio::process::Child;
+use tokio::sync::RwLock;
+use tracing::info;
+
+pub const DEFAULT_RUNNER_TIMEOUT_SECS: u64 = 300;
+
+static ACTIVE_PROCESSES: once_cell::sync::Lazy<Arc<RwLock<HashMap<String, u32>>>> =
+    once_cell::sync::Lazy::new(|| Arc::new(RwLock::new(HashMap::new())));
+
+pub async fn register_process(execution_id: String, pid: u32) {
+    let mut reg = ACTIVE_PROCESSES.write().await;
+    reg.insert(execution_id, pid);
+}
+
+pub async fn unregister_process(execution_id: &str) {
+    let mut reg = ACTIVE_PROCESSES.write().await;
+    reg.remove(execution_id);
+}
 
 // A stream that holds the Child process handle to prevent it from being dropped (and killed)
-// until the stream itself is dropped.
+// until the stream itself is dropped, while tracking its execution ID for stop operations.
 pub struct ProcessStream<S> {
     stream: S,
     _child: Child,
+    execution_id: Option<String>,
+}
+
+impl<S> ProcessStream<S> {
+    pub fn new(stream: S, child: Child) -> Self {
+        let execution_id = child.id().map(|pid| {
+            let id = pid.to_string();
+            let id_clone = id.clone();
+            tokio::spawn(async move {
+                register_process(id_clone, pid).await;
+            });
+            id
+        });
+        Self {
+            stream,
+            _child: child,
+            execution_id,
+        }
+    }
+}
+
+impl<S> Drop for ProcessStream<S> {
+    fn drop(&mut self) {
+        if let Some(ref id) = self.execution_id {
+            let id = id.clone();
+            tokio::spawn(async move {
+                unregister_process(&id).await;
+            });
+        }
+    }
 }
 
 impl<S: Stream + Unpin> Stream for ProcessStream<S> {
@@ -120,10 +168,7 @@ pub async fn execute_stream(
 
         let merged_stream = futures::stream::select(stdout_stream, stderr_stream);
 
-        return Ok(Box::pin(ProcessStream {
-            stream: merged_stream,
-            _child: child,
-        }));
+        return Ok(Box::pin(ProcessStream::new(merged_stream, child)));
     }
 
     let (program, args) = match lang_id.as_str() {
@@ -184,10 +229,7 @@ pub async fn execute_stream(
     let merged_stream = futures::stream::select(stdout_stream, stderr_stream);
 
     // Wrap the stream with the child handle to keep the process alive
-    Ok(Box::pin(ProcessStream {
-        stream: merged_stream,
-        _child: child,
-    }))
+    Ok(Box::pin(ProcessStream::new(merged_stream, child)))
 }
 
 /// Execute code in the specified language
@@ -251,11 +293,34 @@ pub async fn execute(
     })
 }
 
-/// Stop a running execution by ID
-pub async fn stop(_execution_id: &str) -> Result<()> {
-    // In a production system, you would maintain a registry of running processes
-    // and be able to kill them by ID
-    Err(AppError::NotImplemented("stop execution".to_string()))
+/// Stop a running execution by ID or PID
+pub async fn stop(execution_id: &str) -> Result<()> {
+    let mut reg = ACTIVE_PROCESSES.write().await;
+    let pid = if let Some(pid) = reg.remove(execution_id) {
+        Some(pid)
+    } else if let Ok(pid) = execution_id.parse::<u32>() {
+        Some(pid)
+    } else {
+        None
+    };
+
+    if let Some(pid) = pid {
+        #[cfg(unix)]
+        unsafe {
+            // Send SIGTERM, then SIGKILL to process and process group
+            libc::kill(-(pid as i32), libc::SIGTERM);
+            libc::kill(pid as i32, libc::SIGTERM);
+            libc::kill(-(pid as i32), libc::SIGKILL);
+            libc::kill(pid as i32, libc::SIGKILL);
+        }
+        info!("Successfully stopped execution {} (pid {})", execution_id, pid);
+        Ok(())
+    } else {
+        Err(AppError::NotFound(format!(
+            "Execution ID '{}' not found in active processes",
+            execution_id
+        )))
+    }
 }
 
 // Language-specific execution functions
@@ -328,7 +393,7 @@ if _plot_capture_enabled and plt.get_fignums():
         stderr_output.push('\n');
     }
 
-    let timeout_duration = std::time::Duration::from_secs(30);
+    let timeout_duration = std::time::Duration::from_secs(DEFAULT_RUNNER_TIMEOUT_SECS);
 
     let status_result = tokio::time::timeout(timeout_duration, child.wait()).await;
 
@@ -342,9 +407,10 @@ if _plot_capture_enabled and plt.get_fignums():
         }
         Err(_) => {
             let _ = child.kill().await;
-            return Err(AppError::ExecutionError(
-                "Execution timed out (30s limit)".to_string(),
-            ));
+            return Err(AppError::ExecutionError(format!(
+                "Execution timed out ({}s limit)",
+                DEFAULT_RUNNER_TIMEOUT_SECS
+            )));
         }
     };
 
@@ -390,7 +456,7 @@ async fn execute_javascript(code: &str, node_path: Option<String>) -> Result<Exe
         stderr_output.push('\n');
     }
 
-    let timeout_duration = std::time::Duration::from_secs(30);
+    let timeout_duration = std::time::Duration::from_secs(DEFAULT_RUNNER_TIMEOUT_SECS);
 
     let status_result = tokio::time::timeout(timeout_duration, child.wait()).await;
 
@@ -404,9 +470,10 @@ async fn execute_javascript(code: &str, node_path: Option<String>) -> Result<Exe
         }
         Err(_) => {
             let _ = child.kill().await;
-            return Err(AppError::ExecutionError(
-                "Execution timed out (30s limit)".to_string(),
-            ));
+            return Err(AppError::ExecutionError(format!(
+                "Execution timed out ({}s limit)",
+                DEFAULT_RUNNER_TIMEOUT_SECS
+            )));
         }
     };
 
@@ -458,7 +525,7 @@ async fn execute_typescript(code: &str, _node_path: Option<String>) -> Result<Ex
         stderr_output.push('\n');
     }
 
-    let timeout_duration = std::time::Duration::from_secs(30);
+    let timeout_duration = std::time::Duration::from_secs(DEFAULT_RUNNER_TIMEOUT_SECS);
     let status_result = tokio::time::timeout(timeout_duration, child.wait()).await;
 
     let status = match status_result {
@@ -471,9 +538,10 @@ async fn execute_typescript(code: &str, _node_path: Option<String>) -> Result<Ex
         }
         Err(_) => {
             let _ = child.kill().await;
-            return Err(AppError::ExecutionError(
-                "Execution timed out (30s limit)".to_string(),
-            ));
+            return Err(AppError::ExecutionError(format!(
+                "Execution timed out ({}s limit)",
+                DEFAULT_RUNNER_TIMEOUT_SECS
+            )));
         }
     };
 
@@ -521,7 +589,7 @@ async fn execute_d(code: &str) -> Result<ExecutionResult> {
         stderr_output.push('\n');
     }
 
-    let timeout_duration = std::time::Duration::from_secs(30);
+    let timeout_duration = std::time::Duration::from_secs(DEFAULT_RUNNER_TIMEOUT_SECS);
     let status_result = tokio::time::timeout(timeout_duration, child.wait()).await;
 
     let status = match status_result {
@@ -534,9 +602,10 @@ async fn execute_d(code: &str) -> Result<ExecutionResult> {
         }
         Err(_) => {
             let _ = child.kill().await;
-            return Err(AppError::ExecutionError(
-                "Execution timed out (30s limit)".to_string(),
-            ));
+            return Err(AppError::ExecutionError(format!(
+                "Execution timed out ({}s limit)",
+                DEFAULT_RUNNER_TIMEOUT_SECS
+            )));
         }
     };
 
@@ -881,7 +950,7 @@ async fn execute_ardium(code: &str) -> Result<ExecutionResult> {
         stderr_output.push('\n');
     }
 
-    let timeout_duration = std::time::Duration::from_secs(30);
+    let timeout_duration = std::time::Duration::from_secs(DEFAULT_RUNNER_TIMEOUT_SECS);
     let status_result = tokio::time::timeout(timeout_duration, child.wait()).await;
 
     let status = match status_result {
@@ -894,9 +963,10 @@ async fn execute_ardium(code: &str) -> Result<ExecutionResult> {
         }
         Err(_) => {
             let _ = child.kill().await;
-            return Err(AppError::ExecutionError(
-                "Execution timed out (30s limit)".to_string(),
-            ));
+            return Err(AppError::ExecutionError(format!(
+                "Execution timed out ({}s limit)",
+                DEFAULT_RUNNER_TIMEOUT_SECS
+            )));
         }
     };
 
@@ -986,7 +1056,7 @@ async fn execute_r(code: &str) -> Result<ExecutionResult> {
         stderr_output.push('\n');
     }
 
-    let timeout_duration = std::time::Duration::from_secs(60); // R can be slow with Tidyverse
+    let timeout_duration = std::time::Duration::from_secs(DEFAULT_RUNNER_TIMEOUT_SECS); // R can be slow with Tidyverse
     let status_result = tokio::time::timeout(timeout_duration, child.wait()).await;
 
     let status = match status_result {
@@ -999,9 +1069,10 @@ async fn execute_r(code: &str) -> Result<ExecutionResult> {
         }
         Err(_) => {
             let _ = child.kill().await;
-            return Err(AppError::ExecutionError(
-                "R execution timed out (60s limit)".to_string(),
-            ));
+            return Err(AppError::ExecutionError(format!(
+                "R execution timed out ({}s limit)",
+                DEFAULT_RUNNER_TIMEOUT_SECS
+            )));
         }
     };
 
@@ -1054,10 +1125,7 @@ async fn streaming_execute_r(
 
     let merged_stream = futures::stream::select(stdout_stream, stderr_stream);
 
-    Ok(Box::pin(ProcessStream {
-        stream: merged_stream,
-        _child: child,
-    }))
+    Ok(Box::pin(ProcessStream::new(merged_stream, child)))
 }
 
 /// Find Julia binary
@@ -1120,7 +1188,7 @@ async fn execute_julia(code: &str) -> Result<ExecutionResult> {
         stderr_output.push('\n');
     }
 
-    let timeout_duration = std::time::Duration::from_secs(60);
+    let timeout_duration = std::time::Duration::from_secs(DEFAULT_RUNNER_TIMEOUT_SECS);
     let status_result = tokio::time::timeout(timeout_duration, child.wait()).await;
 
     let status = match status_result {
@@ -1133,9 +1201,10 @@ async fn execute_julia(code: &str) -> Result<ExecutionResult> {
         }
         Err(_) => {
             let _ = child.kill().await;
-            return Err(AppError::ExecutionError(
-                "Julia execution timed out (60s limit)".to_string(),
-            ));
+            return Err(AppError::ExecutionError(format!(
+                "Julia execution timed out ({}s limit)",
+                DEFAULT_RUNNER_TIMEOUT_SECS
+            )));
         }
     };
 
@@ -1181,10 +1250,7 @@ async fn streaming_execute_custom(
 
     let merged_stream = futures::stream::select(stdout_stream, stderr_stream);
 
-    Ok(Box::pin(ProcessStream {
-        stream: merged_stream,
-        _child: child,
-    }))
+    Ok(Box::pin(ProcessStream::new(merged_stream, child)))
 }
 
 async fn execute_rmarkdown(code: &str) -> Result<ExecutionResult> {
@@ -1590,10 +1656,7 @@ async fn streaming_execute_compilation_lang(
 
     let merged_stream = futures::stream::select(stdout_stream, stderr_stream);
 
-    Ok(Box::pin(ProcessStream {
-        stream: merged_stream,
-        _child: child,
-    }))
+    Ok(Box::pin(ProcessStream::new(merged_stream, child)))
 }
 
 // ============================================================================
