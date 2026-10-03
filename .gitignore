@@ -130,3 +130,18 @@ microcode-experiment/
 
 bin/
 AeroteqProd/
+
+# Additional credential/key material (pentest hardening)
+*.p12
+*.pfx
+*.p8
+*.jks
+*.keystore
+*.mobileprovision
+GoogleService-Info.plist
+google-services.json
+*service-account*.json
+.npmrc
+.netrc
+id_rsa*
+id_ed25519*
