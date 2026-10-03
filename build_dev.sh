@@ -3,15 +3,22 @@ set -e
 
 # Parse arguments
 BUNDLE_RUNTIMES=false
+BUNDLE_SECRETS=false
 while [[ $# -gt 0 ]]; do
     case $1 in
         --with-runtimes)
             BUNDLE_RUNTIMES=true
             shift
             ;;
+        --with-secrets)
+            # Opt-in only: embeds local Secrets.plist (API keys) into the .app.
+            # Never distribute a bundle built with this flag.
+            BUNDLE_SECRETS=true
+            shift
+            ;;
         *)
             echo "Unknown option: $1"
-            echo "Usage: ./build_dev.sh [--with-runtimes]"
+            echo "Usage: ./build_dev.sh [--with-runtimes] [--with-secrets]"
             exit 1
             ;;
     esac
@@ -163,8 +170,8 @@ if [ -f "MicroCOdeDoogleIcon.png" ]; then
     echo "   Copying logo..."
     cp "MicroCOdeDoogleIcon.png" "$BUNDLE_NAME/Contents/Resources/"
 fi
-if [ -f "Secrets.plist" ]; then
-    echo "   Copying Secrets.plist..."
+if [ "$BUNDLE_SECRETS" = true ] && [ -f "Secrets.plist" ]; then
+    echo "   ⚠️  Copying Secrets.plist (--with-secrets): do NOT distribute this bundle"
     cp "Secrets.plist" "$BUNDLE_NAME/Contents/Resources/"
 fi
 if [ -f "mcp-server.py" ]; then
