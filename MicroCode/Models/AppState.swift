@@ -1351,25 +1351,37 @@ class AppState: ObservableObject {
             }
         }
         
-        // Start the backend server automatically
-        Task {
+        // Start the backend server and AI catalog on background queue with gentle staggering
+        // This ensures cold-launch idle memory stays <= 50MB and prevents startup UI stutter.
+        Task.detached(priority: .background) { [weak self] in
+            // Allow initial UI render to settle before running background services
+            try? await Task.sleep(nanoseconds: 2_500_000_000)
+            
             await AIModelCatalog.shared.refreshLiveProviderModels()
-            let refreshedAI = AIModelCatalog.shared.normalizedSelection(provider: aiProvider, model: aiModel)
-            if refreshedAI.provider != aiProvider || refreshedAI.model != aiModel {
-                aiProvider = refreshedAI.provider
-                aiModel = refreshedAI.model
-                saveSettings()
+            await MainActor.run {
+                guard let self else { return }
+                let refreshedAI = AIModelCatalog.shared.normalizedSelection(provider: self.aiProvider, model: self.aiModel)
+                if refreshedAI.provider != self.aiProvider || refreshedAI.model != self.aiModel {
+                    self.aiProvider = refreshedAI.provider
+                    self.aiModel = refreshedAI.model
+                    self.saveSettings()
+                }
             }
+            
             do {
-                print("🚀 Starting backend server...")
+                print("🚀 Starting backend server (staggered background startup)...")
                 try await BackendService.shared.startBackend()
                 ArdiumLSPService.shared.start() // Start Ardium LSP
                 print("✅ Backend server started successfully on port 3000")
-                checkDerivedDataSize() // Initial check
             } catch {
                 print("⚠️ Failed to start backend server: \(error.localizedDescription)")
                 print("   Some features (.NET, ML Training) will not be available.")
-                // Continue even if backend fails - some features will work without it
+            }
+            
+            // Defer DerivedData size check by 12s to eliminate startup disk I/O
+            try? await Task.sleep(nanoseconds: 12_000_000_000)
+            await MainActor.run {
+                self?.checkDerivedDataSize()
             }
         }
     }
@@ -1824,9 +1836,13 @@ class AppState: ObservableObject {
         // Initialize MicroCode AI Core
         self.microCodeService = MicroCodeService(workspacePath: url.path)
         
-        // Auto-start MCP Server
-        Task { @MainActor in
-            MCPServer.shared.start(workspace: url.path)
+        // Deferred MCP Server startup (staggered to avoid idle RAM bloating)
+        Task.detached(priority: .background) { [weak self] in
+            try? await Task.sleep(nanoseconds: 5_000_000_000)
+            await MainActor.run {
+                guard let self = self, self.workspaceLoadGeneration == loadGeneration else { return }
+                MCPServer.shared.start(workspace: url.path)
+            }
         }
         
         // Sync AI Provider Auth keys to AppState
@@ -2410,13 +2426,55 @@ class AppState: ObservableObject {
 
     func selectFile(at index: Int) {
         guard index >= 0 && index < openFiles.count else { return }
+        openFiles[index].decompress()
         currentFileIndex = index
         currentFile = openFiles[index]
+        IdleStateCompactor.shared.recordActivity()
     }
 
     func selectFile(_ file: CodeFile) {
         if let index = openFiles.firstIndex(where: { $0.id == file.id }) {
             selectFile(at: index)
+        }
+    }
+
+    // MARK: - State Compression & Idle Memory Compaction
+
+    /// Compresses inactive open file tabs and trims bloated logs during idle to maintain <= 50MB RAM footprint.
+    @MainActor
+    func compressInactiveFiles() -> Int {
+        var savedBytes = 0
+        let currentIndex = self.currentFileIndex
+        for i in 0..<openFiles.count {
+            if i != currentIndex {
+                let uncompressedCount = openFiles[i].content.utf8.count
+                if uncompressedCount > 512 && !openFiles[i].isCompressed {
+                    openFiles[i].compress()
+                    let compressedCount = openFiles[i].compressedByteSize
+                    savedBytes += max(0, uncompressedCount - compressedCount)
+                }
+            } else {
+                openFiles[i].decompress()
+            }
+        }
+        
+        // Compact console output if excessively long
+        if consoleOutput.count > 50_000 {
+            let keep = String(consoleOutput.suffix(15_000))
+            savedBytes += (consoleOutput.count - keep.count)
+            consoleOutput = "[Earlier logs compacted during idle]...\n" + keep
+        }
+        
+        return savedBytes
+    }
+
+    /// Decompresses the currently active file tab when user touches or interacts with the app.
+    @MainActor
+    func decompressActiveFile() {
+        let index = currentFileIndex
+        if index >= 0 && index < openFiles.count {
+            openFiles[index].decompress()
+            currentFile = openFiles[index]
         }
     }
 
@@ -4734,13 +4792,79 @@ struct CodeFile: Identifiable, Equatable {
     let id: UUID
     var name: String
     var path: String
-    var content: String
+    private var _content: String
+    private var _compressedData: Data?
     var language: String
     var isUnsaved: Bool
     var isReadOnly: Bool = false
     var usesPlainTextMode: Bool = false
     var originalByteSize: Int = 0
     var isTruncated: Bool = false
+
+    var isCompressed: Bool {
+        _compressedData != nil && _content.isEmpty
+    }
+
+    var compressedByteSize: Int {
+        _compressedData?.count ?? _content.utf8.count
+    }
+
+    var content: String {
+        get {
+            if !_content.isEmpty {
+                return _content
+            }
+            if let data = _compressedData, let decompressed = StateCompressionEngine.decompressString(data) {
+                return decompressed
+            }
+            return _content
+        }
+        set {
+            _content = newValue
+            _compressedData = nil
+        }
+    }
+
+    init(
+        id: UUID = UUID(),
+        name: String,
+        path: String,
+        content: String,
+        language: String,
+        isUnsaved: Bool,
+        isReadOnly: Bool = false,
+        usesPlainTextMode: Bool = false,
+        originalByteSize: Int = 0,
+        isTruncated: Bool = false
+    ) {
+        self.id = id
+        self.name = name
+        self.path = path
+        self._content = content
+        self._compressedData = nil
+        self.language = language
+        self.isUnsaved = isUnsaved
+        self.isReadOnly = isReadOnly
+        self.usesPlainTextMode = usesPlainTextMode
+        self.originalByteSize = originalByteSize
+        self.isTruncated = isTruncated
+    }
+
+    mutating func compress() {
+        guard !_content.isEmpty, _content.utf8.count > 256 else { return }
+        if let compressed = StateCompressionEngine.compressString(_content) {
+            _compressedData = compressed
+            _content = ""
+        }
+    }
+
+    mutating func decompress() {
+        guard let data = _compressedData else { return }
+        if let decompressed = StateCompressionEngine.decompressString(data) {
+            _content = decompressed
+            _compressedData = nil
+        }
+    }
 
     static func == (lhs: CodeFile, rhs: CodeFile) -> Bool {
         lhs.id == rhs.id

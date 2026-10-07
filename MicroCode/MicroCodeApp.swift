@@ -27,8 +27,6 @@ struct MicroCodeApp: App {
         // signals and exceptions during startup are recorded too.
         CrashReporter.shared.install()
         CrashReporter.shared.breadcrumb("MicroCodeApp.init")
-        _ = AIModelCatalog.shared
-        _ = LocalEcosystemDiscovery.shared
     }
 
     var body: some Scene {
@@ -40,6 +38,9 @@ struct MicroCodeApp: App {
                 .onAppear {
                     // Critical: Perform window setup on main thread
                     setupWindow()
+                    
+                    // Activate Idle State Compactor for <= 50MB RAM management
+                    IdleStateCompactor.shared.startMonitoring()
                     
                     // Defer heavy non-critical setup to background
                     Task.detached(priority: .background) {
@@ -94,16 +95,19 @@ struct MicroCodeApp: App {
     }
     
     private func performBackgroundStartup() async {
-        // Warm up critical services
-        _ = PreviewService.shared
-        _ = AuthService.shared
-        _ = AutoHealerService.shared
-        
-        // Start Local MCP & HTTP Daemon Bridge for Omni AI
-        MCPServer.shared.startLocalHttpBridge(port: 18888)
-        
-        // Background refresh of live models & local ecosystem engines
-        Task.detached(priority: .utility) {
+        // Stagger background warmup to allow cold-launch first frame to stay under 50MB RAM
+        Task.detached(priority: .background) {
+            try? await Task.sleep(nanoseconds: 2_000_000_000) // 2s deferral
+            
+            _ = PreviewService.shared
+            _ = AuthService.shared
+            _ = AutoHealerService.shared
+            _ = LocalEcosystemDiscovery.shared
+            
+            // Start Local MCP & HTTP Daemon Bridge for Omni AI on low-priority thread
+            MCPServer.shared.startLocalHttpBridge(port: 18888)
+            
+            // Background refresh of live models & local ecosystem engines
             await AIModelCatalog.shared.refreshIfNeeded(force: false)
         }
         

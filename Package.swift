@@ -194,6 +194,8 @@ let package = Package(
                 "Services/ContainerService.swift",
                 "Views/ContainerView.swift",
                 "Services/PerformanceManager.swift",
+                "Services/StateCompressionEngine.swift",
+                "Services/IdleStateCompactor.swift",
                 "Services/PreviewService.swift",
                 "Views/PreviewView.swift",
                 "Views/Components/ToolWindowWrapper.swift",

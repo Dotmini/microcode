@@ -126,6 +126,7 @@ public struct DirtyRegion: Sendable {
 /// Caches tokenization results per line for incremental updates.
 /// Thread-safe for concurrent access.
 public final class SyntaxCache: @unchecked Sendable {
+    public static let shared = SyntaxCache()
     
     /// Cache entries indexed by line number
     private var cache: [Int: LineCacheEntry] = [:]
@@ -357,6 +358,17 @@ public final class SyntaxCache: @unchecked Sendable {
         
         cache.removeAll()
         dirtyRegions.removeAll()
+        _flattenedTokens = nil
+    }
+    
+    /// Purge memory completely without keeping capacity
+    public func purgeMemory() {
+        lock.lock()
+        defer { lock.unlock() }
+        
+        cache.removeAll(keepingCapacity: false)
+        dirtyRegions.removeAll(keepingCapacity: false)
+        _flattenedTokens = nil
     }
     
     /// Initialize cache for a new document
