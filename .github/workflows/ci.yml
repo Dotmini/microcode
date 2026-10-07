@@ -632,10 +632,17 @@ jobs:
 
       - name: 🚀 Sync New Release to microcode.dotmini.net
         if: ${{ needs.release.result == 'success' }}
+        env:
+          SYNC_SECRET: ${{ secrets.RELEASE_SYNC_SECRET }}
         run: |
-          # Non-fatal: a website sync problem must not fail a published release,
-          # but surface it as a warning instead of hiding it.
+          # Secure release sync: passes encrypted token via Authorization header over TLS
+          AUTH_HEADER=""
+          if [ -n "$SYNC_SECRET" ]; then
+            AUTH_HEADER="Authorization: Bearer $SYNC_SECRET"
+          fi
           if ! curl -fsSL --max-time 30 --retry 2 --retry-delay 5 \
-                -X POST https://microcode.dotmini.net/api/release/sync-github; then
+                -X POST \
+                ${AUTH_HEADER:+-H "$AUTH_HEADER"} \
+                https://microcode.dotmini.net/api/release/sync-github; then
             echo "::warning::microcode.dotmini.net release sync failed; sync manually."
           fi
