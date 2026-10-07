@@ -1235,7 +1235,6 @@ enum XcodeNavigatorTab: Int, CaseIterable {
     case sourceControl = 1
     case search = 2
     case issues = 3
-    case recent = 4
 
     var icon: String {
         switch self {
@@ -1243,7 +1242,6 @@ enum XcodeNavigatorTab: Int, CaseIterable {
         case .sourceControl: return "arrow.triangle.branch"
         case .search: return "magnifyingglass"
         case .issues: return "exclamationmark.triangle"
-        case .recent: return "clock"
         }
     }
 
@@ -1253,7 +1251,6 @@ enum XcodeNavigatorTab: Int, CaseIterable {
         case .sourceControl: return "Source Control"
         case .search: return "Search in Workspace"
         case .issues: return "Issue Navigator"
-        case .recent: return "Recent Projects & Files"
         }
     }
 }
@@ -1300,8 +1297,6 @@ struct XcodeEditorSidebar: View {
                     searchNavigatorContent
                 case .issues:
                     issuesNavigatorContent
-                case .recent:
-                    recentNavigatorContent
                 }
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity)
@@ -1327,7 +1322,7 @@ struct XcodeEditorSidebar: View {
 
     private var navigatorTabBar: some View {
         HStack(spacing: 2) {
-            Spacer().frame(width: 64)
+            Spacer().frame(width: 68)
             ForEach(XcodeNavigatorTab.allCases, id: \.self) { tab in
                 Button {
                     withAnimation(.easeInOut(duration: 0.12)) {
@@ -1346,9 +1341,10 @@ struct XcodeEditorSidebar: View {
             }
             Spacer()
         }
-        .padding(.horizontal, 4)
-        .padding(.top, 7)
-        .padding(.bottom, 5)
+        .padding(.leading, 0)
+        .padding(.trailing, 4)
+        .padding(.top, 4)
+        .padding(.bottom, 4)
     }
 
     // MARK: - Project Header Bar
