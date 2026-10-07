@@ -137,6 +137,7 @@ class AgentService: ObservableObject {
             }
             self.isLoading = false
             self.agentPhase = .idle
+            IdleStateCompactor.shared.performAIWorkloadCompaction()
             self.currentToolExecution = nil
             self.logActivity(.info, "Generation stopped by user")
             if let runID = self.activeKernelRunID {
@@ -1136,6 +1137,7 @@ class AgentService: ObservableObject {
             agentPhase = .idle
             saveArx()
             saveChats()
+            IdleStateCompactor.shared.performAIWorkloadCompaction()
             objectWillChange.send()
             // Auto-process queue
             Task { @MainActor in
@@ -1295,6 +1297,7 @@ class AgentService: ObservableObject {
             
             // Stream the response
             var streamedText = ""
+            streamedText.reserveCapacity(16384)
             var receivedToolCalls: [AIToolCall] = []
             var modelError: String?
             
@@ -1324,6 +1327,7 @@ class AgentService: ObservableObject {
                 let result = await withCheckedContinuation { (continuation: CheckedContinuation<(String, [AIToolCall], String?), Never>) in
                     var toolCalls: [AIToolCall] = []
                     var text = finalText.isEmpty ? "" : finalText + "\n\n"
+                    text.reserveCapacity(max(16384, text.count + 4096))
                     let prefixLength = text.count
                     
                     aiClient.sendMessage(
@@ -3425,10 +3429,36 @@ struct AgentMessageData: Codable, Identifiable {
 struct AgentMessageModel: Identifiable {
     let id: String
     let role: MessageRole
-    let content: String
+    private let rawContent: String?
+    private let compressedContent: Data?
     let toolResults: [ToolResultModel]
     let pendingChanges: [PendingChangeModel]
     let timestamp: Date
+    
+    var content: String {
+        if let raw = rawContent { return raw }
+        if let comp = compressedContent, let decomp = StateCompressionEngine.decompressString(comp) {
+            return decomp
+        }
+        return ""
+    }
+    
+    init(id: String, role: MessageRole, content: String, toolResults: [ToolResultModel] = [], pendingChanges: [PendingChangeModel] = [], timestamp: Date = Date()) {
+        self.id = id
+        self.role = role
+        self.toolResults = toolResults
+        self.pendingChanges = pendingChanges
+        self.timestamp = timestamp
+        
+        // Transparent Apple Silicon LZFSE compression for non-streaming messages > 1KB
+        if id != "streaming" && content.utf8.count > 1024, let comp = StateCompressionEngine.compressString(content) {
+            self.compressedContent = comp
+            self.rawContent = nil
+        } else {
+            self.rawContent = content
+            self.compressedContent = nil
+        }
+    }
     
     enum MessageRole: String, Codable {
         case user, assistant, system, tool
@@ -3440,8 +3470,34 @@ struct ToolResultModel {
     let toolName: String
     var toolParams: [String: Any]? = nil
     let success: Bool
-    let output: String
+    private let rawOutput: String?
+    private let compressedOutput: Data?
     let error: String?
+    
+    var output: String {
+        if let raw = rawOutput { return raw }
+        if let comp = compressedOutput, let decomp = StateCompressionEngine.decompressString(comp) {
+            return decomp
+        }
+        return ""
+    }
+    
+    init(toolCallId: String, toolName: String, toolParams: [String: Any]? = nil, success: Bool, output: String, error: String? = nil) {
+        self.toolCallId = toolCallId
+        self.toolName = toolName
+        self.toolParams = toolParams
+        self.success = success
+        self.error = error
+        
+        // Transparent Apple Silicon LZFSE compression for tool outputs > 512B
+        if output.utf8.count > 512, let comp = StateCompressionEngine.compressString(output) {
+            self.compressedOutput = comp
+            self.rawOutput = nil
+        } else {
+            self.rawOutput = output
+            self.compressedOutput = nil
+        }
+    }
 }
 
 struct PendingChangeModel: Identifiable, Equatable {
@@ -3450,9 +3506,62 @@ struct PendingChangeModel: Identifiable, Equatable {
     let description: String
     let additions: Int
     let deletions: Int
-    let oldContent: String
-    let newContent: String
+    private let rawOldContent: String?
+    private let compressedOldContent: Data?
+    private let rawNewContent: String?
+    private let compressedNewContent: Data?
     var status: PendingChangeStatus
+    
+    var oldContent: String {
+        if let raw = rawOldContent { return raw }
+        if let comp = compressedOldContent, let decomp = StateCompressionEngine.decompressString(comp) {
+            return decomp
+        }
+        return ""
+    }
+    
+    var newContent: String {
+        if let raw = rawNewContent { return raw }
+        if let comp = compressedNewContent, let decomp = StateCompressionEngine.decompressString(comp) {
+            return decomp
+        }
+        return ""
+    }
+    
+    init(id: String, filePath: String, description: String, additions: Int, deletions: Int, oldContent: String, newContent: String, status: PendingChangeStatus) {
+        self.id = id
+        self.filePath = filePath
+        self.description = description
+        self.additions = additions
+        self.deletions = deletions
+        self.status = status
+        
+        if oldContent.utf8.count > 512, let comp = StateCompressionEngine.compressString(oldContent) {
+            self.compressedOldContent = comp
+            self.rawOldContent = nil
+        } else {
+            self.rawOldContent = oldContent
+            self.compressedOldContent = nil
+        }
+        
+        if newContent.utf8.count > 512, let comp = StateCompressionEngine.compressString(newContent) {
+            self.compressedNewContent = comp
+            self.rawNewContent = nil
+        } else {
+            self.rawNewContent = newContent
+            self.compressedNewContent = nil
+        }
+    }
+    
+    static func == (lhs: PendingChangeModel, rhs: PendingChangeModel) -> Bool {
+        return lhs.id == rhs.id &&
+               lhs.filePath == rhs.filePath &&
+               lhs.status == rhs.status &&
+               lhs.additions == rhs.additions &&
+               lhs.deletions == rhs.deletions &&
+               lhs.oldContent == rhs.oldContent &&
+               lhs.newContent == rhs.newContent
+    }
     
     enum PendingChangeStatus: Equatable {
         case pending, accepted, rejected

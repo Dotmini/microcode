@@ -2448,7 +2448,7 @@ class AppState: ObservableObject {
         for i in 0..<openFiles.count {
             if i != currentIndex {
                 let uncompressedCount = openFiles[i].content.utf8.count
-                if uncompressedCount > 512 && !openFiles[i].isCompressed {
+                if uncompressedCount > 256 && !openFiles[i].isCompressed {
                     openFiles[i].compress()
                     let compressedCount = openFiles[i].compressedByteSize
                     savedBytes += max(0, uncompressedCount - compressedCount)
@@ -2458,11 +2458,18 @@ class AppState: ObservableObject {
             }
         }
         
-        // Compact console output if excessively long
-        if consoleOutput.count > 50_000 {
-            let keep = String(consoleOutput.suffix(15_000))
+        // Compact console output if long
+        if consoleOutput.count > 10_000 {
+            let keep = String(consoleOutput.suffix(3_000))
             savedBytes += (consoleOutput.count - keep.count)
             consoleOutput = "[Earlier logs compacted during idle]...\n" + keep
+        }
+        
+        // Compact cached git diff if oversized
+        if gitDiff.count > 20_000 {
+            let keep = String(gitDiff.prefix(5_000))
+            savedBytes += (gitDiff.count - keep.count)
+            gitDiff = keep + "\n\n... [Diff preview compacted for performance]"
         }
         
         return savedBytes

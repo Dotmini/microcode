@@ -103,16 +103,23 @@ public final class IdleStateCompactor: ObservableObject {
                 bytesSaved += await appState.compressInactiveFiles()
             }
             
-            // 2. Clear syntax highlight line caches (recomputed lazily when scrolling)
+            // 2. Purge cached NSScrollViews and NSTextViews for closed or hidden tabs
+            await MainActor.run {
+                SyntaxHighlightedCodeView.purgeNonVisibleViewCache()
+                CATransaction.begin()
+                CATransaction.flush()
+                CATransaction.commit()
+                NSGraphicsContext.current?.flushGraphics()
+            }
+            
+            // 3. Clear syntax highlight line caches
             SyntaxCache.shared.purgeMemory()
             
-            // 3. Purge system and network image/URL caches
+            // 4. Purge system and network image/URL caches
             URLCache.shared.removeAllCachedResponses()
             
-            // 4. Instruct Darwin kernel to release dirty heap pages back to macOS
-            #if os(macOS)
-            malloc_zone_pressure_relief(malloc_default_zone(), 0)
-            #endif
+            // 5. Instruct Darwin kernel to release dirty heap pages across ALL malloc zones back to macOS
+            Self.relieveAllMallocZones()
             
             let residentMemory = await PerformanceManager.shared.getResidentMemory()
             
@@ -124,5 +131,35 @@ public final class IdleStateCompactor: ObservableObject {
                 os_log(.info, log: .performance, "🍃 Idle Memory Compaction complete: Resident RAM is %{public}llu bytes, compressed %{public}d bytes", residentMemory, bytesSaved)
             }
         }
+    }
+    
+    /// Immediate compaction called after AI assistant streaming and tool executions complete.
+    /// Prevents AI context and tool output from ballooning memory.
+    public nonisolated func performAIWorkloadCompaction() {
+        Task.detached(priority: .background) {
+            autoreleasepool {
+                Self.relieveAllMallocZones()
+                URLCache.shared.removeAllCachedResponses()
+            }
+        }
+    }
+    
+    /// Relieves memory pressure across all active Darwin malloc zones and purgeable memory.
+    public nonisolated static func relieveAllMallocZones() {
+        #if os(macOS)
+        var count: UInt32 = 0
+        var zonesList: UnsafeMutablePointer<vm_address_t>?
+        if malloc_get_all_zones(mach_task_self_, nil, &zonesList, &count) == KERN_SUCCESS, let zonesList = zonesList {
+            for i in 0..<Int(count) {
+                let address = zonesList[i]
+                if let zone = UnsafeMutablePointer<malloc_zone_t>(bitPattern: UInt(address)) {
+                    malloc_zone_pressure_relief(zone, 0)
+                }
+            }
+        }
+        if let purgeableZone = malloc_default_purgeable_zone() {
+            malloc_zone_pressure_relief(purgeableZone, 0)
+        }
+        #endif
     }
 }

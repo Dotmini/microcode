@@ -179,6 +179,17 @@ public final class SyntaxHighlightingEngine: @unchecked Sendable {
     /// Lock for thread safety
     private let lock = NSLock()
     
+    /// Purges idle and inactive lexer and line caches to save memory
+    public func purgeInactiveCaches() {
+        lock.lock()
+        defer { lock.unlock() }
+        for (lang, lexer) in loadedLexers where lang != currentLanguage {
+            lexer.cache.purgeMemory()
+        }
+        cachedAttributedString = nil
+        cachedLineOffsets = nil
+    }
+    
     /// Whether the initial view setup has completed
     /// (set to true after the makeNSView async block fires)
     internal var isViewReady: Bool = false
@@ -880,6 +891,18 @@ public struct SyntaxHighlightedCodeView: NSViewRepresentable {
     /// Per-editor reused scroll views, keyed by editorID. Main-actor only
     /// (SyntaxHighlightedCodeView is always used from SwiftUI/main).
     @MainActor private static var viewCache: [String: NSScrollView] = [:]
+
+    /// Purges cached NSScrollViews that are no longer mounted in any active window,
+    /// freeing tens of megabytes of TextKit glyph and layout backing memory.
+    @MainActor
+    public static func purgeNonVisibleViewCache() {
+        let keys = Array(viewCache.keys)
+        for key in keys {
+            if let sv = viewCache[key], sv.window == nil {
+                viewCache.removeValue(forKey: key)
+            }
+        }
+    }
 
     public init(text: Binding<String>, language: String, fontSize: CGFloat = 13, isDark: Bool = true, themeName: String? = nil, fontName: String = "Menlo", fontWeight: Int = 2, fileURL: URL? = nil, isScrollEnabled: Bool = true, isTransparent: Bool = false, isEditable: Bool = true, enableHighlighting: Bool = true, showLineNumbers: Bool = false, editorID: String? = nil) {
         self._text = text
