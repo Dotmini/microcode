@@ -1327,7 +1327,7 @@ struct XcodeEditorSidebar: View {
 
     private var navigatorTabBar: some View {
         HStack(spacing: 2) {
-            Spacer().frame(width: 72)
+            Spacer().frame(width: 64)
             ForEach(XcodeNavigatorTab.allCases, id: \.self) { tab in
                 Button {
                     withAnimation(.easeInOut(duration: 0.12)) {
@@ -1337,15 +1337,16 @@ struct XcodeEditorSidebar: View {
                     Image(systemName: selectedTab == tab ? "\(tab.icon).fill" : tab.icon)
                         .font(.system(size: 11, weight: selectedTab == tab ? .semibold : .regular))
                         .foregroundColor(selectedTab == tab ? .accentColor : .secondary)
-                        .frame(maxWidth: .infinity, minHeight: 26)
-                        .background(selectedTab == tab ? Color.primary.opacity(0.08) : Color.clear)
+                        .frame(width: 24, height: 22)
+                        .background(selectedTab == tab ? Color.primary.opacity(0.10) : Color.clear)
                         .cornerRadius(4)
                 }
                 .buttonStyle(.plain)
                 .help(tab.title)
             }
+            Spacer()
         }
-        .padding(.horizontal, 6)
+        .padding(.horizontal, 4)
         .padding(.top, 7)
         .padding(.bottom, 5)
     }
