@@ -473,6 +473,15 @@ EOF
         codesign --force --deep --sign - "$APP_BUNDLE"
         echo -e "${GREEN}✓ App bundle: $APP_BUNDLE${NC}"
         
+        # Auto-sync to Applications for instant local access
+        if [ -w "/Applications/MicroCode.app" ] || [ -w "/Applications" ]; then
+            mkdir -p /Applications/MicroCode.app 2>/dev/null || true
+            rsync -a --delete "$APP_BUNDLE/" /Applications/MicroCode.app/ 2>/dev/null && echo -e "${GREEN}✓ Synced to /Applications/MicroCode.app${NC}" || true
+        fi
+        if [ -d "$HOME/Applications" ]; then
+            rsync -a --delete "$APP_BUNDLE/" "$HOME/Applications/MicroCode.app/" 2>/dev/null && echo -e "${GREEN}✓ Synced to $HOME/Applications/MicroCode.app${NC}" || true
+        fi
+        
         if [ $? -eq 0 ]; then
              echo ""
              echo -e "${GREEN}✓ Frontend (SwiftPM) build successful!${NC}"
