@@ -291,6 +291,11 @@ struct AndroidDeviceMetalSurface: NSViewRepresentable {
         if let latest = androidStream.latestPixelBuffer {
             nsView.renderFrame(latest)
         }
+        androidStream.onDecodedFrame = { [weak nsView] pixelBuffer in
+            DispatchQueue.main.async {
+                nsView?.renderFrame(pixelBuffer)
+            }
+        }
     }
 }
 

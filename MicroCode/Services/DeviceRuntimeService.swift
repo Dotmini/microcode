@@ -970,16 +970,24 @@ final class DeviceRuntimeService: ObservableObject {
             if Task.isCancelled { return }
             
             // Check device state via ADB
-            if let adb = try? self.androidTool("adb"),
-               let check = try? await self.command(adb, ["-s", serial, "get-state"], directory: nil) {
-                if Task.isCancelled { return }
-                let st = check.output.trimmingCharacters(in: .whitespacesAndNewlines)
-                if st != "device" {
-                    await MainActor.run {
-                        guard !Task.isCancelled else { return }
-                        self.embeddedAndroidStatus = "Device \(serial) is \(st). Click Attach / Retry."
+            if let adb = try? self.androidTool("adb") {
+                if let check = try? await self.command(adb, ["-s", serial, "get-state"], directory: nil) {
+                    if Task.isCancelled { return }
+                    var st = check.output.trimmingCharacters(in: .whitespacesAndNewlines)
+                    if st == "offline" {
+                        _ = try? await self.command(adb, ["-s", serial, "reconnect", "offline"], directory: nil)
+                        try? await Task.sleep(nanoseconds: 1_200_000_000)
+                        if let recheck = try? await self.command(adb, ["-s", serial, "get-state"], directory: nil) {
+                            st = recheck.output.trimmingCharacters(in: .whitespacesAndNewlines)
+                        }
                     }
-                    return
+                    if st != "device" {
+                        await MainActor.run {
+                            guard !Task.isCancelled else { return }
+                            self.embeddedAndroidStatus = "Device \(serial) is \(st). Click Attach / Retry."
+                        }
+                        return
+                    }
                 }
             }
             if Task.isCancelled { return }
@@ -1212,28 +1220,24 @@ final class DeviceRuntimeService: ObservableObject {
                     statusMessage = "Android Emulator is already running: \(device.name)."
                     return
                 }
+                if let _ = await firstAttachedEmulatorSerial() {
+                    statusMessage = "Android Emulator is already running: \(device.name)."
+                    return
+                }
+                if isEmulatorProcessRunning(avdName: avdName) {
+                    statusMessage = "Android Emulator is starting: \(device.name)..."
+                    return
+                }
                 let emulator = try androidTool("emulator")
                 if deviceRuntimeProcess?.isRunning != true {
                     let process = Process()
                     process.executableURL = URL(fileURLWithPath: emulator)
-                    // Keep the emulator's own Qt window hidden: MicroCode owns
-                    // the visible device frame and talks to the real AVD over
-                    // the supported ADB transport.
-                    // Preserve Quick Boot snapshots and skip the boot animation.
-                    // This makes a warm AVD attach immediately and keeps a cold
-                    // start as short as the Android runtime permits.
-                    // Use hardware GPU plus a real multi-core guest. Warm
-                    // Quick Boot remains enabled; a stopped AVD still has an
-                    // unavoidable cold-boot phase, but it no longer blocks
-                    // opening the Preview dock.
-                    process.arguments = ["-avd", avdName, "-no-window", "-no-audio", "-no-boot-anim", "-no-metrics", "-crash-report-mode", "disabled", "-gpu", "host", "-cores", "4", "-netdelay", "none", "-netspeed", "full"]
+                    // Launch emulator with native window visible so the user actually sees their Android Emulator running
+                    process.arguments = ["-avd", avdName, "-no-audio", "-no-boot-anim", "-no-metrics", "-crash-report-mode", "disabled", "-gpu", "host", "-cores", "4", "-netdelay", "none", "-netspeed", "full"]
                     process.standardOutput = FileHandle.nullDevice
                     process.standardError = FileHandle.nullDevice
                     try process.run()
                     deviceRuntimeProcess = process
-                    // The Emulator validates AVD disk allocation immediately.
-                    // Detect an early exit here rather than making the user wait
-                    // through the full ADB readiness timeout with no diagnosis.
                     try await Task.sleep(nanoseconds: 800_000_000)
                     guard process.isRunning else {
                         deviceRuntimeProcess = nil
@@ -1677,6 +1681,28 @@ final class DeviceRuntimeService: ObservableObject {
         return nil
     }
 
+    private func isEmulatorProcessRunning(avdName: String) -> Bool {
+        if deviceRuntimeProcess?.isRunning == true { return true }
+        let fm = FileManager.default
+        let roots = [
+            ProcessInfo.processInfo.environment["ANDROID_AVD_HOME"],
+            NSHomeDirectory() + "/.android/avd",
+            NSHomeDirectory() + "/Library/Android/sdk/avd"
+        ].compactMap { $0 }
+        for root in roots {
+            let lockPath = "\(root)/\(avdName).avd/hardware-qemu.ini.lock"
+            if fm.fileExists(atPath: lockPath) {
+                if let pidStr = try? String(contentsOfFile: lockPath, encoding: .utf8).trimmingCharacters(in: .whitespacesAndNewlines),
+                   let pid = Int32(pidStr), pid > 0 {
+                    if kill(pid, 0) == 0 {
+                        return true
+                    }
+                }
+            }
+        }
+        return false
+    }
+
     /// A newly launched AVD is not immediately visible to Gradle/ADB.  Wait for
     /// the *actual* device connection rather than racing an install against boot.
     private func readyAndroidSerial(for device: RuntimeDevice) async throws -> String {
@@ -1684,6 +1710,7 @@ final class DeviceRuntimeService: ObservableObject {
         let avdName = String(device.id.dropFirst(4))
         for _ in 0..<90 {
             if let serial = await attachedAndroidSerial(named: avdName) { return serial }
+            if let first = await firstAttachedEmulatorSerial() { return first }
             try? await Task.sleep(nanoseconds: 1_000_000_000)
         }
         throw ToolBoxError.executionFailed("Android Emulator did not become ready within 90 seconds. Open it once from Android Studio, then try again.")
@@ -1695,27 +1722,33 @@ final class DeviceRuntimeService: ObservableObject {
     private func attachedAndroidSerial(named avdName: String) async -> String? {
         guard let adb = try? androidTool("adb"),
               let result = try? await command(adb, ["devices"], directory: nil) else { return nil }
-        let serials = result.output
-            .split(whereSeparator: \.isNewline)
-            .dropFirst()
-            .map { $0.split(separator: "\t") }
-            .compactMap { fields -> String? in
-                guard fields.count >= 2,
-                      fields[1].trimmingCharacters(in: .whitespacesAndNewlines) == "device",
-                      fields[0].hasPrefix("emulator-") else { return nil }
-                return String(fields[0])
+        let lines = result.output.split(whereSeparator: \.isNewline).dropFirst()
+        var serials: [String] = []
+        for line in lines {
+            let parts = line.split(whereSeparator: { $0.isWhitespace })
+            guard parts.count >= 2, parts[0].hasPrefix("emulator-") else { continue }
+            let state = parts[1].trimmingCharacters(in: .whitespacesAndNewlines)
+            if state == "offline" {
+                _ = try? await command(adb, ["-s", String(parts[0]), "reconnect", "offline"], directory: nil)
+            } else if state == "device" {
+                serials.append(String(parts[0]))
             }
+        }
+        if serials.count == 1 {
+            return serials[0]
+        }
         for serial in serials {
             guard let name = try? await command(adb, ["-s", serial, "emu", "avd", "name"], directory: nil) else { continue }
-            // The emulator console appends a protocol acknowledgement ("OK")
-            // after the actual name. Compare only the first non-empty line.
             let reportedName = name.output
                 .split(whereSeparator: \.isNewline)
                 .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
                 .first(where: { !$0.isEmpty && $0 != "OK" })
-            if reportedName == avdName { return serial }
+            if reportedName == avdName ||
+               reportedName?.lowercased().replacingOccurrences(of: "_", with: " ") == avdName.lowercased().replacingOccurrences(of: "_", with: " ") {
+                return serial
+            }
         }
-        return nil
+        return serials.first
     }
 
     private func androidAVDName(serial: String) async -> String? {
@@ -1730,16 +1763,18 @@ final class DeviceRuntimeService: ObservableObject {
     private func firstAttachedEmulatorSerial() async -> String? {
         guard let adb = try? androidTool("adb"),
               let result = try? await command(adb, ["devices"], directory: nil) else { return nil }
-        let serials = result.output
-            .split(whereSeparator: \.isNewline)
-            .dropFirst()
-            .compactMap { line -> String? in
-                let parts = line.split(separator: "\t")
-                guard parts.count >= 2, parts[1].trimmingCharacters(in: .whitespacesAndNewlines) == "device" else { return nil }
-                let serial = String(parts[0]).trimmingCharacters(in: .whitespacesAndNewlines)
-                return serial.hasPrefix("emulator-") ? serial : nil
+        let lines = result.output.split(whereSeparator: \.isNewline).dropFirst()
+        for line in lines {
+            let parts = line.split(whereSeparator: { $0.isWhitespace })
+            guard parts.count >= 2, parts[0].hasPrefix("emulator-") else { continue }
+            let state = parts[1].trimmingCharacters(in: .whitespacesAndNewlines)
+            if state == "offline" {
+                _ = try? await command(adb, ["-s", String(parts[0]), "reconnect", "offline"], directory: nil)
+            } else if state == "device" {
+                return String(parts[0])
             }
-        return serials.first
+        }
+        return nil
     }
 
     private func androidTool(_ name: String) throws -> String {

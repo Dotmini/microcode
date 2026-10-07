@@ -37,7 +37,7 @@ final class AndroidStreamService: ObservableObject {
     private var decoder: DeviceStreamDecoder?
     private var localPort: UInt16 = 27183
     private var controlPort: UInt16 = 27184
-    private let scid = "12345678"
+    private var scid: String = String(format: "%08x", UInt32.random(in: 0x10000000...0x7fffffff))
     
     // FPS tracking
     private var frameCount = 0
@@ -74,6 +74,7 @@ final class AndroidStreamService: ObservableObject {
         stopStreaming()
         hasReceivedFirstFrame = false
         latestPixelBuffer = nil
+        self.scid = String(format: "%08x", UInt32.random(in: 0x10000000...0x7fffffff))
         self.localPort = UInt16.random(in: 27180...27280)
         self.controlPort = self.localPort + 1
         let resolvedAdb = adbPath ?? resolvedAdbPath ?? "adb"
@@ -82,7 +83,10 @@ final class AndroidStreamService: ObservableObject {
         // Fast check: ensure device is online before attempting scrcpy handshake
         if let state = try? await Self.runADB(resolvedAdb, args: ["-s", serial, "get-state"], timeoutSeconds: 2.0) {
             let trimmed = state.trimmingCharacters(in: .whitespacesAndNewlines)
-            if trimmed != "device" {
+            if trimmed == "offline" {
+                _ = try? await Self.runADB(resolvedAdb, args: ["-s", serial, "reconnect", "offline"], timeoutSeconds: 2.0)
+                try? await Task.sleep(nanoseconds: 1_200_000_000)
+            } else if trimmed != "device" {
                 statusMessage = "Device not ready (\(trimmed))"
                 return
             }
@@ -113,14 +117,27 @@ final class AndroidStreamService: ObservableObject {
             // Step 3: Launch scrcpy-server on device
             try launchServer(serial: serial, adbPath: resolvedAdb, maxFPS: maxFPS, maxSize: maxSize)
             
-            // Step 4: Wait for server to start, then connect
-            try await Task.sleep(nanoseconds: 600_000_000) // 600ms for server startup
+            // Step 4: Connect sockets with retry for server startup
+            var connected = false
+            for attempt in 1...6 {
+                try? await Task.sleep(nanoseconds: 500_000_000)
+                do {
+                    try await connectVideoSocket()
+                    try? await connectControlSocket()
+                    connected = true
+                    break
+                } catch {
+                    print("[AndroidStream] Connection attempt \(attempt) failed: \(error). Retrying...")
+                    connection?.cancel()
+                    connection = nil
+                    controlConnection?.cancel()
+                    controlConnection = nil
+                }
+            }
             
-            // Step 5: Connect video socket with timeout
-            try await connectVideoSocket()
-
-            // Step 6: Connect control socket
-            try? await connectControlSocket()
+            guard connected else {
+                throw StreamError.connectionFailed
+            }
             
             statusMessage = "Live · \(deviceName.isEmpty ? "Android" : deviceName) · 60 FPS Native GPU"
             isStreaming = true
