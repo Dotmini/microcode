@@ -153,7 +153,7 @@ jobs:
     name: "🔨 Build ${{ matrix.arch }}"
     needs: security
     runs-on: macos-14
-    timeout-minutes: 45
+    timeout-minutes: 90
     strategy:
       fail-fast: false
       matrix:
@@ -181,7 +181,7 @@ jobs:
           elif git describe --tags --abbrev=0 2>/dev/null; then
             VERSION="$(git describe --tags --abbrev=0 | sed 's/^v//')"
           else
-            VERSION="1.0.0"
+            VERSION="2.5.28"
           fi
           BUILD_NUMBER=$(git rev-list --count HEAD)
           SHORT_SHA=$(git rev-parse --short HEAD)
