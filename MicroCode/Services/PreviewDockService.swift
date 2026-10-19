@@ -91,39 +91,39 @@ public final class PreviewDockService: ObservableObject {
         openTabs.first(where: { $0.id == activeTabId }) ?? openTabs.first
     }
     
-    public func selectTab(id: String) {
-        if !openTabs.contains(where: { $0.id == id }) {
-            // Re-open standard known tabs if they were previously closed
-            switch id {
-            case "android":
-                openTabs.append(PreviewDockTabItem(id: "android", title: "Android Emu", icon: "candybarphone", kind: .android, isClosable: true, url: nil))
-            case "ios":
-                openTabs.append(PreviewDockTabItem(id: "ios", title: "iOS Sim", icon: "iphone", kind: .ios, isClosable: true, url: nil))
-            case "web":
-                openTabs.append(PreviewDockTabItem(id: "web", title: "WebApp Preview", icon: "globe", kind: .web, isClosable: true, url: nil))
-            case "ios-physical":
-                openTabs.append(PreviewDockTabItem(id: "ios-physical", title: "iPhone (USB)", icon: "iphone", kind: .iOSPhysical, isClosable: true, url: nil))
-            case "android-physical":
-                openTabs.append(PreviewDockTabItem(id: "android-physical", title: "Android (USB)", icon: "candybarphone", kind: .androidPhysical, isClosable: true, url: nil))
-            default:
-                break
-            }
-        }
+    public func activateTabWithoutSideEffects(id: String) {
+        ensureStandardTabExists(id: id)
+        guard openTabs.contains(where: { $0.id == id }) else { return }
+        activeTabId = id
+        isDockVisible = true
+        DeviceRuntimeService.shared.showingEmbeddedDeviceDock = true
+    }
 
+    private func ensureStandardTabExists(id: String) {
+        guard !openTabs.contains(where: { $0.id == id }) else { return }
+        switch id {
+        case "android":
+            openTabs.append(PreviewDockTabItem(id: "android", title: "Android Emu", icon: "candybarphone", kind: .android, isClosable: true, url: nil))
+        case "ios":
+            openTabs.append(PreviewDockTabItem(id: "ios", title: "iOS Sim", icon: "iphone", kind: .ios, isClosable: true, url: nil))
+        case "web":
+            openTabs.append(PreviewDockTabItem(id: "web", title: "WebApp Preview", icon: "globe", kind: .web, isClosable: true, url: nil))
+        case "ios-physical":
+            openTabs.append(PreviewDockTabItem(id: "ios-physical", title: "iPhone (USB)", icon: "iphone", kind: .iOSPhysical, isClosable: true, url: nil))
+        case "android-physical":
+            openTabs.append(PreviewDockTabItem(id: "android-physical", title: "Android (USB)", icon: "candybarphone", kind: .androidPhysical, isClosable: true, url: nil))
+        default:
+            break
+        }
+    }
+
+    public func selectTab(id: String) {
+        ensureStandardTabExists(id: id)
         guard openTabs.contains(where: { $0.id == id }) else { return }
         activeTabId = id
         isDockVisible = true
         DeviceRuntimeService.shared.showingEmbeddedDeviceDock = true
         syncWithDeviceRuntime()
-        if id == "android" {
-            Task { @MainActor in
-                await DeviceRuntimeService.shared.startPreferredEmbeddedAndroid()
-            }
-        } else if id == "ios" {
-            Task { @MainActor in
-                await DeviceRuntimeService.shared.startPreferredEmbeddedAppleSimulator()
-            }
-        }
     }
     
     public func openFile(url: URL, makeActive: Bool = true) {
@@ -249,8 +249,10 @@ public final class PreviewDockService: ObservableObject {
         isDockVisible = false
         DeviceRuntimeService.shared.showingEmbeddedDeviceDock = false
         DeviceRuntimeService.shared.stopEmbeddedAndroid()
-        AppleSimulatorCaptureService.shared.stop()
-        Task { await ServeSimService.shared.stop() }
+        DeviceRuntimeService.shared.stopEmbeddedAppleSimulator()
+        IOSDeviceCaptureService.shared.stopCapture()
+        IOSDeviceCaptureService.shared.stopMonitoring()
+        AndroidStreamService.shared.stopStreaming()
     }
 
     public func closeTab(id: String) {
@@ -263,7 +265,12 @@ public final class PreviewDockService: ObservableObject {
         if id == "android" {
             DeviceRuntimeService.shared.stopEmbeddedAndroid()
         } else if id == "ios" {
-            Task { await ServeSimService.shared.stop() }
+            DeviceRuntimeService.shared.stopEmbeddedAppleSimulator()
+        } else if id == "ios-physical" {
+            IOSDeviceCaptureService.shared.stopCapture()
+            IOSDeviceCaptureService.shared.stopMonitoring()
+        } else if id == "android-physical" {
+            AndroidStreamService.shared.stopStreaming()
         }
 
         if openTabs.isEmpty {
@@ -308,28 +315,32 @@ public final class PreviewDockService: ObservableObject {
         switch active.kind {
         case .web:
             DeviceRuntimeService.shared.embeddedDockMode = .web
-            DeviceRuntimeService.shared.showingEmbeddedAppleDock = false
             DeviceRuntimeService.shared.stopEmbeddedAndroid()
-            AppleSimulatorCaptureService.shared.stop()
-            Task { await ServeSimService.shared.stop() }
+            DeviceRuntimeService.shared.stopEmbeddedAppleSimulator()
+            IOSDeviceCaptureService.shared.stopCapture()
         case .ios:
             DeviceRuntimeService.shared.embeddedDockMode = .ios
             DeviceRuntimeService.shared.showingEmbeddedAppleDock = true
             DeviceRuntimeService.shared.stopEmbeddedAndroid()
+            IOSDeviceCaptureService.shared.stopCapture()
+            DeviceRuntimeService.shared.selectDefaultAppleSimulatorIfNeeded()
         case .iOSPhysical:
             DeviceRuntimeService.shared.embeddedDockMode = .ios
-            DeviceRuntimeService.shared.showingEmbeddedAppleDock = false
             DeviceRuntimeService.shared.stopEmbeddedAndroid()
-            Task { await ServeSimService.shared.stop() }
-        case .android, .androidPhysical:
+            DeviceRuntimeService.shared.stopEmbeddedAppleSimulator()
+        case .android:
             DeviceRuntimeService.shared.embeddedDockMode = .android
-            DeviceRuntimeService.shared.showingEmbeddedAppleDock = false
-            AppleSimulatorCaptureService.shared.stop()
-            Task { await ServeSimService.shared.stop() }
+            DeviceRuntimeService.shared.stopEmbeddedAppleSimulator()
+            IOSDeviceCaptureService.shared.stopCapture()
+        case .androidPhysical:
+            DeviceRuntimeService.shared.embeddedDockMode = .android
+            DeviceRuntimeService.shared.stopEmbeddedAndroid()
+            DeviceRuntimeService.shared.stopEmbeddedAppleSimulator()
+            IOSDeviceCaptureService.shared.stopCapture()
         case .file, .diff:
             DeviceRuntimeService.shared.stopEmbeddedAndroid()
-            AppleSimulatorCaptureService.shared.stop()
-            Task { await ServeSimService.shared.stop() }
+            DeviceRuntimeService.shared.stopEmbeddedAppleSimulator()
+            IOSDeviceCaptureService.shared.stopCapture()
         }
     }
 }

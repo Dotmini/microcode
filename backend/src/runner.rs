@@ -136,6 +136,7 @@ pub async fn execute_stream(
         let mut child = Command::new(&ardium_bin)
             .arg("run")
             .arg(&temp_file)
+            .env_remove("MICROCODE_LOCAL_API_TOKEN")
             .env("DYLD_LIBRARY_PATH", "/usr/local/ardium/lib")
             .env("ARDIUM_LIB_PATH", "/usr/local/ardium/lib")
             .env("ARDIUM_STDLIB", "/usr/local/ardium/stdlib")
@@ -171,14 +172,34 @@ pub async fn execute_stream(
         return Ok(Box::pin(ProcessStream::new(merged_stream, child)));
     }
 
-    let (program, args) = match lang_id.as_str() {
-        "python" => ("python3", vec!["-u".to_string(), temp_file.clone()]), // -u for unbuffered
-        "javascript" | "js" => ("node", vec![temp_file.clone()]),
-        "typescript" | "ts" => ("ts-node", vec![temp_file.clone()]),
-        "swift" => ("swift", vec![temp_file.clone()]),
-        "rust" => ("cargo", vec!["script".to_string(), temp_file.clone()]),
-        "go" => ("go", vec!["run".to_string(), temp_file.clone()]),
-        "d" | "dlang" => ("rdmd", vec![temp_file.clone()]),
+    let (program, args): (String, Vec<String>) = match lang_id.as_str() {
+        "python" => (find_executable("python3"), vec!["-u".to_string(), temp_file.clone()]),
+        "javascript" | "js" => (find_executable("node"), vec![temp_file.clone()]),
+        "typescript" | "ts" => {
+            let bun = find_executable("bun");
+            let deno = find_executable("deno");
+            let ts_node = find_executable("ts-node");
+            if std::path::Path::new(&bun).exists() {
+                (bun, vec!["run".to_string(), temp_file.clone()])
+            } else if std::path::Path::new(&deno).exists() {
+                (deno, vec!["run".to_string(), "-A".to_string(), temp_file.clone()])
+            } else if std::path::Path::new(&ts_node).exists() {
+                (ts_node, vec![temp_file.clone()])
+            } else {
+                (
+                    find_executable("node"),
+                    vec![
+                        "--no-warnings".to_string(),
+                        "--experimental-strip-types".to_string(),
+                        temp_file.clone(),
+                    ],
+                )
+            }
+        }
+        "swift" => (find_executable("swift"), vec![temp_file.clone()]),
+        "rust" => (find_executable("cargo"), vec!["script".to_string(), temp_file.clone()]),
+        "go" => (find_executable("go"), vec!["run".to_string(), temp_file.clone()]),
+        "d" | "dlang" => (find_executable("rdmd"), vec![temp_file.clone()]),
         "r" | "rmarkdown" | "r_markdown" | "rmd" => {
             // Special handling for R and R Markdown with proper library paths
             return streaming_execute_r(&temp_file).await;
@@ -199,8 +220,9 @@ pub async fn execute_stream(
         }
     };
 
-    let mut child = Command::new(program)
+    let mut child = Command::new(&program)
         .args(&args)
+        .env_remove("MICROCODE_LOCAL_API_TOKEN")
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .kill_on_drop(true)
@@ -489,17 +511,36 @@ async fn execute_javascript(code: &str, node_path: Option<String>) -> Result<Exe
 async fn execute_typescript(code: &str, _node_path: Option<String>) -> Result<ExecutionResult> {
     let temp_file = create_temp_file("ts", code).await?;
 
-    let binary = find_executable("ts-node");
+    let bun = find_executable("bun");
+    let deno = find_executable("deno");
+    let ts_node = find_executable("ts-node");
+
+    let (binary, args): (String, Vec<String>) = if std::path::Path::new(&bun).exists() {
+        (bun, vec!["run".to_string(), temp_file.clone()])
+    } else if std::path::Path::new(&deno).exists() {
+        (deno, vec!["run".to_string(), "-A".to_string(), temp_file.clone()])
+    } else if std::path::Path::new(&ts_node).exists() {
+        (ts_node, vec![temp_file.clone()])
+    } else {
+        (
+            find_executable("node"),
+            vec![
+                "--no-warnings".to_string(),
+                "--experimental-strip-types".to_string(),
+                temp_file.clone(),
+            ],
+        )
+    };
 
     let mut child = Command::new(&binary)
-        .arg(&temp_file)
+        .args(&args)
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()
         .map_err(|e| {
             AppError::ExecutionError(format!(
-                "Failed to spawn ts-node (ensure it is installed): {}",
-                e
+                "Failed to spawn TypeScript runner ({}): {}",
+                binary, e
             ))
         })?;
 
@@ -1446,42 +1487,74 @@ async fn cleanup_temp_dir(path: &std::path::Path) {
     let _ = tokio::fs::remove_dir_all(path).await;
 }
 
-/// Find an executable in common macOS paths
-/// macOS GUI apps don't inherit shell PATH, so we need to search manually
+/// Find an executable in MicroCode portable runtimes, app bundle RuntimeLib, and common macOS paths
 fn find_executable(name: &str) -> String {
-    let search_paths = [
-        format!("/opt/homebrew/bin/{}", name), // Apple Silicon Homebrew
-        format!("/usr/local/bin/{}", name),    // Intel Homebrew
-        format!("/usr/local/go/bin/{}", name), // Official Go install
-        format!(
-            "{}/go/bin/{}",
-            std::env::var("HOME").unwrap_or_default(),
-            name
-        ), // Go user install
-        format!("/usr/bin/{}", name),          // System
-        format!("/bin/{}", name),              // System
-        format!(
-            "{}/.cargo/bin/{}",
-            std::env::var("HOME").unwrap_or_default(),
-            name
-        ), // Rust
-        format!(
-            "{}/.nvm/versions/node/v22.0.0/bin/{}",
-            std::env::var("HOME").unwrap_or_default(),
-            name
-        ), // Common NVM location (example)
-        format!(
-            "{}/.nvm/versions/node/v20.0.0/bin/{}",
-            std::env::var("HOME").unwrap_or_default(),
-            name
-        ),
-        format!(
-            "{}/.nvm/versions/node/v18.0.0/bin/{}",
-            std::env::var("HOME").unwrap_or_default(),
-            name
-        ),
-        name.to_string(), // Fallback to PATH
+    let home = std::env::var("HOME").unwrap_or_default();
+    let app_support_runtimes = format!("{}/Library/Application Support/MicroCode/Runtimes", home);
+    let dot_microcode_runtimes = format!("{}/.microcode/runtimes", home);
+
+    let runtime_subdirs = [
+        "python", "nodejs", "bun", "deno", "go", "rust", "java", "kotlin", "c", "cpp", "dotnet", "zig",
     ];
+
+    let mut search_paths: Vec<String> = Vec::new();
+
+    // 1. Check embedded RuntimeLib inside MicroCode.app/Contents/Resources/RuntimeLib
+    if let Ok(exe_path) = std::env::current_exe() {
+        if let Some(contents_dir) = exe_path.parent().and_then(|p| p.parent()) {
+            let res_runtimes = contents_dir.join("Resources").join("RuntimeLib");
+            for dir in &runtime_subdirs {
+                search_paths.push(
+                    res_runtimes
+                        .join(dir)
+                        .join("bin")
+                        .join(name)
+                        .to_string_lossy()
+                        .to_string(),
+                );
+            }
+        }
+    }
+
+    // 2. Check portable runtimes in ~/Library/Application Support/MicroCode/Runtimes and ~/.microcode/runtimes
+    for root in &[&app_support_runtimes, &dot_microcode_runtimes] {
+        for dir in &runtime_subdirs {
+            search_paths.push(format!("{}/{}/bin/{}", root, dir, name));
+        }
+        search_paths.push(format!("{}/go/go/bin/{}", root, name));
+        search_paths.push(format!("{}/java/Contents/Home/bin/{}", root, name));
+        search_paths.push(format!("{}/rust/cargo/bin/{}", root, name));
+        search_paths.push(format!("{}/dotnet/{}", root, name));
+    }
+
+    // 3. Common user & Homebrew paths
+    search_paths.extend([
+        format!("/opt/homebrew/bin/{}", name),
+        format!("/usr/local/bin/{}", name),
+        format!("/usr/local/go/bin/{}", name),
+        format!("{}/go/bin/{}", home, name),
+        format!("{}/.cargo/bin/{}", home, name),
+        format!("{}/.bun/bin/{}", home, name),
+        format!("{}/.deno/bin/{}", home, name),
+        format!("{}/.local/bin/{}", home, name),
+        format!("/opt/homebrew/opt/openjdk@21/bin/{}", name),
+        format!("/opt/homebrew/opt/openjdk/bin/{}", name),
+        format!("{}/.nvm/versions/node/v22.14.0/bin/{}", home, name),
+        format!("{}/.nvm/versions/node/v22.0.0/bin/{}", home, name),
+        format!("{}/.nvm/versions/node/v20.0.0/bin/{}", home, name),
+    ]);
+
+    // 4. Only include /usr/bin for Apple dev shims if Command Line Tools are installed
+    let has_clt = std::path::Path::new("/Library/Developer/CommandLineTools/usr/bin/git").exists()
+        || std::path::Path::new("/Applications/Xcode.app/Contents/Developer/usr/bin/git").exists();
+    let is_apple_shim = matches!(
+        name,
+        "python3" | "python" | "clang" | "clang++" | "gcc" | "g++" | "swift" | "swiftc" | "git"
+    );
+    if has_clt || !is_apple_shim {
+        search_paths.push(format!("/usr/bin/{}", name));
+        search_paths.push(format!("/bin/{}", name));
+    }
 
     for path in &search_paths {
         if std::path::Path::new(path).exists() {
@@ -1719,41 +1792,60 @@ async fn execute_java(code: &str) -> Result<ExecutionResult> {
         .await
         .map_err(|e| AppError::ExecutionError(format!("Failed to write java file: {}", e)))?;
 
-    // Compile
-    let compile_output = Command::new("javac")
-        .arg(&java_file)
-        .current_dir(&temp_dir)
-        .output()
-        .await
-        .map_err(|e| AppError::ExecutionError(format!("Failed to run javac: {}", e)))?;
+    let javac_bin = find_executable("javac");
+    let java_bin = find_executable("java");
 
-    if !compile_output.status.success() {
-        let stderr = String::from_utf8_lossy(&compile_output.stderr);
+    // If javac is available, compile & run; otherwise use Java 11+ single-file source execution
+    if std::path::Path::new(&javac_bin).exists() {
+        let compile_output = Command::new(&javac_bin)
+            .arg(&java_file)
+            .current_dir(&temp_dir)
+            .output()
+            .await
+            .map_err(|e| AppError::ExecutionError(format!("Failed to run javac: {}", e)))?;
+
+        if !compile_output.status.success() {
+            let stderr = String::from_utf8_lossy(&compile_output.stderr);
+            cleanup_temp_dir(&temp_dir).await;
+            return Err(AppError::CompilationError(stderr.to_string()));
+        }
+
+        let run_output = Command::new(&java_bin)
+            .arg(class_name)
+            .current_dir(&temp_dir)
+            .output()
+            .await
+            .map_err(|e| AppError::ExecutionError(format!("Failed to run java: {}", e)))?;
+
         cleanup_temp_dir(&temp_dir).await;
-        return Err(AppError::CompilationError(stderr.to_string()));
+
+        Ok(ExecutionResult {
+            stdout: String::from_utf8_lossy(&run_output.stdout).to_string(),
+            stderr: String::from_utf8_lossy(&run_output.stderr).to_string(),
+            exit_code: run_output.status.code().unwrap_or(-1),
+        })
+    } else {
+        let run_output = Command::new(&java_bin)
+            .arg(&java_file)
+            .current_dir(&temp_dir)
+            .output()
+            .await
+            .map_err(|e| AppError::ExecutionError(format!("Failed to run java: {}", e)))?;
+
+        cleanup_temp_dir(&temp_dir).await;
+
+        Ok(ExecutionResult {
+            stdout: String::from_utf8_lossy(&run_output.stdout).to_string(),
+            stderr: String::from_utf8_lossy(&run_output.stderr).to_string(),
+            exit_code: run_output.status.code().unwrap_or(-1),
+        })
     }
-
-    // Run
-    let run_output = Command::new("java")
-        .arg(class_name)
-        .current_dir(&temp_dir)
-        .output()
-        .await
-        .map_err(|e| AppError::ExecutionError(format!("Failed to run java: {}", e)))?;
-
-    cleanup_temp_dir(&temp_dir).await;
-
-    Ok(ExecutionResult {
-        stdout: String::from_utf8_lossy(&run_output.stdout).to_string(),
-        stderr: String::from_utf8_lossy(&run_output.stderr).to_string(),
-        exit_code: run_output.status.code().unwrap_or(-1),
-    })
 }
 
 async fn execute_kotlin(code: &str) -> Result<ExecutionResult> {
     let temp_file = create_temp_file("kts", code).await?; // Kotlin script
 
-    let output = Command::new("kotlinc")
+    let output = Command::new(find_executable("kotlinc"))
         .arg("-script")
         .arg(&temp_file)
         .output()

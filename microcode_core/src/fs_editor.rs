@@ -34,7 +34,7 @@ impl FileEditor {
         search_block: &str,
         replace_block: &str,
     ) -> Result<EditResult, CoreError> {
-        let path = self.resolve_path(file_path);
+        let path = self.resolve_path(file_path)?;
 
         // Read file contents
         let content = fs::read_to_string(&path).map_err(|e| CoreError::Io {
@@ -76,7 +76,7 @@ impl FileEditor {
 
     /// Read file contents
     pub fn read_file(&self, file_path: &str) -> Result<String, CoreError> {
-        let path = self.resolve_path(file_path);
+        let path = self.resolve_path(file_path)?;
 
         fs::read_to_string(&path).map_err(|e| CoreError::Io {
             msg: format!("Failed to read {}: {}", file_path, e),
@@ -85,7 +85,7 @@ impl FileEditor {
 
     /// Write file contents (creates parent directories if needed)
     pub fn write_file(&self, file_path: &str, content: &str) -> Result<(), CoreError> {
-        let path = self.resolve_path(file_path);
+        let path = self.resolve_path(file_path)?;
 
         // Create parent directories if needed
         if let Some(parent) = path.parent() {
@@ -99,13 +99,49 @@ impl FileEditor {
         })
     }
 
-    /// Resolve path (relative to workspace or absolute)
-    fn resolve_path(&self, file_path: &str) -> PathBuf {
+    /// Resolve path (relative to workspace or absolute) and enforce workspace containment
+    fn resolve_path(&self, file_path: &str) -> Result<PathBuf, CoreError> {
         let path = Path::new(file_path);
-        if path.is_absolute() {
+        for comp in path.components() {
+            if matches!(comp, std::path::Component::ParentDir) {
+                return Err(CoreError::EditValidation {
+                    msg: format!("Path traversal ('..') is not allowed: {}", file_path),
+                });
+            }
+        }
+
+        let candidate = if path.is_absolute() {
             path.to_path_buf()
         } else {
             self.workspace.join(path)
+        };
+
+        let canonical_ws = self.workspace.canonicalize().map_err(|e| CoreError::Io {
+            msg: format!("Failed to canonicalize workspace: {}", e),
+        })?;
+
+        let mut current = Some(candidate.as_path());
+        let mut canonical_ancestor = None;
+        while let Some(anc) = current {
+            if anc.exists() {
+                canonical_ancestor = Some(anc.canonicalize().map_err(|e| CoreError::Io {
+                    msg: format!("Failed to canonicalize path {}: {}", file_path, e),
+                })?);
+                break;
+            }
+            current = anc.parent();
         }
+
+        let check_path = canonical_ancestor.ok_or_else(|| CoreError::EditValidation {
+            msg: format!("Invalid path (no existing ancestor): {}", file_path),
+        })?;
+
+        if !check_path.starts_with(&canonical_ws) {
+            return Err(CoreError::EditValidation {
+                msg: format!("Path {} resolves outside workspace", file_path),
+            });
+        }
+
+        Ok(candidate)
     }
 }

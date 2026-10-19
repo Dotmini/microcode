@@ -160,6 +160,7 @@ struct ACPToolResult {
     let toolCallId: String
     let content: String
     let isError: Bool
+    var toolName: String? = nil
 }
 
 /// Permission request from agent needing user approval
@@ -252,7 +253,7 @@ enum ACPPermissionMode: String, Codable, CaseIterable {
     
     var claudeFlag: String {
         switch self {
-        case .reviewEach: return "plan"
+        case .reviewEach: return "auto"
         case .autoApproveReads: return "auto"
         case .fullAuto: return "auto"
         }
@@ -260,31 +261,34 @@ enum ACPPermissionMode: String, Codable, CaseIterable {
     
     var claudeAllowedTools: [String] {
         switch self {
-        case .reviewEach: return ["Read"]
-        case .autoApproveReads: return ["Read"]
-        case .fullAuto: return ["Read", "Edit", "Bash", "Write"]
+        case .reviewEach: return ["Read", "Grep", "Glob", "LS", "Edit", "Write", "Bash"]
+        case .autoApproveReads: return ["Read", "Grep", "Glob", "LS", "Edit", "Write", "Bash"]
+        case .fullAuto: return ["Read", "Grep", "Glob", "LS", "Edit", "Write", "Bash"]
         }
     }
 }
 
-// MARK: - NDJSON Parser
+// MARK: - NDJSON Parser (Byte-Level UTF-8 Safe)
 
-/// High-performance NDJSON line parser for agent stdio streams
+/// High-performance NDJSON line parser for agent stdio streams.
+/// Buffers raw bytes and splits on 0x0A ('\n') BEFORE decoding UTF-8 so multibyte
+/// characters (Thai, CJK, Emoji) split across OS pipe chunks are never dropped.
 struct ACPNDJSONParser {
-    private var buffer = ""
+    private var rawBuffer = Data()
     
     /// Feed raw data from stdout pipe and return complete JSON lines
     mutating func feed(_ data: Data) -> [[String: Any]] {
-        guard let string = String(data: data, encoding: .utf8) else { return [] }
-        buffer += string
-        
-        let components = buffer.components(separatedBy: "\n")
-        buffer = components.last ?? ""
+        rawBuffer.append(data)
         
         var results: [[String: Any]] = []
-        for line in components.dropLast() {
+        while let newlineIdx = rawBuffer.firstIndex(of: 0x0A) {
+            let lineData = rawBuffer.subdata(in: 0..<newlineIdx)
+            rawBuffer.removeSubrange(0...newlineIdx)
+            
+            let line = String(decoding: lineData, as: UTF8.self)
             let trimmed = line.trimmingCharacters(in: .whitespacesAndNewlines)
             guard !trimmed.isEmpty else { continue }
+            
             if let jsonData = trimmed.data(using: .utf8),
                let json = try? JSONSerialization.jsonObject(with: jsonData) as? [String: Any] {
                 results.append(json)
@@ -296,9 +300,226 @@ struct ACPNDJSONParser {
         return results
     }
     
+    /// Flush any remaining buffered bytes on EOF
+    mutating func flushRemaining() -> [[String: Any]] {
+        guard !rawBuffer.isEmpty else { return [] }
+        let line = String(decoding: rawBuffer, as: UTF8.self)
+        rawBuffer.removeAll(keepingCapacity: false)
+        let trimmed = line.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return [] }
+        if let jsonData = trimmed.data(using: .utf8),
+           let json = try? JSONSerialization.jsonObject(with: jsonData) as? [String: Any] {
+            return [json]
+        } else {
+            return [["type": "text", "text": trimmed + "\n", "_raw": true]]
+        }
+    }
+    
     /// Reset the buffer
     mutating func reset() {
-        buffer = ""
+        rawBuffer.removeAll(keepingCapacity: false)
+    }
+}
+
+// MARK: - Standard ACP 1.0 JSON-RPC 2.0 Codec (https://agentclientprotocol.com)
+
+/// Implements the official Agent Client Protocol (ACP v1) JSON-RPC 2.0 framing,
+/// methods (`initialize`, `session/new`, `session/prompt`, `session/cancel`),
+/// notifications (`session/update`), and bidirectional client capabilities
+/// (`session/request_permission`, `fs/read_text_file`, `fs/write_text_file`).
+struct ACPStandardJsonRpcParser {
+    static let protocolVersion: Int = 1
+    
+    static func buildInitializeRequest(id: Int) -> [String: Any] {
+        [
+            "jsonrpc": "2.0",
+            "id": id,
+            "method": "initialize",
+            "params": [
+                "protocolVersion": protocolVersion,
+                "clientInfo": [
+                    "name": "MicroCode",
+                    "title": "MicroCode Native AI IDE",
+                    "version": "2.3.1"
+                ],
+                "clientCapabilities": [
+                    "fs": [
+                        "readTextFile": true,
+                        "writeTextFile": true
+                    ],
+                    "terminal": true
+                ]
+            ]
+        ]
+    }
+    
+    static func buildSessionNewRequest(id: Int, cwd: String) -> [String: Any] {
+        [
+            "jsonrpc": "2.0",
+            "id": id,
+            "method": "session/new",
+            "params": [
+                "cwd": cwd,
+                "mcpServers": [] as [[String: Any]]
+            ]
+        ]
+    }
+    
+    static func buildSessionPromptRequest(id: Int, sessionId: String, text: String) -> [String: Any] {
+        [
+            "jsonrpc": "2.0",
+            "id": id,
+            "method": "session/prompt",
+            "params": [
+                "sessionId": sessionId,
+                "prompt": [
+                    [
+                        "type": "text",
+                        "text": text
+                    ]
+                ]
+            ]
+        ]
+    }
+    
+    static func buildSessionCancelNotification(sessionId: String) -> [String: Any] {
+        [
+            "jsonrpc": "2.0",
+            "method": "session/cancel",
+            "params": [
+                "sessionId": sessionId
+            ]
+        ]
+    }
+    
+    static func buildPermissionResponse(requestId: Any, optionId: String) -> [String: Any] {
+        [
+            "jsonrpc": "2.0",
+            "id": requestId,
+            "result": [
+                "outcome": [
+                    "outcome": "selected",
+                    "optionId": optionId
+                ]
+            ]
+        ]
+    }
+    
+    /// Parse an incoming JSON-RPC 2.0 ACP message into zero or more unified `ACPStreamEvent`s
+    static func parseEvents(_ json: [String: Any]) -> [ACPStreamEvent] {
+        guard (json["jsonrpc"] as? String) == "2.0" else { return [] }
+        
+        if let method = json["method"] as? String {
+            let params = json["params"] as? [String: Any] ?? [:]
+            switch method {
+            case "session/update":
+                guard let update = params["update"] as? [String: Any] else { return [] }
+                let sessionUpdate = update["sessionUpdate"] as? String ?? ""
+                switch sessionUpdate {
+                case "agent_message_chunk":
+                    if let content = update["content"] as? [String: Any],
+                       let text = content["text"] as? String, !text.isEmpty {
+                        return [.text(text)]
+                    }
+                    if let text = update["text"] as? String, !text.isEmpty {
+                        return [.text(text)]
+                    }
+                case "agent_thought_chunk":
+                    if let content = update["content"] as? [String: Any],
+                       let text = content["text"] as? String, !text.isEmpty {
+                        return [.thinking(text)]
+                    }
+                    if let text = update["text"] as? String, !text.isEmpty {
+                        return [.thinking(text)]
+                    }
+                case "tool_call":
+                    let tcId = update["toolCallId"] as? String ?? update["id"] as? String ?? UUID().uuidString
+                    let title = update["title"] as? String ?? update["name"] as? String ?? "tool"
+                    let rawInput = update["rawInput"] as? [String: Any] ?? update["input"] as? [String: Any] ?? [:]
+                    return [.toolCall(ACPToolCall(id: tcId, name: title, input: rawInput))]
+                case "tool_call_update":
+                    let tcId = update["toolCallId"] as? String ?? update["id"] as? String ?? UUID().uuidString
+                    let status = update["status"] as? String ?? ""
+                    let isError = (status == "failed" || status == "error")
+                    var textOut = ""
+                    if let contentArr = update["content"] as? [[String: Any]] {
+                        for item in contentArr {
+                            if let inner = item["content"] as? [String: Any], let t = inner["text"] as? String {
+                                textOut += t
+                            } else if let t = item["text"] as? String {
+                                textOut += t
+                            }
+                        }
+                    } else if let rawOutput = update["rawOutput"] as? String {
+                        textOut = rawOutput
+                    }
+                    if !textOut.isEmpty || status == "completed" || isError {
+                        return [.toolResult(ACPToolResult(
+                            toolCallId: tcId,
+                            content: textOut.isEmpty ? status : textOut,
+                            isError: isError,
+                            toolName: update["title"] as? String
+                        ))]
+                    }
+                case "plan":
+                    if let entries = update["entries"] as? [[String: Any]], !entries.isEmpty {
+                        let summary = entries.compactMap { $0["content"] as? String }.joined(separator: " → ")
+                        return [.progress(ACPProgress(id: UUID().uuidString, step: 1, total: entries.count, message: summary))]
+                    }
+                default:
+                    break
+                }
+            case "session/request_permission":
+                let reqIdStr: String
+                if let intId = json["id"] as? Int {
+                    reqIdStr = String(intId)
+                } else if let strId = json["id"] as? String {
+                    reqIdStr = strId
+                } else {
+                    reqIdStr = UUID().uuidString
+                }
+                let toolCall = params["toolCall"] as? [String: Any] ?? [:]
+                let title = toolCall["title"] as? String ?? toolCall["kind"] as? String ?? "Tool Execution"
+                let rawInput = toolCall["rawInput"] as? [String: Any] ?? [:]
+                let path = (toolCall["locations"] as? [[String: Any]])?.first?["path"] as? String
+                    ?? rawInput["path"] as? String
+                    ?? rawInput["file_path"] as? String
+                let cmd = rawInput["command"] as? String
+                return [.permissionRequest(ACPPermissionRequest(
+                    id: reqIdStr,
+                    tool: title,
+                    filePath: path,
+                    oldContent: rawInput["old_string"] as? String,
+                    newContent: rawInput["new_string"] as? String ?? rawInput["content"] as? String,
+                    command: cmd,
+                    description: title
+                ))]
+            default:
+                break
+            }
+            return []
+        }
+        
+        if let error = json["error"] as? [String: Any] {
+            let msg = error["message"] as? String ?? "ACP JSON-RPC error"
+            return [.error(msg)]
+        }
+        
+        if let result = json["result"] as? [String: Any] {
+            if let sessionId = result["sessionId"] as? String {
+                return [.sessionInit(ACPSessionInit(sessionId: sessionId, model: nil, tools: [], capabilities: ["acp-v1"]))]
+            }
+            if let stopReason = result["stopReason"] as? String {
+                return [.complete(ACPTaskResult(
+                    sessionId: "acp_turn_\(stopReason)",
+                    result: "",
+                    totalCostUSD: nil,
+                    tokensUsed: nil,
+                    model: nil
+                ))]
+            }
+        }
+        return []
     }
 }
 
@@ -308,54 +529,69 @@ struct ACPNDJSONParser {
 struct ClaudeCodeStreamParser {
     
     static func parse(_ json: [String: Any]) -> ACPStreamEvent? {
+        return parseAll(json).first
+    }
+    
+    /// Parses all events contained in a single Claude Code stream-json line
+    /// (e.g. an assistant message containing both text and tool_use blocks).
+    static func parseAll(_ json: [String: Any]) -> [ACPStreamEvent] {
         let type = json["type"] as? String ?? ""
         
         switch type {
         case "system":
-            return parseSystemEvent(json)
+            if let ev = parseSystemEvent(json) { return [ev] }
+            return []
             
         case "assistant":
-            return parseAssistantMessage(json)
+            return parseAssistantMessages(json)
             
         case "user":
-            // Tool results from Claude's own tool execution
-            if let content = json["content"] as? [[String: Any]] {
+            // Tool results from Claude's own tool execution (supports both top-level and nested message.content)
+            let content: [[String: Any]]? = {
+                if let c = json["content"] as? [[String: Any]] { return c }
+                if let msg = json["message"] as? [String: Any], let c = msg["content"] as? [[String: Any]] { return c }
+                return nil
+            }()
+            if let content = content {
+                var results: [ACPStreamEvent] = []
                 for block in content {
                     if block["type"] as? String == "tool_result" {
                         let toolCallId = block["tool_use_id"] as? String ?? UUID().uuidString
                         let resultContent = extractTextContent(block["content"])
                         let isError = block["is_error"] as? Bool ?? false
-                        return .toolResult(ACPToolResult(
+                        results.append(.toolResult(ACPToolResult(
                             toolCallId: toolCallId,
                             content: resultContent,
                             isError: isError
-                        ))
+                        )))
                     }
                 }
+                return results
             }
-            return nil
+            return []
             
         case "stream_event":
-            return parseStreamDelta(json)
+            if let ev = parseStreamDelta(json) { return [ev] }
+            return []
             
         case "result":
             let sessionId = json["session_id"] as? String ?? "unknown"
             let result = json["result"] as? String ?? ""
             let cost = json["total_cost_usd"] as? Double
-            return .complete(ACPTaskResult(
+            return [.complete(ACPTaskResult(
                 sessionId: sessionId,
                 result: result,
                 totalCostUSD: cost,
                 tokensUsed: nil,
                 model: nil
-            ))
+            ))]
             
         case "text":
             let text = json["text"] as? String ?? ""
-            return text.isEmpty ? nil : .text(text)
+            return text.isEmpty ? [] : [.text(text)]
             
         default:
-            return nil
+            return []
         }
     }
     
@@ -392,41 +628,42 @@ struct ClaudeCodeStreamParser {
         }
     }
     
-    private static func parseAssistantMessage(_ json: [String: Any]) -> ACPStreamEvent? {
+    private static func parseAssistantMessages(_ json: [String: Any]) -> [ACPStreamEvent] {
         let content: [[String: Any]]? = {
             if let c = json["content"] as? [[String: Any]] { return c }
             if let msg = json["message"] as? [String: Any], let c = msg["content"] as? [[String: Any]] { return c }
             return nil
         }()
-        guard let content = content else { return nil }
+        guard let content = content else { return [] }
         
+        var events: [ACPStreamEvent] = []
         for block in content {
             let blockType = block["type"] as? String ?? ""
             
             switch blockType {
             case "text":
                 let text = block["text"] as? String ?? ""
-                if !text.isEmpty { return .text(text) }
+                if !text.isEmpty { events.append(.text(text)) }
                 
             case "thinking":
                 let thinking = block["thinking"] as? String ?? ""
-                if !thinking.isEmpty { return .thinking(thinking) }
+                if !thinking.isEmpty { events.append(.thinking(thinking)) }
                 
             case "tool_use":
                 let toolId = block["id"] as? String ?? UUID().uuidString
                 let toolName = block["name"] as? String ?? "unknown"
                 let input = block["input"] as? [String: Any] ?? [:]
-                return .toolCall(ACPToolCall(
+                events.append(.toolCall(ACPToolCall(
                     id: toolId,
                     name: toolName,
                     input: input
-                ))
+                )))
                 
             default:
                 continue
             }
         }
-        return nil
+        return events
     }
     
     private static func parseStreamDelta(_ json: [String: Any]) -> ACPStreamEvent? {
@@ -589,6 +826,74 @@ struct AGYStreamParser {
 
 // MARK: - OpenCode Stream Event Parser
 
+/// Parses `codex exec --json` JSONL. Codex uses thread/turn/item events,
+/// which the Claude/AGY parsers cannot interpret.
+struct CodexStreamParser {
+    static func parse(_ json: [String: Any]) -> ACPStreamEvent? {
+        let type = json["type"] as? String ?? ""
+        let item = json["item"] as? [String: Any] ?? [:]
+        let id = item["id"] as? String ?? UUID().uuidString
+        let itemType = item["type"] as? String ?? ""
+
+        switch type {
+        case "thread.started":
+            let threadID = json["thread_id"] as? String ?? UUID().uuidString
+            return .sessionInit(ACPSessionInit(sessionId: threadID, model: nil, tools: [], capabilities: []))
+        case "item.started":
+            if itemType == "command_execution" {
+                return .toolCall(ACPToolCall(id: id, name: "Bash", input: ["command": item["command"] as? String ?? ""]))
+            }
+            if itemType == "file_change" {
+                return .toolCall(ACPToolCall(id: id, name: "Edit", input: ["path": item["path"] as? String ?? "workspace"]))
+            }
+            return nil
+        case "item.completed":
+            if itemType == "agent_message", let text = item["text"] as? String, !text.isEmpty {
+                return .text(text)
+            }
+            if itemType == "command_execution" || itemType == "file_change" {
+                let output = item["aggregated_output"] as? String
+                    ?? item["output"] as? String
+                    ?? item["status"] as? String
+                    ?? "Completed"
+                let failed = (item["exit_code"] as? Int).map { $0 != 0 } ?? (item["status"] as? String == "failed")
+                return .toolResult(ACPToolResult(toolCallId: id, content: output, isError: failed, toolName: itemType == "command_execution" ? "Bash" : "Edit"))
+            }
+            return nil
+        case "turn.failed", "error":
+            let error = json["error"] as? [String: Any]
+            return .error(error?["message"] as? String ?? json["message"] as? String ?? "Codex turn failed")
+        case "turn.completed":
+            let usage = json["usage"] as? [String: Any] ?? [:]
+            let input = usage["input_tokens"] as? Int ?? 0
+            let output = usage["output_tokens"] as? Int ?? 0
+            return .complete(ACPTaskResult(sessionId: "completed", result: "", totalCostUSD: nil, tokensUsed: input + output, model: nil))
+        default:
+            return nil
+        }
+    }
+}
+
+struct CodexProcessArguments {
+    static func build(task: String, model: String?, sessionID: String?,
+                      permissionMode: ACPPermissionMode, extra: [String]) -> [String] {
+        var args = ["exec"]
+        if sessionID != nil { args.append("resume") }
+        args.append("--json")
+        args.append("--skip-git-repo-check")
+        if permissionMode == .fullAuto {
+            args.append("--dangerously-bypass-approvals-and-sandbox")
+        } else if sessionID == nil {
+            args += ["--sandbox", "workspace-write"]
+        }
+        if let model, !model.isEmpty { args += ["--model", model] }
+        args += extra
+        if let sessionID { args.append(sessionID) }
+        args.append(task)
+        return args
+    }
+}
+
 /// Parses OpenCode `run --format json` NDJSON events
 struct OpenCodeStreamParser {
     static func parse(_ json: [String: Any]) -> ACPStreamEvent? {
@@ -638,6 +943,14 @@ struct OpenCodeStreamParser {
             return .complete(ACPTaskResult(sessionId: sid, result: res, totalCostUSD: nil, tokensUsed: nil, model: nil))
             
         case "error":
+            if let errDict = json["error"] as? [String: Any] {
+                let dataDict = errDict["data"] as? [String: Any]
+                let msg = dataDict?["message"] as? String
+                    ?? errDict["message"] as? String
+                    ?? errDict["name"] as? String
+                    ?? "OpenCode error"
+                return .error(msg)
+            }
             let err = json["error"] as? String ?? part["error"] as? String ?? json["message"] as? String ?? "OpenCode error"
             return .error(err)
             

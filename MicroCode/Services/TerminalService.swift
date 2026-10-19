@@ -54,6 +54,10 @@ class TerminalService: ObservableObject {
         // Handle Output
         outputPipe.fileHandleForReading.readabilityHandler = { [weak self] handle in
             let data = handle.availableData
+            if data.isEmpty {
+                handle.readabilityHandler = nil
+                return
+            }
             if let str = String(data: data, encoding: .utf8), !str.isEmpty {
                 DispatchQueue.main.async {
                     self?.appendOutput(str)
@@ -64,6 +68,10 @@ class TerminalService: ObservableObject {
         // Handle Error
         errorPipe.fileHandleForReading.readabilityHandler = { [weak self] handle in
             let data = handle.availableData
+            if data.isEmpty {
+                handle.readabilityHandler = nil
+                return
+            }
             if let str = String(data: data, encoding: .utf8), !str.isEmpty {
                 DispatchQueue.main.async {
                     self?.appendOutput(str)

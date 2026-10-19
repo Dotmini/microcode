@@ -31,18 +31,53 @@ pub async fn status(repo_path: &str) -> Result<GitStatus> {
     let mut files = Vec::new();
     for entry in statuses.iter() {
         let path = entry.path().unwrap_or("").to_string();
-        let status = match entry.status() {
-            s if s.is_wt_new() || s.is_index_new() => "added",
-            s if s.is_wt_modified() || s.is_index_modified() => "modified",
-            s if s.is_wt_deleted() || s.is_index_deleted() => "deleted",
-            s if s.is_wt_renamed() || s.is_index_renamed() => "renamed",
-            _ => "untracked",
-        };
+        let s = entry.status();
 
-        files.push(GitFileStatus {
-            path,
-            status: status.to_string(),
-        });
+        // Emit staged (index) status if present
+        if s.is_index_new() {
+            files.push(GitFileStatus {
+                path: path.clone(),
+                status: "staged_added".to_string(),
+            });
+        } else if s.is_index_modified() || s.is_index_typechange() {
+            files.push(GitFileStatus {
+                path: path.clone(),
+                status: "staged_modified".to_string(),
+            });
+        } else if s.is_index_deleted() {
+            files.push(GitFileStatus {
+                path: path.clone(),
+                status: "staged_deleted".to_string(),
+            });
+        } else if s.is_index_renamed() {
+            files.push(GitFileStatus {
+                path: path.clone(),
+                status: "staged_renamed".to_string(),
+            });
+        }
+
+        // Emit unstaged (working tree) status if present
+        if s.is_wt_new() {
+            files.push(GitFileStatus {
+                path,
+                status: "untracked".to_string(),
+            });
+        } else if s.is_wt_modified() || s.is_wt_typechange() {
+            files.push(GitFileStatus {
+                path,
+                status: "modified".to_string(),
+            });
+        } else if s.is_wt_deleted() {
+            files.push(GitFileStatus {
+                path,
+                status: "deleted".to_string(),
+            });
+        } else if s.is_wt_renamed() {
+            files.push(GitFileStatus {
+                path,
+                status: "renamed".to_string(),
+            });
+        }
     }
 
     // Calculate ahead/behind
@@ -65,13 +100,31 @@ pub async fn commit(repo_path: &str, message: &str) -> Result<()> {
         .signature()
         .map_err(|e| AppError::GitError(e.to_string()))?;
 
+    // Check if user already staged specific files in the index
+    let has_staged_changes = repo
+        .statuses(None)
+        .map(|statuses| {
+            statuses.iter().any(|e| {
+                e.status().intersects(
+                    git2::Status::INDEX_NEW
+                        | git2::Status::INDEX_MODIFIED
+                        | git2::Status::INDEX_DELETED
+                        | git2::Status::INDEX_RENAMED
+                        | git2::Status::INDEX_TYPECHANGE,
+                )
+            })
+        })
+        .unwrap_or(false);
+
     // Get the current tree
     let mut index = repo
         .index()
         .map_err(|e| AppError::GitError(e.to_string()))?;
-    index
-        .add_all(["*"].iter(), git2::IndexAddOption::DEFAULT, None)
-        .map_err(|e| AppError::GitError(e.to_string()))?;
+    if !has_staged_changes {
+        index
+            .add_all(["*"].iter(), git2::IndexAddOption::DEFAULT, None)
+            .map_err(|e| AppError::GitError(e.to_string()))?;
+    }
     index
         .write()
         .map_err(|e| AppError::GitError(e.to_string()))?;

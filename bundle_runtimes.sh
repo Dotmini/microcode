@@ -200,29 +200,24 @@ bundle_ruby_note() {
 bundle_java() {
     echo "📦 Java (Temurin JDK 21)..."
     if [ "$TARGET_ARCH" = "arm64" ]; then
-        local url="https://github.com/adoptium/temurin21-binaries/releases/download/jdk-21.0.5%2B11/OpenJDK21U-jre_aarch64_mac_hotspot_21.0.5_11.tar.gz"
+        local url="https://github.com/adoptium/temurin21-binaries/releases/download/jdk-21.0.5%2B11/OpenJDK21U-jdk_aarch64_mac_hotspot_21.0.5_11.tar.gz"
     else
-        local url="https://github.com/adoptium/temurin21-binaries/releases/download/jdk-21.0.5%2B11/OpenJDK21U-jre_x64_mac_hotspot_21.0.5_11.tar.gz"
+        local url="https://github.com/adoptium/temurin21-binaries/releases/download/jdk-21.0.5%2B11/OpenJDK21U-jdk_x64_mac_hotspot_21.0.5_11.tar.gz"
     fi
-    local cache="${CACHE_DIR}/java-${TARGET_ARCH}.tar.gz"
+    local cache="${CACHE_DIR}/java-jdk-${TARGET_ARCH}.tar.gz"
     download_cached "$url" "$cache"
 
     local target="${RUNTIMES_ROOT}/java"
     rm -rf "$target" && mkdir -p "$target"
 
-    # Temurin macOS JRE tar structure:
-    #   jdk-21.0.5+11-jre/Contents/Home/bin/java  (macOS app bundle layout)
-    # We strip 1 component to get inside jdk-X/ dir, then find Contents/Home
     local tmp_java="${CACHE_DIR}/java-tmp-${TARGET_ARCH}"
     rm -rf "$tmp_java" && mkdir -p "$tmp_java"
     tar -xzf "$cache" -C "$tmp_java" --strip-components=1
 
     # Find the Home dir (Contents/Home on macOS, or root on Linux)
     if [ -d "$tmp_java/Contents/Home" ]; then
-        # macOS bundle layout
         cp -R "$tmp_java/Contents/Home/." "$target/"
     elif [ -d "$tmp_java/bin" ]; then
-        # Flat layout (Linux-style)
         cp -R "$tmp_java/." "$target/"
     else
         echo "      ⚠️  Unknown Java archive layout — copying as-is"

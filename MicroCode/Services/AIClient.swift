@@ -62,17 +62,16 @@ enum StreamableAIProvider: String, CaseIterable {
     }
     
     var defaultModel: String {
+        if Thread.isMainThread {
+            if let liveFirst = MainActor.assumeIsolated({ AIModelCatalog.shared.provider(self.rawValue)?.models.first?.id }),
+               !liveFirst.isEmpty {
+                return liveFirst
+            }
+        }
         switch self {
-        case .omni: return "gpt-4o"
-        case .anthropic: return "claude-3-7-sonnet-20250219"
-        case .openai: return "gpt-4o"
-        case .gemini: return "gemini-2.0-flash"
-        case .deepseek: return "deepseek-chat"
-        case .qwen: return "qwen-coder-plus"
-        case .grok: return "grok-2"
-        case .glm: return "glm-4-plus"
-        case .copilot: return "auto"
         case .local: return LocalLLMService.cachedModel
+        case .copilot: return "auto"
+        default: return ""
         }
     }
     
@@ -161,7 +160,138 @@ struct AIToolCall: Identifiable {
     let id: String
     let name: String
     let arguments: [String: Any]
+    var thoughtSignature: String? = nil
 }
+
+struct AIStructuredToolResult {
+    let toolCallId: String
+    let name: String
+    let output: String
+    let success: Bool
+}
+
+enum AIStructuredTurn {
+    case assistantToolCalls(text: String, toolCalls: [AIToolCall])
+    case toolResults(results: [AIStructuredToolResult], directive: String)
+}
+
+enum AIStructuredTurnCodec {
+    static let markerKey = "_mc_structured_turn"
+
+    static func stripThoughtTags(_ text: String) -> String {
+        guard text.contains("<thought>") else { return text.trimmingCharacters(in: .whitespacesAndNewlines) }
+        let cleaned = text.replacingOccurrences(
+            of: "<thought>[\\s\\S]*?</thought>",
+            with: "",
+            options: .regularExpression
+        )
+        return cleaned.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    static func encodeAssistantTurn(text: String, toolCalls: [AIToolCall]) -> String {
+        let tcPayload: [[String: Any]] = toolCalls.map { tc in
+            var dict: [String: Any] = [
+                "id": tc.id,
+                "name": tc.name,
+                "arguments": tc.arguments
+            ]
+            if let sig = tc.thoughtSignature, !sig.isEmpty {
+                dict["thoughtSignature"] = sig
+            }
+            return dict
+        }
+        let payload: [String: Any] = [
+            markerKey: true,
+            "kind": "assistant_tool_calls",
+            "text": text,
+            "tool_calls": tcPayload
+        ]
+        guard let data = try? JSONSerialization.data(withJSONObject: payload),
+              let json = String(data: data, encoding: .utf8) else {
+            return text
+        }
+        return json
+    }
+
+    static func encodeToolResultsTurn(results: [AIStructuredToolResult], directive: String) -> String {
+        let resPayload: [[String: Any]] = results.map { r in
+            [
+                "tool_call_id": r.toolCallId,
+                "name": r.name,
+                "output": r.output,
+                "success": r.success
+            ]
+        }
+        let payload: [String: Any] = [
+            markerKey: true,
+            "kind": "tool_results",
+            "results": resPayload,
+            "directive": directive
+        ]
+        guard let data = try? JSONSerialization.data(withJSONObject: payload),
+              let json = String(data: data, encoding: .utf8) else {
+            return directive
+        }
+        return json
+    }
+
+    static func decode(_ content: String) -> AIStructuredTurn? {
+        let trimmed = content.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard trimmed.hasPrefix("{"), trimmed.contains("\"\(markerKey)\""),
+              let data = trimmed.data(using: .utf8),
+              let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              (json[markerKey] as? Bool) == true,
+              let kind = json["kind"] as? String else {
+            return nil
+        }
+
+        if kind == "assistant_tool_calls" {
+            let text = json["text"] as? String ?? ""
+            let rawCalls = json["tool_calls"] as? [[String: Any]] ?? []
+            let calls: [AIToolCall] = rawCalls.compactMap { item in
+                guard let name = item["name"] as? String, !name.isEmpty else { return nil }
+                let id = item["id"] as? String ?? UUID().uuidString
+                let args = item["arguments"] as? [String: Any] ?? [:]
+                let sig = item["thoughtSignature"] as? String
+                return AIToolCall(id: id, name: name, arguments: args, thoughtSignature: sig)
+            }
+            return .assistantToolCalls(text: text, toolCalls: calls)
+        } else if kind == "tool_results" {
+            let rawResults = json["results"] as? [[String: Any]] ?? []
+            let results: [AIStructuredToolResult] = rawResults.compactMap { item in
+                guard let name = item["name"] as? String else { return nil }
+                let id = item["tool_call_id"] as? String ?? UUID().uuidString
+                let output = item["output"] as? String ?? ""
+                let success = item["success"] as? Bool ?? true
+                return AIStructuredToolResult(toolCallId: id, name: name, output: output, success: success)
+            }
+            let directive = json["directive"] as? String ?? ""
+            return .toolResults(results: results, directive: directive)
+        }
+        return nil
+    }
+
+    /// Compacts oversized tool output inside a structured turn without breaking its JSON envelope.
+    static func compactToolOutputsIfNeeded(_ content: String, maxCharsPerOutput: Int) -> String {
+        guard case .toolResults(let results, let directive) = decode(content) else {
+            return content
+        }
+        var changed = false
+        let compactedResults: [AIStructuredToolResult] = results.map { r in
+            guard r.output.count > maxCharsPerOutput else { return r }
+            changed = true
+            let headCount = max(500, (maxCharsPerOutput * 2) / 3)
+            let tailCount = max(250, maxCharsPerOutput / 3)
+            let head = String(r.output.prefix(headCount))
+            let tail = String(r.output.suffix(tailCount))
+            let compacted = head + "\n... [Earlier tool output compacted] ...\n" + tail
+            return AIStructuredToolResult(toolCallId: r.toolCallId, name: r.name, output: compacted, success: r.success)
+        }
+        guard changed else { return content }
+        return encodeToolResultsTurn(results: compactedResults, directive: directive)
+    }
+}
+
 
 // MARK: - Streaming Client
 
@@ -395,35 +525,62 @@ final class AIClient: ObservableObject {
         onComplete: @escaping (String) -> Void,
         onError: @escaping (String) -> Void
     ) {
-        // Determine key mode: "cloud" (Dotmini proxy) vs "direct" (user's own key)
+        let ent = EnterpriseAIAuthService.shared
+        let safePrompt = ent.redactPromptIfNeeded(prompt)
         let keyMode = UserDefaults.standard.string(forKey: "aiKeyMode") ?? "cloud"
         var actualKey: String = ""
         var baseURL: String = provider.directBaseURL
+        let useVertexGemini = (ent.mode == .geminiVertex && provider == .gemini)
+        let useDotminiEnterprise = (ent.mode == .dotminiEnterprise)
+        let useCustomGateway = (ent.mode == .customGateway && !ent.customGatewayBaseURL.isEmpty)
         
         if provider == .local || keyMode == "local" {
             actualKey = "local"
             baseURL = LocalLLMService.cachedEndpoint
-            
+        } else if useVertexGemini {
+            actualKey = "vertex_enterprise"
+            baseURL = "vertex://\(ent.vertexLocation)/\(ent.vertexProjectId)"
+        } else if useDotminiEnterprise {
+            actualKey = !ent.dotminiEnterpriseKey.isEmpty
+                ? ent.dotminiEnterpriseKey
+                : (DotminiPlatformKeyService.shared.authorizationToken ?? SupabaseAuthService.shared.accessToken ?? "")
+            baseURL = ent.dotminiEnterpriseURL.trimmingCharacters(in: CharacterSet(charactersIn: "/"))
+        } else if useCustomGateway {
+            actualKey = ent.customGatewayAPIKey
+            baseURL = ent.customGatewayBaseURL.trimmingCharacters(in: CharacterSet(charactersIn: "/"))
+        } else if apiKey == "codex_oauth", let codexCreds = Self.loadCodexOAuthCredentials(fallbackToken: "") {
+            actualKey = codexCreds.accessToken
+            baseURL = "https://chatgpt.com/backend-api/codex"
         } else if keyMode == "subscription" {
-            if let account = resolveSubscriptionAccount(for: provider),
-               account.provider == .copilot, SubscriptionAuthManager.shared.isConnected(.copilot) {
-                actualKey = account.sessionToken
+            let resolvedByokKey = AIModelCatalog.resolveKey(provider.rawValue)
+            let passedKey = apiKey.trimmingCharacters(in: .whitespacesAndNewlines)
+            let account = resolveSubscriptionAccount(for: provider)
+            let subToken = account?.sessionToken.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+            
+            if let account, account.provider == .copilot, SubscriptionAuthManager.shared.isConnected(.copilot) {
+                actualKey = subToken
                 baseURL = StreamableAIProvider.copilot.directBaseURL
+            } else if provider == .openai,
+                      let codexCreds = Self.loadCodexOAuthCredentials(fallbackToken: subToken),
+                      !(resolvedByokKey.hasPrefix("sk-") && !resolvedByokKey.hasPrefix("sk-ant-")) {
+                actualKey = codexCreds.accessToken
+                baseURL = "https://chatgpt.com/backend-api/codex"
+            } else if !subToken.isEmpty && !subToken.hasPrefix("cli-oauth:") {
+                actualKey = subToken
+                baseURL = provider.directBaseURL
+            } else if !resolvedByokKey.isEmpty {
+                actualKey = resolvedByokKey
+                baseURL = provider.directBaseURL
+            } else if !passedKey.isEmpty && !passedKey.hasPrefix("cli-oauth:") {
+                actualKey = passedKey
+                baseURL = provider.directBaseURL
+            } else if provider == .openai, let codexCreds = Self.loadCodexOAuthCredentials(fallbackToken: "") {
+                actualKey = codexCreds.accessToken
+                baseURL = "https://chatgpt.com/backend-api/codex"
             } else {
-                // Fallback to BYOK keys if available — don't block the user
-                let specificKey = UserDefaults.standard.string(forKey: "\(provider.rawValue)_api_key") ?? ""
-                let passedKey = apiKey.trimmingCharacters(in: .whitespacesAndNewlines)
-                if !specificKey.isEmpty {
-                    actualKey = specificKey
-                    baseURL = provider.directBaseURL
-                } else if !passedKey.isEmpty {
-                    actualKey = passedKey
-                    baseURL = provider.directBaseURL
-                } else {
-                    let message = "No API key found for \(provider.rawValue). Add a Direct API Key in Settings, or connect GitHub Copilot for subscription access."
-                    onError(message)
-                    return
-                }
+                let message = "No active subscription or API key found for \(provider.rawValue). Connect in Settings → AI Provider → Subscription, or add a Direct API Key."
+                onError(message)
+                return
             }
         } else if keyMode == "direct" {
             // ━━━ BYOK (DIRECT) MODE ━━━
@@ -435,10 +592,15 @@ final class AIClient: ObservableObject {
                 actualKey = passedKey
             } else if !resolvedKey.isEmpty {
                 actualKey = resolvedKey
+            } else if provider == .openai, let codexCreds = Self.loadCodexOAuthCredentials(fallbackToken: "") {
+                actualKey = codexCreds.accessToken
+                baseURL = "https://chatgpt.com/backend-api/codex"
             } else {
                 actualKey = ""
             }
-            baseURL = provider.directBaseURL
+            if baseURL != "https://chatgpt.com/backend-api/codex" {
+                baseURL = provider.directBaseURL
+            }
             
         } else {
             // ━━━ CLOUD MODE (Dotmini) ━━━
@@ -449,7 +611,7 @@ final class AIClient: ObservableObject {
             baseURL = provider.cloudBaseURL
         }
         
-        if actualKey.isEmpty && provider != .local && provider != .omni {
+        if actualKey.isEmpty && provider != .local && provider != .omni && !useVertexGemini && !useCustomGateway {
             switch keyMode {
             case "subscription":
                 onError("No subscription session found for \(provider.rawValue). Go to Settings → AI Provider → Subscription to connect.")
@@ -473,7 +635,15 @@ final class AIClient: ObservableObject {
         
         streamTask = Task {
             let requestKey: String
-            if keyMode == "cloud" && baseURL == provider.cloudBaseURL && provider != .local {
+            if useDotminiEnterprise {
+                if !ent.dotminiEnterpriseKey.isEmpty {
+                    requestKey = ent.dotminiEnterpriseKey
+                } else if let platformKey = DotminiPlatformKeyService.shared.authorizationToken {
+                    requestKey = platformKey
+                } else {
+                    requestKey = actualKey
+                }
+            } else if keyMode == "cloud" && baseURL == provider.cloudBaseURL && provider != .local {
                 if let platformKey = DotminiPlatformKeyService.shared.authorizationToken {
                     requestKey = platformKey
                 } else if SupabaseAuthService.shared.session != nil {
@@ -498,28 +668,32 @@ final class AIClient: ObservableObject {
                     self.pendingStreamTokens = ""
                 }
                 do {
-                    if keyMode == "subscription" || baseURL == provider.cloudBaseURL {
-                        // All cloud-routed requests (Dotmini Cloud or Web Subscriptions) use OpenAI-compatible gateway
-                        try await streamOpenAI(prompt: prompt, attachments: attachments, systemPrompt: systemPrompt, conversationHistory: trimmedHistory, model: resolvedModel, apiKey: requestKey, baseURL: baseURL, tools: tools, onToken: onToken, onToolCall: onToolCall)
+                    if useVertexGemini {
+                        try await streamGemini(prompt: safePrompt, attachments: attachments, systemPrompt: systemPrompt, conversationHistory: trimmedHistory, model: resolvedModel, apiKey: requestKey, tools: tools, onToken: onToken, onToolCall: onToolCall)
+                    } else if baseURL == "https://chatgpt.com/backend-api/codex" {
+                        try await streamCodexResponses(prompt: safePrompt, attachments: attachments, systemPrompt: systemPrompt, conversationHistory: trimmedHistory, model: resolvedModel, accessToken: requestKey, tools: tools, onToken: onToken, onToolCall: onToolCall)
+                    } else if useDotminiEnterprise || useCustomGateway || baseURL == provider.cloudBaseURL || baseURL == StreamableAIProvider.copilot.directBaseURL {
+                        // Cloud-routed requests (Dotmini Cloud Enterprise, Dotmini Cloud, Custom Gateway, or GitHub Copilot) use OpenAI-compatible gateway
+                        try await streamOpenAI(prompt: safePrompt, attachments: attachments, systemPrompt: systemPrompt, conversationHistory: trimmedHistory, model: resolvedModel, apiKey: requestKey, baseURL: baseURL, tools: tools, onToken: onToken, onToolCall: onToolCall)
                     } else {
-                        // Direct / BYOK mode: use native protocols where necessary
+                        // Direct / Subscription mode with native provider endpoints
                         switch provider {
                         case .gemini:
                             let lower = resolvedModel.lowercased()
                             if !lower.contains("gemini") && !lower.contains("gemma") {
                                 let fallback = StreamableAIProvider.detect(from: resolvedModel)
                                 if fallback != .gemini {
-                                    try await streamOpenAI(prompt: prompt, attachments: attachments, systemPrompt: systemPrompt, conversationHistory: trimmedHistory, model: resolvedModel, apiKey: actualKey, baseURL: fallback.directBaseURL, tools: tools, onToken: onToken, onToolCall: onToolCall)
+                                    try await streamOpenAI(prompt: safePrompt, attachments: attachments, systemPrompt: systemPrompt, conversationHistory: trimmedHistory, model: resolvedModel, apiKey: requestKey, baseURL: fallback.directBaseURL, tools: tools, onToken: onToken, onToolCall: onToolCall)
                                 } else {
-                                    try await streamGemini(prompt: prompt, attachments: attachments, systemPrompt: systemPrompt, conversationHistory: trimmedHistory, model: resolvedModel, apiKey: actualKey, tools: tools, onToken: onToken, onToolCall: onToolCall)
+                                    try await streamGemini(prompt: safePrompt, attachments: attachments, systemPrompt: systemPrompt, conversationHistory: trimmedHistory, model: resolvedModel, apiKey: requestKey, tools: tools, onToken: onToken, onToolCall: onToolCall)
                                 }
                             } else {
-                                try await streamGemini(prompt: prompt, attachments: attachments, systemPrompt: systemPrompt, conversationHistory: trimmedHistory, model: resolvedModel, apiKey: actualKey, tools: tools, onToken: onToken, onToolCall: onToolCall)
+                                try await streamGemini(prompt: safePrompt, attachments: attachments, systemPrompt: systemPrompt, conversationHistory: trimmedHistory, model: resolvedModel, apiKey: requestKey, tools: tools, onToken: onToken, onToolCall: onToolCall)
                             }
                         case .anthropic:
-                            try await streamAnthropic(prompt: prompt, attachments: attachments, systemPrompt: systemPrompt, conversationHistory: trimmedHistory, model: resolvedModel, apiKey: actualKey, tools: tools, onToken: onToken, onToolCall: onToolCall)
+                            try await streamAnthropic(prompt: safePrompt, attachments: attachments, systemPrompt: systemPrompt, conversationHistory: trimmedHistory, model: resolvedModel, apiKey: requestKey, tools: tools, onToken: onToken, onToolCall: onToolCall)
                         case .omni, .openai, .deepseek, .grok, .qwen, .glm, .copilot, .local:
-                            try await streamOpenAI(prompt: prompt, attachments: attachments, systemPrompt: systemPrompt, conversationHistory: trimmedHistory, model: resolvedModel, apiKey: actualKey, baseURL: baseURL, tools: tools, onToken: onToken, onToolCall: onToolCall)
+                            try await streamOpenAI(prompt: safePrompt, attachments: attachments, systemPrompt: systemPrompt, conversationHistory: trimmedHistory, model: resolvedModel, apiKey: requestKey, baseURL: baseURL, tools: tools, onToken: onToken, onToolCall: onToolCall)
                         }
                     }
                     
@@ -552,6 +726,307 @@ final class AIClient: ObservableObject {
         isStreaming = false
     }
     
+    // MARK: - Codex ChatGPT Subscription OAuth Support
+    
+    static func loadCodexOAuthCredentials(fallbackToken: String) -> (accessToken: String, accountId: String, defaultModel: String)? {
+        let home = FileManager.default.homeDirectoryForCurrentUser
+        let authURL = home.appendingPathComponent(".codex/auth.json")
+        var accessToken = ""
+        var accountId = ""
+        if let data = try? Data(contentsOf: authURL),
+           let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] {
+            if let tokens = json["tokens"] as? [String: Any] {
+                accessToken = (tokens["access_token"] as? String) ?? ""
+                accountId = (tokens["account_id"] as? String) ?? ""
+            }
+            if accessToken.isEmpty {
+                accessToken = (json["access_token"] as? String) ?? ""
+            }
+        }
+        if accessToken.isEmpty && !fallbackToken.isEmpty && !fallbackToken.hasPrefix("sk-") && !fallbackToken.hasPrefix("cli-oauth:") {
+            accessToken = fallbackToken
+        }
+        guard !accessToken.isEmpty else { return nil }
+        
+        var defaultModel = "gpt-6-luna"
+        let configURL = home.appendingPathComponent(".codex/config.toml")
+        if let configStr = try? String(contentsOf: configURL, encoding: .utf8) {
+            for line in configStr.components(separatedBy: .newlines) {
+                let trimmed = line.trimmingCharacters(in: .whitespaces)
+                if trimmed.hasPrefix("model =") || trimmed.hasPrefix("model=") {
+                    let parts = trimmed.split(separator: "=", maxSplits: 1)
+                    if parts.count > 1 {
+                        let m = parts[1].trimmingCharacters(in: CharacterSet(charactersIn: " \"'"))
+                        if !m.isEmpty { defaultModel = m }
+                    }
+                }
+            }
+        }
+        return (accessToken, accountId, defaultModel)
+    }
+    
+    private func streamCodexResponses(
+        prompt: String,
+        attachments: [AIAttachment],
+        systemPrompt: String?,
+        conversationHistory: [(role: String, content: String)],
+        model: String,
+        accessToken: String,
+        tools: [[String: Any]]?,
+        onToken: @escaping (String) -> Void,
+        onToolCall: ((AIToolCall) -> Void)?
+    ) async throws {
+        let creds = Self.loadCodexOAuthCredentials(fallbackToken: accessToken)
+        let token = creds?.accessToken ?? accessToken
+        let accountId = creds?.accountId ?? ""
+        let fallbackModel = creds?.defaultModel ?? "gpt-6-luna"
+        
+        var candidateModel = model.trimmingCharacters(in: .whitespacesAndNewlines)
+        if candidateModel.isEmpty || candidateModel == "gpt-4o" || candidateModel == "gpt-4o-mini" || candidateModel == "gpt-5.4" || candidateModel == "gpt-5.4-mini" {
+            candidateModel = fallbackModel
+        }
+        
+        try await executeCodexResponsesStream(
+            prompt: prompt,
+            attachments: attachments,
+            systemPrompt: systemPrompt,
+            conversationHistory: conversationHistory,
+            model: candidateModel,
+            fallbackModel: fallbackModel,
+            token: token,
+            accountId: accountId,
+            tools: tools,
+            onToken: onToken,
+            onToolCall: onToolCall
+        )
+    }
+    
+    private func executeCodexResponsesStream(
+        prompt: String,
+        attachments: [AIAttachment],
+        systemPrompt: String?,
+        conversationHistory: [(role: String, content: String)],
+        model: String,
+        fallbackModel: String,
+        token: String,
+        accountId: String,
+        tools: [[String: Any]]?,
+        onToken: @escaping (String) -> Void,
+        onToolCall: ((AIToolCall) -> Void)?
+    ) async throws {
+        guard let url = URL(string: "https://chatgpt.com/backend-api/codex/responses") else {
+            throw NSError(domain: "AIClient", code: -1, userInfo: [NSLocalizedDescriptionKey: "Invalid Codex Responses URL"])
+        }
+        
+        var request = URLRequest(url: url, timeoutInterval: requestTimeout)
+        request.httpMethod = "POST"
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        request.setValue("text/event-stream", forHTTPHeaderField: "Accept")
+        request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
+        if !accountId.isEmpty {
+            request.setValue(accountId, forHTTPHeaderField: "ChatGPT-Account-Id")
+        }
+        request.setValue("codex_cli_rs/0.1.0", forHTTPHeaderField: "User-Agent")
+        
+        var inputItems: [[String: Any]] = []
+        var activeCallIds: Set<String> = []
+        
+        func appendTurn(role: String, content: String) {
+            let trimmed = content.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !trimmed.isEmpty else { return }
+            if let structured = AIStructuredTurnCodec.decode(trimmed) {
+                switch structured {
+                case .assistantToolCalls(let text, let toolCalls):
+                    let cleanText = AIStructuredTurnCodec.stripThoughtTags(text)
+                    if !cleanText.isEmpty {
+                        inputItems.append([
+                            "type": "message",
+                            "role": "assistant",
+                            "content": [["type": "output_text", "text": cleanText]]
+                        ])
+                    }
+                    activeCallIds.removeAll()
+                    for tc in toolCalls {
+                        let argsData = (try? JSONSerialization.data(withJSONObject: tc.arguments)) ?? Data("{}".utf8)
+                        let argsStr = String(data: argsData, encoding: .utf8) ?? "{}"
+                        inputItems.append([
+                            "type": "function_call",
+                            "call_id": tc.id,
+                            "name": tc.name,
+                            "arguments": argsStr
+                        ])
+                        activeCallIds.insert(tc.id)
+                    }
+                case .toolResults(let results, let directive):
+                    var unmatched: [String] = []
+                    for res in results {
+                        if activeCallIds.contains(res.toolCallId) {
+                            inputItems.append([
+                                "type": "function_call_output",
+                                "call_id": res.toolCallId,
+                                "output": res.output
+                            ])
+                        } else {
+                            unmatched.append("[\(res.name)]: \(res.output)")
+                        }
+                    }
+                    activeCallIds.removeAll()
+                    let combined = (unmatched + (directive.isEmpty ? [] : [directive])).joined(separator: "\n\n")
+                    if !combined.isEmpty {
+                        inputItems.append([
+                            "type": "message",
+                            "role": "user",
+                            "content": [["type": "input_text", "text": combined]]
+                        ])
+                    }
+                }
+            } else {
+                activeCallIds.removeAll()
+                let cleanText = role == "assistant" ? AIStructuredTurnCodec.stripThoughtTags(trimmed) : trimmed
+                guard !cleanText.isEmpty else { return }
+                let contentType = role == "assistant" ? "output_text" : "input_text"
+                inputItems.append([
+                    "type": "message",
+                    "role": role == "assistant" ? "assistant" : "user",
+                    "content": [["type": contentType, "text": cleanText]]
+                ])
+            }
+        }
+        
+        for msg in conversationHistory {
+            appendTurn(role: msg.role, content: msg.content)
+        }
+        
+        var finalUserPrompt = prompt.trimmingCharacters(in: .whitespacesAndNewlines)
+        for attachment in attachments {
+            switch attachment.type {
+            case .text:
+                if let t = attachment.textContent {
+                    finalUserPrompt += "\n\n[File: \(attachment.name)]\n\(t)\n[/File]"
+                }
+            case .pdf:
+                let pdfText = attachment.pdfExtractedText
+                finalUserPrompt += "\n\n[Document: \(attachment.name)]\n\(pdfText)\n[/Document]"
+            case .image:
+                let visionResult = await AppleVisionEngine.shared.analyzeImage(data: attachment.data, filename: attachment.name)
+                finalUserPrompt += "\n\n\(visionResult.formattedSummary)"
+            }
+        }
+        if finalUserPrompt.isEmpty { finalUserPrompt = "Continue." }
+        appendTurn(role: "user", content: finalUserPrompt)
+        
+        let instructions = (systemPrompt?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty == false)
+            ? systemPrompt!
+            : "You are MicroCode AI, an expert software engineering assistant."
+        
+        var body: [String: Any] = [
+            "model": model,
+            "instructions": instructions,
+            "input": inputItems,
+            "stream": true,
+            "store": false
+        ]
+        
+        if let tools = tools, !tools.isEmpty {
+            let formattedTools: [[String: Any]] = tools.compactMap { t in
+                guard let name = t["name"] as? String else { return nil }
+                var item: [String: Any] = [
+                    "type": "function",
+                    "name": name,
+                    "description": (t["description"] as? String) ?? ""
+                ]
+                if let params = t["parameters"] as? [String: Any] {
+                    item["parameters"] = params
+                }
+                return item
+            }
+            if !formattedTools.isEmpty {
+                body["tools"] = formattedTools
+            }
+        }
+        
+        request.httpBody = try JSONSerialization.data(withJSONObject: body)
+        
+        let (bytes, response) = try await URLSession.shared.bytes(for: request)
+        guard let http = response as? HTTPURLResponse else {
+            throw NSError(domain: "AIClient", code: -1, userInfo: [NSLocalizedDescriptionKey: "Invalid response from ChatGPT Codex"])
+        }
+        
+        if http.statusCode != 200 {
+            var errBody = ""
+            for try await line in bytes.lines {
+                errBody += line
+                if errBody.count > 600 { break }
+            }
+            if http.statusCode == 400 && model != fallbackModel && (errBody.contains("not supported") || errBody.contains("model")) {
+                try await executeCodexResponsesStream(
+                    prompt: prompt,
+                    attachments: attachments,
+                    systemPrompt: systemPrompt,
+                    conversationHistory: conversationHistory,
+                    model: fallbackModel,
+                    fallbackModel: fallbackModel,
+                    token: token,
+                    accountId: accountId,
+                    tools: tools,
+                    onToken: onToken,
+                    onToolCall: onToolCall
+                )
+                return
+            }
+            throw NSError(domain: "AIClient", code: http.statusCode, userInfo: [NSLocalizedDescriptionKey: "ChatGPT Codex error (\(http.statusCode)): \(errBody.prefix(240))"])
+        }
+        
+        var isStreamingReasoning = false
+        for try await line in bytes.lines {
+            if Task.isCancelled { break }
+            guard line.hasPrefix("data: ") else { continue }
+            let jsonStr = String(line.dropFirst(6)).trimmingCharacters(in: .whitespacesAndNewlines)
+            if jsonStr == "[DONE]" || jsonStr.isEmpty { continue }
+            guard let data = jsonStr.data(using: .utf8),
+                  let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+                  let type = json["type"] as? String else { continue }
+            
+            switch type {
+            case "response.reasoning_summary_text.delta", "response.reasoning_text.delta":
+                if let delta = json["delta"] as? String, !delta.isEmpty {
+                    if !isStreamingReasoning {
+                        isStreamingReasoning = true
+                        appendStreamToken("<thought>", onToken: onToken)
+                    }
+                    appendStreamToken(delta, onToken: onToken)
+                }
+            case "response.output_text.delta":
+                if let delta = json["delta"] as? String, !delta.isEmpty {
+                    if isStreamingReasoning {
+                        isStreamingReasoning = false
+                        appendStreamToken("</thought>\n\n", onToken: onToken)
+                    }
+                    appendStreamToken(delta, onToken: onToken)
+                }
+            case "response.output_item.done":
+                if isStreamingReasoning {
+                    isStreamingReasoning = false
+                    appendStreamToken("</thought>\n\n", onToken: onToken)
+                }
+                if let item = json["item"] as? [String: Any],
+                   (item["type"] as? String) == "function_call",
+                   let name = item["name"] as? String {
+                    let callId = (item["call_id"] as? String) ?? (item["id"] as? String) ?? UUID().uuidString
+                    let argsStr = (item["arguments"] as? String) ?? "{}"
+                    let args = (argsStr.data(using: .utf8).flatMap { try? JSONSerialization.jsonObject(with: $0) as? [String: Any] }) ?? [:]
+                    onToolCall?(AIToolCall(id: callId, name: name, arguments: args))
+                }
+            default:
+                break
+            }
+        }
+        
+        if isStreamingReasoning {
+            appendStreamToken("</thought>\n\n", onToken: onToken)
+        }
+    }
+    
     // MARK: - Non-Streaming (for Agent tool loops)
     
     func sendSync(
@@ -562,35 +1037,53 @@ final class AIClient: ObservableObject {
         apiKey: String,
         tools: [[String: Any]]? = nil
     ) async throws -> (text: String, toolCalls: [AIToolCall]) {
+        let ent = EnterpriseAIAuthService.shared
         let keyMode = UserDefaults.standard.string(forKey: "aiKeyMode") ?? "cloud"
         let actualKey: String
         let baseURL: String
+        let useVertexGemini = (ent.mode == .geminiVertex && provider == .gemini)
+        let useDotminiEnterprise = (ent.mode == .dotminiEnterprise)
+        let useCustomGateway = (ent.mode == .customGateway && !ent.customGatewayBaseURL.isEmpty)
         
         if provider == .local {
             actualKey = ""
             baseURL = provider.directBaseURL
-            
+        } else if useVertexGemini {
+            actualKey = "vertex_enterprise"
+            baseURL = "vertex://\(ent.vertexLocation)/\(ent.vertexProjectId)"
+        } else if useDotminiEnterprise {
+            let sessionToken = await SupabaseAuthService.shared.refreshAccessTokenIfNeeded()
+            actualKey = !ent.dotminiEnterpriseKey.isEmpty
+                ? ent.dotminiEnterpriseKey
+                : (DotminiPlatformKeyService.shared.authorizationToken ?? sessionToken ?? "")
+            baseURL = ent.dotminiEnterpriseURL.trimmingCharacters(in: CharacterSet(charactersIn: "/"))
+        } else if useCustomGateway {
+            actualKey = ent.customGatewayAPIKey
+            baseURL = ent.customGatewayBaseURL.trimmingCharacters(in: CharacterSet(charactersIn: "/"))
         } else if keyMode == "subscription" {
-            if let account = resolveSubscriptionAccount(for: provider),
-               account.provider == .copilot, SubscriptionAuthManager.shared.isConnected(.copilot) {
-                actualKey = account.sessionToken
+            let resolvedByokKey = AIModelCatalog.resolveKey(provider.rawValue)
+            let passedKey = apiKey.trimmingCharacters(in: .whitespacesAndNewlines)
+            let account = resolveSubscriptionAccount(for: provider)
+            let subToken = account?.sessionToken.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+            
+            if let account, account.provider == .copilot, SubscriptionAuthManager.shared.isConnected(.copilot) {
+                actualKey = subToken
                 baseURL = StreamableAIProvider.copilot.directBaseURL
+            } else if !subToken.isEmpty && !subToken.hasPrefix("cli-oauth:") {
+                actualKey = subToken
+                baseURL = provider.directBaseURL
+            } else if !resolvedByokKey.isEmpty {
+                actualKey = resolvedByokKey
+                baseURL = provider.directBaseURL
+            } else if !passedKey.isEmpty && !passedKey.hasPrefix("cli-oauth:") {
+                actualKey = passedKey
+                baseURL = provider.directBaseURL
             } else {
-                let specificKey = UserDefaults.standard.string(forKey: "\(provider.rawValue)_api_key") ?? ""
-                let passedKey = apiKey.trimmingCharacters(in: .whitespacesAndNewlines)
-                if !specificKey.isEmpty {
-                    actualKey = specificKey
-                    baseURL = provider.directBaseURL
-                } else if !passedKey.isEmpty {
-                    actualKey = passedKey
-                    baseURL = provider.directBaseURL
-                } else {
-                    throw NSError(domain: "AIClient", code: 401, userInfo: [NSLocalizedDescriptionKey: "No API key found for \(provider.rawValue). Add a Direct API Key in Settings, or connect GitHub Copilot."])
-                }
+                throw NSError(domain: "AIClient", code: 401, userInfo: [NSLocalizedDescriptionKey: "No active subscription or API key found for \(provider.rawValue)."])
             }
         } else if keyMode == "direct" {
             // ━━━ BYOK (DIRECT) MODE ━━━
-            let specificKey = UserDefaults.standard.string(forKey: "\(provider.rawValue)_api_key") ?? ""
+            let specificKey = AIModelCatalog.resolveKey(provider.rawValue)
             let legacyKey = UserDefaults.standard.string(forKey: "apiKey") ?? ""
             let passedKey = apiKey.trimmingCharacters(in: .whitespacesAndNewlines)
             
@@ -613,9 +1106,10 @@ final class AIClient: ObservableObject {
             baseURL = provider.cloudBaseURL
         }
         
-        
-        if keyMode == "subscription" || baseURL == provider.cloudBaseURL {
-            // Cloud and Copilot use the OpenAI-compatible transport → all models via OpenAI protocol through Dotmini proxy
+        if useVertexGemini {
+            return try await syncGemini(messages: messages, systemPrompt: systemPrompt, model: model, apiKey: actualKey, tools: tools)
+        } else if useDotminiEnterprise || useCustomGateway || baseURL == provider.cloudBaseURL || baseURL == StreamableAIProvider.copilot.directBaseURL {
+            // Cloud, Dotmini Enterprise, Custom Gateway, and Copilot use OpenAI-compatible transport
             return try await syncOpenAI(messages: messages, systemPrompt: systemPrompt, model: model, apiKey: actualKey, baseURL: baseURL, tools: tools)
         } else {
             // Direct/Subscription mode → use native protocols
@@ -680,16 +1174,31 @@ final class AIClient: ObservableObject {
     private func streamGemini(prompt: String, attachments: [AIAttachment], systemPrompt: String?, conversationHistory: [(role: String, content: String)], model: String, apiKey: String, tools: [[String: Any]]?, onToken: @escaping (String) -> Void, onToolCall: ((AIToolCall) -> Void)?) async throws {
         let baseURL = StreamableAIProvider.gemini.directBaseURL
         let cleanModel = model.hasPrefix("models/") ? String(model.dropFirst(7)) : model
-        guard let url = URL(string: "\(baseURL)/models/\(cleanModel):streamGenerateContent?alt=sse&key=\(apiKey)") else {
+        let isVertexEnterprise = EnterpriseAIAuthService.shared.mode == .geminiVertex
+        
+        let url: URL
+        if isVertexEnterprise, let vertexURL = EnterpriseAIAuthService.shared.buildVertexGeminiURL(model: cleanModel, streaming: true) {
+            url = vertexURL
+        } else if let directURL = URL(string: "\(baseURL)/models/\(cleanModel):streamGenerateContent?alt=sse&key=\(apiKey)") {
+            url = directURL
+        } else {
             throw NSError(domain: "AIClient", code: -1, userInfo: [NSLocalizedDescriptionKey: "Invalid URL configuration for gemini"])
         }
         
         var request = URLRequest(url: url, timeoutInterval: requestTimeout)
         request.httpMethod = "POST"
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
-        if baseURL.trimmingCharacters(in: CharacterSet(charactersIn: "/")) == StreamableAIProvider.cloudProxyURL.trimmingCharacters(in: CharacterSet(charactersIn: "/")) {
+        if isVertexEnterprise {
+            if let authHeader = try await EnterpriseAIAuthService.shared.resolveVertexAuthorizationHeader() {
+                request.setValue(authHeader, forHTTPHeaderField: "Authorization")
+            }
+            if !EnterpriseAIAuthService.shared.vertexProjectId.isEmpty {
+                request.setValue(EnterpriseAIAuthService.shared.vertexProjectId, forHTTPHeaderField: "x-goog-user-project")
+            }
+        } else if baseURL.trimmingCharacters(in: CharacterSet(charactersIn: "/")) == StreamableAIProvider.cloudProxyURL.trimmingCharacters(in: CharacterSet(charactersIn: "/")) {
             request.setValue("microcode", forHTTPHeaderField: "X-Dotmini-Product")
         }
+        EnterpriseAIAuthService.shared.applyEnterpriseHeaders(to: &request)
         
         var body: [String: Any] = [
             "generationConfig": ["temperature": 0.7, "maxOutputTokens": maxOutputTokens(for: cleanModel)]
@@ -701,17 +1210,85 @@ final class AIClient: ObservableObject {
         
         var rawContents: [[String: Any]] = []
         
+        func appendGeminiTurn(role: String, content: String) {
+            let trimmed = content.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !trimmed.isEmpty else { return }
+            if let structured = AIStructuredTurnCodec.decode(trimmed) {
+                switch structured {
+                case .assistantToolCalls(let text, let toolCalls):
+                    var parts: [[String: Any]] = []
+                    let cleanText = AIStructuredTurnCodec.stripThoughtTags(text)
+                    if !cleanText.isEmpty {
+                        parts.append(["text": cleanText])
+                    }
+                    for tc in toolCalls {
+                        var part: [String: Any] = [
+                            "functionCall": [
+                                "name": tc.name,
+                                "args": tc.arguments
+                            ]
+                        ]
+                        if let sig = tc.thoughtSignature, !sig.isEmpty {
+                            part["thoughtSignature"] = sig
+                        }
+                        parts.append(part)
+                    }
+                    if !parts.isEmpty {
+                        rawContents.append(["role": "model", "parts": parts])
+                    }
+                case .toolResults(let results, let directive):
+                    var parts: [[String: Any]] = []
+                    for res in results {
+                        parts.append([
+                            "functionResponse": [
+                                "name": res.name,
+                                "response": [
+                                    "result": res.output,
+                                    "success": res.success
+                                ]
+                            ]
+                        ])
+                    }
+                    if !directive.isEmpty {
+                        parts.append(["text": directive])
+                    }
+                    if !parts.isEmpty {
+                        rawContents.append(["role": "user", "parts": parts])
+                    }
+                }
+            } else {
+                let geminiRole = role == "assistant" ? "model" : "user"
+                let cleanText = role == "assistant" ? AIStructuredTurnCodec.stripThoughtTags(trimmed) : trimmed
+                guard !cleanText.isEmpty else { return }
+                rawContents.append(["role": geminiRole, "parts": [["text": cleanText]]])
+            }
+        }
+        
         for msg in conversationHistory {
-            let trimmed = msg.content.trimmingCharacters(in: .whitespacesAndNewlines)
-            guard !trimmed.isEmpty else { continue }
-            let geminiRole = msg.role == "assistant" ? "model" : "user"
-            rawContents.append(["role": geminiRole, "parts": [["text": trimmed]]])
+            appendGeminiTurn(role: msg.role, content: msg.content)
         }
         
         var userParts: [[String: Any]] = []
         let trimmedPrompt = prompt.trimmingCharacters(in: .whitespacesAndNewlines)
         if !trimmedPrompt.isEmpty {
-            userParts.append(["text": trimmedPrompt])
+            if case .toolResults(let results, let directive) = AIStructuredTurnCodec.decode(trimmedPrompt) {
+                for res in results {
+                    userParts.append([
+                        "functionResponse": [
+                            "name": res.name,
+                            "response": [
+                                "result": res.output,
+                                "success": res.success
+                            ]
+                        ]
+                    ])
+                }
+                if !directive.isEmpty {
+                    userParts.append(["text": directive])
+                }
+            } else {
+                userParts.append(["text": trimmedPrompt])
+            }
         }
         
         for attachment in attachments {
@@ -839,7 +1416,8 @@ final class AIClient: ObservableObject {
                         appendStreamToken("</thought>\n\n", onToken: onToken)
                     }
                     let args = fc["args"] as? [String: Any] ?? [:]
-                    let toolCall = AIToolCall(id: UUID().uuidString, name: name, arguments: args)
+                    let thoughtSig = part["thoughtSignature"] as? String
+                    let toolCall = AIToolCall(id: UUID().uuidString, name: name, arguments: args, thoughtSignature: thoughtSig)
                     onToolCall?(toolCall)
                 }
             }
@@ -899,7 +1477,7 @@ final class AIClient: ObservableObject {
                 request.setValue(dotminiLicense, forHTTPHeaderField: "X-Dotmini-License")
             }
             let isJWT = apiKey.components(separatedBy: ".").count >= 3
-            let isPlatformKey = apiKey.hasPrefix("sk-dotmini-") || apiKey.hasPrefix("mci-live-")
+            let isPlatformKey = apiKey.hasPrefix("sk-dotmini-") || apiKey.hasPrefix("mci-live-") || EnterpriseAIAuthService.shared.mode == .dotminiEnterprise
             if (isJWT || isPlatformKey) && !apiKey.isEmpty {
                 request.setValue("Bearer \(apiKey)", forHTTPHeaderField: "Authorization")
             }
@@ -915,39 +1493,107 @@ final class AIClient: ObservableObject {
                 request.setValue("Bearer \(apiKey)", forHTTPHeaderField: "Authorization")
             }
         }
+        EnterpriseAIAuthService.shared.applyEnterpriseHeaders(to: &request)
         
         var messages: [[String: Any]] = []
-        if let sys = systemPrompt { messages.append(["role": "system", "content": sys]) }
-        for msg in conversationHistory { messages.append(["role": msg.role, "content": msg.content]) }
+        if let sys = systemPrompt, !sys.isEmpty { messages.append(["role": "system", "content": sys]) }
         
-        var contentArray: [[String: Any]] = [["type": "text", "text": prompt]]
-        let isVision = isVisionCapableModel(model)
-        
-        for attachment in attachments {
-            switch attachment.type {
-            case .image(let format):
-                // 1. Run local Apple Neural Engine OCR & Vision extraction
-                let visionResult = await AppleVisionEngine.shared.analyzeImage(data: attachment.data, filename: attachment.name)
-                
-                if isVision {
-                    // Send native image_url to vision-capable models
-                    contentArray.append(["type": "image_url", "image_url": ["url": "data:image/\(format);base64,\(attachment.base64String)"]])
-                    if !visionResult.extractedText.isEmpty {
-                        contentArray.append(["type": "text", "text": "\n[Apple Neural Vision OCR Aid]:\n\(visionResult.extractedText)\n"])
+        var activeAssistantToolCallIds: Set<String> = []
+        func appendOpenAITurn(role: String, content: String) {
+            let trimmed = content.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !trimmed.isEmpty else { return }
+            if let structured = AIStructuredTurnCodec.decode(trimmed) {
+                switch structured {
+                case .assistantToolCalls(let text, let toolCalls):
+                    let cleanText = AIStructuredTurnCodec.stripThoughtTags(text)
+                    var msgDict: [String: Any] = ["role": "assistant"]
+                    if !cleanText.isEmpty {
+                        msgDict["content"] = cleanText
+                    } else {
+                        msgDict["content"] = NSNull()
                     }
-                } else {
-                    // Text-only LLM bridge: Provide full structural vision & OCR breakdown
-                    contentArray.append(["type": "text", "text": "\n\(visionResult.formattedSummary)\n"])
+                    let tcArray: [[String: Any]] = toolCalls.map { tc in
+                        let argsData = (try? JSONSerialization.data(withJSONObject: tc.arguments)) ?? Data("{}".utf8)
+                        let argsStr = String(data: argsData, encoding: .utf8) ?? "{}"
+                        return [
+                            "id": tc.id,
+                            "type": "function",
+                            "function": [
+                                "name": tc.name,
+                                "arguments": argsStr
+                            ]
+                        ]
+                    }
+                    if !tcArray.isEmpty {
+                        msgDict["tool_calls"] = tcArray
+                    }
+                    messages.append(msgDict)
+                    activeAssistantToolCallIds = Set(toolCalls.map { $0.id })
+                case .toolResults(let results, let directive):
+                    var unmatchedOutputs: [String] = []
+                    for res in results {
+                        if activeAssistantToolCallIds.contains(res.toolCallId) {
+                            messages.append([
+                                "role": "tool",
+                                "tool_call_id": res.toolCallId,
+                                "content": res.output
+                            ])
+                        } else {
+                            unmatchedOutputs.append("[\(res.name)]: \(res.output)")
+                        }
+                    }
+                    activeAssistantToolCallIds.removeAll()
+                    let combinedDirective = (unmatchedOutputs + (directive.isEmpty ? [] : [directive])).joined(separator: "\n\n")
+                    if !combinedDirective.isEmpty {
+                        messages.append(["role": "user", "content": combinedDirective])
+                    }
                 }
-            case .text:
-                if let text = attachment.textContent { contentArray.append(["type": "text", "text": "\n[File: \(attachment.name)]\n\(text)\n"]) }
-            case .pdf:
-                let pdfText = attachment.pdfExtractedText
-                let preview = pdfText.isEmpty ? "[Empty or Scanned PDF]" : pdfText
-                contentArray.append(["type": "text", "text": "\n[Document: \(attachment.name) (\(attachment.pdfPageCount) pages)]\n\(preview)\n[/Document]\n"])
+            } else {
+                activeAssistantToolCallIds.removeAll()
+                let cleanText = role == "assistant" ? AIStructuredTurnCodec.stripThoughtTags(trimmed) : trimmed
+                guard !cleanText.isEmpty else { return }
+                messages.append(["role": role, "content": cleanText])
             }
         }
-        messages.append(["role": "user", "content": contentArray])
+        
+        for msg in conversationHistory {
+            appendOpenAITurn(role: msg.role, content: msg.content)
+        }
+        
+        if attachments.isEmpty {
+            let safePrompt = prompt.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? "Continue." : prompt
+            appendOpenAITurn(role: "user", content: safePrompt)
+        } else {
+            activeAssistantToolCallIds.removeAll()
+            var contentArray: [[String: Any]] = [["type": "text", "text": prompt.isEmpty ? "Analyze attachment." : prompt]]
+            let isVision = isVisionCapableModel(model)
+            
+            for attachment in attachments {
+                switch attachment.type {
+                case .image(let format):
+                    // 1. Run local Apple Neural Engine OCR & Vision extraction
+                    let visionResult = await AppleVisionEngine.shared.analyzeImage(data: attachment.data, filename: attachment.name)
+                    
+                    if isVision {
+                        // Send native image_url to vision-capable models
+                        contentArray.append(["type": "image_url", "image_url": ["url": "data:image/\(format);base64,\(attachment.base64String)"]])
+                        if !visionResult.extractedText.isEmpty {
+                            contentArray.append(["type": "text", "text": "\n[Apple Neural Vision OCR Aid]:\n\(visionResult.extractedText)\n"])
+                        }
+                    } else {
+                        // Text-only LLM bridge: Provide full structural vision & OCR breakdown
+                        contentArray.append(["type": "text", "text": "\n\(visionResult.formattedSummary)\n"])
+                    }
+                case .text:
+                    if let text = attachment.textContent { contentArray.append(["type": "text", "text": "\n[File: \(attachment.name)]\n\(text)\n"]) }
+                case .pdf:
+                    let pdfText = attachment.pdfExtractedText
+                    let preview = pdfText.isEmpty ? "[Empty or Scanned PDF]" : pdfText
+                    contentArray.append(["type": "text", "text": "\n[Document: \(attachment.name) (\(attachment.pdfPageCount) pages)]\n\(preview)\n[/Document]\n"])
+                }
+            }
+            messages.append(["role": "user", "content": contentArray])
+        }
         
         let effectiveModel = normalizeModelName(model, provider: StreamableAIProvider.detect(from: model), baseURL: baseURL)
         let isReasoning = effectiveModel.hasPrefix("o1") || effectiveModel.hasPrefix("o3") || effectiveModel.hasPrefix("o4")
@@ -993,8 +1639,8 @@ final class AIClient: ObservableObject {
             throw NSError(domain: "AIClient", code: code, userInfo: [NSLocalizedDescriptionKey: finalMsg])
         }
         
-        // Buffer for streaming tool calls
-        var toolCallBuffers: [String: (name: String, args: String)] = [:]
+        // Buffer for streaming tool calls (keyed by integer index for deterministic order)
+        var toolCallBuffers: [Int: (id: String, name: String, args: String)] = [:]
         var isStreamingReasoning = false
         
         for try await line in bytes.lines {
@@ -1048,23 +1694,29 @@ final class AIClient: ObservableObject {
             // Tool calls (streamed incrementally)
             if let toolCalls = delta["tool_calls"] as? [[String: Any]] {
                 for tc in toolCalls {
-                    let idx = "\(tc["index"] as? Int ?? 0)"
+                    let idx = tc["index"] as? Int ?? 0
+                    var entry = toolCallBuffers[idx] ?? (id: UUID().uuidString, name: "", args: "")
+                    if let tcId = tc["id"] as? String, !tcId.isEmpty {
+                        entry.id = tcId
+                    }
                     if let function = tc["function"] as? [String: Any] {
-                        if let name = function["name"] as? String {
-                            toolCallBuffers[idx] = (name: name, args: "")
+                        if let name = function["name"] as? String, !name.isEmpty {
+                            entry.name = name
                         }
-                        if let argChunk = function["arguments"] as? String {
-                            toolCallBuffers[idx]?.args.append(argChunk)
+                        if let argChunk = function["arguments"] as? String, !argChunk.isEmpty {
+                            entry.args.append(argChunk)
                         }
                     }
+                    toolCallBuffers[idx] = entry
                 }
             }
             
             // Check finish reason
             if let finishReason = choices.first?["finish_reason"] as? String, finishReason == "tool_calls" {
-                for (_, buffer) in toolCallBuffers {
+                for idx in toolCallBuffers.keys.sorted() {
+                    guard let buffer = toolCallBuffers[idx], !buffer.name.isEmpty else { continue }
                     let args = (try? JSONSerialization.jsonObject(with: Data(buffer.args.utf8))) as? [String: Any] ?? [:]
-                    let toolCall = AIToolCall(id: UUID().uuidString, name: buffer.name, arguments: args)
+                    let toolCall = AIToolCall(id: buffer.id, name: buffer.name, arguments: args)
                     onToolCall?(toolCall)
                 }
                 toolCallBuffers.removeAll()
@@ -1078,10 +1730,10 @@ final class AIClient: ObservableObject {
         
         // Flush any remaining buffered tool calls (e.g. if provider sent finish_reason: "stop" or nil)
         if !toolCallBuffers.isEmpty {
-            for (_, buffer) in toolCallBuffers {
-                guard !buffer.name.isEmpty else { continue }
+            for idx in toolCallBuffers.keys.sorted() {
+                guard let buffer = toolCallBuffers[idx], !buffer.name.isEmpty else { continue }
                 let args = (try? JSONSerialization.jsonObject(with: Data(buffer.args.utf8))) as? [String: Any] ?? [:]
-                let toolCall = AIToolCall(id: UUID().uuidString, name: buffer.name, arguments: args)
+                let toolCall = AIToolCall(id: buffer.id, name: buffer.name, arguments: args)
                 onToolCall?(toolCall)
             }
             toolCallBuffers.removeAll()
@@ -1103,7 +1755,83 @@ final class AIClient: ObservableObject {
         request.setValue("2023-06-01", forHTTPHeaderField: "anthropic-version")
         
         var allMessages: [[String: Any]] = []
-        for msg in conversationHistory { allMessages.append(["role": msg.role, "content": msg.content]) }
+        var activeAnthropicToolUseIds: Set<String> = []
+        
+        func appendAnthropicBlocks(role: String, blocks: [[String: Any]]) {
+            guard !blocks.isEmpty else { return }
+            if let last = allMessages.last, (last["role"] as? String) == role {
+                var existingBlocks: [[String: Any]] = []
+                if let lastArr = last["content"] as? [[String: Any]] {
+                    existingBlocks = lastArr
+                } else if let lastStr = last["content"] as? String, !lastStr.isEmpty {
+                    existingBlocks = [["type": "text", "text": lastStr]]
+                }
+                existingBlocks.append(contentsOf: blocks)
+                allMessages[allMessages.count - 1] = ["role": role, "content": existingBlocks]
+            } else {
+                allMessages.append(["role": role, "content": blocks])
+            }
+        }
+        
+        func appendAnthropicTurn(role: String, content: String) {
+            let trimmed = content.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !trimmed.isEmpty else { return }
+            let normalizedRole = role == "assistant" ? "assistant" : "user"
+            if let structured = AIStructuredTurnCodec.decode(trimmed) {
+                switch structured {
+                case .assistantToolCalls(let text, let toolCalls):
+                    var blocks: [[String: Any]] = []
+                    let cleanText = AIStructuredTurnCodec.stripThoughtTags(text)
+                    if !cleanText.isEmpty {
+                        blocks.append(["type": "text", "text": cleanText])
+                    }
+                    for tc in toolCalls {
+                        blocks.append([
+                            "type": "tool_use",
+                            "id": tc.id,
+                            "name": tc.name,
+                            "input": tc.arguments
+                        ])
+                    }
+                    appendAnthropicBlocks(role: "assistant", blocks: blocks)
+                    activeAnthropicToolUseIds = Set(toolCalls.map { $0.id })
+                case .toolResults(let results, let directive):
+                    var blocks: [[String: Any]] = []
+                    for res in results {
+                        if activeAnthropicToolUseIds.contains(res.toolCallId) {
+                            blocks.append([
+                                "type": "tool_result",
+                                "tool_use_id": res.toolCallId,
+                                "content": res.output,
+                                "is_error": !res.success
+                            ])
+                        } else {
+                            blocks.append([
+                                "type": "text",
+                                "text": "[\(res.name) result]:\n\(res.output)"
+                            ])
+                        }
+                    }
+                    activeAnthropicToolUseIds.removeAll()
+                    if !directive.isEmpty {
+                        blocks.append(["type": "text", "text": directive])
+                    }
+                    appendAnthropicBlocks(role: "user", blocks: blocks)
+                }
+            } else {
+                activeAnthropicToolUseIds.removeAll()
+                let cleanText = normalizedRole == "assistant" ? AIStructuredTurnCodec.stripThoughtTags(trimmed) : trimmed
+                guard !cleanText.isEmpty else { return }
+                appendAnthropicBlocks(role: normalizedRole, blocks: [["type": "text", "text": cleanText]])
+            }
+        }
+        
+        for msg in conversationHistory {
+            appendAnthropicTurn(role: msg.role, content: msg.content)
+        }
+        if allMessages.first?["role"] as? String == "assistant" {
+            allMessages.insert(["role": "user", "content": [["type": "text", "text": "Please begin."]]], at: 0)
+        }
         
         var messageContent: [[String: Any]] = []
         let isVision = isVisionCapableModel(model)
@@ -1127,8 +1855,21 @@ final class AIClient: ObservableObject {
                 messageContent.append(["type": "text", "text": "File: \(attachment.name)\n\(text)"])
             }
         }
-        messageContent.append(["type": "text", "text": prompt])
-        allMessages.append(["role": "user", "content": messageContent])
+        let safePrompt = prompt.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? "Continue." : prompt
+        if !messageContent.isEmpty {
+            appendAnthropicBlocks(role: "user", blocks: messageContent)
+        }
+        appendAnthropicTurn(role: "user", content: safePrompt)
+        
+        // Anthropic Multi-Turn Prompt Caching: mark the last block of the latest user turn as ephemeral
+        if let lastUserIdx = allMessages.lastIndex(where: { ($0["role"] as? String) == "user" }),
+           var userBlocks = allMessages[lastUserIdx]["content"] as? [[String: Any]],
+           !userBlocks.isEmpty {
+            var lastBlock = userBlocks[userBlocks.count - 1]
+            lastBlock["cache_control"] = ["type": "ephemeral"]
+            userBlocks[userBlocks.count - 1] = lastBlock
+            allMessages[lastUserIdx]["content"] = userBlocks
+        }
         
         var body: [String: Any] = ["model": model, "max_tokens": maxOutputTokens(for: model), "stream": true, "messages": allMessages]
         
@@ -1247,12 +1988,28 @@ final class AIClient: ObservableObject {
         let baseURL = StreamableAIProvider.gemini.directBaseURL
         let normalizedModel = normalizeModelName(model, provider: .gemini, baseURL: baseURL)
         let cleanModel = normalizedModel.hasPrefix("models/") ? String(normalizedModel.dropFirst(7)) : normalizedModel
-        guard let url = URL(string: "\(baseURL)/models/\(cleanModel):generateContent?key=\(apiKey)") else {
+        let isVertexEnterprise = EnterpriseAIAuthService.shared.mode == .geminiVertex
+        
+        let url: URL
+        if isVertexEnterprise, let vertexURL = EnterpriseAIAuthService.shared.buildVertexGeminiURL(model: cleanModel, streaming: false) {
+            url = vertexURL
+        } else if let directURL = URL(string: "\(baseURL)/models/\(cleanModel):generateContent?key=\(apiKey)") {
+            url = directURL
+        } else {
             throw NSError(domain: "AIClient", code: -1, userInfo: [NSLocalizedDescriptionKey: "Invalid URL configuration for gemini"])
         }
         var request = URLRequest(url: url, timeoutInterval: requestTimeout)
         request.httpMethod = "POST"
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        if isVertexEnterprise {
+            if let authHeader = try await EnterpriseAIAuthService.shared.resolveVertexAuthorizationHeader() {
+                request.setValue(authHeader, forHTTPHeaderField: "Authorization")
+            }
+            if !EnterpriseAIAuthService.shared.vertexProjectId.isEmpty {
+                request.setValue(EnterpriseAIAuthService.shared.vertexProjectId, forHTTPHeaderField: "x-goog-user-project")
+            }
+        }
+        EnterpriseAIAuthService.shared.applyEnterpriseHeaders(to: &request)
         
         var body: [String: Any] = [
             "generationConfig": ["temperature": 0.7, "maxOutputTokens": maxOutputTokens(for: cleanModel)]
@@ -1369,7 +2126,7 @@ final class AIClient: ObservableObject {
                 request.setValue(dotminiLicense, forHTTPHeaderField: "X-Dotmini-License")
             }
             let isJWT = apiKey.components(separatedBy: ".").count >= 3
-            let isPlatformKey = apiKey.hasPrefix("sk-dotmini-") || apiKey.hasPrefix("mci-live-")
+            let isPlatformKey = apiKey.hasPrefix("sk-dotmini-") || apiKey.hasPrefix("mci-live-") || EnterpriseAIAuthService.shared.mode == .dotminiEnterprise
             if (isJWT || isPlatformKey) && !apiKey.isEmpty {
                 request.setValue("Bearer \(apiKey)", forHTTPHeaderField: "Authorization")
             }
@@ -1385,13 +2142,19 @@ final class AIClient: ObservableObject {
                 request.setValue("Bearer \(apiKey)", forHTTPHeaderField: "Authorization")
             }
         }
+        EnterpriseAIAuthService.shared.applyEnterpriseHeaders(to: &request)
         
         var apiMessages: [[String: Any]] = []
-        if let sys = systemPrompt { apiMessages.append(["role": "system", "content": sys]) }
+        if let sys = systemPrompt, !sys.isEmpty { apiMessages.append(["role": "system", "content": sys]) }
         for msg in messages {
             let role = msg.first(where: { $0.0 == "_role" })?.1 as? String ?? "user"
             let content = msg.first(where: { $0.0 == "text" })?.1 as? String ?? ""
-            apiMessages.append(["role": role, "content": content])
+            let trimmed = content.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !trimmed.isEmpty else { continue }
+            apiMessages.append(["role": role, "content": trimmed])
+        }
+        if apiMessages.isEmpty || (apiMessages.count == 1 && (apiMessages.first?["role"] as? String) == "system") {
+            apiMessages.append(["role": "user", "content": "Continue with the task."])
         }
         
         let isReasoning = model.hasPrefix("o1") || model.hasPrefix("o3") || model.hasPrefix("o4")
@@ -1491,9 +2254,21 @@ final class AIClient: ObservableObject {
         
         var apiMessages: [[String: Any]] = []
         for msg in messages {
-            let role = msg.first(where: { $0.0 == "_role" })?.1 as? String ?? "user"
+            let rawRole = msg.first(where: { $0.0 == "_role" })?.1 as? String ?? "user"
+            let role = rawRole == "assistant" ? "assistant" : "user"
             let content = msg.first(where: { $0.0 == "text" })?.1 as? String ?? ""
-            apiMessages.append(["role": role, "content": content])
+            let trimmed = content.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !trimmed.isEmpty else { continue }
+            if let last = apiMessages.last, (last["role"] as? String) == role, let lastText = last["content"] as? String {
+                apiMessages[apiMessages.count - 1] = ["role": role, "content": lastText + "\n\n" + trimmed]
+            } else {
+                apiMessages.append(["role": role, "content": trimmed])
+            }
+        }
+        if apiMessages.isEmpty {
+            apiMessages.append(["role": "user", "content": "Continue with the task."])
+        } else if apiMessages.first?["role"] as? String == "assistant" {
+            apiMessages.insert(["role": "user", "content": "Please begin."], at: 0)
         }
         
         var body: [String: Any] = ["model": model, "max_tokens": maxOutputTokens(for: model), "messages": apiMessages]

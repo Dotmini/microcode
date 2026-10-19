@@ -211,7 +211,7 @@ class APIClientService: ObservableObject {
         
         // Resolve environment variables
         let resolvedURL = resolveVariables(request.url)
-        guard let url = buildURL(resolvedURL, queryParams: request.queryParams) else {
+        guard let url = buildURL(resolvedURL, queryParams: request.queryParams, auth: request.auth) else {
             error = "Invalid URL: \(resolvedURL)"
             throw NSError(domain: "APIClient", code: 400, userInfo: [NSLocalizedDescriptionKey: "Invalid URL"])
         }
@@ -313,7 +313,7 @@ class APIClientService: ObservableObject {
         case .apiKey:
             let key = resolveVariables(auth.apiKeyName)
             let value = resolveVariables(auth.apiKeyValue)
-            if auth.apiKeyIn == "header" {
+            if auth.apiKeyIn == "header" && !key.isEmpty {
                 request.setValue(value, forHTTPHeaderField: key)
             }
             // Query param handled in buildURL
@@ -324,15 +324,24 @@ class APIClientService: ObservableObject {
     
     // MARK: - URL Builder
     
-    private func buildURL(_ urlString: String, queryParams: [KeyValueItem]) -> URL? {
+    private func buildURL(_ urlString: String, queryParams: [KeyValueItem], auth: APIAuth? = nil) -> URL? {
         guard var components = URLComponents(string: urlString) else { return nil }
         
+        var items = components.queryItems ?? []
         let activeParams = queryParams.filter { $0.isEnabled && !$0.key.isEmpty }
-        if !activeParams.isEmpty {
-            var items = components.queryItems ?? []
-            for param in activeParams {
-                items.append(URLQueryItem(name: param.key, value: resolveVariables(param.value)))
+        for param in activeParams {
+            items.append(URLQueryItem(name: param.key, value: resolveVariables(param.value)))
+        }
+        
+        if let auth = auth, auth.type == .apiKey && auth.apiKeyIn == "query" {
+            let key = resolveVariables(auth.apiKeyName)
+            let value = resolveVariables(auth.apiKeyValue)
+            if !key.isEmpty {
+                items.append(URLQueryItem(name: key, value: value))
             }
+        }
+        
+        if !items.isEmpty {
             components.queryItems = items
         }
         
@@ -357,7 +366,8 @@ class APIClientService: ObservableObject {
         parts.append("-X \(request.method)")
         
         let resolvedURL = resolveVariables(request.url)
-        parts.append("'\(resolvedURL)'")
+        let finalURL = buildURL(resolvedURL, queryParams: request.queryParams, auth: request.auth)?.absoluteString ?? resolvedURL
+        parts.append("'\(finalURL)'")
         
         for (key, value) in request.headers {
             parts.append("-H '\(key): \(resolveVariables(value))'")

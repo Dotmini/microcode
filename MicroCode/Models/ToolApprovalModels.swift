@@ -4,13 +4,13 @@ import Combine
 enum ToolApprovalMode: String, Codable, CaseIterable {
     case safe = "safe"           // Ask before every tool execution
     case smart = "smart"         // Ask only for dangerous operations
-    case yolo = "yolo"           // Never ask, auto-approve everything
+    case yolo = "yolo"           // Explicit opt-in: auto-approve workspace tools
     
     var displayName: String {
         switch self {
         case .safe: return "Safe"
         case .smart: return "Smart"
-        case .yolo: return "YOLO"
+        case .yolo: return "Full Auto"
         }
     }
     
@@ -59,13 +59,29 @@ struct ToolApprovalHistoryEntry: Identifiable {
 class ToolApprovalManager: ObservableObject {
     static let shared = ToolApprovalManager()
     
-    @Published var mode: ToolApprovalMode = .smart
+    @Published var mode: ToolApprovalMode = .smart {
+        didSet {
+            defaults.set(mode.rawValue, forKey: "microcode.toolApprovalMode")
+            if mode == .yolo {
+                while let id = pendingRequest?.id { resolve(id: id, approved: true) }
+            }
+        }
+    }
     @Published private(set) var pendingRequest: ToolApprovalRequest?
     @Published var approvalHistory: [ToolApprovalHistoryEntry] = []
     @Published var alwaysAllowedTools: Set<String> = ["file_read", "get_diagnostics", "list_directory"]
     
     private var queue: [ToolApprovalRequest] = []
     private var timeouts: [UUID: Task<Void, Never>] = [:]
+    private let defaults: UserDefaults
+
+    init(defaults: UserDefaults = .standard) {
+        self.defaults = defaults
+        if let saved = defaults.string(forKey: "microcode.toolApprovalMode"),
+           let storedMode = ToolApprovalMode(rawValue: saved) {
+            mode = storedMode
+        }
+    }
 
     func requestApproval(toolName: String, arguments: [String: String], description: String) async -> Bool {
         guard !Task.isCancelled else { return false }

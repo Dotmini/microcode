@@ -115,20 +115,19 @@ class DebugService: ObservableObject {
         Raw Output:
         \(error.rawOutput)
         
-        Provide a plain-English explanation, identify the root cause, and return a JSON object with a 'fix' containing 'description', 'oldCode', 'newCode', 'filePath', and 'confidence' (0.0 to 1.0).
+        Provide a plain-English explanation, identify the root cause, and at the end return a ```json fenced block with a 'fix' object containing 'description', 'oldCode', 'newCode', 'filePath', and 'confidence' (0.0 to 1.0).
         """
         
         do {
-            // Simplified for now assuming AIClient returns something like this
             let response = try await AIClient.shared.generateText(prompt: prompt)
-            
-            // Basic extraction (in a real scenario we'd use a better JSON parser out of the LLM response)
-            let explanation = response
+            let (explanation, parsedFix) = Self.extractExplanationAndFix(from: response, fallbackFilePath: error.stackTrace.first(where: { $0.filePath != nil })?.filePath)
             
             errors[index].aiExplanation = explanation
+            errors[index].suggestedFix = parsedFix
             errors[index].status = .explained
             if currentError?.id == error.id {
                 currentError?.aiExplanation = explanation
+                currentError?.suggestedFix = parsedFix
                 currentError?.status = .explained
             }
         } catch let catchError {
@@ -142,9 +141,80 @@ class DebugService: ObservableObject {
         isAnalyzing = false
     }
     
+    private static func extractExplanationAndFix(from response: String, fallbackFilePath: String?) -> (String, SuggestedFix?) {
+        var jsonCandidate: String?
+        var cleanExplanation = response
+        
+        if let fenceStart = response.range(of: "```json"),
+           let fenceEnd = response.range(of: "```", range: fenceStart.upperBound..<response.endIndex) {
+            jsonCandidate = String(response[fenceStart.upperBound..<fenceEnd.lowerBound]).trimmingCharacters(in: .whitespacesAndNewlines)
+            cleanExplanation.removeSubrange(fenceStart.lowerBound..<fenceEnd.upperBound)
+            cleanExplanation = cleanExplanation.trimmingCharacters(in: .whitespacesAndNewlines)
+        } else if let firstBrace = response.firstIndex(of: "{"),
+                  let lastBrace = response.lastIndex(of: "}"),
+                  firstBrace < lastBrace {
+            jsonCandidate = String(response[firstBrace...lastBrace])
+        }
+        
+        guard let jsonStr = jsonCandidate,
+              let data = jsonStr.data(using: .utf8),
+              let rootObj = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
+            return (response, nil)
+        }
+        
+        let fixDict = (rootObj["fix"] as? [String: Any]) ?? rootObj
+        guard let oldCode = fixDict["oldCode"] as? String,
+              let newCode = fixDict["newCode"] as? String,
+              !oldCode.isEmpty else {
+            return (cleanExplanation.isEmpty ? response : cleanExplanation, nil)
+        }
+        
+        let description = (fixDict["description"] as? String) ?? "AI suggested fix"
+        let filePath = (fixDict["filePath"] as? String).flatMap({ $0.isEmpty ? nil : $0 }) ?? fallbackFilePath ?? ""
+        let confidence = (fixDict["confidence"] as? Double) ?? 0.85
+        
+        guard !filePath.isEmpty else {
+            return (cleanExplanation.isEmpty ? response : cleanExplanation, nil)
+        }
+        
+        let suggested = SuggestedFix(
+            description: description,
+            filePath: filePath,
+            oldCode: oldCode,
+            newCode: newCode,
+            confidence: confidence
+        )
+        return (cleanExplanation.isEmpty ? response : cleanExplanation, suggested)
+    }
+    
     func applyFix(_ fix: SuggestedFix) async {
-        // Implement applying the fix, possibly via AgentToolBox or PendingChangeModel
-        print("Applying fix to \(fix.filePath)")
+        let fileURL = URL(fileURLWithPath: (fix.filePath as NSString).expandingTildeInPath)
+        guard FileManager.default.fileExists(atPath: fileURL.path),
+              let content = try? String(contentsOf: fileURL, encoding: .utf8) else {
+            print("[DebugService] Cannot read file for fix: \(fix.filePath)")
+            return
+        }
+        
+        guard content.contains(fix.oldCode) else {
+            print("[DebugService] oldCode not found in \(fix.filePath)")
+            return
+        }
+        
+        let updatedContent = content.replacingOccurrences(of: fix.oldCode, with: fix.newCode)
+        do {
+            try updatedContent.write(to: fileURL, atomically: true, encoding: .utf8)
+            for idx in errors.indices {
+                if errors[idx].suggestedFix == fix {
+                    errors[idx].status = .fixed
+                }
+            }
+            if currentError?.suggestedFix == fix {
+                currentError?.status = .fixed
+            }
+            NotificationCenter.default.post(name: NSNotification.Name("FileUpdatedExternally"), object: nil, userInfo: ["path": fileURL.path])
+        } catch {
+            print("[DebugService] Failed to write fix to \(fix.filePath): \(error)")
+        }
     }
     
     func dismissError(_ error: RuntimeError) {

@@ -4,13 +4,63 @@
 
 use crate::error::{AppError, Result};
 use crate::models::FileInfo;
-use std::path::Path;
+use std::path::{Component, Path};
 use tokio::fs;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use walkdir::WalkDir;
 
+/// Rejects path traversal (`..`), null bytes, and sensitive OS/credential locations.
+fn validate_safe_file_path(path: &str, is_mutation: bool) -> Result<()> {
+    if path.trim().is_empty() || path.contains('\0') {
+        return Err(AppError::BadRequest("Invalid file path".to_string()));
+    }
+    let path_obj = Path::new(path);
+    for comp in path_obj.components() {
+        if matches!(comp, Component::ParentDir) {
+            return Err(AppError::BadRequest(
+                "Path traversal ('..') is not allowed".to_string(),
+            ));
+        }
+    }
+
+    let normalized = path.replace('\\', "/");
+    let blocked_segments = [
+        "/.ssh/",
+        "/.aws/",
+        "/.gnupg/",
+        "/.kube/",
+        "/Library/Keychains/",
+        "/etc/shadow",
+        "/etc/sudoers",
+        "/etc/master.passwd",
+    ];
+    for seg in blocked_segments {
+        if normalized.contains(seg) || normalized.ends_with(seg.trim_end_matches('/')) {
+            return Err(AppError::BadRequest(format!(
+                "Access to sensitive path is restricted: {}",
+                path
+            )));
+        }
+    }
+
+    if is_mutation {
+        let system_roots = ["/System/", "/bin/", "/sbin/", "/usr/bin/", "/usr/sbin/", "/etc/"];
+        for root in system_roots {
+            if normalized.starts_with(root) {
+                return Err(AppError::BadRequest(format!(
+                    "Modifying system directory is restricted: {}",
+                    path
+                )));
+            }
+        }
+    }
+
+    Ok(())
+}
+
 /// List files and directories in a given path
 pub async fn list_directory(path: &str) -> Result<Vec<FileInfo>> {
+    validate_safe_file_path(path, false)?;
     let path_buf = Path::new(path);
 
     if !path_buf.exists() {
@@ -66,6 +116,7 @@ pub async fn list_directory(path: &str) -> Result<Vec<FileInfo>> {
 
 /// List files recursively
 pub async fn list_directory_recursive(path: &str) -> Result<Vec<FileInfo>> {
+    validate_safe_file_path(path, false)?;
     let path_buf = Path::new(path);
 
     if !path_buf.exists() {
@@ -123,6 +174,7 @@ pub async fn list_directory_recursive(path: &str) -> Result<Vec<FileInfo>> {
 
 /// Read file contents
 pub async fn read_file(path: &str) -> Result<String> {
+    validate_safe_file_path(path, false)?;
     let path_buf = Path::new(path);
 
     if !path_buf.exists() {
@@ -150,6 +202,7 @@ pub async fn read_file(path: &str) -> Result<String> {
 
 /// Write file contents
 pub async fn write_file(path: &str, content: &str) -> Result<()> {
+    validate_safe_file_path(path, true)?;
     let path_buf = Path::new(path);
 
     // Create parent directories if they don't exist
@@ -181,6 +234,7 @@ pub async fn write_file(path: &str, content: &str) -> Result<()> {
 
 /// Delete a file or directory
 pub async fn delete_file(path: &str) -> Result<()> {
+    validate_safe_file_path(path, true)?;
     let path_buf = Path::new(path);
 
     if !path_buf.exists() {
@@ -202,6 +256,7 @@ pub async fn delete_file(path: &str) -> Result<()> {
 
 /// Create a new directory
 pub async fn create_directory(path: &str) -> Result<()> {
+    validate_safe_file_path(path, true)?;
     fs::create_dir_all(path)
         .await
         .map_err(|e| AppError::IoError(e))?;

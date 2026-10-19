@@ -27,10 +27,11 @@ final class ServeSimService: ObservableObject {
     @Published private(set) var connectionState: ServeSimConnectionState = .idle
 
     private let port = 3200
-    private var activeDeviceID: String?
+    private(set) var activeDeviceID: String?
     private var activeSimulatorName: String?
     private var commandURL: URL?
     private var nodeURL: URL?
+    private var activeProcess: Process?
     private var connectionGeneration = 0
 
     private init() {}
@@ -64,6 +65,10 @@ final class ServeSimService: ObservableObject {
 
         connectionGeneration &+= 1
         let generation = connectionGeneration
+        commandURL = runtime
+        nodeURL = node
+        activeDeviceID = simulatorID
+        activeSimulatorName = simulatorName
         connectionState = .connecting
         statusMessage = "Starting fast iOS Preview for \(simulatorName)…"
         do {
@@ -72,18 +77,12 @@ final class ServeSimService: ObservableObject {
                 "--detach", "--quiet", "--port", "\(port)",
                 "--fit", "--panes", "none", "--codec", "auto", simulatorID
             ])
-            commandURL = runtime
-            nodeURL = node
-            activeDeviceID = simulatorID
-            activeSimulatorName = simulatorName
+            guard generation == connectionGeneration else { return }
             let url = URL(string: "http://127.0.0.1:\(port)")!
             guard await waitUntilReachable(url, generation: generation) else {
                 guard generation == connectionGeneration else { return }
                 isActive = false
                 connectionState = .failed
-                // Keep previewURL intact. If this is a reconnect, the last
-                // valid device frame remains visible under the retry overlay
-                // rather than being replaced by a blank canvas.
                 statusMessage = output.isEmpty
                     ? "Preview did not connect in 12 seconds. Check the simulator, then Retry."
                     : "Preview did not connect. \(output)"
@@ -93,9 +92,6 @@ final class ServeSimService: ObservableObject {
             previewURL = sessionURL(for: url, generation: generation)
             isActive = true
             connectionState = .ready
-            // Keep implementation details out of the product UI.  The preview
-            // itself still uses the local H.264/WebSocket helper, but users only
-            // need the device and its performance state.
             statusMessage = "Interactive preview · 60 FPS target"
         } catch {
             guard generation == connectionGeneration else { return }
@@ -116,6 +112,11 @@ final class ServeSimService: ObservableObject {
 
     func stop() async {
         connectionGeneration &+= 1
+        if let proc = activeProcess, proc.isRunning {
+            proc.terminate()
+            kill(proc.processIdentifier, SIGKILL)
+        }
+        activeProcess = nil
         await stopHelper(keepPresentation: false)
         activeDeviceID = nil
         activeSimulatorName = nil
@@ -152,8 +153,17 @@ final class ServeSimService: ObservableObject {
     }
 
     private func stopHelper(keepPresentation: Bool) async {
-        guard let device = activeDeviceID, let commandURL, let nodeURL else { return }
-        _ = try? await run(nodeURL, [commandURL.path, "--kill", device])
+        if let device = activeDeviceID, let commandURL = commandURL ?? locateRuntime(), let nodeURL = nodeURL ?? locateNode() {
+            _ = try? await run(nodeURL, [commandURL.path, "--kill", device])
+        }
+        // Always ensure any detached serve-sim daemon on port 3200 is reaped so it cannot consume CPU in background
+        let pkill = Process()
+        pkill.executableURL = URL(fileURLWithPath: "/usr/bin/pkill")
+        pkill.arguments = ["-f", "serve-sim"]
+        pkill.standardOutput = FileHandle.nullDevice
+        pkill.standardError = FileHandle.nullDevice
+        try? pkill.run()
+
         isActive = false
         if !keepPresentation {
             previewURL = nil
@@ -178,9 +188,6 @@ final class ServeSimService: ObservableObject {
     }
 
     private func waitUntilReachable(_ url: URL, generation: Int) async -> Bool {
-        // A warm simulator is normally ready within a second. A cold Apple
-        // boot can take longer, but this is deliberately bounded so Preview
-        // can never sit at “connecting” indefinitely.
         for attempt in 0..<80 {
             guard generation == connectionGeneration else { return false }
             if await isReachable(url) { return true }
@@ -200,7 +207,13 @@ final class ServeSimService: ObservableObject {
             process.arguments = arguments
             process.standardOutput = output
             process.standardError = output
-            process.terminationHandler = { process in
+            self.activeProcess = process
+            process.terminationHandler = { [weak self] process in
+                Task { @MainActor in
+                    if self?.activeProcess === process {
+                        self?.activeProcess = nil
+                    }
+                }
                 let text = String(decoding: output.fileHandleForReading.readDataToEndOfFile(), as: UTF8.self)
                     .trimmingCharacters(in: .whitespacesAndNewlines)
                 if process.terminationStatus == 0 {

@@ -49,14 +49,32 @@ impl LlmProvider for AnthropicProvider {
             format!("{}\n\n{}", system_prompt, ctx_str)
         };
 
-        // Build Anthropic messages (filter out system role)
-        let api_messages: Vec<serde_json::Value> = messages
-            .iter()
-            .filter(|m| m.role != "system")
-            .map(|m| {
+        // Build Anthropic messages (filter out system/empty messages & coalesce consecutive same-role turns)
+        let mut coalesced: Vec<(&str, String)> = Vec::new();
+        for m in messages {
+            if m.role == "system" || m.content.trim().is_empty() {
+                continue;
+            }
+            let role = if m.role == "user" { "user" } else { "assistant" };
+            if coalesced.is_empty() && role != "user" {
+                coalesced.push(("user", "[Conversation context continued]".to_string()));
+            }
+            if let Some(last) = coalesced.last_mut() {
+                if last.0 == role {
+                    last.1.push_str("\n\n");
+                    last.1.push_str(&m.content);
+                    continue;
+                }
+            }
+            coalesced.push((role, m.content.clone()));
+        }
+
+        let api_messages: Vec<serde_json::Value> = coalesced
+            .into_iter()
+            .map(|(role, content)| {
                 serde_json::json!({
-                    "role": if m.role == "user" { "user" } else { "assistant" },
-                    "content": m.content
+                    "role": role,
+                    "content": content
                 })
             })
             .collect();

@@ -878,9 +878,9 @@ class AppState: ObservableObject {
     @Published var fontSize: CGFloat = 16
     @Published var fontFamily: String = "SF Mono"
     @Published var appTheme: AppTheme = .dark
-    /// Disabled by default. The editor uses a non-ruler overlay when enabled
+    /// Enabled by default. The editor uses a non-ruler overlay when enabled
     /// so this preference never changes NSScrollView's intrinsic layout.
-    @Published var showLineNumbers: Bool = false
+    @Published var showLineNumbers: Bool = true
     
     // AI Agent Chat Font Settings
     @Published var agentFontName: String = "SF Pro"
@@ -1210,15 +1210,12 @@ class AppState: ObservableObject {
         cellFontName = defaults.string(forKey: "cellFontName") ?? "SF Mono"
         cellFontSize = CGFloat(defaults.double(forKey: "cellFontSize")) == 0 ? 16.0 : CGFloat(defaults.double(forKey: "cellFontSize"))
         cellFontWeight = defaults.object(forKey: "cellFontWeight") == nil ? 2 : defaults.integer(forKey: "cellFontWeight")
-        // One-time migration: older Settings UI displayed a hard-coded ON
-        // checkbox even though line numbers were disabled internally. Do not
-        // treat that stale preference as a real user choice.
-        let lineNumberMigrationKey = "lineNumbersOverlayPreferenceInitialized"
+        let lineNumberMigrationKey = "lineNumbersOverlayEnabledByDefaultV2"
         if defaults.bool(forKey: lineNumberMigrationKey) {
             showLineNumbers = defaults.bool(forKey: "showLineNumbers")
         } else {
-            showLineNumbers = false
-            defaults.set(false, forKey: "showLineNumbers")
+            showLineNumbers = true
+            defaults.set(true, forKey: "showLineNumbers")
             defaults.set(true, forKey: lineNumberMigrationKey)
         }
         let opaqueDefaultMigrationKey = "opaqueDarkThemeDefaultMigrationV1"
@@ -1259,32 +1256,38 @@ class AppState: ObservableObject {
         let savedProvider = defaults.string(forKey: "aiProvider") ?? defaults.string(forKey: "provider")?.lowercased()
         let savedModel = defaults.string(forKey: "aiModel") ?? defaults.string(forKey: "model")
 
+        let topModelFor = { (prov: String) -> String in
+            AIModelCatalog.shared.provider(prov)?.models.first?.id
+                ?? LocalEcosystemDiscovery.shared.models(for: prov).first?.id
+                ?? ""
+        }
+
         if let savedProvider = savedProvider, !(apiKeys[savedProvider]?.isEmpty ?? true) {
             aiProvider = savedProvider
-            aiModel = savedModel ?? "gemini-2.5-flash"
+            aiModel = savedModel ?? topModelFor(savedProvider)
         } else if hasGemini {
             aiProvider = "gemini"
-            aiModel = (savedModel?.contains("gemini") == true) ? savedModel! : "gemini-2.5-flash"
+            aiModel = (savedModel?.contains("gemini") == true) ? savedModel! : topModelFor("gemini")
             defaults.set("gemini", forKey: "aiProvider")
             defaults.set(aiModel, forKey: "aiModel")
         } else if hasDeepSeek {
             aiProvider = "deepseek"
-            aiModel = (savedModel?.contains("deepseek") == true) ? savedModel! : "deepseek-chat"
+            aiModel = (savedModel?.contains("deepseek") == true) ? savedModel! : topModelFor("deepseek")
             defaults.set("deepseek", forKey: "aiProvider")
             defaults.set(aiModel, forKey: "aiModel")
         } else if hasOpenAI {
             aiProvider = "openai"
-            aiModel = (savedModel?.contains("gpt") == true || savedModel?.contains("o1") == true || savedModel?.contains("o3") == true) ? savedModel! : "gpt-4o"
+            aiModel = (savedModel?.contains("gpt") == true || savedModel?.contains("o1") == true || savedModel?.contains("o3") == true) ? savedModel! : topModelFor("openai")
             defaults.set("openai", forKey: "aiProvider")
             defaults.set(aiModel, forKey: "aiModel")
         } else if hasAnthropic {
             aiProvider = "anthropic"
-            aiModel = "claude-3-7-sonnet"
+            aiModel = (savedModel?.contains("claude") == true) ? savedModel! : topModelFor("anthropic")
             defaults.set("anthropic", forKey: "aiProvider")
             defaults.set(aiModel, forKey: "aiModel")
         } else {
             aiProvider = savedProvider ?? "gemini"
-            aiModel = savedModel ?? "gemini-2.5-flash"
+            aiModel = savedModel ?? topModelFor(aiProvider)
         }
 
         let normalizedAI = AIModelCatalog.shared.normalizedSelection(provider: aiProvider, model: aiModel)
@@ -1855,6 +1858,28 @@ class AppState: ObservableObject {
 
         guard workspaceLoadGeneration == loadGeneration,
               workspaceFolder?.standardizedFileURL == url.standardizedFileURL else { return }
+
+        // Auto-open a primary entry file when no files are currently open so
+        // switching to Code Editor mode immediately displays code rather than
+        // an empty "Select a file to view" placeholder.
+        if self.openFiles.isEmpty {
+            let preferredNames = [
+                "main.swift", "App.swift", "ContentView.swift", "Package.swift",
+                "main.rs", "lib.rs", "Cargo.toml",
+                "index.tsx", "App.tsx", "index.ts", "app.js", "index.js", "index.html",
+                "main.py", "app.py", "main.go", "main.c", "main.cpp", "README.md"
+            ]
+            let rootFiles = self.fileTree.filter { !$0.isDirectory && !$0.name.hasPrefix(".") }
+            let candidateNode = preferredNames.lazy.compactMap { pref in
+                rootFiles.first(where: { $0.name.caseInsensitiveCompare(pref) == .orderedSame })
+            }.first ?? rootFiles.first
+
+            if let entryNode = candidateNode {
+                let savedMode = self.editorMode
+                await self.loadFile(url: URL(fileURLWithPath: entryNode.path))
+                self.editorMode = savedMode
+            }
+        }
         
         // Step 3: Lazy-load background services with delays to prevent CPU spike
         
@@ -2395,12 +2420,6 @@ class AppState: ObservableObject {
                     await syncFileToRemote(file, to: syncServer)
                 }
             }
-            
-            // Remote workspace sync
-            if isRemoteProject {
-                let localURL = URL(fileURLWithPath: file.path)
-                await remoteWorkspaceManager.syncFile(localURL: localURL)
-            }
         } catch {
             alertMessage = "Failed to save file: \(error.localizedDescription)"
         }
@@ -2411,7 +2430,10 @@ class AppState: ObservableObject {
         
         let localURL = URL(fileURLWithPath: file.path)
         let relativePath = localURL.path.replacingOccurrences(of: workspace.path, with: "")
-        let remotePath = relativePath.hasPrefix("/") ? relativePath : "/" + relativePath
+            .trimmingCharacters(in: CharacterSet(charactersIn: "/"))
+        let remoteBase = RemoteWorkspaceManager.shared.currentWorkspace?.remotePath ?? "."
+        let cleanBase = remoteBase.hasSuffix("/") ? String(remoteBase.dropLast()) : remoteBase
+        let remotePath = relativePath.isEmpty ? cleanBase : "\(cleanBase)/\(relativePath)"
         
         print("📡 Syncing to remote: \(remotePath) on \(server.name)")
         
@@ -2714,11 +2736,28 @@ class AppState: ObservableObject {
         try? FileManager.default.removeItem(at: sourceFile)
     }
     
-    /// Execute script content directly (Public helper for Playground)
+    /// Execute script content directly (Public helper for Playground & Cell Mode)
     @MainActor
     public func executeScript(code: String, language: String) async -> (stdout: String, stderr: String, exitCode: Int32) {
         let tempDir = FileManager.default.temporaryDirectory
         let ext = fileExtension(for: language)
+        
+        // Auto-provision portable runtime if missing on the user's Mac
+        var statusLogs: [String] = []
+        let runtimeReady = await RuntimeManager.shared.ensureRuntime(forLanguage: language) { msg in
+            statusLogs.append(msg)
+        }
+        if !runtimeReady, let rType = RuntimeManager.shared.runtimeType(forLanguage: language) {
+            return (
+                "",
+                """
+                ❌ \(rType.rawValue) runtime is not installed on this Mac.
+                Run this one-liner in Terminal to install all MicroCode portable runtimes:
+                curl -fsSL https://microcode.dotmini.net/install.sh | bash
+                """,
+                1
+            )
+        }
         
         // Fast hashing for intelligent execution cache
         let data = Data(code.utf8)
@@ -2727,21 +2766,25 @@ class AppState: ObservableObject {
         
         let sourceFile: URL
         if language.lowercased() == "java" {
-            // Java requires public class name to match file name (conventionally Main.java)
             let javaDir = tempDir.appendingPathComponent("java_\(codeHash)", isDirectory: true)
             try? FileManager.default.createDirectory(at: javaDir, withIntermediateDirectories: true, attributes: nil)
-            sourceFile = javaDir.appendingPathComponent("Main.java")
+            // Match public class name if defined in user code
+            var className = "Main"
+            if let range = code.range(of: #"public\s+class\s+([A-Za-z_][A-Za-z0-9_]*)"#, options: .regularExpression) {
+                let matchStr = String(code[range])
+                if let lastWord = matchStr.split(whereSeparator: { $0.isWhitespace }).last {
+                    className = String(lastWord)
+                }
+            }
+            sourceFile = javaDir.appendingPathComponent("\(className).java")
         } else {
             let filename = "script_\(codeHash).\(ext)"
             sourceFile = tempDir.appendingPathComponent(filename)
         }
         
         do {
-            if !FileManager.default.fileExists(atPath: sourceFile.path) {
-                try code.write(to: sourceFile, atomically: true, encoding: .utf8)
-            }
+            try code.write(to: sourceFile, atomically: true, encoding: .utf8)
             let result = await executeLocalCommand(language: language, sourcePath: sourceFile.path, tempDir: tempDir, codeHash: String(codeHash))
-            // Do not remove source file to allow caching for same code runs
             return result
         } catch {
             return ("", "Error: Failed to write temp file: \(error.localizedDescription)", 1)
@@ -2802,12 +2845,36 @@ class AppState: ObservableObject {
         
         switch lang {
         case "python", "py", "python3":
+            if let pyExe = RuntimeManager.shared.selectedExecutable(for: .python) {
+                return await runProcess(executable: pyExe, arguments: [sourcePath])
+            }
             args = ["python3", sourcePath]
             
         case "javascript", "js":
+            if let nodeExe = RuntimeManager.shared.selectedExecutable(for: .nodejs) {
+                return await runProcess(executable: nodeExe, arguments: [sourcePath])
+            } else if let bunExe = RuntimeManager.shared.selectedExecutable(for: .bun) {
+                return await runProcess(executable: bunExe, arguments: ["run", sourcePath])
+            }
             args = ["node", sourcePath]
             
         case "typescript", "ts":
+            // 1. Prefer Bun (instant native TS execution)
+            if let bunExe = RuntimeManager.shared.selectedExecutable(for: .bun) {
+                return await runProcess(executable: bunExe, arguments: ["run", sourcePath])
+            }
+            // 2. Try Deno
+            if let denoExe = RuntimeManager.shared.selectedExecutable(for: .deno) {
+                return await runProcess(executable: denoExe, arguments: ["run", "-A", sourcePath])
+            }
+            // 3. Try Node.js 22+ native type stripping
+            if let nodeExe = RuntimeManager.shared.selectedExecutable(for: .nodejs) {
+                let stripRes = await runProcess(executable: nodeExe, arguments: ["--no-warnings", "--experimental-strip-types", sourcePath])
+                if stripRes.exitCode == 0 || !stripRes.stderr.contains("bad option") {
+                    return stripRes
+                }
+            }
+            // 4. Fallback to npx tsc
             let jsPath = tempDir.appendingPathComponent("output_\(hashSuffix).js").path
             if !FileManager.default.fileExists(atPath: jsPath) {
                 let compileResult = await runProcess(executable: "/usr/bin/env", arguments: ["npx", "tsc", "--outFile", jsPath, sourcePath])
@@ -2828,55 +2895,108 @@ class AppState: ObservableObject {
             let classDir = tempDir.appendingPathComponent("class_\(hashSuffix)").path
             let classFilePath = (classDir as NSString).appendingPathComponent("\(className).class")
             
+            let javaExe = RuntimeManager.shared.selectedExecutable(for: .java) ?? "java"
+            let javacCandidate = (javaExe as NSString).deletingLastPathComponent + "/javac"
+            let hasJavac = FileManager.default.isExecutableFile(atPath: javacCandidate)
+            
             if !FileManager.default.fileExists(atPath: classFilePath) {
                 try? FileManager.default.createDirectory(atPath: classDir, withIntermediateDirectories: true, attributes: nil)
-                let compileResult = await runProcess(executable: "/usr/bin/env", arguments: ["javac", "-d", classDir, sourcePath])
-                if compileResult.exitCode != 0 { return compileResult }
+                let compileResult: (stdout: String, stderr: String, exitCode: Int32)
+                if hasJavac {
+                    compileResult = await runProcess(executable: javacCandidate, arguments: ["-d", classDir, sourcePath])
+                } else {
+                    compileResult = await runProcess(executable: "/usr/bin/env", arguments: ["javac", "-d", classDir, sourcePath])
+                }
+                if compileResult.exitCode != 0 {
+                    // Fallback to Java 11+ single-file source execution (JEP 330)
+                    if javaExe.hasPrefix("/") {
+                        return await runProcess(executable: javaExe, arguments: [sourcePath])
+                    }
+                    return await runProcess(executable: "/usr/bin/env", arguments: ["java", sourcePath])
+                }
+            }
+            if javaExe.hasPrefix("/") {
+                return await runProcess(executable: javaExe, arguments: ["-cp", classDir, className])
             }
             return await runProcess(executable: "/usr/bin/env", arguments: ["java", "-cp", classDir, className])
             
         case "kotlin", "kt":
             let jarPath = tempDir.appendingPathComponent("output_\(hashSuffix).jar").path
+            let kotlincExe = RuntimeManager.shared.selectedExecutable(for: .kotlin)
             if !FileManager.default.fileExists(atPath: jarPath) {
-                let compileResult = await runProcess(executable: "/usr/bin/env", arguments: ["kotlinc", sourcePath, "-include-runtime", "-d", jarPath])
+                let compileResult: (stdout: String, stderr: String, exitCode: Int32)
+                if let kotlincExe = kotlincExe {
+                    compileResult = await runProcess(executable: kotlincExe, arguments: [sourcePath, "-include-runtime", "-d", jarPath])
+                } else {
+                    compileResult = await runProcess(executable: "/usr/bin/env", arguments: ["kotlinc", sourcePath, "-include-runtime", "-d", jarPath])
+                }
                 if compileResult.exitCode != 0 {
-                    if compileResult.stderr.contains("not found") || compileResult.stderr.contains("No such file") {
-                        return ("", "❌ Error: Kotlin compiler (kotlinc) not found in PATH.\nPlease install Kotlin via: brew install kotlin", 1)
-                    }
                     return compileResult
                 }
+            }
+            if let javaExe = RuntimeManager.shared.selectedExecutable(for: .java) {
+                return await runProcess(executable: javaExe, arguments: ["-jar", jarPath])
             }
             return await runProcess(executable: "/usr/bin/env", arguments: ["java", "-jar", jarPath])
             
         case "go", "golang":
             let outputPath = tempDir.appendingPathComponent("output_go_\(hashSuffix)").path
+            let goExe = RuntimeManager.shared.selectedExecutable(for: .go)
             if !FileManager.default.fileExists(atPath: outputPath) {
-                let compileResult = await runProcess(executable: "/usr/bin/env", arguments: ["go", "build", "-o", outputPath, sourcePath])
-                if compileResult.exitCode != 0 { return await runProcess(executable: "/usr/bin/env", arguments: ["go", "run", sourcePath]) }
+                let compileResult: (stdout: String, stderr: String, exitCode: Int32)
+                if let goExe = goExe {
+                    compileResult = await runProcess(executable: goExe, arguments: ["build", "-o", outputPath, sourcePath])
+                } else {
+                    compileResult = await runProcess(executable: "/usr/bin/env", arguments: ["go", "build", "-o", outputPath, sourcePath])
+                }
+                if compileResult.exitCode != 0 {
+                    if let goExe = goExe {
+                        return await runProcess(executable: goExe, arguments: ["run", sourcePath])
+                    }
+                    return await runProcess(executable: "/usr/bin/env", arguments: ["go", "run", sourcePath])
+                }
             }
             return await runProcess(executable: outputPath, arguments: [])
             
         // Systems
         case "rust", "rs":
             let outputPath = tempDir.appendingPathComponent("output_rs_\(hashSuffix)").path
+            let rustcExe = RuntimeManager.shared.selectedExecutable(for: .rust)
             if !FileManager.default.fileExists(atPath: outputPath) {
-                let compileResult = await runProcess(executable: "/usr/bin/env", arguments: ["rustc", "-o", outputPath, sourcePath])
+                let compileResult: (stdout: String, stderr: String, exitCode: Int32)
+                if let rustcExe = rustcExe {
+                    compileResult = await runProcess(executable: rustcExe, arguments: ["-o", outputPath, sourcePath])
+                } else {
+                    compileResult = await runProcess(executable: "/usr/bin/env", arguments: ["rustc", "-o", outputPath, sourcePath])
+                }
                 if compileResult.exitCode != 0 { return compileResult }
             }
             return await runProcess(executable: outputPath, arguments: [])
             
         case "c":
             let outputPath = tempDir.appendingPathComponent("output_c_\(hashSuffix)").path
+            let clangExe = RuntimeManager.shared.selectedExecutable(for: .c)
             if !FileManager.default.fileExists(atPath: outputPath) {
-                let compileResult = await runProcess(executable: "/usr/bin/env", arguments: ["clang", "-o", outputPath, sourcePath])
+                let compileResult: (stdout: String, stderr: String, exitCode: Int32)
+                if let clangExe = clangExe {
+                    compileResult = await runProcess(executable: clangExe, arguments: ["-o", outputPath, sourcePath])
+                } else {
+                    compileResult = await runProcess(executable: "/usr/bin/env", arguments: ["clang", "-o", outputPath, sourcePath])
+                }
                 if compileResult.exitCode != 0 { return compileResult }
             }
             return await runProcess(executable: outputPath, arguments: [])
             
         case "cpp", "c++", "cxx", "cc":
             let outputPath = tempDir.appendingPathComponent("output_cpp_\(hashSuffix)").path
+            let clangppExe = RuntimeManager.shared.selectedExecutable(for: .cpp)
             if !FileManager.default.fileExists(atPath: outputPath) {
-                let compileResult = await runProcess(executable: "/usr/bin/env", arguments: ["clang++", "-std=c++20", "-o", outputPath, sourcePath])
+                let compileResult: (stdout: String, stderr: String, exitCode: Int32)
+                if let clangppExe = clangppExe {
+                    compileResult = await runProcess(executable: clangppExe, arguments: ["-std=c++20", "-o", outputPath, sourcePath])
+                } else {
+                    compileResult = await runProcess(executable: "/usr/bin/env", arguments: ["clang++", "-std=c++20", "-o", outputPath, sourcePath])
+                }
                 if compileResult.exitCode != 0 { return compileResult }
             }
             return await runProcess(executable: outputPath, arguments: [])
@@ -2905,7 +3025,29 @@ class AppState: ObservableObject {
             
         // .NET / C#
         case "csharp", "cs":
-            // Try mono mcs first for single file
+            if let dotnetExe = RuntimeManager.shared.selectedExecutable(for: .dotnet) {
+                let projDir = tempDir.appendingPathComponent("cs_proj_\(hashSuffix)", isDirectory: true)
+                let csprojPath = projDir.appendingPathComponent("App.csproj")
+                let programPath = projDir.appendingPathComponent("Program.cs")
+                if !FileManager.default.fileExists(atPath: csprojPath.path) {
+                    try? FileManager.default.createDirectory(at: projDir, withIntermediateDirectories: true)
+                    let csproj = """
+                    <Project Sdk="Microsoft.NET.Sdk">
+                      <PropertyGroup>
+                        <OutputType>Exe</OutputType>
+                        <TargetFramework>net8.0</TargetFramework>
+                        <ImplicitUsings>enable</ImplicitUsings>
+                        <Nullable>enable</Nullable>
+                      </PropertyGroup>
+                    </Project>
+                    """
+                    try? csproj.write(to: csprojPath, atomically: true, encoding: .utf8)
+                }
+                if let srcContent = try? String(contentsOfFile: sourcePath, encoding: .utf8) {
+                    try? srcContent.write(to: programPath, atomically: true, encoding: .utf8)
+                }
+                return await runProcess(executable: dotnetExe, arguments: ["run", "--project", projDir.path, "--nologo"])
+            }
             let binPath = tempDir.appendingPathComponent("out_\(hashSuffix).exe").path
             if !FileManager.default.fileExists(atPath: binPath) {
                 let compileResult = await runProcess(executable: "/usr/bin/env", arguments: ["mcs", sourcePath, "-out:" + binPath])
@@ -3062,18 +3204,25 @@ class AppState: ObservableObject {
                 process.arguments = arguments
             }
             
-            // Build rich PATH environment covering cargo, swiftly, homebrew, openjdk, dotnet, etc.
+            // Build rich PATH environment covering portable runtimes, cargo, swiftly, homebrew, openjdk, dotnet, etc.
             var env = ProcessInfo.processInfo.environment
             let home = NSHomeDirectory()
-            let additionalPaths = [
+            let portableBins = RuntimeManager.shared.allRuntimeBinDirectories()
+            let additionalPaths = portableBins + [
                 "/opt/homebrew/bin",
                 "/opt/homebrew/sbin",
                 "/usr/local/bin",
                 "\(home)/.cargo/bin",
+                "\(home)/.bun/bin",
+                "\(home)/.deno/bin",
+                "\(home)/.local/bin",
+                "\(home)/go/bin",
+                "/usr/local/go/bin",
                 "\(home)/.swiftly/bin",
                 "/opt/homebrew/opt/openjdk@21/bin",
                 "/opt/homebrew/opt/openjdk@17/bin",
                 "/opt/homebrew/opt/openjdk/bin",
+                "/Library/Frameworks/Python.framework/Versions/3.12/bin",
                 "/Library/Frameworks/Python.framework/Versions/3.11/bin",
                 "/Library/Frameworks/Python.framework/Versions/Current/bin",
                 "\(home)/Library/Android/sdk/cmdline-tools/latest/bin",
@@ -3084,12 +3233,11 @@ class AppState: ObservableObject {
             let existingPath = env["PATH"] ?? "/usr/bin:/bin:/usr/sbin:/sbin"
             let completePath = (additionalPaths + [existingPath]).joined(separator: ":")
             env["PATH"] = completePath
-            if env["JAVA_HOME"] == nil {
-                if FileManager.default.fileExists(atPath: "/opt/homebrew/opt/openjdk@21/libexec/openjdk.jdk/Contents/Home") {
-                    env["JAVA_HOME"] = "/opt/homebrew/opt/openjdk@21/libexec/openjdk.jdk/Contents/Home"
-                } else if FileManager.default.fileExists(atPath: "/opt/homebrew/opt/openjdk/libexec/openjdk.jdk/Contents/Home") {
-                    env["JAVA_HOME"] = "/opt/homebrew/opt/openjdk/libexec/openjdk.jdk/Contents/Home"
-                }
+            if env["JAVA_HOME"] == nil, let javaHome = RuntimeManager.shared.portableJavaHome() {
+                env["JAVA_HOME"] = javaHome
+            }
+            if env["GOROOT"] == nil, let goRoot = RuntimeManager.shared.portableGoRoot() {
+                env["GOROOT"] = goRoot
             }
             process.environment = env
             
@@ -4299,6 +4447,7 @@ class AppState: ObservableObject {
         ) else { return [] }
         
         for childURL in contents {
+            guard !childURL.lastPathComponent.hasPrefix("._") else { continue }
             let isDirectory = (try? childURL.resourceValues(forKeys: [.isDirectoryKey]))?.isDirectory ?? false
             let node = FileNode(
                 name: childURL.lastPathComponent,
@@ -4418,39 +4567,13 @@ class AppState: ObservableObject {
         showingPreviewView = false
         DeviceRuntimeService.shared.showingEmbeddedDeviceDock = false
         DeviceRuntimeService.shared.stopEmbeddedAndroid()
-        AppleSimulatorCaptureService.shared.stop()
-        Task { await ServeSimService.shared.stop() }
+        DeviceRuntimeService.shared.stopEmbeddedAppleSimulator(shutdownSimulator: true)
         PreviewDockService.shared.isDockVisible = false
         saveSettings()
     }
 
     /// Intelligently detect the best preview platform for the current workspace (defaulting to Web)
     func detectBestPreviewTab() -> String {
-        guard let folder = workspaceFolder else {
-            return PreviewDockService.shared.activeTabId
-        }
-        let fm = FileManager.default
-        let folderPath = folder.path
-        
-        // 1. WebApp indicators (HTML, Vite, Next, React, Vue, Svelte, static web)
-        let webFiles = ["index.html", "package.json", "vite.config.ts", "vite.config.js", "next.config.js", "next.config.mjs", "nuxt.config.ts", "svelte.config.js", "astro.config.mjs", "public/index.html", "dist/index.html"]
-        for rel in webFiles {
-            if fm.fileExists(atPath: folder.appendingPathComponent(rel).path) {
-                return "web"
-            }
-        }
-        
-        // 2. iOS indicators (Xcode project, xcworkspace, Podfile)
-        if let items = try? fm.contentsOfDirectory(atPath: folderPath) {
-            if items.contains(where: { $0.hasSuffix(".xcodeproj") || $0.hasSuffix(".xcworkspace") || $0 == "Podfile" }) {
-                return "ios"
-            }
-            // 3. Android indicators (Gradle, AndroidManifest)
-            if items.contains(where: { $0 == "build.gradle" || $0 == "build.gradle.kts" || $0 == "settings.gradle" || $0 == "settings.gradle.kts" }) {
-                return "android"
-            }
-        }
-        
         return "web"
     }
     
@@ -4464,6 +4587,7 @@ class AppState: ObservableObject {
         
         // Update published property
         editorMode = mode
+        TelemetryService.shared.recordMode(mode)
         NotificationCenter.default.post(name: NSNotification.Name("MicroCodeEditorModeChanged"), object: mode)
     }
     

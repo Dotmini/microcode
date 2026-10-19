@@ -678,6 +678,79 @@ impl PipelineEngine {
         Ok(status.code().unwrap_or(-1))
     }
 
+    async fn execute_process(
+        &self,
+        run_id: &str,
+        job_id: &str,
+        step_name: &str,
+        program: &str,
+        args: &[String],
+        cwd: &Path,
+        env: &HashMap<String, String>,
+    ) -> Result<i32, String> {
+        self.emit_log(
+            run_id,
+            job_id,
+            step_name,
+            &format!("$ {} {}", program, args.join(" ")),
+            "stdout",
+        )
+        .await;
+
+        let mut child = Command::new(program)
+            .args(args)
+            .current_dir(cwd)
+            .envs(env)
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .spawn()
+            .map_err(|e| format!("Failed to spawn {}: {}", program, e))?;
+
+        let stdout = child.stdout.take();
+        let stderr = child.stderr.take();
+
+        let engine_out = self.clone();
+        let rid_out = run_id.to_string();
+        let jid_out = job_id.to_string();
+        let sn_out = step_name.to_string();
+
+        let stdout_task = tokio::spawn(async move {
+            if let Some(stdout) = stdout {
+                use tokio::io::{AsyncBufReadExt, BufReader};
+                let reader = BufReader::new(stdout);
+                let mut lines = reader.lines();
+                while let Ok(Some(line)) = lines.next_line().await {
+                    engine_out
+                        .emit_log(&rid_out, &jid_out, &sn_out, &line, "stdout")
+                        .await;
+                }
+            }
+        });
+
+        let engine_err = self.clone();
+        let rid_err = run_id.to_string();
+        let jid_err = job_id.to_string();
+        let sn_err = step_name.to_string();
+
+        let stderr_task = tokio::spawn(async move {
+            if let Some(stderr) = stderr {
+                use tokio::io::{AsyncBufReadExt, BufReader};
+                let reader = BufReader::new(stderr);
+                let mut lines = reader.lines();
+                while let Ok(Some(line)) = lines.next_line().await {
+                    engine_err
+                        .emit_log(&rid_err, &jid_err, &sn_err, &line, "stderr")
+                        .await;
+                }
+            }
+        });
+
+        let _ = tokio::join!(stdout_task, stderr_task);
+
+        let status = child.wait().await.map_err(|e| e.to_string())?;
+        Ok(status.code().unwrap_or(-1))
+    }
+
     async fn execute_ssh_deploy(
         &self,
         run_id: &str,
@@ -703,19 +776,19 @@ impl PipelineEngine {
 
         let ssh_cmd = if let Some(key) = key_path {
             let expanded_key = shellexpand::tilde(key).to_string();
+            let escaped_key = expanded_key.replace('\'', "'\\''");
             format!(
-                "ssh -p {} -i {} -o StrictHostKeyChecking=no",
-                port, expanded_key
+                "ssh -p {} -i '{}' -o StrictHostKeyChecking=accept-new",
+                port, escaped_key
             )
         } else {
-            format!("ssh -p {} -o StrictHostKeyChecking=no", port)
+            format!("ssh -p {} -o StrictHostKeyChecking=accept-new", port)
         };
 
         rsync_args.push(ssh_cmd);
         rsync_args.push(source_path.to_string_lossy().to_string());
         rsync_args.push(dest);
 
-        let cmd = format!("rsync {}", rsync_args.join(" "));
         self.emit_log(
             run_id,
             job_id,
@@ -725,11 +798,12 @@ impl PipelineEngine {
         )
         .await;
 
-        self.execute_shell(
+        self.execute_process(
             run_id,
             job_id,
             step_name,
-            &cmd,
+            "rsync",
+            &rsync_args,
             project_dir,
             &HashMap::new(),
         )
@@ -754,7 +828,7 @@ impl PipelineEngine {
 
         let mut ssh_args = vec![
             "-o".to_string(),
-            "StrictHostKeyChecking=no".to_string(),
+            "StrictHostKeyChecking=accept-new".to_string(),
             "-p".to_string(),
             port,
         ];
@@ -769,7 +843,6 @@ impl PipelineEngine {
         ssh_args.push(dest.clone());
         ssh_args.push(command.clone());
 
-        let cmd = format!("ssh {}", ssh_args.join(" "));
         self.emit_log(
             run_id,
             job_id,
@@ -779,9 +852,8 @@ impl PipelineEngine {
         )
         .await;
 
-        // Use a temp dir for cwd since this is remote
         let tmp = std::env::temp_dir();
-        self.execute_shell(run_id, job_id, step_name, &cmd, &tmp, &HashMap::new())
+        self.execute_process(run_id, job_id, step_name, "ssh", &ssh_args, &tmp, &HashMap::new())
             .await
     }
 
@@ -805,12 +877,18 @@ impl PipelineEngine {
         )
         .await;
 
-        let cmd = format!("git pull {} {}", remote, branch);
-        self.execute_shell(
+        let git_args = vec![
+            "pull".to_string(),
+            "--".to_string(),
+            remote.to_string(),
+            branch.to_string(),
+        ];
+        self.execute_process(
             run_id,
             job_id,
             step_name,
-            &cmd,
+            "git",
+            &git_args,
             project_dir,
             &HashMap::new(),
         )

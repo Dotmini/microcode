@@ -124,7 +124,7 @@ public class StateMachineLexer: LexerProtocol, @unchecked Sendable {
             // Handle based on current state
             switch state {
             case .normal:
-                let (token, newState, consumed) = tokenizeNormal(remaining, line: lineNumber, column: column, offset: offset)
+                let (token, newState, consumed) = tokenizeNormal(remaining, line: lineNumber, column: column, offset: offset, previousToken: tokens.last)
                 if let token = token {
                     tokens.append(token)
                 }
@@ -170,7 +170,7 @@ public class StateMachineLexer: LexerProtocol, @unchecked Sendable {
                 
             default:
                 // Handle other states - fallback to normal
-                let (token, newState, consumed) = tokenizeNormal(remaining, line: lineNumber, column: column, offset: offset)
+                let (token, newState, consumed) = tokenizeNormal(remaining, line: lineNumber, column: column, offset: offset, previousToken: tokens.last)
                 if let token = token {
                     tokens.append(token)
                 }
@@ -188,7 +188,7 @@ public class StateMachineLexer: LexerProtocol, @unchecked Sendable {
     // MARK: - State-Specific SyntaxTokenizers
     
     /// SyntaxTokenize in normal state (not inside string or comment)
-    private func tokenizeNormal(_ text: Substring, line: Int, column: Int, offset: Int) -> (SyntaxToken?, SyntaxLexerState, Int) {
+    private func tokenizeNormal(_ text: Substring, line: Int, column: Int, offset: Int, previousToken: SyntaxToken? = nil) -> (SyntaxToken?, SyntaxLexerState, Int) {
         guard !text.isEmpty else { return (nil, .normal, 0) }
         
         guard let first = text.first else { return (nil, .normal, 0) }
@@ -255,9 +255,14 @@ public class StateMachineLexer: LexerProtocol, @unchecked Sendable {
             return tokenizeNumber(text, line: line, column: column, offset: offset)
         }
         
-        // Identifiers and keywords
-        if first.isLetter || first == "_" || first == "@" || first == "#" {
-            return tokenizeIdentifier(text, line: line, column: column, offset: offset)
+        // CSS custom properties (--var-name)
+        if languageId == "css" && text.hasPrefix("--") {
+            return tokenizeIdentifier(text, line: line, column: column, offset: offset, previousToken: previousToken)
+        }
+        
+        // Identifiers, keywords, decorators (@), directives/hex (#), and $-prefixed variables
+        if first.isLetter || first == "_" || first == "@" || first == "#" || (first == "$" && (text.dropFirst().first?.isLetter == true || text.dropFirst().first == "_" || text.dropFirst().first?.isNumber == true)) {
+            return tokenizeIdentifier(text, line: line, column: column, offset: offset, previousToken: previousToken)
         }
         
         // Operators and punctuation
@@ -369,10 +374,14 @@ public class StateMachineLexer: LexerProtocol, @unchecked Sendable {
         var index = text.startIndex
         var isFloat = false
         var isHex = false
+        var isBinaryOrOctal = false
         
-        // Check for hex
+        // Check for hex / binary / octal prefixes
         if text.hasPrefix("0x") || text.hasPrefix("0X") {
             isHex = true
+            index = text.index(index, offsetBy: 2)
+        } else if text.hasPrefix("0b") || text.hasPrefix("0B") || text.hasPrefix("0o") || text.hasPrefix("0O") {
+            isBinaryOrOctal = true
             index = text.index(index, offsetBy: 2)
         }
         
@@ -380,7 +389,13 @@ public class StateMachineLexer: LexerProtocol, @unchecked Sendable {
             let char = text[index]
             
             if isHex {
-                if char.isHexDigit {
+                if char.isHexDigit || char == "_" {
+                    index = text.index(after: index)
+                } else {
+                    break
+                }
+            } else if isBinaryOrOctal {
+                if char.isNumber || char == "_" {
                     index = text.index(after: index)
                 } else {
                     break
@@ -408,56 +423,149 @@ public class StateMachineLexer: LexerProtocol, @unchecked Sendable {
             }
         }
         
+        // Optional unit/type suffix (e.g., 12px, 1.5rem, 100%, 64u64, 0.5f)
+        if languageId == "css" && index < text.endIndex {
+            if text[index] == "%" {
+                index = text.index(after: index)
+            } else {
+                while index < text.endIndex && text[index].isLetter {
+                    index = text.index(after: index)
+                }
+            }
+        }
+        
         let numberText = String(text[text.startIndex..<index])
         let range = SyntaxTextRange(line: line, column: column, length: numberText.utf16.count, offset: offset)
         let token = SyntaxToken(type: .number, text: numberText, range: range, endState: .normal)
         return (token, .normal, numberText.count)
     }
     
-    /// SyntaxTokenize an identifier or keyword
-    private func tokenizeIdentifier(_ text: Substring, line: Int, column: Int, offset: Int) -> (SyntaxToken?, SyntaxLexerState, Int) {
+    /// SyntaxTokenize an identifier or keyword with lookahead & previous-token context
+    private func tokenizeIdentifier(_ text: Substring, line: Int, column: Int, offset: Int, previousToken: SyntaxToken? = nil) -> (SyntaxToken?, SyntaxLexerState, Int) {
         var index = text.startIndex
         guard let first = text.first else { return (nil, .normal, 0) }
         
-        // Handle @ and # prefixed identifiers (decorators, preprocessor)
+        // Handle @, #, $, and -- prefixed identifiers
         var isDecorator = false
         var isPreprocessor = false
+        var isDollarVariable = false
+        var isCssCustomProp = false
         
-        if first == "@" {
+        let allowsHyphenInIdent = (languageId == "css" || languageId == "html" || languageId == "yaml" || languageId == "toml")
+        
+        if languageId == "css" && text.hasPrefix("--") {
+            isCssCustomProp = true
+            index = text.index(index, offsetBy: 2)
+        } else if first == "@" {
             isDecorator = true
             index = text.index(after: index)
         } else if first == "#" {
             isPreprocessor = true
+            index = text.index(after: index)
+        } else if first == "$" {
+            isDollarVariable = true
             index = text.index(after: index)
         }
         
         // Consume identifier characters
         while index < text.endIndex {
             let char = text[index]
-            if char.isLetter || char.isNumber || char == "_" {
+            if char.isLetter || char.isNumber || char == "_" || (allowsHyphenInIdent && char == "-") {
                 index = text.index(after: index)
             } else {
                 break
             }
         }
         
+        // Rust macro invocation suffix (e.g. println!, vec!, format!)
+        var isRustMacro = false
+        if languageId == "rust" && index < text.endIndex && text[index] == "!" && !isDecorator && !isPreprocessor {
+            isRustMacro = true
+            index = text.index(after: index)
+        }
+        
         let identText = String(text[text.startIndex..<index])
         let range = SyntaxTextRange(line: line, column: column, length: identText.utf16.count, offset: offset)
         
+        // Lookahead past horizontal whitespace on the same line
+        let afterIdent = text[index...].drop(while: { $0 == " " || $0 == "\t" })
+        let nextNonWS = afterIdent.first
+        let isFollowedByParen = (nextNonWS == "(")
+        let isFollowedByColon = (nextNonWS == ":" && !afterIdent.hasPrefix("::"))
+        
+        let prevText = previousToken?.text
+        let prevType = previousToken?.type
+        let isAfterMemberAccess = (prevText == "." || prevText == "?." || prevText == "->" || prevText == "::")
+        
+        // Case-insensitive keyword lookup ONLY for SQL and HTML; case-sensitive for code languages
+        let matchedKeyword: SyntaxTokenType? = (languageId == "sql" || languageId == "html")
+            ? (keywords[identText] ?? keywords[identText.lowercased()])
+            : keywords[identText]
+        
         // Determine token type
         let tokenType: SyntaxTokenType
-        if isDecorator {
-            tokenType = .annotation
-        } else if isPreprocessor {
+        if isCssCustomProp || isDollarVariable {
+            tokenType = .variable
+        } else if isRustMacro {
             tokenType = .preprocessor
-        } else if let kwType = keywords[identText] ?? keywords[identText.lowercased()] {
-            tokenType = kwType
-        } else if identText == "true" || identText == "false" || identText == "TRUE" || identText == "FALSE" {
+        } else if isDecorator {
+            tokenType = matchedKeyword ?? .annotation
+        } else if isPreprocessor {
+            let body = identText.dropFirst()
+            if (languageId == "css" || languageId == "html"),
+               (body.count == 3 || body.count == 4 || body.count == 6 || body.count == 8),
+               body.allSatisfy({ $0.isHexDigit }) {
+                tokenType = .number
+            } else {
+                tokenType = matchedKeyword ?? .preprocessor
+            }
+        } else if identText == "true" || identText == "false" || (languageId == "python" && (identText == "True" || identText == "False")) || (languageId == "sql" && (identText.uppercased() == "TRUE" || identText.uppercased() == "FALSE")) {
             tokenType = .boolean
-        } else if identText == "nil" || identText == "null" || identText == "None" || identText == "NULL" {
+        } else if identText == "nil" || identText == "null" || identText == "None" || identText == "NULL" || identText == "nullptr" || identText == "undefined" {
             tokenType = .null
+        } else if prevType == .keywordDeclaration {
+            // Identifier immediately following a declaration keyword
+            if prevText == "func" || prevText == "def" || prevText == "fn" || prevText == "function" || prevText == "sub" {
+                tokenType = .function
+            } else if prevText == "class" || prevText == "struct" || prevText == "enum" || prevText == "protocol" || prevText == "interface" || prevText == "trait" || prevText == "actor" || prevText == "type" || prevText == "typealias" || prevText == "extension" || prevText == "impl" || prevText == "record" {
+                tokenType = .type
+            } else if let kwType = matchedKeyword {
+                tokenType = kwType
+            } else {
+                tokenType = .variable
+            }
+        } else if isAfterMemberAccess {
+            // Member access: obj.method() -> .function, obj.prop -> .property, Module.Type -> .type
+            if isFollowedByParen {
+                tokenType = .function
+            } else if identText.first?.isUppercase == true {
+                tokenType = .type
+            } else {
+                tokenType = .property
+            }
+        } else if let kwType = matchedKeyword {
+            tokenType = kwType
+        } else if isFollowedByParen {
+            // Function or method call: foo(...) or PascalCase initializer
+            if identText.first?.isUppercase == true && identText.contains(where: { $0.isLowercase }) {
+                tokenType = .type
+            } else {
+                tokenType = .function
+            }
+        } else if (languageId == "yaml" || languageId == "css" || languageId == "toml") && isFollowedByColon {
+            tokenType = .property
+        } else if isFollowedByColon && (prevText == "(" || prevText == "," || prevText == "{") {
+            // Named argument label or object literal key: foo(bar: 1, baz: 2) or { key: val }
+            tokenType = .property
+        } else if identText.count >= 2 && identText.contains("_") && identText.allSatisfy({ !$0.isLetter || $0.isUppercase }) {
+            // SCREAMING_SNAKE_CASE constant
+            tokenType = .constant
         } else if identText.first?.isUppercase == true {
             tokenType = .type
+        } else if languageId == "html" && (prevText == "<" || prevText == "</" || prevText == "/") {
+            tokenType = .keyword
+        } else if languageId == "html" && nextNonWS == "=" {
+            tokenType = .property
         } else {
             tokenType = .identifier
         }
@@ -471,17 +579,18 @@ public class StateMachineLexer: LexerProtocol, @unchecked Sendable {
         guard let first = text.first else { return (nil, .normal, 0) }
         
         // Multi-character operators (check longest first)
-        let multiOps = ["===", "!==", "...", "..<", "->", "=>", "<=", ">=", "==", "!=", "&&", "||", "<<", ">>", "+=", "-=", "*=", "/=", "??", "++", "--"]
+        let multiOps = ["===", "!==", "...", "..<", "?.", "::", "->", "=>", "</", "/>", "<=", ">=", "==", "!=", "&&", "||", "<<", ">>", "+=", "-=", "*=", "/=", "??", "++", "--"]
         for op in multiOps {
             if text.hasPrefix(op) {
                 let range = SyntaxTextRange(line: line, column: column, length: op.utf16.count, offset: offset)
-                let token = SyntaxToken(type: .operator, text: op, range: range, endState: .normal)
+                let type: SyntaxTokenType = (op == "?." || op == "::") ? .delimiter : .operator
+                let token = SyntaxToken(type: type, text: op, range: range, endState: .normal)
                 return (token, .normal, op.count)
             }
         }
         
         // Single-character operators
-        let operators: Set<Character> = ["+", "-", "*", "/", "%", "=", "<", ">", "!", "&", "|", "^", "~", "?"]
+        let operators: Set<Character> = ["+", "-", "*", "/", "%", "=", "<", ">", "!", "&", "|", "^", "~", "?", "$"]
         let punctuation: Set<Character> = ["(", ")", "[", "]", "{", "}", ",", ";", ":"]
         let delimiters: Set<Character> = ["."]
         

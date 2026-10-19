@@ -79,16 +79,17 @@ final class IOSDeviceControlService: ObservableObject {
         let targetX = info.bounds.origin.x + (normalizedX * info.bounds.width)
         let targetY = info.bounds.origin.y + insetTop + (normalizedY * usableHeight)
         let targetPoint = CGPoint(x: targetX, y: targetY)
+        let pid = info.pid
 
-        let src = CGEventSource(stateID: .combinedSessionState)
-        if let down = CGEvent(mouseEventSource: src, mouseType: .leftMouseDown, mouseCursorPosition: targetPoint, mouseButton: .left),
-           let up = CGEvent(mouseEventSource: src, mouseType: .leftMouseUp, mouseCursorPosition: targetPoint, mouseButton: .left) {
-            down.postToPid(info.pid)
-            down.post(tap: .cghidEventTap)
-            usleep(35000)
-            up.postToPid(info.pid)
-            up.post(tap: .cghidEventTap)
-            lastActionStatus = "Tap (\(Int(targetX)), \(Int(targetY)))"
+        lastActionStatus = "Tap (\(Int(targetX)), \(Int(targetY)))"
+        Task.detached(priority: .userInteractive) {
+            let src = CGEventSource(stateID: .combinedSessionState)
+            if let down = CGEvent(mouseEventSource: src, mouseType: .leftMouseDown, mouseCursorPosition: targetPoint, mouseButton: .left),
+               let up = CGEvent(mouseEventSource: src, mouseType: .leftMouseUp, mouseCursorPosition: targetPoint, mouseButton: .left) {
+                down.postToPid(pid)
+                try? await Task.sleep(nanoseconds: 35_000_000)
+                up.postToPid(pid)
+            }
         }
     }
 
@@ -106,28 +107,29 @@ final class IOSDeviceControlService: ObservableObject {
             x: info.bounds.origin.x + (toX * info.bounds.width),
             y: info.bounds.origin.y + insetTop + (toY * usableHeight)
         )
+        let pid = info.pid
+        lastActionStatus = "Swipe sent"
 
-        let src = CGEventSource(stateID: .combinedSessionState)
-        if let down = CGEvent(mouseEventSource: src, mouseType: .leftMouseDown, mouseCursorPosition: startPt, mouseButton: .left) {
-            down.postToPid(info.pid)
-            down.post(tap: .cghidEventTap)
-        }
-
-        let steps = max(4, durationMs / 20)
-        for i in 1...steps {
-            let t = CGFloat(i) / CGFloat(steps)
-            let curr = CGPoint(x: startPt.x + (endPt.x - startPt.x) * t, y: startPt.y + (endPt.y - startPt.y) * t)
-            if let drag = CGEvent(mouseEventSource: src, mouseType: .leftMouseDragged, mouseCursorPosition: curr, mouseButton: .left) {
-                drag.postToPid(info.pid)
-                drag.post(tap: .cghidEventTap)
+        Task.detached(priority: .userInteractive) {
+            let src = CGEventSource(stateID: .combinedSessionState)
+            if let down = CGEvent(mouseEventSource: src, mouseType: .leftMouseDown, mouseCursorPosition: startPt, mouseButton: .left) {
+                down.postToPid(pid)
             }
-            usleep(UInt32((durationMs * 1000) / steps))
-        }
 
-        if let up = CGEvent(mouseEventSource: src, mouseType: .leftMouseUp, mouseCursorPosition: endPt, mouseButton: .left) {
-            up.postToPid(info.pid)
-            up.post(tap: .cghidEventTap)
-            lastActionStatus = "Swipe sent"
+            let steps = max(4, durationMs / 20)
+            let stepNs = UInt64(max(1, (durationMs * 1_000_000) / steps))
+            for i in 1...steps {
+                let t = CGFloat(i) / CGFloat(steps)
+                let curr = CGPoint(x: startPt.x + (endPt.x - startPt.x) * t, y: startPt.y + (endPt.y - startPt.y) * t)
+                if let drag = CGEvent(mouseEventSource: src, mouseType: .leftMouseDragged, mouseCursorPosition: curr, mouseButton: .left) {
+                    drag.postToPid(pid)
+                }
+                try? await Task.sleep(nanoseconds: stepNs)
+            }
+
+            if let up = CGEvent(mouseEventSource: src, mouseType: .leftMouseUp, mouseCursorPosition: endPt, mouseButton: .left) {
+                up.postToPid(pid)
+            }
         }
     }
 
@@ -138,7 +140,6 @@ final class IOSDeviceControlService: ObservableObject {
         if let scroll = CGEvent(scrollWheelEvent2Source: nil, units: .pixel, wheelCount: 2, wheel1: Int32(deltaY * 5), wheel2: Int32(deltaX * 5), wheel3: 0) {
             scroll.location = center
             scroll.postToPid(info.pid)
-            scroll.post(tap: .cghidEventTap)
         }
     }
 
@@ -147,7 +148,6 @@ final class IOSDeviceControlService: ObservableObject {
         guard let info = getMirroringWindowInfo() else { return }
         if let cgEvent = event.cgEvent {
             cgEvent.postToPid(info.pid)
-            cgEvent.post(tap: .cghidEventTap)
         }
     }
 
@@ -302,28 +302,37 @@ final class IOSDeviceControlService: ObservableObject {
 
     // MARK: - Device Discovery & Utilities
 
+    private var isDiscoveringUDID = false
+
     func discoverPhysicalUDID() {
-        Task {
+        guard !isDiscoveringUDID else { return }
+        isDiscoveringUDID = true
+        Task.detached(priority: .utility) {
+            var foundID: String? = nil
+            var foundModel: String? = nil
             let proc = Process()
             let pipe = Pipe()
             proc.executableURL = URL(fileURLWithPath: "/usr/bin/xcrun")
-            proc.arguments = ["devicectl", "list", "devices", "--json-output", "-"]
+            proc.arguments = ["devicectl", "list", "devices", "--json-output", "-", "--omit-deprecated-fields-in-json", "--timeout", "3"]
             proc.standardOutput = pipe
+            proc.standardError = FileHandle.nullDevice
             do {
                 try proc.run()
-                proc.waitUntilExit()
                 let data = pipe.fileHandleForReading.readDataToEndOfFile()
+                proc.waitUntilExit()
                 if let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
                    let result = json["result"] as? [String: Any],
                    let devices = result["devices"] as? [[String: Any]] {
                     for d in devices {
-                        let reality = (d["hardwareProperties"] as? [String: Any])?["reality"] as? String ?? ""
-                        let model = (d["hardwareProperties"] as? [String: Any])?["marketingName"] as? String ?? ""
-                        if reality == "physical" {
-                            if let id = d["identifier"] as? String {
-                                self.deviceUDID = id
+                        let hw = (d["hardwareProperties"] as? [String: Any])
+                            ?? ((d["properties"] as? [String: Any])?["hardware"] as? [String: Any])
+                        let reality = hw?["reality"] as? String ?? ""
+                        let model = hw?["marketingName"] as? String ?? ""
+                        if reality.caseInsensitiveCompare("physical") == .orderedSame {
+                            if let id = (hw?["udid"] as? String) ?? (d["identifier"] as? String) {
+                                foundID = id
                                 if !model.isEmpty {
-                                    self.deviceModelName = model
+                                    foundModel = model
                                 }
                                 break
                             }
@@ -332,6 +341,18 @@ final class IOSDeviceControlService: ObservableObject {
                 }
             } catch {
                 print("[IOSControl] Failed to list devices: \(error)")
+            }
+            let finalID = foundID
+            let finalModel = foundModel
+            await MainActor.run {
+                let service = IOSDeviceControlService.shared
+                service.isDiscoveringUDID = false
+                if let finalID {
+                    service.deviceUDID = finalID
+                }
+                if let finalModel, !finalModel.isEmpty {
+                    service.deviceModelName = finalModel
+                }
             }
         }
     }
@@ -357,6 +378,8 @@ final class IOSDeviceControlService: ObservableObject {
             let proc = Process()
             proc.executableURL = URL(fileURLWithPath: "/usr/bin/xcrun")
             proc.arguments = ["devicectl"] + args
+            proc.standardOutput = FileHandle.nullDevice
+            proc.standardError = FileHandle.nullDevice
             do {
                 try proc.run()
             } catch {

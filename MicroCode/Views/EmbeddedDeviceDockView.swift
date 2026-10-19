@@ -127,6 +127,30 @@ struct EmbeddedDeviceDockView: View {
                     .buttonStyle(.plain)
                     .help("Device & Run settings")
 
+                    if dockService.activeTab?.kind == .ios && (ServeSimService.shared.isActive || deviceRuntime.isWorking) {
+                        Button {
+                            deviceRuntime.stopEmbeddedAppleSimulator(shutdownSimulator: true)
+                        } label: {
+                            Image(systemName: "stop.circle.fill")
+                                .font(.system(size: 12))
+                                .foregroundColor(.red)
+                        }
+                        .buttonStyle(.plain)
+                        .help("Stop iOS Simulator & free CPU")
+                    }
+
+                    if dockService.activeTab?.kind == .android && (deviceRuntime.isEmbeddedAndroidActive || deviceRuntime.isWorking) {
+                        Button {
+                            deviceRuntime.stopEmbeddedAndroid(shutdownEmulator: true)
+                        } label: {
+                            Image(systemName: "stop.circle.fill")
+                                .font(.system(size: 12))
+                                .foregroundColor(.red)
+                        }
+                        .buttonStyle(.plain)
+                        .help("Stop Android Emulator & free CPU")
+                    }
+
                     if DeviceRuntimeService.shared.project?.runtime == .flutter {
                         Button {
                             DeviceRuntimeService.shared.hotReloadCurrentProject()
@@ -243,8 +267,8 @@ struct EmbeddedDeviceDockView: View {
                             runtime: deviceRuntime,
                             canvasColor: canvas,
                             onHide: {
-                                deviceRuntime.showingEmbeddedDeviceDock = false
-                                dockService.isDockVisible = false
+                                appState.hidePreviewInspector()
+                                dockService.hideDock()
                             }
                         )
                     case .ios:
@@ -252,10 +276,8 @@ struct EmbeddedDeviceDockView: View {
                             canvasColor: canvas,
                             onConfigure: { deviceRuntime.showingDeviceRuntimeSheet = true },
                             onHide: {
-                                Task { await ServeSimService.shared.stop() }
-                                deviceRuntime.showingEmbeddedDeviceDock = false
-                                dockService.isDockVisible = false
-                                deviceRuntime.showingEmbeddedAppleDock = false
+                                appState.hidePreviewInspector()
+                                dockService.hideDock()
                             }
                         )
                     case .iOSPhysical:
@@ -268,8 +290,8 @@ struct EmbeddedDeviceDockView: View {
                             canvasColor: canvas,
                             onConfigure: { deviceRuntime.showingDeviceRuntimeSheet = true },
                             onHide: {
-                                deviceRuntime.showingEmbeddedDeviceDock = false
-                                dockService.isDockVisible = false
+                                appState.hidePreviewInspector()
+                                dockService.hideDock()
                             }
                         )
                     case .file(let url):
@@ -378,7 +400,15 @@ struct DevicePreviewHeaderMenu: View {
                 
                 Button("iPhone USB (Hardware)") {
                     withAnimation(.easeInOut(duration: 0.16)) {
+                        appState.showPreviewInspector()
                         PreviewDockService.shared.selectTab(id: "ios-physical")
+                    }
+                }
+
+                Button("Android USB (Hardware)") {
+                    withAnimation(.easeInOut(duration: 0.16)) {
+                        appState.showPreviewInspector()
+                        PreviewDockService.shared.selectTab(id: "android-physical")
                     }
                 }
                 

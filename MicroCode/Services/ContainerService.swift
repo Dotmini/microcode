@@ -68,6 +68,15 @@ class ContainerService: ObservableObject {
     @Published var systemStatus: ContainerSystemStatus = .unknown
     @Published var systemStatusMessage: String = ""
     @Published var isSystemReady = false
+    @Published var detectedRuntimeName: String = "Docker / Container"
+    @Published var activeRuntimePath: String = "/usr/local/bin/docker"
+
+    enum RuntimeKind {
+        case docker
+        case podman
+        case appleContainer
+    }
+    private(set) var runtimeKind: RuntimeKind = .docker
     
     enum ContainerSystemStatus {
         case unknown
@@ -82,9 +91,9 @@ class ContainerService: ObservableObject {
             switch self {
             case .unknown: return "Checking container system..."
             case .checking: return "Verifying container runtime..."
-            case .notInstalled: return "Apple Container CLI not installed"
+            case .notInstalled: return "No container runtime installed (Docker / OrbStack / Podman / Apple Container)"
             case .pluginsUnavailable: return "Container plugins unavailable"
-            case .needsStart: return "Container system needs to be started"
+            case .needsStart: return "Container daemon needs to be started"
             case .ready: return "Container system ready"
             case .error(let msg): return "Error: \(msg)"
             }
@@ -150,12 +159,32 @@ class ContainerService: ObservableObject {
     
     @Published var deploymentProfiles: [DeploymentProfile] = [.webApp, .api, .database]
     
-    private let containerPath = "/usr/local/bin/container"
     private var runningProcess: Process?
     
     init() {
+        detectRuntimeBinary()
         Task {
             await checkSystemStatus()
+        }
+    }
+
+    private func detectRuntimeBinary() {
+        let candidates: [(path: String, kind: RuntimeKind, name: String)] = [
+            ("/opt/homebrew/bin/docker", .docker, "Docker / OrbStack"),
+            ("/usr/local/bin/docker", .docker, "Docker / OrbStack"),
+            ("/Applications/OrbStack.app/Contents/MacOS/xbin/docker", .docker, "OrbStack"),
+            ("/opt/homebrew/bin/podman", .podman, "Podman"),
+            ("/usr/local/bin/podman", .podman, "Podman"),
+            ("/opt/homebrew/bin/container", .appleContainer, "Apple Container"),
+            ("/usr/local/bin/container", .appleContainer, "Apple Container")
+        ]
+        for c in candidates {
+            if FileManager.default.isExecutableFile(atPath: c.path) {
+                activeRuntimePath = c.path
+                runtimeKind = c.kind
+                detectedRuntimeName = c.name
+                return
+            }
         }
     }
     
@@ -164,24 +193,40 @@ class ContainerService: ObservableObject {
     /// Check if container system is operational
     func checkSystemStatus() async {
         systemStatus = .checking
+        detectRuntimeBinary()
         
-        // Check if container CLI exists
-        guard FileManager.default.fileExists(atPath: containerPath) else {
+        guard FileManager.default.isExecutableFile(atPath: activeRuntimePath) else {
             systemStatus = .notInstalled
-            systemStatusMessage = "Install Apple Container CLI: brew install container"
+            systemStatusMessage = "Install Docker Desktop, OrbStack, Podman, or Apple Container CLI"
             isSystemReady = false
             return
         }
         
         do {
-            // Try a simple command to check system status
-            let output = try await runContainerCommand(["system", "status"])
+            let statusArgs: [String]
+            switch runtimeKind {
+            case .docker, .podman:
+                statusArgs = ["info", "--format", "{{.ServerVersion}}"]
+            case .appleContainer:
+                statusArgs = ["system", "status"]
+            }
+            let output = try await runContainerCommand(statusArgs)
+            let trimmed = output.trimmingCharacters(in: .whitespacesAndNewlines)
             
-            if output.lowercased().contains("running") || output.lowercased().contains("ready") {
+            if runtimeKind != .appleContainer {
+                if !trimmed.isEmpty && !trimmed.lowercased().contains("cannot connect") {
+                    systemStatus = .ready
+                    systemStatusMessage = "\(detectedRuntimeName) operational (v\(trimmed))"
+                    isSystemReady = true
+                } else {
+                    systemStatus = .needsStart
+                    systemStatusMessage = "Start \(detectedRuntimeName) daemon"
+                    isSystemReady = false
+                }
+            } else if output.lowercased().contains("running") || output.lowercased().contains("ready") {
                 systemStatus = .ready
-                systemStatusMessage = "Container system operational"
+                systemStatusMessage = "\(detectedRuntimeName) operational"
                 isSystemReady = true
-                terminalOutput += "✅ Container system ready\n"
             } else if output.lowercased().contains("not running") || output.lowercased().contains("stopped") {
                 systemStatus = .needsStart
                 systemStatusMessage = "Run: container system start"
@@ -192,40 +237,51 @@ class ContainerService: ObservableObject {
             }
         } catch {
             let errorMsg = error.localizedDescription
-            
             if errorMsg.contains("Plugins are unavailable") || errorMsg.contains("plugins") {
                 systemStatus = .pluginsUnavailable
                 systemStatusMessage = "Start container system: container system start"
                 isSystemReady = false
-                terminalOutput += "⚠️ Container plugins unavailable. Run: container system start\n"
+            } else if errorMsg.lowercased().contains("cannot connect") || errorMsg.lowercased().contains("daemon") || errorMsg.lowercased().contains("not running") {
+                systemStatus = .needsStart
+                systemStatusMessage = "\(detectedRuntimeName) daemon is not running"
+                isSystemReady = false
             } else if errorMsg.contains("not found") || errorMsg.contains("No such file") {
                 systemStatus = .notInstalled
-                systemStatusMessage = "Container CLI not found at \(containerPath)"
+                systemStatusMessage = "Container CLI not found"
                 isSystemReady = false
             } else {
-                // Might still be operational despite error
-                systemStatus = .ready
-                isSystemReady = true
+                systemStatus = .needsStart
+                systemStatusMessage = errorMsg
+                isSystemReady = false
             }
         }
     }
     
     /// Initialize container system (start services)
     func initializeSystem() async throws {
-        terminalOutput += "$ container system start\n"
         systemStatus = .checking
-        
         do {
-            let output = try await runContainerCommand(["system", "start"])
-            terminalOutput += output + "\n"
-            
-            // Wait a moment for services to initialize
-            try await Task.sleep(nanoseconds: 2_000_000_000) // 2 seconds
-            
+            switch runtimeKind {
+            case .appleContainer:
+                terminalOutput += "$ container system start\n"
+                let output = try await runContainerCommand(["system", "start"])
+                terminalOutput += output + "\n"
+            case .podman:
+                terminalOutput += "$ podman machine start\n"
+                let output = try await runContainerCommand(["machine", "start"])
+                terminalOutput += output + "\n"
+            case .docker:
+                terminalOutput += "$ open -a OrbStack || open -a Docker\n"
+                if FileManager.default.fileExists(atPath: "/Applications/OrbStack.app") {
+                    _ = try? await runCustomExecutable("/usr/bin/open", args: ["-a", "OrbStack"])
+                } else {
+                    _ = try? await runCustomExecutable("/usr/bin/open", args: ["-a", "Docker"])
+                }
+            }
+            try await Task.sleep(nanoseconds: 2_000_000_000)
             await checkSystemStatus()
-            
             if isSystemReady {
-                terminalOutput += "✅ Container system started successfully\n"
+                terminalOutput += "✅ \(detectedRuntimeName) started successfully\n"
             }
         } catch {
             terminalOutput += "❌ Failed to start: \(error.localizedDescription)\n"
@@ -235,9 +291,15 @@ class ContainerService: ObservableObject {
     
     /// Stop container system
     func stopSystem() async throws {
-        terminalOutput += "$ container system stop\n"
-        let output = try await runContainerCommand(["system", "stop"])
-        terminalOutput += output + "\n"
+        if runtimeKind == .appleContainer {
+            terminalOutput += "$ container system stop\n"
+            let output = try await runContainerCommand(["system", "stop"])
+            terminalOutput += output + "\n"
+        } else if runtimeKind == .podman {
+            terminalOutput += "$ podman machine stop\n"
+            let output = try await runContainerCommand(["machine", "stop"])
+            terminalOutput += output + "\n"
+        }
         isSystemReady = false
         systemStatus = .needsStart
     }
@@ -384,16 +446,85 @@ class ContainerService: ObservableObject {
         isLoading = true
         defer { isLoading = false }
         
-        let output = try await runContainerCommand(["list", "--format", "json"])
+        let args = (runtimeKind == .appleContainer) ? ["list", "--format", "json"] : ["ps", "-a", "--format", "json"]
+        let output = try await runContainerCommand(args)
         
-        // Parse JSON output
         if let data = output.data(using: .utf8),
            let json = try? JSONSerialization.jsonObject(with: data) as? [[String: Any]] {
             containers = json.compactMap { parseContainer($0) }
+            return
+        }
+        // Docker CLI `--format json` emits NDJSON (one JSON object per line)
+        let lines = output.split(separator: "\n").map(String.init)
+        var parsedNDJSON: [Container] = []
+        for line in lines {
+            if let data = line.data(using: .utf8),
+               let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+               let c = parseContainer(obj) {
+                parsedNDJSON.append(c)
+            }
+        }
+        if !parsedNDJSON.isEmpty || output.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            containers = parsedNDJSON
         } else {
-            // Fallback: parse text output
             containers = parseTextContainerList(output)
         }
+    }
+
+    /// Reads `.devcontainer/devcontainer.json` or `.devcontainer.json` in `projectPath`
+    /// and launches a ready-to-code DevContainer with configured image, ports, env, and postCreateCommand.
+    func launchDevContainer(projectPath: String) async throws -> Container {
+        let fm = FileManager.default
+        let candidates = [
+            (projectPath as NSString).appendingPathComponent(".devcontainer/devcontainer.json"),
+            (projectPath as NSString).appendingPathComponent(".devcontainer.json")
+        ]
+        var configDict: [String: Any] = [:]
+        if let path = candidates.first(where: { fm.fileExists(atPath: $0) }),
+           let raw = try? String(contentsOfFile: path, encoding: .utf8) {
+            // Strip single-line // comments allowed in JSONC devcontainer.json
+            let cleaned = raw
+                .components(separatedBy: .newlines)
+                .map { line -> String in
+                    let trimmed = line.trimmingCharacters(in: .whitespaces)
+                    return trimmed.hasPrefix("//") ? "" : line
+                }
+                .joined(separator: "\n")
+            if let data = cleaned.data(using: .utf8),
+               let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] {
+                configDict = json
+            }
+        }
+
+        let name = (configDict["name"] as? String) ?? "devcontainer-\((projectPath as NSString).lastPathComponent.lowercased())"
+        let image = (configDict["image"] as? String) ?? "mcr.microsoft.com/devcontainers/universal:2"
+        var ports: [Container.PortMapping] = []
+        if let fwd = configDict["forwardPorts"] as? [Any] {
+            for item in fwd {
+                if let p = item as? Int {
+                    ports.append(Container.PortMapping(hostPort: p, containerPort: p, protocol_: "tcp"))
+                } else if let s = item as? String, let p = Int(s) {
+                    ports.append(Container.PortMapping(hostPort: p, containerPort: p, protocol_: "tcp"))
+                }
+            }
+        }
+        var env: [String: String] = ["DEVCONTAINER": "true"]
+        if let remoteEnv = configDict["remoteEnv"] as? [String: String] {
+            for (k, v) in remoteEnv { env[k] = v }
+        }
+        let postCreate = (configDict["postCreateCommand"] as? String)
+        let keepAliveCmd = postCreate.map { "\($0) && tail -f /dev/null" } ?? "tail -f /dev/null"
+
+        let profile = DeploymentProfile(
+            name: name,
+            baseImage: image,
+            ports: ports,
+            volumes: [],
+            environment: env,
+            command: keepAliveCmd
+        )
+        let safeContainerName = "mc-dev-\((projectPath as NSString).lastPathComponent.lowercased().replacingOccurrences(of: " ", with: "-"))"
+        return try await deployWithProfile(profile, projectPath: projectPath, containerName: safeContainerName)
     }
     
     func createContainer(
@@ -516,17 +647,16 @@ class ContainerService: ObservableObject {
     }
     
     func deleteContainer(_ containerId: String) async throws {
-        let output = try await runContainerCommand(["delete", containerId])
-        terminalOutput += "$ container delete \(containerId)\n\(output)\n"
+        let rmArgs = (runtimeKind == .appleContainer) ? ["delete", containerId] : ["rm", "-f", containerId]
+        let output = try await runContainerCommand(rmArgs)
+        terminalOutput += "$ \(rmArgs.joined(separator: " "))\n\(output)\n"
         try await listContainers()
     }
     
     func execInContainer(_ containerId: String, command: String) async throws -> String {
-        var args = ["exec", containerId]
-        args.append(contentsOf: command.split(separator: " ").map(String.init))
-        
+        let args = ["exec", containerId, "sh", "-lc", command]
         let output = try await runContainerCommand(args)
-        terminalOutput += "$ container exec \(containerId) \(command)\n\(output)\n"
+        terminalOutput += "$ exec \(containerId) \(command)\n\(output)\n"
         return output
     }
     
@@ -545,8 +675,23 @@ class ContainerService: ObservableObject {
     // MARK: - Image Management
     
     func listImages() async throws {
-        let output = try await runContainerCommand(["image", "list"])
-        images = parseImageList(output)
+        if runtimeKind == .appleContainer {
+            let output = try await runContainerCommand(["image", "list"])
+            images = parseImageList(output)
+        } else {
+            let output = try await runContainerCommand(["images", "--format", "{{.Repository}} {{.Tag}} {{.Size}}"])
+            let lines = output.split(separator: "\n").map(String.init)
+            images = lines.compactMap { line -> ContainerImage? in
+                let parts = line.split(separator: " ", omittingEmptySubsequences: true).map(String.init)
+                guard parts.count >= 2 else { return nil }
+                return ContainerImage(
+                    name: parts[0],
+                    tag: parts[1],
+                    size: parts.count > 2 ? parts.dropFirst(2).joined(separator: " ") : nil,
+                    createdAt: nil
+                )
+            }
+        }
     }
     
     func buildImage(dockerfile: String, tag: String, context: String) async throws {
@@ -566,8 +711,9 @@ class ContainerService: ObservableObject {
         isLoading = true
         defer { isLoading = false }
         
-        terminalOutput += "$ container image pull \(name)\n"
-        let output = try await runContainerCommand(["image", "pull", name])
+        let pullArgs = (runtimeKind == .appleContainer) ? ["image", "pull", name] : ["pull", name]
+        terminalOutput += "$ \(pullArgs.joined(separator: " "))\n"
+        let output = try await runContainerCommand(pullArgs)
         terminalOutput += output + "\n"
         
         try await listImages()
@@ -628,45 +774,60 @@ class ContainerService: ObservableObject {
     // MARK: - Helper Methods
     
     private func runContainerCommand(_ args: [String]) async throws -> String {
+        let binPath = activeRuntimePath
+        return try await runCustomExecutable(binPath, args: args)
+    }
+
+    private func runCustomExecutable(_ binPath: String, args: [String]) async throws -> String {
         return try await withCheckedThrowingContinuation { continuation in
-            let process = Process()
-            process.executableURL = URL(fileURLWithPath: containerPath)
-            process.arguments = args
-            
-            let pipe = Pipe()
-            process.standardOutput = pipe
-            process.standardError = pipe
-            
-            do {
-                try process.run()
-                process.waitUntilExit()
+            DispatchQueue.global(qos: .userInitiated).async {
+                let process = Process()
+                process.executableURL = URL(fileURLWithPath: binPath)
+                process.arguments = args
                 
-                let data = pipe.fileHandleForReading.readDataToEndOfFile()
-                let output = String(data: data, encoding: .utf8) ?? ""
+                let pipe = Pipe()
+                process.standardOutput = pipe
+                process.standardError = pipe
                 
-                if process.terminationStatus != 0 {
-                    continuation.resume(throwing: ContainerError.commandFailed(output))
-                } else {
-                    continuation.resume(returning: output)
+                do {
+                    try process.run()
+                    // Read pipe BEFORE waitUntilExit() so >64KB output never deadlocks
+                    let data = pipe.fileHandleForReading.readDataToEndOfFile()
+                    process.waitUntilExit()
+                    let output = String(data: data, encoding: .utf8) ?? ""
+                    
+                    if process.terminationStatus != 0 {
+                        continuation.resume(throwing: ContainerError.commandFailed(output))
+                    } else {
+                        continuation.resume(returning: output)
+                    }
+                } catch {
+                    continuation.resume(throwing: error)
                 }
-            } catch {
-                continuation.resume(throwing: error)
             }
         }
     }
     
     private func parseContainer(_ json: [String: Any]) -> Container? {
-        guard let id = json["Id"] as? String ?? json["id"] as? String,
-              let name = json["Name"] as? String ?? json["name"] as? String,
-              let image = json["Image"] as? String ?? json["image"] as? String else {
-            return nil
-        }
+        let id = (json["ID"] as? String) ?? (json["Id"] as? String) ?? (json["id"] as? String)
+        let rawName = (json["Names"] as? String)
+            ?? (json["Name"] as? String)
+            ?? (json["name"] as? String)
+            ?? ((json["Names"] as? [String])?.first)
+        let image = (json["Image"] as? String) ?? (json["image"] as? String)
+        guard let id, let rawName, let image else { return nil }
+        let name = rawName.hasPrefix("/") ? String(rawName.dropFirst()) : rawName
         
-        let statusStr = json["Status"] as? String ?? json["status"] as? String ?? "unknown"
+        let statusStr = (json["State"] as? String)
+            ?? (json["Status"] as? String)
+            ?? (json["status"] as? String)
+            ?? "unknown"
         let status: Container.ContainerStatus = {
-            if statusStr.lowercased().contains("running") { return .running }
-            if statusStr.lowercased().contains("exited") { return .exited }
-            if statusStr.lowercased().contains("stopped") { return .stopped }
+            let lower = statusStr.lowercased()
+            if lower.contains("running") || lower.contains("up ") { return .running }
+            if lower.contains("exited") { return .exited }
+            if lower.contains("stopped") { return .stopped }
+            if lower.contains("created") { return .created }
             return .unknown
         }()
         

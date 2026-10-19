@@ -71,39 +71,25 @@ final class AIModelRouter: ObservableObject {
     
     // MARK: - Model Tiering
     
-    /// Categorize models into complexity tiers
-    private let modelTiers: [String: TaskComplexity] = [
-        // Trivial (fast, cheap autocomplete)
-        "gpt-4o-mini": .trivial,
-        "gemini-2.0-flash": .trivial,
-        "gemini-2.5-flash": .trivial,
-        "gemini-1.5-flash": .trivial,
-        "claude-3-5-haiku": .trivial,
-        "glm-4-flash": .trivial,
-        "qwen-turbo": .trivial,
-        
-        // Moderate (standard coding tasks)
-        "gpt-4o": .moderate,
-        "gpt-4-turbo": .moderate,
-        "chatgpt-4o-latest": .moderate,
-        "claude-3-5-sonnet": .moderate,
-        "claude-3-7-sonnet": .moderate,
-        "gemini-2.5-pro": .moderate,
-        "gemini-1.5-pro": .moderate,
-        "deepseek-chat": .moderate,
-        "qwen-plus": .moderate,
-        "qwen-max": .moderate,
-        "glm-4-plus": .moderate,
-        
-        // Complex (heavy multi-file agent work)
-        "claude-3-opus": .complex,
-        
-        // Reasoning (deep thinking, math, debugging)
-        "o1": .reasoning,
-        "o1-mini": .reasoning,
-        "o3-mini": .reasoning,
-        "deepseek-reasoner": .reasoning,
-    ]
+    /// Dynamically infer complexity tier from live model ID and capabilities
+    private func inferComplexityTier(modelId: String) -> TaskComplexity {
+        let lower = modelId.lowercased()
+        if lower.contains("argon") || lower.contains("opus") || lower.contains("reason") ||
+           lower.contains("thinking") || lower.hasSuffix("-high") || lower.contains("o1") ||
+           lower.contains("o3") || lower.contains("o4") || lower.contains("qwq") {
+            return .reasoning
+        }
+        if lower.contains("pro") || lower.contains("astra") || lower.contains("sol") ||
+           lower.contains("max") || lower.contains("ultra") {
+            return .complex
+        }
+        if lower.contains("flash") || lower.contains("mini") || lower.contains("lite") ||
+           lower.contains("nano") || lower.contains("haiku") || lower.contains("turbo") ||
+           lower.contains("luna") || lower.hasSuffix("-low") {
+            return .trivial
+        }
+        return .moderate
+    }
     
     private init() {
         if let saved = UserDefaults.standard.string(forKey: "ai_routing_strategy"),
@@ -221,26 +207,27 @@ final class AIModelRouter: ObservableObject {
     ) -> [ModelTier] {
         var candidates: [ModelTier] = []
         
-        for (modelId, tier) in modelTiers {
-            // Match complexity level
-            guard complexityLevel(tier) >= complexityLevel(targetComplexity) else { continue }
-            
-            let pricing = ModelPricing.lookup(modelId)
-            let provider = inferProvider(modelId: modelId)
-            
-            // Check if provider key is available
+        for providerEntry in AIModelCatalog.shared.providers {
+            let provider = providerEntry.id
             let hasAccess = availableKeys[provider] ?? false ||
                             provider == "local" ||
                             provider == "ollama"
             guard hasAccess else { continue }
             
-            candidates.append(ModelTier(
-                modelId: modelId,
-                provider: provider,
-                tier: tier,
-                inputPricePerMillion: pricing.inputPerMillion,
-                outputPricePerMillion: pricing.outputPerMillion
-            ))
+            for modelEntry in providerEntry.models {
+                let modelId = modelEntry.id
+                let tier = inferComplexityTier(modelId: modelId)
+                guard complexityLevel(tier) >= complexityLevel(targetComplexity) else { continue }
+                
+                let pricing = ModelPricing.lookup(modelId)
+                candidates.append(ModelTier(
+                    modelId: modelId,
+                    provider: provider,
+                    tier: tier,
+                    inputPricePerMillion: pricing.inputPerMillion,
+                    outputPricePerMillion: pricing.outputPerMillion
+                ))
+            }
         }
         
         // Sort based on strategy

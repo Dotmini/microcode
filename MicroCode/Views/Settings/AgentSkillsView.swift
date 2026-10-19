@@ -55,6 +55,8 @@ final class AgentSkillsStore: ObservableObject {
     @Published var activeCount: Int = 0
     @Published var selectedSkillForDetail: AgentSkillItem? = nil
     @Published var isScanning: Bool = false
+    @Published var autoActivatedSkillIds: Set<String> = []
+    @Published var jitAutoRouterEnabled: Bool = true
     
     private let enabledKey = "microcode.enabledSkills.real.v2"
     
@@ -69,6 +71,7 @@ final class AgentSkillsStore: ObservableObject {
         let home = NSHomeDirectory()
         
         var searchRoots = [
+            "\(home)/.microcode/skills",
             "\(home)/.agents/skills",
             "\(home)/.codex/skills",
             "\(home)/.codex/plugins/cache",
@@ -79,6 +82,7 @@ final class AgentSkillsStore: ObservableObject {
         
         // Scan active workspace and external volumes for project-specific skills
         if let ws = AgentToolBox.shared.workspaceRoot, !ws.isEmpty {
+            searchRoots.append("\(ws)/.microcode/skills")
             searchRoots.append("\(ws)/.skills")
             searchRoots.append("\(ws)/.agents/skills")
             searchRoots.append("\(ws)/skills")
@@ -307,19 +311,286 @@ final class AgentSkillsStore: ObservableObject {
         updateCount()
     }
     
-    /// Returns the active instruction prompt of all enabled skills to inject into AgentService
-    func activeSkillsPromptSnippet() -> String {
-        let enabled = skills.filter { $0.isEnabled }
-        guard !enabled.isEmpty else { return "" }
-        
-        var snippet = "\n\n## ACTIVE AGENT SKILLS & CAPABILITIES (\(enabled.count) Loaded):\n"
-        for s in enabled {
-            snippet += "### Skill: \(s.name) (`\(s.id)`)\n"
-            snippet += "Path: \(s.filePath)\n"
-            snippet += "\(s.description)\n\n"
+    // MARK: - Zero-Round-Trip Semantic JIT Skill Router & Autonomous Crystallizer
+    
+    func availableScripts(forSkill skill: AgentSkillItem) -> [String] {
+        let skillDir = URL(fileURLWithPath: skill.filePath).deletingLastPathComponent()
+        let scriptsDir = skillDir.appendingPathComponent("scripts")
+        guard let items = try? FileManager.default.contentsOfDirectory(atPath: scriptsDir.path) else {
+            return []
         }
-        snippet += "Before applying a skill, use file_read on its SKILL.md path and follow the complete instructions. A description is discovery metadata, not the skill itself.\n"
+        return items.filter { !$0.hasPrefix(".") }.sorted()
+    }
+    
+    /// Ranks all discovered skills against user prompt intent, workspace stack, and open editor files.
+    func rankSkills(
+        forPrompt prompt: String,
+        workspacePath: String? = nil,
+        openFiles: [String] = []
+    ) -> [(skill: AgentSkillItem, score: Int, reason: String)] {
+        let lowPrompt = prompt.lowercased()
+        let promptTokens = Set(
+            lowPrompt.components(separatedBy: CharacterSet.alphanumerics.inverted)
+                .filter { $0.count >= 3 }
+        )
+        let wsRoot = workspacePath ?? AgentToolBox.shared.workspaceRoot ?? ""
+        let fm = FileManager.default
+        
+        // Workspace stack signals
+        let hasPackageJson = !wsRoot.isEmpty && fm.fileExists(atPath: (wsRoot as NSString).appendingPathComponent("package.json"))
+        let hasPubspec = !wsRoot.isEmpty && fm.fileExists(atPath: (wsRoot as NSString).appendingPathComponent("pubspec.yaml"))
+        let hasFirebaseJson = !wsRoot.isEmpty && fm.fileExists(atPath: (wsRoot as NSString).appendingPathComponent("firebase.json"))
+        let openExts = Set(openFiles.map { URL(fileURLWithPath: $0).pathExtension.lowercased() })
+        
+        var ranked: [(skill: AgentSkillItem, score: Int, reason: String)] = []
+        
+        for skill in skills {
+            var score = skill.isEnabled ? 10 : 0
+            var reasons: [String] = []
+            let lowId = skill.id.lowercased()
+            let lowName = skill.name.lowercased()
+            let lowDesc = skill.description.lowercased()
+            
+            // 1. Direct ID or Name match in prompt
+            if !lowPrompt.isEmpty && (lowPrompt.contains(lowId) || lowPrompt.contains(lowName)) {
+                score += 55
+                reasons.append("Direct prompt mention")
+            }
+            
+            // 2. Keyword overlap between prompt tokens and skill ID/name/tags/description
+            let idTokens = Set(lowId.components(separatedBy: CharacterSet(charactersIn: "-_.")).filter { $0.count >= 3 })
+            let matchedIdTokens = promptTokens.intersection(idTokens)
+            if !matchedIdTokens.isEmpty {
+                score += matchedIdTokens.count * 18
+                reasons.append("Matched keywords: \(matchedIdTokens.sorted().joined(separator: ", "))")
+            }
+            
+            for token in promptTokens where token.count >= 4 {
+                if lowDesc.contains(token) {
+                    score += 6
+                }
+            }
+            
+            // 3. Workspace & file extension stack affinity
+            if (openExts.contains("ar") || lowPrompt.contains("ardium")) && lowId.contains("ardium") {
+                score += 45
+                reasons.append("Ardium (.ar) context")
+            }
+            if (hasPubspec || openExts.contains("dart") || lowPrompt.contains("flutter")) && (lowId.contains("flutter") || lowId.contains("dart")) {
+                score += 30
+                reasons.append("Flutter/Dart project")
+            }
+            if (hasFirebaseJson || lowPrompt.contains("firebase") || lowPrompt.contains("firestore")) && (lowId.contains("firebase") || lowId.contains("firestore")) {
+                score += 32
+                reasons.append("Firebase workspace")
+            }
+            if hasPackageJson && (lowPrompt.contains("lcp") || lowPrompt.contains("devtools") || lowPrompt.contains("a11y") || lowPrompt.contains("memory leak")) {
+                if ["chrome-devtools", "debug-optimize-lcp", "a11y-debugging", "memory-leak-debugging"].contains(lowId) {
+                    score += 35
+                    reasons.append("Web diagnostics match")
+                }
+            }
+            if (lowPrompt.contains("simulator") || lowPrompt.contains("emulator") || lowPrompt.contains("adb") || lowPrompt.contains("android") || lowPrompt.contains("ios")) &&
+               ["device-automation", "android-cli", "mobile-release-automation", "xcode-project-setup"].contains(lowId) {
+                score += 38
+                reasons.append("Mobile device/runtime task")
+            }
+            if (openExts.contains("pdb") || openExts.contains("cif") || openExts.contains("mmcif") || lowPrompt.contains("protein") || lowPrompt.contains("alphafold") || lowPrompt.contains("uniprot")) &&
+               skill.category == .science {
+                score += 35
+                reasons.append("Biomolecular/Science task")
+            }
+            if (lowPrompt.contains("runpod") || lowPrompt.contains("gpu")) && lowId == "runpod-orchestrator" {
+                score += 45
+                reasons.append("RunPod GPU orchestration")
+            }
+            if (lowPrompt.contains("omni") || lowPrompt.contains("o1x") || lowPrompt.contains("tpat")) && lowId == "dotmini-omni-ai" {
+                score += 45
+                reasons.append("Dotmini Omni AI")
+            }
+            
+            if score > 0 {
+                ranked.append((skill, score, reasons.isEmpty ? "User enabled" : reasons.joined(separator: " • ")))
+            }
+        }
+        
+        return ranked.sorted {
+            if $0.score != $1.score { return $0.score > $1.score }
+            return $0.skill.name < $1.skill.name
+        }
+    }
+    
+    /// Distills the actionable core of a SKILL.md (stripping YAML frontmatter) for Zero-Round-Trip JIT injection
+    func distilledInstructions(for skill: AgentSkillItem, maxChars: Int = 1500) -> String {
+        var body = skill.instructions
+        if body.hasPrefix("---") {
+            let parts = body.components(separatedBy: "---")
+            if parts.count >= 3 {
+                body = parts.dropFirst(2).joined(separator: "---").trimmingCharacters(in: .whitespacesAndNewlines)
+            }
+        }
+        if body.count <= maxChars { return body }
+        return String(body.prefix(maxChars)) + "\n... [Full skill at \(skill.filePath)]"
+    }
+    
+    /// Returns the active instruction prompt of matched & enabled skills to inject into AgentService.
+    /// Automatically pre-injects full distilled instructions for Top-2 high-confidence JIT matches (Zero Extra Round-Trip).
+    func activeSkillsPromptSnippet(
+        forPrompt prompt: String = "",
+        workspacePath: String? = nil,
+        openFiles: [String] = []
+    ) -> String {
+        let ranked = rankSkills(forPrompt: prompt, workspacePath: workspacePath, openFiles: openFiles)
+        guard !ranked.isEmpty else { return "" }
+        
+        // Top 2 high-confidence skills get Zero-Round-Trip JIT full instruction pre-loading
+        let jitPreloaded = jitAutoRouterEnabled ? Array(ranked.filter { $0.score >= 24 }.prefix(2)) : []
+        let jitIds = Set(jitPreloaded.map { $0.skill.id })
+        if autoActivatedSkillIds != jitIds {
+            autoActivatedSkillIds = jitIds
+        }
+        
+        let catalogSkills = Array(ranked.filter { !jitIds.contains($0.skill.id) }.prefix(8))
+        
+        var snippet = "\n\n## MICROCODE AUTONOMOUS SKILL ENGINE (JIT Context-Aware Router)\n"
+        snippet += "- Tool `skill_engine` is available (`recommend`, `activate`, `run_script`, `crystallize`).\n"
+        
+        if !jitPreloaded.isEmpty {
+            snippet += "\n### ⚡ JIT AUTO-ACTIVATED SKILLS (Pre-Loaded — Execute Immediately Without Extra file_read):\n"
+            for entry in jitPreloaded {
+                let s = entry.skill
+                let scripts = availableScripts(forSkill: s)
+                snippet += "#### [JIT ACTIVE] \(s.name) (`\(s.id)`) — Match: \(entry.reason)\n"
+                snippet += "- Path: `\(s.filePath)`\n"
+                if !scripts.isEmpty {
+                    snippet += "- Bundled Helper Scripts (run via `skill_engine(action: \"run_script\", skill_id: \"\(s.id)\", script: ...)`): `\(scripts.joined(separator: "`, `"))`\n"
+                }
+                snippet += "```markdown\n\(distilledInstructions(for: s, maxChars: 1400))\n```\n\n"
+            }
+        }
+        
+        if !catalogSkills.isEmpty {
+            snippet += "### Active Skill Catalog (Use `skill_engine(action: \"activate\", skill_id: ...)` or `file_read` when needed):\n"
+            for entry in catalogSkills {
+                let s = entry.skill
+                snippet += "- **`\(s.id)`** (\(s.name)): \(s.description.prefix(160)) [Path: `\(s.filePath)`]\n"
+            }
+        }
+        
         return snippet
+    }
+    
+    /// Autonomously crystallizes a reusable workflow, architecture pattern, or debugging recipe into a real SKILL.md on disk
+    @discardableResult
+    func crystallizeSkill(
+        id rawId: String,
+        name: String,
+        description: String,
+        instructions: String,
+        scriptName: String? = nil,
+        scriptContent: String? = nil,
+        scope: String = "workspace",
+        workspacePath: String? = nil
+    ) throws -> AgentSkillItem {
+        let cleanId = rawId.lowercased()
+            .replacingOccurrences(of: " ", with: "-")
+            .replacingOccurrences(of: "[^a-z0-9-_]", with: "", options: .regularExpression)
+        guard !cleanId.isEmpty else {
+            throw NSError(domain: "SkillEngine", code: 1, userInfo: [NSLocalizedDescriptionKey: "Invalid skill_id"])
+        }
+        
+        let baseRoot: String
+        if scope.lowercased() == "global" {
+            baseRoot = "\(NSHomeDirectory())/.microcode/skills"
+        } else {
+            let ws = workspacePath ?? AgentToolBox.shared.workspaceRoot ?? "\(NSHomeDirectory())/.microcode"
+            baseRoot = (ws as NSString).appendingPathComponent(".microcode/skills")
+        }
+        
+        let skillDir = URL(fileURLWithPath: baseRoot).appendingPathComponent(cleanId)
+        try FileManager.default.createDirectory(at: skillDir, withIntermediateDirectories: true)
+        
+        let skillFile = skillDir.appendingPathComponent("SKILL.md")
+        let finalMarkdown: String
+        if instructions.trimmingCharacters(in: .whitespacesAndNewlines).hasPrefix("---") {
+            finalMarkdown = instructions
+        } else {
+            finalMarkdown = """
+            ---
+            name: \(name)
+            description: \(description.replacingOccurrences(of: "\n", with: " "))
+            ---
+            
+            # \(name)
+            
+            \(instructions)
+            """
+        }
+        try AgentPrivacyGuard.safeWrite(content: finalMarkdown, to: skillFile)
+        
+        if let sName = scriptName, !sName.isEmpty, let sCode = scriptContent, !sCode.isEmpty {
+            let scriptsDir = skillDir.appendingPathComponent("scripts")
+            try FileManager.default.createDirectory(at: scriptsDir, withIntermediateDirectories: true)
+            let safeScriptName = URL(fileURLWithPath: sName).lastPathComponent
+            let scriptURL = scriptsDir.appendingPathComponent(safeScriptName)
+            try AgentPrivacyGuard.safeWrite(content: sCode, to: scriptURL)
+            try? FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: scriptURL.path)
+        }
+        
+        var enabled = Set(UserDefaults.standard.stringArray(forKey: enabledKey) ?? [])
+        enabled.insert(cleanId)
+        UserDefaults.standard.set(Array(enabled), forKey: enabledKey)
+        
+        loadAndScanSkills()
+        if let created = skills.first(where: { $0.id == cleanId }) {
+            return created
+        }
+        throw NSError(domain: "SkillEngine", code: 2, userInfo: [NSLocalizedDescriptionKey: "Skill written to \(skillFile.path) but not indexed"])
+    }
+    
+    /// Executes a bundled helper script inside a skill's `scripts/` directory using MicroCode Portable Runtimes
+    func executeSkillScript(
+        skillId: String,
+        scriptName: String,
+        arguments: [String] = [],
+        workspacePath: String? = nil
+    ) async throws -> String {
+        guard let skill = skills.first(where: { $0.id.lowercased() == skillId.lowercased() }) else {
+            throw NSError(domain: "SkillEngine", code: 404, userInfo: [NSLocalizedDescriptionKey: "Skill '\(skillId)' not found"])
+        }
+        let skillDir = URL(fileURLWithPath: skill.filePath).deletingLastPathComponent()
+        let cleanScript = URL(fileURLWithPath: scriptName).lastPathComponent
+        let candidate1 = skillDir.appendingPathComponent("scripts").appendingPathComponent(cleanScript)
+        let candidate2 = skillDir.appendingPathComponent(scriptName)
+        let scriptURL = FileManager.default.fileExists(atPath: candidate1.path) ? candidate1 : candidate2
+        
+        guard FileManager.default.fileExists(atPath: scriptURL.path) else {
+            let available = availableScripts(forSkill: skill)
+            throw NSError(
+                domain: "SkillEngine",
+                code: 405,
+                userInfo: [NSLocalizedDescriptionKey: "Script '\(scriptName)' not found in \(skill.id). Available scripts: \(available.joined(separator: ", "))"]
+            )
+        }
+        
+        let ext = scriptURL.pathExtension.lowercased()
+        let escapedArgs = arguments.map { $0.shellEscaped() }.joined(separator: " ")
+        let cmd: String
+        switch ext {
+        case "py":
+            cmd = "python3 \(scriptURL.path.shellEscaped()) \(escapedArgs)"
+        case "js", "mjs":
+            cmd = "node \(scriptURL.path.shellEscaped()) \(escapedArgs)"
+        case "ts":
+            cmd = "npx -y ts-node \(scriptURL.path.shellEscaped()) \(escapedArgs)"
+        case "ar":
+            cmd = "arc run \(scriptURL.path.shellEscaped()) \(escapedArgs)"
+        default:
+            cmd = "bash \(scriptURL.path.shellEscaped()) \(escapedArgs)"
+        }
+        
+        let cwd = workspacePath ?? AgentToolBox.shared.workspaceRoot ?? skillDir.path
+        return try await ShellCommandTool().execute(params: ["command": cmd, "cwd": cwd])
     }
 }
 
@@ -485,9 +756,20 @@ struct AgentSkillsView: View {
                     .clipShape(RoundedRectangle(cornerRadius: 6))
                 
                 VStack(alignment: .leading, spacing: 2) {
-                    Text(skill.name)
-                        .font(.system(size: 12, weight: .semibold))
-                        .lineLimit(1)
+                    HStack(spacing: 5) {
+                        Text(skill.name)
+                            .font(.system(size: 12, weight: .semibold))
+                            .lineLimit(1)
+                        if store.autoActivatedSkillIds.contains(skill.id) {
+                            Text("JIT AUTO")
+                                .font(.system(size: 8, weight: .bold))
+                                .foregroundColor(.teal)
+                                .padding(.horizontal, 4)
+                                .padding(.vertical, 1)
+                                .background(Color.teal.opacity(0.14))
+                                .clipShape(Capsule())
+                        }
+                    }
                     Text(skill.provider)
                         .font(.system(size: 9.5, weight: .medium))
                         .foregroundColor(.secondary)

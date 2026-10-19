@@ -170,6 +170,12 @@ pub async fn mcp_message_handler(
     let session_id = params.get("sessionId").cloned().unwrap_or_default();
     let token = params.get("token").cloned().unwrap_or_else(|| "default".to_string());
 
+    let method = payload.get("method").and_then(|m| m.as_str()).unwrap_or("");
+    let is_notification = payload.get("id").is_none() || method.starts_with("notifications/");
+    if is_notification {
+        return Json(json!({ "status": "accepted" }));
+    }
+
     let response = process_jsonrpc_request(&gateway, &token, payload).await;
 
     // Send JSON-RPC response through SSE stream
@@ -201,11 +207,28 @@ pub async fn mcp_tunnel_ws_handler(
     State(gateway): State<Arc<McpGatewayState>>,
     Query(params): Query<HashMap<String, String>>,
 ) -> Response {
-    let token = params.get("token").cloned().unwrap_or_else(|| "default".to_string());
+    let token = params.get("token").cloned().unwrap_or_default();
+    if token.trim().is_empty() || token == "default" {
+        return (
+            axum::http::StatusCode::UNAUTHORIZED,
+            "Valid non-default tunnel token is required",
+        )
+            .into_response();
+    }
     ws.on_upgrade(move |socket| handle_desktop_tunnel(socket, gateway, token))
 }
 
 async fn handle_desktop_tunnel(mut socket: WebSocket, gateway: Arc<McpGatewayState>, token: String) {
+    {
+        let tunnels = gateway.desktop_tunnels.read().await;
+        if let Some(existing) = tunnels.get(&token) {
+            if !existing.is_closed() {
+                warn!("[MCP Gateway] Rejecting duplicate tunnel connection for active token");
+                let _ = socket.close().await;
+                return;
+            }
+        }
+    }
     info!("[MCP Gateway] Desktop tunnel connected");
     let (tx, mut rx) = mpsc::channel::<Value>(64);
 
@@ -278,7 +301,7 @@ async fn process_jsonrpc_request(gateway: &Arc<McpGatewayState>, token: &str, re
             }
         }),
 
-        "initialized" => json!({
+        "initialized" | "notifications/initialized" | "notifications/cancelled" => json!({
             "jsonrpc": "2.0",
             "id": id,
             "result": null

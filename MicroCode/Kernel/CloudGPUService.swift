@@ -153,6 +153,20 @@ final class CloudGPUService: ObservableObject {
     @Published var activeSessionElapsedSeconds: Int = 0
     @Published var activeSessionCostSatang: Int = 0
     @Published var gatewayMessage: String = ""
+    @Published var maxSessionBudgetTHB: Int = UserDefaults.standard.integer(forKey: "cloudGPU.maxSessionBudgetTHB") {
+        didSet { defaults.set(maxSessionBudgetTHB, forKey: "cloudGPU.maxSessionBudgetTHB") }
+    }
+    @Published var idleTimeoutMinutes: Int = {
+        let v = UserDefaults.standard.object(forKey: "cloudGPU.idleTimeoutMinutes") as? Int
+        return v ?? 60
+    }() {
+        didSet { defaults.set(idleTimeoutMinutes, forKey: "cloudGPU.idleTimeoutMinutes") }
+    }
+    private var lastActivityAt: Date = Date()
+
+    func recordActivity() {
+        lastActivityAt = Date()
+    }
 
     private let defaults: UserDefaults
     private let network: URLSession
@@ -473,6 +487,7 @@ final class CloudGPUService: ObservableObject {
     }
 
     private func startSessionTimer() {
+        lastActivityAt = Date()
         sessionTimerTask?.cancel()
         sessionTimerTask = Task { [weak self] in
             while !Task.isCancelled {
@@ -484,6 +499,23 @@ final class CloudGPUService: ObservableObject {
                         self.activeSessionCostSatang,
                         Int((Double(self.activeSessionElapsedSeconds) / 60.0 * Double(price)).rounded(.down))
                     )
+                }
+                // Cost Guardrail check
+                if self.maxSessionBudgetTHB > 0 && self.activeSessionCostSatang >= self.maxSessionBudgetTHB * 100 {
+                    let cap = self.maxSessionBudgetTHB
+                    await self.stop()
+                    self.gatewayMessage = "Auto-stopped by Cost Guardrail (reached ฿\(cap) session budget cap)."
+                    return
+                }
+                // Idle Timeout check
+                if self.idleTimeoutMinutes > 0 {
+                    let idleSec = Int(Date().timeIntervalSince(self.lastActivityAt))
+                    if idleSec >= self.idleTimeoutMinutes * 60 {
+                        let mins = self.idleTimeoutMinutes
+                        await self.stop()
+                        self.gatewayMessage = "Auto-stopped after \(mins) min of inactivity."
+                        return
+                    }
                 }
             }
         }
@@ -670,44 +702,65 @@ final class CloudGPUService: ObservableObject {
         guard let s = activeSession else {
             throw NSError(domain: "CloudGPUService", code: 400, userInfo: [NSLocalizedDescriptionKey: "No active Cloud GPU session. Connect to a GPU first."])
         }
+        recordActivity()
 
         var authURL = repoURL.trimmingCharacters(in: .whitespacesAndNewlines)
-        if let t = token, !t.isEmpty {
+        let cleanToken = token?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        if !cleanToken.isEmpty {
             if authURL.hasPrefix("https://github.com/") {
-                authURL = authURL.replacingOccurrences(of: "https://github.com/", with: "https://oauth2:\(t)@github.com/")
+                authURL = authURL.replacingOccurrences(of: "https://github.com/", with: "https://oauth2:\(cleanToken)@github.com/")
             } else if authURL.hasPrefix("https://gitlab.com/") {
-                authURL = authURL.replacingOccurrences(of: "https://gitlab.com/", with: "https://oauth2:\(t)@gitlab.com/")
+                authURL = authURL.replacingOccurrences(of: "https://gitlab.com/", with: "https://oauth2:\(cleanToken)@gitlab.com/")
+            } else if authURL.hasPrefix("https://huggingface.co/") {
+                authURL = authURL.replacingOccurrences(of: "https://huggingface.co/", with: "https://user:\(cleanToken)@huggingface.co/")
             }
         }
 
         let targetDir = destination.hasPrefix("/") ? destination : "/workspace/\(destination)"
+        let safeBranch = branch.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? "main" : branch.trimmingCharacters(in: .whitespacesAndNewlines)
+
+        let targetDirB64 = Data(targetDir.utf8).base64EncodedString()
+        let repoUrlB64 = Data(authURL.utf8).base64EncodedString()
+        let branchB64 = Data(safeBranch.utf8).base64EncodedString()
+        let tokenB64 = Data(cleanToken.utf8).base64EncodedString()
+
         let cloneScript = """
+        import base64
         import os
         import subprocess
 
-        target_dir = "\(targetDir)"
-        repo_url = "\(authURL)"
-        branch = "\(branch.isEmpty ? "main" : branch)"
+        target_dir = base64.b64decode("\(targetDirB64)").decode("utf-8")
+        repo_url = base64.b64decode("\(repoUrlB64)").decode("utf-8")
+        branch = base64.b64decode("\(branchB64)").decode("utf-8")
+        secret_tok = base64.b64decode("\(tokenB64)").decode("utf-8")
+
+        def redact(text: str) -> str:
+            if secret_tok and secret_tok in text:
+                return text.replace(secret_tok, "***REDACTED***")
+            return text
 
         os.makedirs("/workspace", exist_ok=True)
         print(f"🚀 [Dotmini Cloud 10Gbps Ingest] Cloning {repo_url.split('@')[-1]} into {target_dir}...")
 
-        cmd = ["git", "clone", "--depth", "1", "-b", branch, repo_url, target_dir]
+        cmd = ["git", "clone", "--depth", "1", "-b", branch, "--", repo_url, target_dir]
         proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
         for line in proc.stdout:
-            print(line, end="")
+            print(redact(line), end="")
         proc.wait()
 
         if proc.returncode == 0:
             print(f"✅ Ingestion successful! Dataset ready at {target_dir}")
-            # Try pulling Git LFS if present
             subprocess.run(["git", "-C", target_dir, "lfs", "pull"], capture_output=True)
         else:
             print(f"❌ Git clone failed with exit code {proc.returncode}")
         """
 
         let kernel = JupyterKernel(endpoint: jupyterHTTPBase(from: s.wssURL), token: s.jupyterToken)
-        return try await kernel.execute(code: cloneScript, language: "python", progress: progress)
+        let result = try await kernel.execute(code: cloneScript, language: "python") { line in
+            let safeLine = (!cleanToken.isEmpty) ? line.replacingOccurrences(of: cleanToken, with: "***REDACTED***") : line
+            progress(safeLine)
+        }
+        return (!cleanToken.isEmpty) ? result.replacingOccurrences(of: cleanToken, with: "***REDACTED***") : result
     }
 
     /// List dataset files inside the Cloud GPU volume

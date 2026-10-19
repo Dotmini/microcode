@@ -253,29 +253,40 @@ public final class MultiPlatformRulesEngine: ObservableObject {
                 ))
             }
 
-            // 9. Scan Cursor MCP servers (.cursor/mcp.json or .mcp.json)
+            // 9. Scan Universal MCP servers across MicroCode, Antigravity, Claude, Cursor, Windsurf, VS Code, and Codex
             var mcpServers: [DiscoveredMCPServer] = []
+            let homeURL = self.fileManager.homeDirectoryForCurrentUser
             let mcpCandidates: [(URL, String)] = [
-                (rootURL.appendingPathComponent(".cursor/mcp.json"), "Cursor (.cursor/mcp.json)"),
+                (rootURL.appendingPathComponent(".microcode/mcp.json"), "MicroCode Workspace (.microcode/mcp.json)"),
                 (rootURL.appendingPathComponent(".mcp.json"), "MCP Standard (.mcp.json)"),
-                (self.fileManager.homeDirectoryForCurrentUser.appendingPathComponent(".cursor/mcp.json"), "Cursor User (~/.cursor/mcp.json)")
+                (rootURL.appendingPathComponent(".cursor/mcp.json"), "Cursor (.cursor/mcp.json)"),
+                (rootURL.appendingPathComponent(".vscode/mcp.json"), "VS Code (.vscode/mcp.json)"),
+                (homeURL.appendingPathComponent(".microcode/mcp.json"), "MicroCode Global (~/.microcode/mcp.json)"),
+                (homeURL.appendingPathComponent(".cursor/mcp.json"), "Cursor User (~/.cursor/mcp.json)"),
+                (homeURL.appendingPathComponent(".codeium/windsurf/mcp_config.json"), "Windsurf (~/.codeium/windsurf/mcp_config.json)"),
+                (homeURL.appendingPathComponent(".codex/mcp.json"), "Codex (~/.codex/mcp.json)"),
+                (homeURL.appendingPathComponent(".gemini/settings.json"), "Antigravity (~/.gemini/settings.json)"),
+                (homeURL.appendingPathComponent("Library/Application Support/Claude/claude_desktop_config.json"), "Claude Desktop")
             ]
             for (fileURL, label) in mcpCandidates {
                 if let data = try? Data(contentsOf: fileURL),
-                   let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-                   let servers = json["mcpServers"] as? [String: [String: Any]] {
-                    for (serverName, spec) in servers {
-                        let cmd = spec["command"] as? String ?? ""
-                        let args = spec["args"] as? [String] ?? []
-                        let env = spec["env"] as? [String: String] ?? [:]
-                        if !cmd.isEmpty && !mcpServers.contains(where: { $0.name == serverName }) {
-                            mcpServers.append(DiscoveredMCPServer(
-                                name: serverName,
-                                sourcePlatform: label,
-                                command: cmd,
-                                args: args,
-                                env: env
-                            ))
+                   let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] {
+                    let serversDict = (json["mcpServers"] as? [String: [String: Any]]) ?? (json["servers"] as? [String: [String: Any]])
+                    if let servers = serversDict {
+                        for (serverName, spec) in servers {
+                            if let disabled = spec["disabled"] as? Bool, disabled { continue }
+                            let cmd = spec["command"] as? String ?? ""
+                            let args = spec["args"] as? [String] ?? []
+                            let env = spec["env"] as? [String: String] ?? [:]
+                            if !cmd.isEmpty && !mcpServers.contains(where: { $0.name == serverName }) {
+                                mcpServers.append(DiscoveredMCPServer(
+                                    name: serverName,
+                                    sourcePlatform: label,
+                                    command: cmd,
+                                    args: args,
+                                    env: env
+                                ))
+                            }
                         }
                     }
                 }
@@ -290,6 +301,7 @@ public final class MultiPlatformRulesEngine: ObservableObject {
                 self.ignoredPatterns = finalIgnores
                 self.lastScanDate = Date()
                 self.currentWorkspace = root
+                ExternalMCPManager.shared.syncWithDiscoveredServers(finalMCPServers)
             }
         }
     }

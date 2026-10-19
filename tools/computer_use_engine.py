@@ -85,8 +85,15 @@ KEYCODES = {
 
 
 class MicroCodeComputerUse:
-    def __init__(self):
+    def __init__(self, auto_launch: bool = True):
         self.pid, self.window_id, self.bounds = self._find_window()
+        if not self.pid and auto_launch and os.path.exists("/Applications/MicroCode.app"):
+            subprocess.Popen(["open", "-a", "/Applications/MicroCode.app"])
+            for _ in range(20):
+                time.sleep(0.3)
+                self.pid, self.window_id, self.bounds = self._find_window()
+                if self.pid and self.window_id:
+                    break
         if not self.pid:
             raise RuntimeError("MicroCode process is not running!")
 
@@ -97,7 +104,7 @@ class MicroCodeComputerUse:
             pid = int(pid_str)
         except Exception:
             try:
-                pid_str = subprocess.check_output(["pgrep", "-f", "MicroCode"]).decode().strip().split("\n")[0]
+                pid_str = subprocess.check_output(["pgrep", "-f", "MicroCode.app/Contents/MacOS/MicroCode"]).decode().strip().split("\n")[0]
                 pid = int(pid_str)
             except Exception:
                 return None, None, None
@@ -106,14 +113,19 @@ class MicroCodeComputerUse:
         bounds = None
         candidates = []
         windows = Quartz.CGWindowListCopyWindowInfo(Quartz.kCGWindowListOptionOnScreenOnly, Quartz.kCGNullWindowID)
-        for w in windows:
+        for idx, w in enumerate(windows):
             owner = w.get("kCGWindowOwnerName", "")
-            if "MicroCode" in owner:
+            owner_pid = w.get("kCGWindowOwnerPID", 0)
+            layer = w.get("kCGWindowLayer", 0)
+            if ("MicroCode" in owner or owner_pid == pid) and layer == 0:
                 wid = w.get("kCGWindowNumber")
                 b = w.get("kCGWindowBounds", {})
                 w_w = float(b.get("Width", 0))
                 w_h = float(b.get("Height", 0))
-                candidates.append((w_w * w_h, wid, {
+                if w_w < 200 or w_h < 200:
+                    continue
+                is_main = 1 if (w_w >= 400 and w_h >= 300) else 0
+                candidates.append((is_main, -idx, w_w * w_h, wid, {
                     "x": float(b.get("X", 0)),
                     "y": float(b.get("Y", 0)),
                     "width": w_w,
@@ -123,29 +135,17 @@ class MicroCodeComputerUse:
         if not candidates:
             return pid, None, None
 
-        candidates.sort(key=lambda c: c[0], reverse=True)
-        _, window_id, bounds = candidates[0]
+        candidates.sort(key=lambda c: (c[0], c[1], c[2]), reverse=True)
+        _, _, _, window_id, bounds = candidates[0]
         return pid, window_id, bounds
 
-    def inspect_elements(self, max_depth: int = 8) -> List[Dict[str, Any]]:
-        """Recursively query the AXUIElement tree of MicroCode."""
+    def inspect_elements(self, max_depth: int = 16) -> List[Dict[str, Any]]:
+        """Recursively query the AXUIElement tree of all active MicroCode windows, sheets, and popovers."""
         app_ax = AXUIElementCreateApplication(self.pid)
         _, windows = AXUIElementCopyAttributeValue(app_ax, kAXWindowsAttribute, None)
         if not windows:
             return []
 
-        # Choose the main window (the one with largest width/height or position matching bounds)
-        best_w = windows[0]
-        max_area = 0
-        for w in windows:
-            _, size_val = AXUIElementCopyAttributeValue(w, kAXSizeAttribute, None)
-            if size_val:
-                ok, sz = AXValueGetValue(size_val, kAXValueCGSizeType, None)
-                if ok and (sz.width * sz.height) > max_area:
-                    max_area = sz.width * sz.height
-                    best_w = w
-
-        w = best_w
         results = []
 
         def traverse(elem, depth):
@@ -176,13 +176,14 @@ class MicroCodeComputerUse:
                     "y": round(pos["y"] + size["height"] / 2.0, 1),
                 }
 
-            label = (title or desc or "").strip()
-            if label or (role and any(k in role for k in ["Button", "Text", "Cell", "Menu"])):
+            val_str = str(val or "").strip() if isinstance(val, (str, int, float)) else ""
+            label = (title or desc or val_str or "").strip()
+            if label or (role and any(k in str(role) for k in ["Button", "Text", "Cell", "Menu", "PopUp", "Tab", "CheckBox", "Radio"])):
                 results.append({
                     "role": str(role or ""),
                     "title": str(title or ""),
                     "description": str(desc or ""),
-                    "value": str(val or "") if isinstance(val, (str, int, float)) else "",
+                    "value": val_str,
                     "label": label,
                     "position": pos,
                     "size": size,
@@ -194,7 +195,8 @@ class MicroCodeComputerUse:
                 for c in children:
                     traverse(c, depth + 1)
 
-        traverse(w, 0)
+        for w in windows:
+            traverse(w, 0)
         return results
 
     def find_element(self, query: str, role: Optional[str] = None) -> Optional[Dict[str, Any]]:

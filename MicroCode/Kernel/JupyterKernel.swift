@@ -50,14 +50,14 @@ class JupyterKernel: ComputeKernel {
     
     func cancel() async throws {
         state = .stopping
-        // Jupyter API allows interrupt, but for simplicity we stop it or let it run
-        // Real implementation would hit /api/kernels/<id>/interrupt
+        await client.interruptKernel()
         state = .idle
     }
     
     func execute(code: String, language: String, progress: @escaping (String) -> Void) async throws -> String {
         state = .running
         defer { state = .idle }
+        Task { @MainActor in CloudGPUService.shared.recordActivity() }
         
         let kernelName = getJupyterKernelName(for: language)
 

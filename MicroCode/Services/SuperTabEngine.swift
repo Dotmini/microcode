@@ -78,6 +78,7 @@ public class SuperTabEngine: ObservableObject {
     /// Triggers prediction with debouncing
     public func triggerPrediction(content: String, cursorLine: Int, cursorColumn: Int, fileExtension: String) {
         debounceTimer?.cancel()
+        predictionTask?.cancel()
         
         // Cancel existing active prediction cycle if the cursor moved outside the current edit point
         if isActive, let current = currentEditPoint {
@@ -98,8 +99,6 @@ public class SuperTabEngine: ObservableObject {
         
         predictionTask = Task {
             do {
-                isActive = true
-                
                 // Extract context window: 2000 chars before, 1000 after
                 let (prefix, suffix) = extractContext(content: content, line: cursorLine, column: cursorColumn)
                 
@@ -111,13 +110,13 @@ public class SuperTabEngine: ObservableObject {
                     self.allPredictions = SuperTabPrediction(points: predictions).points
                     self.currentIndex = 0
                     self.currentEditPoint = self.allPredictions.first
-                } else {
+                    self.isActive = true
+                } else if self.isActive {
                     dismiss()
                 }
             } catch {
-                if !Task.isCancelled {
+                if !Task.isCancelled, self.isActive {
                     dismiss()
-                    print("SuperTabEngine error: \(error)")
                 }
             }
         }

@@ -161,15 +161,12 @@ if [ -z "$CARGO_HOST_TARGET" ]; then
     echo -e "${RED}Error: Could not determine the Rust host target${NC}"
     exit 1
 fi
-if [ "$USE_EXTERNAL_SSD" = true ] || [ -n "${CODETUNER_BUILD_ROOT:-}" ]; then
+if [ "$USE_EXTERNAL_SSD" = true ] || [ -n "${CODETUNER_BUILD_ROOT:-}" ] || [ -d "/Volumes/MAC" ] || [ -d "/Volumes/MicroCodeBuild" ]; then
     echo -e "${GREEN}✓ Mode: External SSD ($BUILD_ROOT)${NC}"
 else
     echo -e "${GREEN}✓ Mode: Standard Local Build (Internal Drive)${NC}"
     echo -e "${GREEN}✓ Build directory: $BUILD_ROOT${NC}"
 fi
-
-# Set deployment target for both Rust and Swift
-export MACOSX_DEPLOYMENT_TARGET=12.0
 
 # Build Backend
 if [ "$FRONTEND_ONLY" = false ]; then

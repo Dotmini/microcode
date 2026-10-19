@@ -142,6 +142,7 @@ let package = Package(
                 "Views/OpenVSXMarketplaceView.swift",
                 "Models/AICodeReport.swift",
                 "Services/AgentCore/AgentToolBox.swift",
+                "Services/AgentCore/AgentExecutionEvidence.swift",
                 "Services/AgentCore/ToolScope.swift",
                 "Services/AgentCore/AgentPrivacyGuard.swift",
                 "Services/AgentCore/AppleVisionEngine.swift",
@@ -230,6 +231,7 @@ let package = Package(
                 "Services/AIModelCatalog.swift",       // Shared dynamic model registry
                 "Services/LocalEcosystemDiscovery.swift", // Real discovered models from Codex, AGY, Claude Code, Zed
                 "Services/DotminiPlatformKeyService.swift", // Platform API-key bridge
+                "Services/EnterpriseAIAuthService.swift",  // Enterprise AI & Governance (Vertex AI, Dotmini Enterprise ZDR)
                 "Services/AIProviderAuthService.swift",// Multi-provider Auth + Keychain
                 "Services/KeychainManager.swift",      // Keychain CRUD + Rust FFI Bridge
                 "Services/MCPServer.swift",            // MCP Protocol Server

@@ -11,6 +11,7 @@ final class AndroidStreamService: ObservableObject {
     static let shared = AndroidStreamService()
     
     @Published private(set) var isStreaming = false
+    @Published private(set) var isScanning = false
     @Published private(set) var deviceName: String = ""
     @Published private(set) var deviceResolution: CGSize = .zero
     @Published private(set) var measuredFPS: Double = 0
@@ -456,8 +457,8 @@ final class AndroidStreamService: ObservableObject {
                     return
                 }
                 
-                // Feed to VideoToolbox decoder
-                self.decoder?.decodeNALUnit(frameData)
+                // Feed complete access unit to VideoToolbox decoder with microsecond PTS
+                self.decoder?.decodeAccessUnit(frameData, ptsMicroseconds: pts)
                 
                 // Continue reading next packet
                 self.readNextVideoPacket(conn)
@@ -540,8 +541,18 @@ final class AndroidStreamService: ObservableObject {
 
     /// Scan for connected physical Android devices via ADB
     func scanDevices() async {
-        guard let adb = resolvedAdbPath else { return }
-        guard let output = try? await Self.runADB(adb, args: ["devices", "-l"]) else { return }
+        guard !isScanning else { return }
+        guard let adb = resolvedAdbPath else {
+            statusMessage = "ADB not found. Install Android Platform Tools."
+            return
+        }
+        isScanning = true
+        statusMessage = "Scanning ADB for Android devices…"
+        defer { isScanning = false }
+        guard let output = try? await Self.runADB(adb, args: ["devices", "-l"], timeoutSeconds: 2.5) else {
+            statusMessage = "ADB scan timed out."
+            return
+        }
         var list: [AndroidDeviceItem] = []
         let lines = output.components(separatedBy: .newlines)
         for line in lines {
@@ -564,9 +575,13 @@ final class AndroidStreamService: ObservableObject {
         if let firstPhysical = physical.first, !isStreaming {
             self.activeSerial = firstPhysical.id
             self.deviceName = firstPhysical.model
+            self.statusMessage = "Ready: \(firstPhysical.model) (\(firstPhysical.id))"
         } else if let first = list.first, !isStreaming {
             self.activeSerial = first.id
             self.deviceName = first.model
+            self.statusMessage = "Ready: \(first.model) (\(first.id))"
+        } else if list.isEmpty && !isStreaming {
+            self.statusMessage = "No Android device detected via USB."
         }
     }
 

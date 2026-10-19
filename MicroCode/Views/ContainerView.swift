@@ -199,9 +199,18 @@ struct ContainerView: View {
         }
     }
     
+    private var resolvedWorkspacePath: String? {
+        if let folderPath = appState.workspaceFolder?.path, !folderPath.isEmpty {
+            return folderPath
+        }
+        if let filePath = appState.currentFile?.path {
+            return URL(fileURLWithPath: filePath).deletingLastPathComponent().path
+        }
+        return nil
+    }
+
     private func deployProfile(_ profile: ContainerService.DeploymentProfile) {
-        guard let filePath = appState.currentFile?.path else { return }
-        let projectPath = URL(fileURLWithPath: filePath).deletingLastPathComponent().path
+        guard let projectPath = resolvedWorkspacePath else { return }
         
         Task {
             do {
@@ -214,8 +223,7 @@ struct ContainerView: View {
     }
     
     private func quickDeploy(_ type: ContainerService.QuickDeployType) {
-        guard let filePath = appState.currentFile?.path else { return }
-        let projectPath = URL(fileURLWithPath: filePath).deletingLastPathComponent().path
+        guard let projectPath = resolvedWorkspacePath else { return }
         
         Task {
             do {
@@ -231,19 +239,40 @@ struct ContainerView: View {
         HStack {
             Image(systemName: "shippingbox.fill")
                 .foregroundColor(.orange)
-            Text("Apple Containers")
+            Text("Containers (\(containerService.detectedRuntimeName))")
                 .font(.headline)
             
             Spacer()
             
             // Actions
             Button {
-                Task { try? await containerService.listContainers() }
+                Task {
+                    await containerService.checkSystemStatus()
+                    try? await containerService.listContainers()
+                }
             } label: {
                 Image(systemName: "arrow.clockwise")
             }
             .buttonStyle(.bordered)
             .controlSize(.small)
+
+            Button {
+                guard let projectPath = resolvedWorkspacePath else { return }
+                Task {
+                    do {
+                        _ = try await containerService.launchDevContainer(projectPath: projectPath)
+                        selectedTab = 0
+                    } catch {
+                        containerService.terminalOutput += "❌ DevContainer launch failed: \(error.localizedDescription)\n"
+                    }
+                }
+            } label: {
+                Image(systemName: "cube.transparent")
+                Text("Launch DevContainer")
+            }
+            .buttonStyle(.bordered)
+            .controlSize(.small)
+            .disabled(resolvedWorkspacePath == nil)
             
             Button {
                 showNewContainer = true

@@ -364,6 +364,7 @@ impl AgentKernel {
             .tool_name
             .as_ref()
             .map(|name| tool_fingerprint(name, &request.arguments));
+        let is_start_event = matches!(kind.as_str(), "tool_start" | "model_start");
         let progress =
             request.made_progress || inferred_progress(&kind, request.success, &request.output);
 
@@ -372,15 +373,17 @@ impl AgentKernel {
             run.error_streak = 0;
             run.retry_attempt = 0;
             run.replans_without_progress = 0;
-        } else {
+        } else if !is_start_event {
             run.no_progress_streak = run.no_progress_streak.saturating_add(1);
         }
         if request.success == Some(false) || !request.error.is_empty() {
             run.error_streak = run.error_streak.saturating_add(1);
             run.last_error = Some(summary.clone());
         }
-        if let Some(fp) = fingerprint.clone() {
-            push_bounded(&mut run.recent_fingerprints, fp, MAX_RECENT_FINGERPRINTS);
+        if !is_start_event {
+            if let Some(fp) = fingerprint.clone() {
+                push_bounded(&mut run.recent_fingerprints, fp, MAX_RECENT_FINGERPRINTS);
+            }
         }
 
         update_plan_node(
@@ -779,8 +782,11 @@ fn evaluate(run: &mut AgentRun, request: &ObserveRequest) -> KernelDirective {
         });
 
         let launch_satisfied = !is_launch || has_launch_checkpoint;
+        let requires_evidence = objective_requires_tool_evidence(&run.objective) || !run.plan.is_empty();
+        let evidence_satisfied = has_observed_work(run)
+            || (!requires_evidence && !request.output.trim().is_empty());
 
-        if plan_is_complete_or_empty(&run.plan) && has_observed_work(run) && launch_satisfied {
+        if plan_is_complete_or_empty(&run.plan) && evidence_satisfied && launch_satisfied {
             run.state = RunState::Completed;
             run.terminal_reason = Some("Objective completed successfully".into());
             return directive_for(
@@ -863,6 +869,20 @@ fn has_observed_work(run: &AgentRun) -> bool {
                 "tool_result" | "subagent_completed" | "file_change"
             )
     })
+}
+
+fn objective_requires_tool_evidence(objective: &str) -> bool {
+    let lower = objective.trim().to_lowercase();
+    if lower.is_empty() {
+        return false;
+    }
+    let action_keywords = [
+        "fix", "create", "write", "edit", "modify", "update", "implement", "refactor", "delete",
+        "remove", "add", "build", "compile", "test", "verify", "run", "launch", "deploy", "install",
+        "finish", "search", "find", "grep", "inspect", "read", "check", "audit", "review",
+        "แก้", "สร้าง", "เขียน", "ปรับ", "เพิ่ม", "ลบ", "รัน", "ทดสอบ", "คอมไพล์", "ค้นหา", "ตรวจ", "รีวิว",
+    ];
+    action_keywords.iter().any(|kw| lower.contains(kw))
 }
 
 fn state_for_event(kind: &str, success: Option<bool>, transient: bool) -> RunState {
@@ -1091,16 +1111,42 @@ fn compact(value: &str) -> String {
     if value.chars().count() <= MAX_TEXT_CHARS {
         return value.to_string();
     }
-    let head: String = value.chars().take(MAX_TEXT_CHARS * 2 / 3).collect();
+    let head_budget = MAX_TEXT_CHARS / 2;
+    let diag_budget = MAX_TEXT_CHARS / 6;
+    let tail_budget = MAX_TEXT_CHARS / 3;
+
+    let head: String = value.chars().take(head_budget).collect();
     let tail: String = value
         .chars()
         .rev()
-        .take(MAX_TEXT_CHARS / 3)
+        .take(tail_budget)
         .collect::<String>()
         .chars()
         .rev()
         .collect();
-    format!("{}\n…[kernel compacted]…\n{}", head, tail)
+
+    let middle_lines: Vec<&str> = value
+        .lines()
+        .filter(|line| {
+            let l = line.to_ascii_lowercase();
+            l.contains("error:")
+                || l.contains("error[")
+                || l.contains("fatal:")
+                || l.contains("panicked at")
+                || l.contains("failed")
+        })
+        .take(12)
+        .collect();
+
+    if !middle_lines.is_empty() {
+        let diag: String = middle_lines.join("\n").chars().take(diag_budget).collect();
+        format!(
+            "{}\n…[diagnostics]…\n{}\n…[kernel compacted]…\n{}",
+            head, diag, tail
+        )
+    } else {
+        format!("{}\n…[kernel compacted]…\n{}", head, tail)
+    }
 }
 
 fn bounded_unique(values: Vec<String>, max: usize) -> Vec<String> {

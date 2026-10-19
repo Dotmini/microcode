@@ -30,7 +30,7 @@ public struct InlineDiffView: View {
             
             ScrollViewReader { proxy in
                 ScrollView {
-                    VStack(alignment: .leading, spacing: 16) {
+                    LazyVStack(alignment: .leading, spacing: 16) {
                         ForEach($diffResult.hunks) { $hunk in
                             DiffHunkRow(hunk: $hunk, isHovered: hoveredHunkId == hunk.id)
                                 .id(hunk.id)

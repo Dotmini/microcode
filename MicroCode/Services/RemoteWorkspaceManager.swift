@@ -77,26 +77,50 @@ class RemoteWorkspaceManager: ObservableObject {
         startFileWatcher(localPath: localCachePath)
     }
     
+    private static let ignoredDirectories: Set<String> = [
+        ".git", "node_modules", "target", ".venv", "venv", "__pycache__",
+        ".build", "build", "dist", ".next", ".nuxt", ".codetuner-build",
+        "Pods", "DerivedData", ".gradle", ".idea", ".cache", "checkpoints", "wandb"
+    ]
+    
+    private static let maxAutoDownloadFileSize: UInt64 = 2 * 1024 * 1024 // 2 MB cap for initial workspace sync
+    private static let maxInitialDepth: Int = 3
+
     // MARK: - Download Project Structure
     
-    private func downloadProjectStructure(serverId: String, remotePath: String, localPath: URL) async throws {
-        // List all files recursively
+    private func downloadProjectStructure(
+        serverId: String,
+        remotePath: String,
+        localPath: URL,
+        depth: Int = 0
+    ) async throws {
+        guard depth <= Self.maxInitialDepth else { return }
         let files = try await BackendService.shared.listRemoteFiles(id: serverId, path: remotePath)
         
-        // Download each file
         for file in files {
+            if file.name == "." || file.name == ".." { continue }
             if file.isDirectory {
-                // Create directory locally
+                if Self.ignoredDirectories.contains(file.name) {
+                    continue
+                }
                 let localDir = localPath.appendingPathComponent(file.name)
                 try FileManager.default.createDirectory(at: localDir, withIntermediateDirectories: true)
                 
-                // Recursively download subdirectory
-                try await downloadProjectStructure(serverId: serverId, remotePath: file.path, localPath: localDir)
+                try await downloadProjectStructure(
+                    serverId: serverId,
+                    remotePath: file.path,
+                    localPath: localDir,
+                    depth: depth + 1
+                )
             } else {
-                // Download file
-                let fileData = try await BackendService.shared.downloadRemoteFile(id: serverId, path: file.path)
-                let localFile = localPath.appendingPathComponent(file.name)
-                try fileData.write(to: localFile)
+                // Skip huge binary/checkpoint files during workspace open
+                if file.size > Self.maxAutoDownloadFileSize {
+                    continue
+                }
+                if let fileData = try? await BackendService.shared.downloadRemoteFile(id: serverId, path: file.path) {
+                    let localFile = localPath.appendingPathComponent(file.name)
+                    try? fileData.write(to: localFile)
+                }
             }
         }
     }
@@ -111,14 +135,19 @@ class RemoteWorkspaceManager: ObservableObject {
         }
         
         do {
-            // Calculate remote path
-            let relativePath = localURL.path.replacingOccurrences(of: workspace.localCachePath.path, with: "")
-            let remotePath = workspace.remotePath + relativePath
+            let baseLocalPath = workspace.localCachePath.standardizedFileURL.path
+            let fileLocalPath = localURL.standardizedFileURL.path
+            var relativePath = fileLocalPath.replacingOccurrences(of: baseLocalPath, with: "")
+            if !relativePath.hasPrefix("/") {
+                relativePath = "/" + relativePath
+            }
+            let cleanRemoteRoot = workspace.remotePath.hasSuffix("/")
+                ? String(workspace.remotePath.dropLast())
+                : workspace.remotePath
+            let remotePath = cleanRemoteRoot + relativePath
             
-            // Read file content
             let data = try Data(contentsOf: localURL)
             
-            // Upload to server
             try await BackendService.shared.uploadRemoteFile(
                 id: workspace.serverId.uuidString,
                 path: remotePath,

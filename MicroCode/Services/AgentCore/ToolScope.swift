@@ -29,15 +29,13 @@ struct ToolScope {
     static let full: Set<ToolTier> = Set(ToolTier.allCases)
     
     static func scopeFor(complexity: TaskComplexity, domain: AgentDomain?, hasMobilePreview: Bool) -> Set<ToolTier> {
-        var tiers: Set<ToolTier> = [.core]
+        var tiers: Set<ToolTier> = [.core, .navigation, .editing, .lsp]
         
         switch complexity {
         case .trivial, .simple:
-            tiers.insert(.navigation)
-        case .moderate:
-            tiers.formUnion([.navigation, .editing, .lsp])
-        case .complex, .reasoning:
-            tiers.formUnion([.navigation, .editing, .lsp, .planning])
+            break
+        case .moderate, .complex, .reasoning:
+            tiers.insert(.planning)
         }
         
         if domain == .science {
@@ -54,7 +52,9 @@ struct ToolScope {
     
     static let toolTierMap: [String: ToolTier] = [
         "file_read": .core, "file_write": .core, "replace_in_file": .core,
+        "multi_replace_in_file": .core, "apply_patch": .core,
         "grep_search": .core, "shell": .core, "git_status": .core,
+        "skill_engine": .core, "mcp_orchestrator": .mcp, "swarm_orchestrator": .planning,
         "find_symbol": .navigation, "list_directory_tree": .navigation,
         "file_search": .navigation, "multi_file_read": .navigation,
         "git_diff": .navigation, "git_log": .navigation,

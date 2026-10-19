@@ -14,76 +14,157 @@ struct SSHConfigEntry {
     var user: String?
     var identityFile: String?
     var port: UInt16?
+    var proxyJump: String?
+    var forwardAgent: Bool = false
 }
 
 class SSHConfigParser {
     static let shared = SSHConfigParser()
     
-    func parseDefaultConfig() -> [SSHConfigEntry] {
+    private let cacheLock = NSLock()
+    private var cachedEntries: [SSHConfigEntry]?
+    private var cachedModificationDate: Date?
+    
+    func parseDefaultConfig(forceRefresh: Bool = false) -> [SSHConfigEntry] {
         let home = FileManager.default.homeDirectoryForCurrentUser
         let configPath = home.appendingPathComponent(".ssh/config")
-        return parse(fileURL: configPath)
+        let mtime = (try? FileManager.default.attributesOfItem(atPath: configPath.path)[.modificationDate]) as? Date
+        
+        cacheLock.lock()
+        if !forceRefresh, let cached = cachedEntries, cachedModificationDate == mtime {
+            cacheLock.unlock()
+            return cached
+        }
+        cacheLock.unlock()
+        
+        let parsed = parse(fileURL: configPath)
+        cacheLock.lock()
+        cachedEntries = parsed
+        cachedModificationDate = mtime
+        cacheLock.unlock()
+        return parsed
     }
     
-    func parse(fileURL: URL) -> [SSHConfigEntry] {
-        guard let content = try? String(contentsOf: fileURL, encoding: .utf8) else {
+    func parse(fileURL: URL, visited: Set<URL> = []) -> [SSHConfigEntry] {
+        let resolvedURL = fileURL.standardizedFileURL
+        guard !visited.contains(resolvedURL),
+              let content = try? String(contentsOf: resolvedURL, encoding: .utf8) else {
             return []
         }
+        var nextVisited = visited
+        nextVisited.insert(resolvedURL)
         
         var entries: [SSHConfigEntry] = []
-        var currentEntry: SSHConfigEntry?
+        var activeAliases: [String] = []
+        var currentBlock: (
+            hostName: String?,
+            user: String?,
+            identityFile: String?,
+            port: UInt16?,
+            proxyJump: String?,
+            forwardAgent: Bool?
+        ) = (nil, nil, nil, nil, nil, nil)
         
-        // Simple line-by-line parser
+        var globalDefaults: (
+            user: String?,
+            identityFile: String?,
+            port: UInt16?,
+            proxyJump: String?,
+            forwardAgent: Bool?
+        ) = (nil, nil, nil, nil, nil)
+        
+        func flushCurrentBlock() {
+            guard !activeAliases.isEmpty else { return }
+            if activeAliases == ["*"] {
+                if let u = currentBlock.user { globalDefaults.user = u }
+                if let id = currentBlock.identityFile { globalDefaults.identityFile = id }
+                if let p = currentBlock.port { globalDefaults.port = p }
+                if let pj = currentBlock.proxyJump { globalDefaults.proxyJump = pj }
+                if let fa = currentBlock.forwardAgent { globalDefaults.forwardAgent = fa }
+            } else {
+                for alias in activeAliases where !alias.contains("*") && !alias.contains("?") {
+                    let resolvedHostName = (currentBlock.hostName?.isEmpty == false) ? currentBlock.hostName! : alias
+                    let entry = SSHConfigEntry(
+                        host: alias,
+                        hostName: resolvedHostName,
+                        user: currentBlock.user ?? globalDefaults.user,
+                        identityFile: currentBlock.identityFile ?? globalDefaults.identityFile,
+                        port: currentBlock.port ?? globalDefaults.port ?? 22,
+                        proxyJump: currentBlock.proxyJump ?? globalDefaults.proxyJump,
+                        forwardAgent: currentBlock.forwardAgent ?? globalDefaults.forwardAgent ?? false
+                    )
+                    entries.append(entry)
+                }
+            }
+            activeAliases = []
+            currentBlock = (nil, nil, nil, nil, nil, nil)
+        }
+        
         let lines = content.components(separatedBy: .newlines)
         
         for line in lines {
             let trimmed = line.trimmingCharacters(in: .whitespaces)
             if trimmed.isEmpty || trimmed.hasPrefix("#") { continue }
             
-            let components = trimmed.components(separatedBy: .whitespaces).filter { !$0.isEmpty }
+            // Support both "Key Value" and "Key=Value" syntax
+            let normalized = trimmed.replacingOccurrences(
+                of: "^([A-Za-z0-9]+)\\s*=\\s*",
+                with: "$1 ",
+                options: .regularExpression
+            )
+            let components = normalized.components(separatedBy: .whitespaces).filter { !$0.isEmpty }
             guard components.count >= 2 else { continue }
             
             let keyword = components[0].lowercased()
-            let value = components[1...].joined(separator: " ")
+            let value = components[1...].joined(separator: " ").trimmingCharacters(in: CharacterSet(charactersIn: "\""))
             
-            if keyword == "host" {
-                // Save previous entry
-                if let entry = currentEntry {
-                    // Only add if it has a HostName (real connection)
-                    if !entry.hostName.isEmpty {
-                        entries.append(entry)
-                    }
+            if keyword == "include" {
+                let sshDir = resolvedURL.deletingLastPathComponent()
+                let rawPattern = (value as NSString).expandingTildeInPath
+                let fullPattern = rawPattern.hasPrefix("/") ? rawPattern : sshDir.appendingPathComponent(rawPattern).path
+                for matchedURL in Self.expandGlob(pattern: fullPattern) {
+                    entries.append(contentsOf: parse(fileURL: matchedURL, visited: nextVisited))
                 }
-                
-                // Start new entry
-                // Handle multiple aliases "Host foo bar" -> just take first for now or simplify
-                let hostAlias = components[1] 
-                currentEntry = SSHConfigEntry(host: hostAlias, hostName: "", user: nil, identityFile: nil, port: 22)
-            } else if let _ = currentEntry {
+            } else if keyword == "host" {
+                flushCurrentBlock()
+                activeAliases = Array(components[1...])
+            } else if !activeAliases.isEmpty {
                 switch keyword {
                 case "hostname":
-                    currentEntry?.hostName = value
+                    currentBlock.hostName = value
                 case "user":
-                    currentEntry?.user = value
+                    currentBlock.user = value
                 case "identityfile":
-                    // Handle ~ expansion
-                    let expanded = (value as NSString).expandingTildeInPath
-                    currentEntry?.identityFile = expanded
+                    currentBlock.identityFile = (value as NSString).expandingTildeInPath
                 case "port":
                     if let p = UInt16(value) {
-                        currentEntry?.port = p
+                        currentBlock.port = p
                     }
+                case "proxyjump":
+                    currentBlock.proxyJump = value
+                case "forwardagent":
+                    currentBlock.forwardAgent = (value.lowercased() == "yes" || value.lowercased() == "true")
                 default:
                     break
                 }
             }
         }
         
-        // Add last entry
-        if let entry = currentEntry, !entry.hostName.isEmpty {
-            entries.append(entry)
-        }
-        
+        flushCurrentBlock()
         return entries
+    }
+    
+    private static func expandGlob(pattern: String) -> [URL] {
+        var gt = glob_t()
+        defer { globfree(&gt) }
+        guard glob(pattern, GLOB_TILDE | GLOB_BRACE, nil, &gt) == 0 else { return [] }
+        var urls: [URL] = []
+        for i in 0..<Int(gt.gl_matchc) {
+            if let cStr = gt.gl_pathv[i] {
+                let path = String(cString: cStr)
+                urls.append(URL(fileURLWithPath: path))
+            }
+        }
+        return urls
     }
 }

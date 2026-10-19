@@ -26,10 +26,10 @@ class AIAutocompleteService: ObservableObject {
     @Published var isRequesting = false
     
     private var requestTask: Task<Void, Never>?
-    private var debounceTimer: Timer?
+    private var suggestionCache: [Int: String] = [:]
     
     // Config
-    private let debounceDelay: TimeInterval = 0.4
+    private let debounceNanoseconds: UInt64 = 350_000_000
     private let maxPrefixLength = 1500
     private let maxSuffixLength = 500
     
@@ -38,52 +38,47 @@ class AIAutocompleteService: ObservableObject {
     
     private init() {}
     
-    /// Triggers an autocomplete request after a debounce delay
+    /// Triggers an autocomplete request after a debounce delay using structured cancellation
     func triggerAutocomplete(prefix: String, suffix: String, cursorLocation: Int, fileExtension: String) {
         guard isEnabled else { return }
         
-        // Cancel previous request
+        // Cancel previous request immediately
         cancelRequest()
         
-        // Don't autocomplete if typing extremely fast or no context
+        // Don't autocomplete if prefix is empty
         guard !prefix.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return }
         
-        debounceTimer = Timer.scheduledTimer(withTimeInterval: debounceDelay, repeats: false) { [weak self] _ in
-            Task { @MainActor [weak self] in
-                await self?.fetchCompletion(prefix: prefix, suffix: suffix, cursorLocation: cursorLocation, fileExtension: fileExtension)
-            }
-        }
-    }
-    
-    func cancelRequest() {
-        debounceTimer?.invalidate()
-        debounceTimer = nil
-        requestTask?.cancel()
-        requestTask = nil
-    }
-    
-    func clearSuggestion() {
-        cancelRequest()
-        currentSuggestion = nil
-    }
-    
-    private func fetchCompletion(prefix: String, suffix: String, cursorLocation: Int, fileExtension: String) async {
-        guard isEnabled else { return }
-        
-        // Truncate context to save tokens and latency
         let truncatedPrefix = String(prefix.suffix(maxPrefixLength))
         let truncatedSuffix = String(suffix.prefix(maxSuffixLength))
-                isRequesting = true
-        requestTask = Task { [weak self] in
+        
+        var hasher = Hasher()
+        hasher.combine(truncatedPrefix)
+        hasher.combine(truncatedSuffix)
+        hasher.combine(fileExtension)
+        let cacheKey = hasher.finalize()
+        
+        if let cached = suggestionCache[cacheKey], !cached.isEmpty {
+            currentSuggestion = AutocompleteSuggestion(
+                text: cached,
+                range: NSRange(location: cursorLocation, length: 0)
+            )
+            return
+        }
+        
+        requestTask = Task { @MainActor [weak self] in
             do {
-                guard let self = self else { return }
+                try await Task.sleep(nanoseconds: self?.debounceNanoseconds ?? 350_000_000)
+                guard let self = self, !Task.isCancelled, self.isEnabled else { return }
+                
+                self.isRequesting = true
+                defer { self.isRequesting = false }
                 
                 // Get active endpoint from LocalLLMService
                 let endpoint = LocalLLMService.shared.activeEndpoint
                 let model = LocalLLMService.shared.activeModel
                 
                 // Call highly optimized Rust FFI Core
-                let completion = try await fetchGhostText(
+                let rawCompletion = try await fetchGhostText(
                     endpoint: endpoint,
                     model: model,
                     prefix: truncatedPrefix,
@@ -92,25 +87,65 @@ class AIAutocompleteService: ObservableObject {
                 
                 guard !Task.isCancelled else { return }
                 
-                // Avoid suggesting just spaces or newlines
-                if completion.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-                    DispatchQueue.main.async {
-                        self.isRequesting = false
-                    }
+                let cleaned = Self.sanitizeCompletion(
+                    rawCompletion,
+                    prefix: truncatedPrefix,
+                    suffix: truncatedSuffix
+                )
+                guard !cleaned.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
                     return
                 }
                 
-                DispatchQueue.main.async {
-                    guard !Task.isCancelled else { return }
-                    self.currentSuggestion = AutocompleteSuggestion(text: completion, range: NSRange(location: cursorLocation, length: 0))
-                    self.isRequesting = false
+                if self.suggestionCache.count > 128 {
+                    self.suggestionCache.removeAll(keepingCapacity: true)
                 }
-                
+                self.suggestionCache[cacheKey] = cleaned
+                self.currentSuggestion = AutocompleteSuggestion(
+                    text: cleaned,
+                    range: NSRange(location: cursorLocation, length: 0)
+                )
             } catch {
-                DispatchQueue.main.async {
-                    self?.isRequesting = false
-                }
+                self?.isRequesting = false
             }
         }
+    }
+    
+    func cancelRequest() {
+        requestTask?.cancel()
+        requestTask = nil
+        if isRequesting {
+            isRequesting = false
+        }
+    }
+    
+    func clearSuggestion() {
+        cancelRequest()
+        if currentSuggestion != nil {
+            currentSuggestion = nil
+        }
+    }
+    
+    private static func sanitizeCompletion(_ raw: String, prefix: String, suffix: String) -> String {
+        var result = raw
+        // Strip accidental markdown code fences
+        if result.hasPrefix("```") {
+            if let firstNewline = result.firstIndex(of: "\n") {
+                result = String(result[result.index(after: firstNewline)...])
+            } else {
+                result = result.replacingOccurrences(of: "```", with: "")
+            }
+            if result.hasSuffix("```") {
+                result = String(result.dropLast(3))
+            }
+        }
+        // Trim duplicate suffix overlap if the model repeated the start of `suffix`
+        let trimmedSuffix = suffix.trimmingCharacters(in: .whitespacesAndNewlines)
+        if !trimmedSuffix.isEmpty,
+           let firstSuffixLine = trimmedSuffix.split(separator: "\n", omittingEmptySubsequences: true).first,
+           firstSuffixLine.count >= 4,
+           result.hasSuffix(String(firstSuffixLine)) {
+            result = String(result.dropLast(firstSuffixLine.count))
+        }
+        return result
     }
 }

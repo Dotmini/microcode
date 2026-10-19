@@ -266,7 +266,10 @@ final class DeviceRuntimeService: ObservableObject {
     private var applicationProcess: Process?
     private var applicationInputHandle: FileHandle?
     private var androidMirrorProcess: Process?
+    private var androidBootTask: Task<Void, Never>?
     private var androidConnectionTask: Task<Void, Never>?
+    private var iosConnectionTask: Task<Void, Never>?
+    private var microCodeBootedSimulatorIDs: Set<String> = []
     private var androidMirrorReadHandle: FileHandle?
     private var androidPNGBuffer = Data()
     private var pendingAndroidFrame: Data?
@@ -377,6 +380,31 @@ final class DeviceRuntimeService: ObservableObject {
         await startEmbeddedAndroid()
     }
 
+    /// Selects a default Apple Simulator target in the UI without booting it or spawning processes.
+    func selectDefaultAppleSimulatorIfNeeded() {
+        if let selected = selectedDevice, selected.isAppleSimulator {
+            return
+        }
+        if let preferred = devices.first(where: { $0.isAppleSimulator && $0.isBooted })
+            ?? devices.first(where: { $0.isAppleSimulator && $0.appleSimulatorFamily == .iPhone })
+            ?? devices.first(where: { $0.isAppleSimulator }) {
+            selectedDeviceID = preferred.id
+            return
+        }
+        Task { @MainActor in
+            let simDevices = await listAppleSimulators()
+            guard !simDevices.isEmpty else { return }
+            self.devices.removeAll { $0.isAppleSimulator }
+            self.devices.append(contentsOf: simDevices)
+            if self.selectedDevice?.isAppleSimulator != true {
+                let preferred = simDevices.first(where: { $0.isBooted })
+                    ?? simDevices.first(where: { $0.appleSimulatorFamily == .iPhone })
+                    ?? simDevices.first
+                self.selectedDeviceID = preferred?.id
+            }
+        }
+    }
+
     /// Header shortcut for starting or attaching the preferred Apple Simulator
     func startPreferredEmbeddedAppleSimulator() async {
         if !devices.contains(where: { $0.isAppleSimulator }) {
@@ -402,7 +430,7 @@ final class DeviceRuntimeService: ObservableObject {
     func openRuntimeDestination(_ device: RuntimeDevice) async {
         selectedDeviceID = device.id
         if device.platform == .android {
-            AppleSimulatorCaptureService.shared.stop()
+            stopEmbeddedAppleSimulator()
             showingEmbeddedDeviceDock = true
             showingEmbeddedAppleDock = false
             await startEmbeddedAndroid()
@@ -441,10 +469,8 @@ final class DeviceRuntimeService: ObservableObject {
     }
 
     func stopActiveRuntime() {
-        stopEmbeddedAndroid()
-        NativeSimulatorBridgeService.shared.stop()
-        AppleSimulatorCaptureService.shared.stop()
-        Task { await ServeSimService.shared.stop() }
+        stopEmbeddedAndroid(shutdownEmulator: true)
+        stopEmbeddedAppleSimulator(shutdownSimulator: true)
         if deviceRuntimeProcess?.isRunning == true { deviceRuntimeProcess?.terminate() }
         deviceRuntimeProcess = nil
         try? applicationInputHandle?.close()
@@ -458,10 +484,8 @@ final class DeviceRuntimeService: ObservableObject {
     /// capture, persistent ADB shell and child emulator/dev-server processes
     /// are all explicitly reaped so they can never keep MicroCode alive.
     func shutdownAllRuntimes() {
-        stopEmbeddedAndroid()
-        NativeSimulatorBridgeService.shared.stop()
-        AppleSimulatorCaptureService.shared.stop()
-        Task { await ServeSimService.shared.stop() }
+        stopEmbeddedAndroid(shutdownEmulator: true)
+        stopEmbeddedAppleSimulator(shutdownSimulator: true)
         if deviceRuntimeProcess?.isRunning == true { deviceRuntimeProcess?.terminate() }
         deviceRuntimeProcess = nil
         try? applicationInputHandle?.close()
@@ -737,75 +761,97 @@ final class DeviceRuntimeService: ObservableObject {
     /// ADB is the documented, authenticated control channel; no process or RAM
     /// inspection is used.
     func startEmbeddedAndroid() async {
-        await MainActor.run {
-            self.embeddedDockMode = .android
-            self.showingEmbeddedAppleDock = false
-            self.showingEmbeddedDeviceDock = true
-            PreviewDockService.shared.selectTab(id: "android")
-            if self.embeddedAndroidFrame == nil {
-                self.updateActiveAndroidSkin()
+        androidBootTask?.cancel()
+        self.embeddedDockMode = .android
+        self.showingEmbeddedAppleDock = false
+        self.showingEmbeddedDeviceDock = true
+        PreviewDockService.shared.activateTabWithoutSideEffects(id: "android")
+        if self.embeddedAndroidFrame == nil {
+            self.updateActiveAndroidSkin()
+        }
+        self.embeddedAndroidStatus = "Preparing Android Emulator…"
+
+        let task = Task { @MainActor in
+            self.isWorking = true
+            defer { self.isWorking = false }
+            do {
+                try Task.checkCancellation()
+
+                var targetDevice = self.selectedDevice
+                if targetDevice?.platform != .android {
+                    targetDevice = self.devices.first(where: { $0.platform == .android && $0.state == "Running" })
+                        ?? self.devices.first(where: { $0.platform == .android })
+                    if let targetDevice {
+                        self.selectedDeviceID = targetDevice.id
+                    }
+                }
+
+                if targetDevice == nil || targetDevice?.platform != .android {
+                    self.embeddedAndroidStatus = "Scanning for Android AVDs and ADB devices…"
+                    let fresh = await self.listAndroidDevices()
+                    try Task.checkCancellation()
+                    if let first = fresh.first(where: { $0.state == "Running" }) ?? fresh.first {
+                        self.devices.removeAll { $0.platform == .android }
+                        self.devices.append(contentsOf: fresh)
+                        self.selectedDeviceID = first.id
+                        targetDevice = first
+                    }
+                }
+
+                guard let device = targetDevice, device.platform == .android else {
+                    self.statusMessage = "Choose an Android device or AVD first."
+                    self.embeddedAndroidStatus = "No Android device or emulator detected. Create an AVD in Android Studio or connect via USB."
+                    return
+                }
+
+                try Task.checkCancellation()
+
+                // 1. If device ID is an active serial (e.g. "emulator-5554" or USB physical device)
+                if !device.id.hasPrefix("avd:") {
+                    self.startAndroidMirror(serial: device.id, deviceName: device.name)
+                    self.statusMessage = "Attached to Android device: \(device.name)."
+                    return
+                }
+
+                let avdName = String(device.id.dropFirst(4))
+                self.embeddedAndroidStatus = "Checking running Android Emulator (\(device.name))…"
+
+                // 2. Reattaching to an already booted AVD is immediate
+                if let serial = await self.attachedAndroidSerial(named: avdName) {
+                    try Task.checkCancellation()
+                    self.startAndroidMirror(serial: serial, deviceName: device.name)
+                    self.statusMessage = "Attached to running Android Emulator: \(device.name)."
+                    return
+                }
+
+                // 3. Fast fallback: if ANY emulator-* is currently active in ADB, attach to it immediately!
+                if let firstRunning = await self.firstAttachedEmulatorSerial() {
+                    try Task.checkCancellation()
+                    self.startAndroidMirror(serial: firstRunning, deviceName: device.name)
+                    self.statusMessage = "Attached to running Android Emulator (\(firstRunning)): \(device.name)."
+                    return
+                }
+
+                try Task.checkCancellation()
+                self.embeddedAndroidStatus = "Starting Android Emulator: \(device.name)…"
+                try await self.startDevice(device)
+                try Task.checkCancellation()
+                self.embeddedAndroidStatus = "Waiting for \(device.name) to connect via ADB…"
+                let serial = try await self.readyAndroidSerial(for: device)
+                try Task.checkCancellation()
+                self.startAndroidMirror(serial: serial, deviceName: device.name)
+                self.statusMessage = "Android Emulator is running inside MicroCode: \(device.name)."
+            } catch is CancellationError {
+                self.statusMessage = "Android Emulator launch cancelled."
+                self.embeddedAndroidStatus = ""
+            } catch {
+                self.statusMessage = error.localizedDescription
+                self.embeddedAndroidStatus = "Could not start emulator: \(error.localizedDescription)"
+                self.appendOutput(error.localizedDescription)
             }
         }
-        
-        // Ensure an Android device is selected; auto-pick booted or available Android device
-        var targetDevice = selectedDevice
-        if targetDevice?.platform != .android {
-            targetDevice = devices.first(where: { $0.platform == .android && $0.state == "Running" })
-                ?? devices.first(where: { $0.platform == .android })
-            if let targetDevice {
-                selectedDeviceID = targetDevice.id
-            }
-        }
-        
-        guard let device = targetDevice, device.platform == .android else {
-            let fresh = await listAndroidDevices()
-            if let first = fresh.first {
-                devices.removeAll { $0.platform == .android }
-                devices.append(contentsOf: fresh)
-                selectedDeviceID = first.id
-                await startEmbeddedAndroid()
-                return
-            }
-            statusMessage = "Choose an Android device or AVD first."
-            embeddedAndroidStatus = "No Android device or emulator detected. Make sure the emulator is running."
-            return
-        }
-        
-        isWorking = true
-        defer { isWorking = false }
-        do {
-            // 1. If device ID is an active serial (e.g. "emulator-5554" or USB physical device)
-            if !device.id.hasPrefix("avd:") {
-                startAndroidMirror(serial: device.id, deviceName: device.name)
-                statusMessage = "Attached to Android device: \(device.name)."
-                return
-            }
-            
-            let avdName = String(device.id.dropFirst(4))
-            
-            // 2. Reattaching to an already booted AVD is immediate
-            if let serial = await attachedAndroidSerial(named: avdName) {
-                startAndroidMirror(serial: serial, deviceName: device.name)
-                statusMessage = "Attached to running Android Emulator: \(device.name)."
-                return
-            }
-            
-            // 3. Fast fallback: if ANY emulator-* is currently active in ADB, attach to it immediately!
-            if let firstRunning = await firstAttachedEmulatorSerial() {
-                startAndroidMirror(serial: firstRunning, deviceName: device.name)
-                statusMessage = "Attached to running Android Emulator (\(firstRunning)): \(device.name)."
-                return
-            }
-            
-            try await startDevice(device)
-            let serial = try await readyAndroidSerial(for: device)
-            startAndroidMirror(serial: serial, deviceName: device.name)
-            statusMessage = "Android Emulator is running inside MicroCode: \(device.name)."
-        } catch {
-            statusMessage = error.localizedDescription
-            embeddedAndroidStatus = "Could not start emulator: \(error.localizedDescription)"
-            appendOutput(error.localizedDescription)
-        }
+        androidBootTask = task
+        await task.value
     }
 
     var isEmbeddedApplePreviewActive: Bool { ServeSimService.shared.isActive }
@@ -814,11 +860,15 @@ final class DeviceRuntimeService: ObservableObject {
     /// keyboard, gestures, and hardware controls in one local WebView. The
     /// raw IOSurface transport remains available for diagnostics only.
     func startEmbeddedAppleSimulator() async {
+        iosConnectionTask?.cancel()
         await MainActor.run {
             self.embeddedDockMode = .ios
             self.showingEmbeddedAppleDock = true
             self.showingEmbeddedDeviceDock = true
-            PreviewDockService.shared.selectTab(id: "ios")
+            PreviewDockService.shared.activateTabWithoutSideEffects(id: "ios")
+        }
+        if selectedDevice?.isAppleSimulator != true {
+            selectDefaultAppleSimulatorIfNeeded()
         }
         guard let device = selectedDevice, device.isAppleSimulator else {
             statusMessage = "Choose an Apple Simulator first."
@@ -831,23 +881,36 @@ final class DeviceRuntimeService: ObservableObject {
             statusMessage = "Interactive \(device.previewTitle) is already ready beside Chat: \(device.name)."
             return
         }
-        isWorking = true
-        defer { isWorking = false }
-        do {
-            try await startDevice(device)
-            NativeSimulatorBridgeService.shared.stop()
-            AppleSimulatorCaptureService.shared.stop()
-            await ServeSimService.shared.start(simulatorID: device.id, simulatorName: device.name)
-            if ServeSimService.shared.isActive {
-                statusMessage = "Interactive \(device.previewTitle) is ready beside Chat: \(device.name)."
-            } else {
-                statusMessage = ServeSimService.shared.statusMessage
-                appendOutput(statusMessage)
+        let task = Task { @MainActor in
+            self.isWorking = true
+            defer { self.isWorking = false }
+            do {
+                try Task.checkCancellation()
+                try await self.startDevice(device)
+                try Task.checkCancellation()
+                guard self.showingEmbeddedAppleDock, self.showingEmbeddedDeviceDock else { return }
+                NativeSimulatorBridgeService.shared.stop()
+                AppleSimulatorCaptureService.shared.stop()
+                await ServeSimService.shared.start(simulatorID: device.id, simulatorName: device.name)
+                guard !Task.isCancelled, self.showingEmbeddedAppleDock else {
+                    await ServeSimService.shared.stop()
+                    return
+                }
+                if ServeSimService.shared.isActive {
+                    self.statusMessage = "Interactive \(device.previewTitle) is ready beside Chat: \(device.name)."
+                } else {
+                    self.statusMessage = ServeSimService.shared.statusMessage
+                    self.appendOutput(self.statusMessage)
+                }
+            } catch is CancellationError {
+                self.statusMessage = "Simulator launch cancelled."
+            } catch {
+                self.statusMessage = error.localizedDescription
+                self.appendOutput(error.localizedDescription)
             }
-        } catch {
-            statusMessage = error.localizedDescription
-            appendOutput(error.localizedDescription)
         }
+        iosConnectionTask = task
+        await task.value
     }
 
     func hotReloadCurrentProject() {
@@ -863,17 +926,77 @@ final class DeviceRuntimeService: ObservableObject {
         statusMessage = "Sent Flutter Hot Reload to the active runtime."
     }
 
-    func stopEmbeddedAndroid() {
+    func stopEmbeddedAndroid(shutdownEmulator: Bool = false) {
+        androidBootTask?.cancel()
+        androidBootTask = nil
         androidConnectionTask?.cancel()
         androidConnectionTask = nil
+        isWorking = false
         AndroidStreamService.shared.stopStreaming()
         stopAndroidMirrorTransport()
         stopAndroidInputChannel()
+        let activeSerial = embeddedAndroidSerial
         embeddedAndroidImage = nil
         embeddedAndroidPixelSize = .zero
         embeddedAndroidSerial = nil
         isEmbeddedAndroidActive = false
         embeddedAndroidStatus = ""
+        if shutdownEmulator {
+            if let proc = deviceRuntimeProcess, proc.isRunning {
+                proc.terminate()
+            }
+            deviceRuntimeProcess = nil
+            if let serial = activeSerial, serial.hasPrefix("emulator-"), let adb = try? androidTool("adb") {
+                Task.detached(priority: .utility) {
+                    let proc = Process()
+                    proc.executableURL = URL(fileURLWithPath: adb)
+                    proc.arguments = ["-s", serial, "emu", "kill"]
+                    proc.standardOutput = FileHandle.nullDevice
+                    proc.standardError = FileHandle.nullDevice
+                    try? proc.run()
+                    proc.waitUntilExit()
+                }
+            }
+        }
+    }
+
+    func stopEmbeddedAppleSimulator(shutdownSimulator: Bool = true) {
+        iosConnectionTask?.cancel()
+        iosConnectionTask = nil
+        showingEmbeddedAppleDock = false
+        isWorking = false
+        NativeSimulatorBridgeService.shared.stop()
+        AppleSimulatorCaptureService.shared.stop()
+        let activeSimID = ServeSimService.shared.activeDeviceID
+        var idsToShutdown = microCodeBootedSimulatorIDs
+        if let activeSimID {
+            idsToShutdown.insert(activeSimID)
+        }
+        microCodeBootedSimulatorIDs.removeAll()
+        Task {
+            await ServeSimService.shared.stop()
+        }
+        if shutdownSimulator {
+            Task.detached(priority: .utility) {
+                let pkill = Process()
+                pkill.executableURL = URL(fileURLWithPath: "/usr/bin/pkill")
+                pkill.arguments = ["-f", "simctl boot"]
+                pkill.standardOutput = FileHandle.nullDevice
+                pkill.standardError = FileHandle.nullDevice
+                try? pkill.run()
+                pkill.waitUntilExit()
+
+                for simID in idsToShutdown {
+                    let proc = Process()
+                    proc.executableURL = URL(fileURLWithPath: "/usr/bin/xcrun")
+                    proc.arguments = ["simctl", "shutdown", simID]
+                    proc.standardOutput = FileHandle.nullDevice
+                    proc.standardError = FileHandle.nullDevice
+                    try? proc.run()
+                    proc.waitUntilExit()
+                }
+            }
+        }
     }
 
     func sendEmbeddedAndroidTap(normalizedX: CGFloat, normalizedY: CGFloat) {
@@ -909,11 +1032,20 @@ final class DeviceRuntimeService: ObservableObject {
     }
 
     func sendEmbeddedAndroidKey(_ key: String) {
+        if AndroidStreamService.shared.isStreaming, let keycode = Int(key) {
+            AndroidStreamService.shared.sendKey(keycode)
+            return
+        }
         guard let serial = embeddedAndroidSerial else { return }
         sendAndroidInput(serial: serial, arguments: ["shell", "input", "keyevent", key])
     }
 
     func sendEmbeddedAndroidText(_ text: String) {
+        guard !text.isEmpty else { return }
+        if AndroidStreamService.shared.isStreaming {
+            AndroidStreamService.shared.sendText(text)
+            return
+        }
         guard let serial = embeddedAndroidSerial else { return }
         // `input text` accepts %s for a literal space. The persistent ADB
         // shell quotes every argument below, so this can safely accept real
@@ -1206,12 +1338,16 @@ final class DeviceRuntimeService: ObservableObject {
                 statusMessage = "Physical Apple device is paired and ready: \(device.name)."
                 return
             }
+            try Task.checkCancellation()
             if !device.isBooted {
+                microCodeBootedSimulatorIDs.insert(device.id)
                 _ = try await command("/usr/bin/xcrun", ["simctl", "boot", device.id], directory: nil)
             }
+            try Task.checkCancellation()
             // `boot` only starts CoreSimulator.  Wait for SpringBoard before
             // handing the destination to xcodebuild/install/launch.
             _ = try await command("/usr/bin/xcrun", ["simctl", "bootstatus", device.id, "-b"], directory: nil)
+            try Task.checkCancellation()
             statusMessage = "\(device.previewTitle) is ready: \(device.name)."
         case .android:
             if device.id.hasPrefix("avd:") {
@@ -1228,6 +1364,7 @@ final class DeviceRuntimeService: ObservableObject {
                     statusMessage = "Android Emulator is starting: \(device.name)..."
                     return
                 }
+                cleanStaleAVDLocks(avdName: avdName)
                 let emulator = try androidTool("emulator")
                 if deviceRuntimeProcess?.isRunning != true {
                     let process = Process()
@@ -1487,8 +1624,22 @@ final class DeviceRuntimeService: ObservableObject {
         let configURL = URL(fileURLWithPath: avdPath).appendingPathComponent("config.ini")
         let config = (try? String(contentsOf: configURL, encoding: .utf8)) ?? ""
         let configuredBytes = storageSize(in: config, key: "disk.dataPartition.size") ?? 2 * 1_024 * 1_024 * 1_024
+        let avdDirURL = URL(fileURLWithPath: avdPath)
+        let existingUserdataBytes: UInt64 = [
+            "userdata-qemu.img.qcow2",
+            "userdata-qemu.img",
+            "userdata.img"
+        ].reduce(0) { acc, fileName in
+            let fileURL = avdDirURL.appendingPathComponent(fileName)
+            let size = ((try? fm.attributesOfItem(atPath: fileURL.path))?[.size] as? NSNumber)?.uint64Value ?? 0
+            return acc + size
+        }
+        let unallocatedDataBytes = configuredBytes > existingUserdataBytes ? (configuredBytes - existingUserdataBytes) : 0
         let reserve: UInt64 = 512 * 1_024 * 1_024
-        let required = configuredBytes + reserve
+        // If userdata is already initialized on disk, only require headroom for runtime snapshots/logs
+        let required: UInt64 = existingUserdataBytes > 0
+            ? min(unallocatedDataBytes + reserve, 1_536 * 1_024 * 1_024)
+            : (configuredBytes + reserve)
         let available = ((try? fm.attributesOfFileSystem(forPath: avdPath))?[.systemFreeSize] as? NSNumber)?.uint64Value ?? 0
         let formatter = ByteCountFormatter()
         formatter.countStyle = .file
@@ -1703,15 +1854,40 @@ final class DeviceRuntimeService: ObservableObject {
         return false
     }
 
+    private func cleanStaleAVDLocks(avdName: String) {
+        let fm = FileManager.default
+        let roots = [
+            ProcessInfo.processInfo.environment["ANDROID_AVD_HOME"],
+            NSHomeDirectory() + "/.android/avd",
+            NSHomeDirectory() + "/Library/Android/sdk/avd"
+        ].compactMap { $0 }
+        for root in roots {
+            let avdDir = "\(root)/\(avdName).avd"
+            guard fm.fileExists(atPath: avdDir) else { continue }
+            for lockName in ["hardware-qemu.ini.lock", "multiinstance.lock"] {
+                let lockPath = "\(avdDir)/\(lockName)"
+                if fm.fileExists(atPath: lockPath) {
+                    try? fm.removeItem(atPath: lockPath)
+                }
+            }
+        }
+    }
+
     /// A newly launched AVD is not immediately visible to Gradle/ADB.  Wait for
     /// the *actual* device connection rather than racing an install against boot.
     private func readyAndroidSerial(for device: RuntimeDevice) async throws -> String {
         if !device.id.hasPrefix("avd:") { return device.id }
         let avdName = String(device.id.dropFirst(4))
-        for _ in 0..<90 {
+        for attempt in 0..<90 {
+            try Task.checkCancellation()
             if let serial = await attachedAndroidSerial(named: avdName) { return serial }
             if let first = await firstAttachedEmulatorSerial() { return first }
-            try? await Task.sleep(nanoseconds: 1_000_000_000)
+            if attempt > 2, let proc = deviceRuntimeProcess, !proc.isRunning {
+                let code = proc.terminationStatus
+                deviceRuntimeProcess = nil
+                throw ToolBoxError.executionFailed("Android Emulator process exited unexpectedly (code \(code)).")
+            }
+            try await Task.sleep(nanoseconds: 1_000_000_000)
         }
         throw ToolBoxError.executionFailed("Android Emulator did not become ready within 90 seconds. Open it once from Android Studio, then try again.")
     }

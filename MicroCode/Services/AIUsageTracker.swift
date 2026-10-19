@@ -49,11 +49,13 @@ struct TokenUsageRecord: Identifiable, Codable, Equatable {
         self.totalTokens = promptTokens + completionTokens
         self.taskLabel = taskLabel
         
-        // Calculate estimated cost
-        let inputCost = Double(promptTokens - cachedTokens) * inputPricePerMillion / 1_000_000.0
-        let cachedCost = Double(cachedTokens) * (inputPricePerMillion * 0.25) / 1_000_000.0 // Cached tokens typically 75% cheaper
-        let outputCost = Double(completionTokens) * outputPricePerMillion / 1_000_000.0
-        self.estimatedCostUSD = inputCost + cachedCost + outputCost
+        // Calculate estimated cost (guard against cachedTokens > promptTokens when providers report uncached prompt tokens)
+        let safeCached = max(0, min(cachedTokens, max(promptTokens, cachedTokens)))
+        let uncachedPrompt = max(0, promptTokens - safeCached)
+        let inputCost = Double(uncachedPrompt) * max(0.0, inputPricePerMillion) / 1_000_000.0
+        let cachedCost = Double(safeCached) * (max(0.0, inputPricePerMillion) * 0.25) / 1_000_000.0
+        let outputCost = Double(max(0, completionTokens)) * max(0.0, outputPricePerMillion) / 1_000_000.0
+        self.estimatedCostUSD = max(0.0, inputCost + cachedCost + outputCost)
     }
 }
 
@@ -347,23 +349,25 @@ final class AIUsageTracker: ObservableObject {
     
     /// Get formatted cost string
     func formattedSessionCost() -> String {
-        if sessionCostUSD < 0.01 {
-            return String(format: "$%.4f", sessionCostUSD)
-        } else if sessionCostUSD < 1.00 {
-            return String(format: "$%.3f", sessionCostUSD)
+        let safeCost = max(0.0, sessionCostUSD)
+        if safeCost < 0.01 {
+            return String(format: "$%.4f", safeCost)
+        } else if safeCost < 1.00 {
+            return String(format: "$%.3f", safeCost)
         } else {
-            return String(format: "$%.2f", sessionCostUSD)
+            return String(format: "$%.2f", safeCost)
         }
     }
     
     /// Get formatted token count
     func formattedSessionTokens() -> String {
-        if sessionTokens >= 1_000_000 {
-            return String(format: "%.1fM", Double(sessionTokens) / 1_000_000.0)
-        } else if sessionTokens >= 1_000 {
-            return String(format: "%.1fK", Double(sessionTokens) / 1_000.0)
+        let safeTokens = max(0, sessionTokens)
+        if safeTokens >= 1_000_000 {
+            return String(format: "%.1fM", Double(safeTokens) / 1_000_000.0)
+        } else if safeTokens >= 1_000 {
+            return String(format: "%.1fK", Double(safeTokens) / 1_000.0)
         } else {
-            return "\(sessionTokens)"
+            return "\(safeTokens)"
         }
     }
     
@@ -407,8 +411,8 @@ final class AIUsageTracker: ObservableObject {
             if let data = line.data(using: .utf8),
                let record = try? decoder.decode(TokenUsageRecord.self, from: data) {
                 records.append(record)
-                sessionTokens += record.totalTokens
-                sessionCostUSD += record.estimatedCostUSD
+                sessionTokens += max(0, record.totalTokens)
+                sessionCostUSD += max(0.0, record.estimatedCostUSD)
                 sessionRequests += 1
             }
         }

@@ -166,9 +166,24 @@ final class TeamIntegrationService: ObservableObject {
     }
 
     private func validate(_ rawURL: String, for integration: TeamIntegration) -> Bool {
-        guard let url = URL(string: rawURL), url.scheme == "https", url.host != nil else { return false }
-        if integration == .slack { return url.host == "hooks.slack.com" }
-        return true // Teams Workflow URLs use the tenant's Power Automate host.
+        guard let url = URL(string: rawURL),
+              url.scheme == "https",
+              let host = url.host?.lowercased(),
+              !host.isEmpty else { return false }
+        if host == "localhost" || host.hasPrefix("127.") || host.hasPrefix("10.") || host.hasPrefix("192.168.") || host == "::1" {
+            return false
+        }
+        if integration == .slack {
+            return host == "hooks.slack.com"
+        }
+        let allowedTeamsSuffixes = [
+            ".webhook.office.com",
+            ".office.com",
+            ".logic.azure.com",
+            ".powerplatform.com",
+            ".microsoft.com"
+        ]
+        return allowedTeamsSuffixes.contains { host.hasSuffix($0) }
     }
 
     private func taskSummary(event: TeamTaskEvent, task: TeamTask) -> String {

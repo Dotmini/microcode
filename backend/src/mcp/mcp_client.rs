@@ -48,10 +48,12 @@ impl McpClient {
 
         let mut child = Command::new(command)
             .args(args)
+            .env_remove("MICROCODE_LOCAL_API_TOKEN")
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::null())
             .current_dir(&self.workspace)
+            .kill_on_drop(true)
             .spawn()
             .map_err(|e| format!("Failed to spawn MCP server: {}", e))?;
 
@@ -93,8 +95,8 @@ impl McpClient {
 
         let _response = self.send_request("initialize", Some(params)).await?;
 
-        // Send initialized notification (no id, no response expected)
-        self.send_notification("initialized", None).await?;
+        // Send notifications/initialized per MCP specification (no id, no response expected)
+        self.send_notification("notifications/initialized", None).await?;
 
         Ok(())
     }
@@ -153,14 +155,20 @@ impl McpClient {
 
         let response = self.send_request("tools/call", Some(params)).await?;
 
+        // Check for tool-level error first
+        if let Some(true) = response["isError"].as_bool() {
+            if let Some(content) = response["content"].as_array() {
+                let texts: Vec<&str> = content.iter().filter_map(|c| c["text"].as_str()).collect();
+                if !texts.is_empty() {
+                    return Err(format!("Tool error: {}", texts.join("\n")));
+                }
+            }
+            return Err(format!("Tool error: {}", response));
+        }
+
         if let Some(content) = response["content"].as_array() {
             let texts: Vec<&str> = content.iter().filter_map(|c| c["text"].as_str()).collect();
             return Ok(texts.join("\n"));
-        }
-
-        // Check for error
-        if let Some(true) = response["isError"].as_bool() {
-            return Err(format!("Tool error: {}", response));
         }
 
         Ok(response.to_string())
@@ -214,7 +222,7 @@ impl McpClient {
 
     // MARK: - Transport Layer
 
-    /// Send a JSON-RPC request and wait for response
+    /// Send a JSON-RPC request and wait for response with matching request ID
     async fn send_request(
         &self,
         method: &str,
@@ -250,31 +258,53 @@ impl McpClient {
             return Err("No stdin connection".to_string());
         }
 
-        // Read response from stdout
+        // Read response from stdout, skipping interleaved notifications until matching ID arrives
         if let Some(lines_mutex) = &self.stdout_lines {
             let mut lines = lines_mutex.lock().await;
+            let deadline = tokio::time::Instant::now() + tokio::time::Duration::from_secs(30);
 
-            // Read lines until we get a response with matching id
-            let timeout = tokio::time::Duration::from_secs(30);
-            match tokio::time::timeout(timeout, lines.next_line()).await {
-                Ok(Ok(Some(line))) => {
-                    let response: JsonRpcResponse = serde_json::from_str(&line).map_err(|e| {
-                        format!(
-                            "Parse error: {} (line: {})",
-                            e,
-                            &line[..line.len().min(200)]
-                        )
-                    })?;
-
-                    if let Some(error) = response.error {
-                        return Err(format!("MCP error {}: {}", error.code, error.message));
-                    }
-
-                    Ok(response.result.unwrap_or(serde_json::Value::Null))
+            loop {
+                let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+                if remaining.is_zero() {
+                    return Err("MCP request timed out (30s)".to_string());
                 }
-                Ok(Ok(None)) => Err("MCP server closed connection".to_string()),
-                Ok(Err(e)) => Err(format!("Read error: {}", e)),
-                Err(_) => Err("MCP request timed out (30s)".to_string()),
+
+                match tokio::time::timeout(remaining, lines.next_line()).await {
+                    Ok(Ok(Some(line))) => {
+                        let trimmed = line.trim();
+                        if trimmed.is_empty() {
+                            continue;
+                        }
+                        let raw_val: serde_json::Value = match serde_json::from_str(trimmed) {
+                            Ok(v) => v,
+                            Err(_) => continue,
+                        };
+                        // Skip server-to-client notifications (messages without "id")
+                        let Some(resp_id) = raw_val.get("id").and_then(|v| v.as_u64()) else {
+                            continue;
+                        };
+                        if resp_id != id {
+                            continue;
+                        }
+
+                        let response: JsonRpcResponse = serde_json::from_value(raw_val).map_err(|e| {
+                            format!(
+                                "Parse error: {} (line: {})",
+                                e,
+                                &trimmed[..trimmed.len().min(200)]
+                            )
+                        })?;
+
+                        if let Some(error) = response.error {
+                            return Err(format!("MCP error {}: {}", error.code, error.message));
+                        }
+
+                        return Ok(response.result.unwrap_or(serde_json::Value::Null));
+                    }
+                    Ok(Ok(None)) => return Err("MCP server closed connection".to_string()),
+                    Ok(Err(e)) => return Err(format!("Read error: {}", e)),
+                    Err(_) => return Err("MCP request timed out (30s)".to_string()),
+                }
             }
         } else {
             Err("No stdout connection".to_string())
@@ -287,11 +317,13 @@ impl McpClient {
         method: &str,
         params: Option<serde_json::Value>,
     ) -> Result<(), String> {
-        let notif = serde_json::json!({
+        let mut notif = serde_json::json!({
             "jsonrpc": "2.0",
-            "method": method,
-            "params": params.unwrap_or(serde_json::Value::Null)
+            "method": method
         });
+        if let Some(p) = params {
+            notif["params"] = p;
+        }
 
         let msg = serde_json::to_string(&notif).map_err(|e| format!("Serialize error: {}", e))?;
 

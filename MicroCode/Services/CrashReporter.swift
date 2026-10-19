@@ -227,7 +227,11 @@ public final class CrashReporter: @unchecked Sendable {
     private static func append(_ text: String, to url: URL) {
         guard let data = text.data(using: .utf8) else { return }
         if let handle = try? FileHandle(forWritingTo: url) {
-            handle.seekToEndOfFile()
+            let size = handle.seekToEndOfFile()
+            if size > 512_000 {
+                // Prevent unbounded log growth on disk
+                try? handle.truncate(atOffset: 0)
+            }
             handle.write(data)
             try? handle.close()
         } else {
@@ -236,10 +240,22 @@ public final class CrashReporter: @unchecked Sendable {
     }
 
     private static func timestamp() -> String {
-        let f = DateFormatter()
-        f.locale = Locale(identifier: "en_US_POSIX")
-        f.dateFormat = "yyyy-MM-dd HH:mm:ss.SSS"
-        return f.string(from: Date())
+        var tv = timeval()
+        gettimeofday(&tv, nil)
+        var sec = tv.tv_sec
+        var tmVal = tm()
+        localtime_r(&sec, &tmVal)
+        let ms = Int(tv.tv_usec) / 1000
+        return String(
+            format: "%04d-%02d-%02d %02d:%02d:%02d.%03d",
+            Int(tmVal.tm_year) + 1900,
+            Int(tmVal.tm_mon) + 1,
+            Int(tmVal.tm_mday),
+            Int(tmVal.tm_hour),
+            Int(tmVal.tm_min),
+            Int(tmVal.tm_sec),
+            ms
+        )
     }
 
     private static func appVersion() -> String {

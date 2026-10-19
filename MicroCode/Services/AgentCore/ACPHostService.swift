@@ -16,7 +16,7 @@ import Combine
 @MainActor
 class ACPAgentSession: ObservableObject, Identifiable {
     let id: UUID
-    let config: ACPAgentConfig
+    private(set) var config: ACPAgentConfig
     
     @Published var state: ACPConnectionState = .disconnected
     @Published var events: [ACPStreamEvent] = []
@@ -37,10 +37,33 @@ class ACPAgentSession: ObservableObject, Identifiable {
     /// Continuation for streaming events to async consumers
     private var eventContinuation: AsyncStream<ACPStreamEvent>.Continuation?
     private var recentStderr: String = ""
+    private var codexCompletion: ACPTaskResult?
+    private var processGeneration = UUID()
+    private var jsonRpcIdCounter: Int = 1
+    private var pendingAcpPromptText: String?
+    private var activeWorkspacePath: String = ""
+    private var initializeReqId: Int?
+    private var sessionNewReqId: Int?
+    
+    /// Returns true if this agent configuration uses standard JSON-RPC 2.0 Agent Client Protocol (ACP v1)
+    var isStandardACPProtocol: Bool {
+        let cmdLower = config.command.lowercased()
+        let argsLower = config.arguments.map { $0.lowercased() }
+        return cmdLower.contains("-acp")
+            || cmdLower.hasSuffix("/acp")
+            || argsLower.contains("acp")
+            || argsLower.contains("--acp")
+            || argsLower.contains("--acp-server")
+            || argsLower.contains("--experimental-acp")
+    }
     
     init(config: ACPAgentConfig) {
         self.id = config.id
         self.config = config
+    }
+
+    func updatePermissionMode(_ mode: ACPPermissionMode) {
+        config.permissionMode = mode // applies to the next invocation; keep the thread ID
     }
     
     /// Async stream of events from the agent
@@ -54,9 +77,18 @@ class ACPAgentSession: ObservableObject, Identifiable {
     
     /// Terminate background process resources without closing the async continuation
     private func terminateCurrentProcess() {
+        processGeneration = UUID()
         stdoutPipe?.fileHandleForReading.readabilityHandler = nil
         stderrPipe?.fileHandleForReading.readabilityHandler = nil
-        process?.terminate()
+        if let proc = process, proc.isRunning {
+            let pid = proc.processIdentifier
+            proc.terminationHandler = nil
+            proc.terminate()
+            // Also terminate child process group if spawned via node/bun shim
+            if pid > 0 {
+                kill(-pid, SIGTERM)
+            }
+        }
         process = nil
         stdinPipe = nil
         stdoutPipe = nil
@@ -66,14 +98,42 @@ class ACPAgentSession: ObservableObject, Identifiable {
         stopTimer()
     }
     
+    /// Write a JSON-RPC 2.0 message to the agent's stdin pipe
+    private func writeJsonRpc(_ payload: [String: Any]) {
+        guard let pipe = stdinPipe,
+              let data = try? JSONSerialization.data(withJSONObject: payload) else { return }
+        var lineData = data
+        lineData.append(0x0A)
+        try? pipe.fileHandleForWriting.write(contentsOf: lineData)
+    }
+    
     /// Spawn the agent process and send a task
     func start(task: String, workspacePath: String, model: String? = nil) {
-        // Always clean up any existing process first
+        self.activeWorkspacePath = workspacePath
+        self.model = model
+        
+        // If already running a persistent JSON-RPC 2.0 ACP session with an established sessionId, send session/prompt directly!
+        if isStandardACPProtocol,
+           let proc = process, proc.isRunning,
+           let sid = sessionId, !sid.isEmpty {
+            streamingText = ""
+            state = .running(taskId: sid)
+            taskStartTime = Date()
+            startTimer()
+            let reqId = jsonRpcIdCounter
+            jsonRpcIdCounter += 1
+            writeJsonRpc(ACPStandardJsonRpcParser.buildSessionPromptRequest(id: reqId, sessionId: sid, text: task))
+            return
+        }
+        
+        // Clean up any existing one-shot process first
         terminateCurrentProcess()
+        let generation = processGeneration
         
         state = .connecting
-        self.model = model
         self.recentStderr = ""
+        self.codexCompletion = nil
+        self.pendingAcpPromptText = isStandardACPProtocol ? task : nil
         
         // Resolve and validate executable path before spawning
         guard let resolvedExecutable = ACPHostService.resolveExecutablePath(config.command) else {
@@ -105,12 +165,14 @@ class ACPAgentSession: ObservableObject, Identifiable {
         // Configure process based on agent type
         configureProcess(process, executablePath: resolvedExecutable, task: task, workspacePath: workspacePath)
         
-        process.standardInput = stdin
+        // Non-ACP CLI tools (`claude -p`, `agy --print`, `opencode run`, `codex exec`, `aider --message`)
+        // expect stdin EOF immediately when the prompt is passed via CLI arguments.
+        process.standardInput = isStandardACPProtocol ? stdin : FileHandle.nullDevice
         process.standardOutput = stdout
         process.standardError = stderr
         
         self.process = process
-        self.stdinPipe = stdin
+        self.stdinPipe = isStandardACPProtocol ? stdin : nil
         self.stdoutPipe = stdout
         self.stderrPipe = stderr
         self.ndjsonParser.reset()
@@ -124,8 +186,12 @@ class ACPAgentSession: ObservableObject, Identifiable {
         // Handle stdout — NDJSON stream
         stdout.fileHandleForReading.readabilityHandler = { [weak self] handle in
             let data = handle.availableData
-            guard !data.isEmpty else { return }
+            if data.isEmpty {
+                handle.readabilityHandler = nil
+                return
+            }
             DispatchQueue.main.async {
+                guard self?.processGeneration == generation else { return }
                 self?.handleStdout(data)
             }
         }
@@ -133,24 +199,47 @@ class ACPAgentSession: ObservableObject, Identifiable {
         // Handle stderr — debug/error output
         stderr.fileHandleForReading.readabilityHandler = { [weak self] handle in
             let data = handle.availableData
-            guard !data.isEmpty else { return }
-            if let text = String(data: data, encoding: .utf8) {
-                DispatchQueue.main.async {
-                    self?.recentStderr += text
-                    if let cur = self?.recentStderr, cur.count > 4000 {
-                        self?.recentStderr = String(cur.suffix(4000))
-                    }
-                    print("[ACP/\(self?.config.type.rawValue ?? "?")] stderr: \(text)")
+            if data.isEmpty {
+                handle.readabilityHandler = nil
+                return
+            }
+            let text = String(decoding: data, as: UTF8.self)
+            DispatchQueue.main.async {
+                guard self?.processGeneration == generation else { return }
+                self?.recentStderr += text
+                if let cur = self?.recentStderr, cur.count > 4000 {
+                    self?.recentStderr = String(cur.suffix(4000))
                 }
+                print("[ACP/\(self?.config.type.rawValue ?? "?")] stderr: \(text)")
             }
         }
         
         // Handle process termination
         process.terminationHandler = { [weak self] proc in
+            stdout.fileHandleForReading.readabilityHandler = nil
+            stderr.fileHandleForReading.readabilityHandler = nil
+            let remainingOut = stdout.fileHandleForReading.availableData
+            let remainingErr = stderr.fileHandleForReading.availableData
             DispatchQueue.main.async {
                 guard let self = self else { return }
+                guard self.processGeneration == generation else { return }
+                if !remainingOut.isEmpty {
+                    self.handleStdout(remainingOut)
+                }
+                for trailingJson in self.ndjsonParser.flushRemaining() {
+                    self.handleParsedJsonLine(trailingJson)
+                }
+                if !remainingErr.isEmpty {
+                    let errText = String(decoding: remainingErr, as: UTF8.self)
+                    self.recentStderr += errText
+                }
                 let exitCode = proc.terminationStatus
                 if exitCode == 0 {
+                    if case .error = self.state {
+                        self.stopTimer()
+                        self.eventContinuation?.finish()
+                        return
+                    }
                     if case .running = self.state {
                         self.state = .ready
                     }
@@ -158,7 +247,7 @@ class ACPAgentSession: ObservableObject, Identifiable {
                         sessionId: self.sessionId ?? "completed",
                         result: self.streamingText,
                         totalCostUSD: nil,
-                        tokensUsed: nil,
+                        tokensUsed: self.codexCompletion?.tokensUsed,
                         model: self.model
                     )))
                 } else {
@@ -166,6 +255,19 @@ class ACPAgentSession: ObservableObject, Identifiable {
                     let errMsg: String
                     if !snippet.isEmpty {
                         errMsg = "Process exited with code \(exitCode):\n\(snippet)"
+                    } else if !self.streamingText.isEmpty {
+                        // Emit partial streaming text if exit was non-zero but content was already produced
+                        self.state = .ready
+                        self.eventContinuation?.yield(.complete(ACPTaskResult(
+                            sessionId: self.sessionId ?? "completed",
+                            result: self.streamingText,
+                            totalCostUSD: nil,
+                            tokensUsed: nil,
+                            model: self.model
+                        )))
+                        self.stopTimer()
+                        self.eventContinuation?.finish()
+                        return
                     } else {
                         errMsg = "Process exited with code \(exitCode)"
                     }
@@ -179,10 +281,17 @@ class ACPAgentSession: ObservableObject, Identifiable {
         
         do {
             try process.run()
-            state = .running(taskId: UUID().uuidString)
+            state = isStandardACPProtocol ? .initializing : .running(taskId: UUID().uuidString)
             taskStartTime = Date()
             startTimer()
-            print("[ACP] Started \(config.type.displayName) agent (stdin pipe active)")
+            print("[ACP] Started \(config.type.displayName) agent (ACP v1 JSON-RPC: \(isStandardACPProtocol))")
+            
+            if isStandardACPProtocol {
+                let initId = jsonRpcIdCounter
+                jsonRpcIdCounter += 1
+                initializeReqId = initId
+                writeJsonRpc(ACPStandardJsonRpcParser.buildInitializeRequest(id: initId))
+            }
         } catch {
             let errMsg = "Failed to start \(config.type.displayName): \(error.localizedDescription)"
             state = .error(errMsg)
@@ -194,6 +303,9 @@ class ACPAgentSession: ObservableObject, Identifiable {
     
     /// Stop the agent process
     func stop() {
+        if isStandardACPProtocol, let sid = sessionId {
+            writeJsonRpc(ACPStandardJsonRpcParser.buildSessionCancelNotification(sessionId: sid))
+        }
         terminateCurrentProcess()
         state = .disconnected
         eventContinuation?.finish()
@@ -209,8 +321,14 @@ class ACPAgentSession: ObservableObject, Identifiable {
         pendingPermissions = []
     }
     
-    /// Send a follow-up message to an ongoing AGY session via stdin
+    /// Send a follow-up message to an ongoing ACP or AGY session via stdin
     func sendInput(_ message: String) {
+        if isStandardACPProtocol, let sid = sessionId {
+            let reqId = jsonRpcIdCounter
+            jsonRpcIdCounter += 1
+            writeJsonRpc(ACPStandardJsonRpcParser.buildSessionPromptRequest(id: reqId, sessionId: sid, text: message))
+            return
+        }
         guard let pipe = stdinPipe,
               config.type == .agy else { return }
         
@@ -223,12 +341,18 @@ class ACPAgentSession: ObservableObject, Identifiable {
         }
     }
     
-    /// Respond to a permission request
+    /// Respond to a permission request (supports both ACP v1 `session/request_permission` and legacy AGY)
     func respondToPermission(_ requestId: String, approved: Bool) {
         if let idx = pendingPermissions.firstIndex(where: { $0.id == requestId }) {
             pendingPermissions[idx].isApproved = approved
         }
-        // For agents that use stdin for permission responses
+        if isStandardACPProtocol {
+            let rpcId: Any = Int(requestId) ?? requestId
+            let optionId = approved ? "allow_once" : "reject_once"
+            writeJsonRpc(ACPStandardJsonRpcParser.buildPermissionResponse(requestId: rpcId, optionId: optionId))
+            return
+        }
+        // For legacy AGY agents that use stdin for permission responses
         if config.type == .agy, let pipe = stdinPipe {
             let response: [String: Any] = [
                 "type": "permission_response",
@@ -249,14 +373,17 @@ class ACPAgentSession: ObservableObject, Identifiable {
         process.executableURL = URL(fileURLWithPath: executablePath)
         process.currentDirectoryURL = URL(fileURLWithPath: workspacePath)
         
-        // Build isolated environment: purge only session IDs, preserving API keys and auth
+        // Build isolated environment: purge session IDs and internal backend tokens
         var env = ProcessInfo.processInfo.environment
+        env.removeValue(forKey: "MICROCODE_LOCAL_API_TOKEN")
         
-        // Only purge session/conversation tracking IDs to prevent crosstalk, keep API keys & auth intact!
+        // Purge session/conversation tracking IDs to prevent crosstalk, keep API keys & auth intact!
         let keysToRemove = env.keys.filter { key in
             key.contains("CONVERSATION_ID") ||
             key.contains("TRAJECTORY_ID") ||
             key.contains("SESSION_ID") ||
+            key == "CLAUDECODE" ||
+            key == "CLAUDE_CODE_ENTRYPOINT" ||
             key == "CHROME_DEVTOOLS_MCP_JS" ||
             key == "__CFBundleIdentifier"
         }
@@ -269,6 +396,7 @@ class ACPAgentSession: ObservableObject, Identifiable {
         let standardPaths = [
             "\(home)/.local/bin",
             "\(home)/.opencode/bin",
+            "\(home)/.codex/plugins/.plugin-appserver/codex-cli/bin",
             "/opt/homebrew/bin",
             "/usr/local/bin",
             "\(home)/.cargo/bin",
@@ -321,7 +449,13 @@ class ACPAgentSession: ObservableObject, Identifiable {
         }
         process.environment = env
         
-        // Build arguments based on agent type
+        // If launched in standard ACP 1.0 JSON-RPC mode, pass only the ACP flags (prompt is sent over JSON-RPC stdio)
+        if isStandardACPProtocol {
+            process.arguments = config.arguments
+            return
+        }
+        
+        // Build arguments based on agent type (CLI fallback mode)
         switch config.type {
         case .claudeCode:
             process.arguments = buildClaudeCodeArgs(task: task, model: self.model)
@@ -334,12 +468,10 @@ class ACPAgentSession: ObservableObject, Identifiable {
         case .custom:
             process.arguments = config.arguments + [task]
         case .codexEngine:
-            var args = config.arguments
-            if let model = self.model, !model.isEmpty {
-                args += ["--model", model]
-            }
-            args += [task]
-            process.arguments = args
+            process.arguments = CodexProcessArguments.build(
+                task: task, model: self.model, sessionID: sessionId,
+                permissionMode: config.permissionMode, extra: config.arguments
+            )
         case .zedEngine:
             var args = config.arguments
             if let model = self.model, !model.isEmpty {
@@ -355,17 +487,26 @@ class ACPAgentSession: ObservableObject, Identifiable {
         var args = [
             "-p", task,
             "--output-format", "stream-json",
+            "--include-partial-messages",
             "--verbose"
         ]
         
-        if let model = model, !model.isEmpty {
-            args += ["--model", model]
+        if let rawModel = model, !rawModel.isEmpty {
+            let lower = rawModel.lowercased()
+            let sanitizedModel: String?
+            if lower.contains("5-5") || lower.contains("argon") || lower.contains("gemini") || lower.contains("gpt") || lower.contains("/") {
+                // Non-Anthropic or AGY-exclusive model IDs are mapped to standard Claude CLI aliases
+                sanitizedModel = lower.contains("opus") ? "opus" : "sonnet"
+            } else {
+                sanitizedModel = rawModel
+            }
+            if let m = sanitizedModel {
+                args += ["--model", m]
+            }
         }
         
-        // Dangerously skip permissions if fullAuto
-        if config.permissionMode == .fullAuto {
-            args += ["--dangerously-skip-permissions"]
-        }
+        // Non-interactive `-p` mode requires permission bypass or full tool allowance so it does not stall on TTY approval prompts
+        args += ["--dangerously-skip-permissions"]
         
         // Resume session if available
         if let sid = sessionId {
@@ -382,11 +523,11 @@ class ACPAgentSession: ObservableObject, Identifiable {
     private func buildAGYArgs(task: String, model: String? = nil) -> [String] {
         var args = [
             "--output-format", "stream-json",
-            "--disable-slash-commands"
+            "--disable-slash-commands",
+            "--dangerously-skip-permissions"
         ]
-        if config.permissionMode == .fullAuto { args.append("--dangerously-skip-permissions") }
         
-        if let model = model, !model.isEmpty {
+        if let model = model, !model.isEmpty, !model.contains("/") {
             args += ["--model", model]
         }
         
@@ -409,7 +550,7 @@ class ACPAgentSession: ObservableObject, Identifiable {
         // Extra user-defined arguments
         args += config.arguments
         
-        args += ["--print", task]
+        args.append("--print=\(task)")
         
         return args
     }
@@ -418,21 +559,24 @@ class ACPAgentSession: ObservableObject, Identifiable {
     private func buildOpenCodeArgs(task: String, model: String? = nil) -> [String] {
         var args = [
             "run",
-            "--format", "json",
-            "--auto"
+            "--format", "json"
         ]
         
-        if let model = model, !model.isEmpty {
-            args += ["-m", model]
+        let resolvedModel: String
+        if let model = model, !model.isEmpty, model.contains("/"), !model.contains("nemotron-3.5-lightning-free") {
+            resolvedModel = model
+        } else {
+            resolvedModel = "opencode/glm-5.3-flash-free"
         }
+        args += ["-m", resolvedModel]
         
         // If continuing an established MicroCode ACP session, resume it:
-        if let sid = sessionId {
+        if let sid = sessionId, !sid.isEmpty, sid != "opencode", sid != "completed", sid != "unknown" {
             args += ["-s", sid]
         }
         
         args += [task]
-        args += config.arguments
+        args += config.arguments.filter { $0 != "--auto" }
         
         return args
     }
@@ -441,10 +585,12 @@ class ACPAgentSession: ObservableObject, Identifiable {
     private func buildAiderArgs(task: String) -> [String] {
         var args = [
             "--no-auto-commits",
-            "--no-git",
-            "--yes",
-            "--message", task
+            "--no-git"
         ]
+        if config.permissionMode == .fullAuto {
+            args.append("--yes")
+        }
+        args += ["--message", task]
         
         // Extra user-defined arguments
         args += config.arguments
@@ -461,30 +607,146 @@ class ACPAgentSession: ObservableObject, Identifiable {
     
     private func handleStdout(_ data: Data) {
         let jsonLines = ndjsonParser.feed(data)
-        
         for json in jsonLines {
-            let event: ACPStreamEvent?
-            
-            switch config.type {
-            case .claudeCode:
-                event = ClaudeCodeStreamParser.parse(json)
-            case .agy:
-                event = AGYStreamParser.parse(json)
-            case .openCode:
-                event = OpenCodeStreamParser.parse(json)
-            default:
-                // Generic parser — try Claude format first, then AGY, then OpenCode
-                event = ClaudeCodeStreamParser.parse(json) ?? AGYStreamParser.parse(json) ?? OpenCodeStreamParser.parse(json)
+            handleParsedJsonLine(json)
+        }
+    }
+    
+    private func handleParsedJsonLine(_ json: [String: Any]) {
+        // 1. Check if this is a standard ACP 1.0 JSON-RPC 2.0 frame
+        if (json["jsonrpc"] as? String) == "2.0" {
+            handleAcpJsonRpcFrame(json)
+            return
+        }
+        
+        // 2. Vendor-specific CLI NDJSON stream parsers
+        var parsedEvents: [ACPStreamEvent] = []
+        switch config.type {
+        case .claudeCode:
+            parsedEvents = ClaudeCodeStreamParser.parseAll(json)
+        case .agy:
+            if let ev = AGYStreamParser.parse(json) { parsedEvents = [ev] }
+        case .openCode:
+            if let ev = OpenCodeStreamParser.parse(json) { parsedEvents = [ev] }
+        case .codexEngine:
+            if let ev = CodexStreamParser.parse(json) { parsedEvents = [ev] }
+        default:
+            let claudeEvs = ClaudeCodeStreamParser.parseAll(json)
+            if !claudeEvs.isEmpty {
+                parsedEvents = claudeEvs
+            } else if let ev = AGYStreamParser.parse(json) ?? OpenCodeStreamParser.parse(json) {
+                parsedEvents = [ev]
             }
-            
-            guard let parsedEvent = event else { continue }
-            
-            // Process the event
+        }
+        
+        for parsedEvent in parsedEvents {
             processEvent(parsedEvent)
         }
     }
     
+    /// Handles bidirectional JSON-RPC 2.0 Agent Client Protocol (ACP v1) messages
+    private func handleAcpJsonRpcFrame(_ json: [String: Any]) {
+        // Handle incoming agent -> client requests (`fs/read_text_file`, `fs/write_text_file`, `session/request_permission`)
+        if let method = json["method"] as? String, let reqId = json["id"] {
+            let params = json["params"] as? [String: Any] ?? [:]
+            switch method {
+            case "fs/read_text_file":
+                guard let path = params["path"] as? String else {
+                    writeJsonRpc(["jsonrpc": "2.0", "id": reqId, "error": ["code": -32602, "message": "Missing path"]])
+                    return
+                }
+                let resolved = resolveWorkspacePath(path)
+                guard isPathInsideWorkspace(resolved) else {
+                    writeJsonRpc(["jsonrpc": "2.0", "id": reqId, "error": ["code": -32602, "message": "Path outside workspace"]])
+                    return
+                }
+                do {
+                    let content = try String(contentsOfFile: resolved, encoding: .utf8)
+                    writeJsonRpc(["jsonrpc": "2.0", "id": reqId, "result": ["content": content]])
+                } catch {
+                    writeJsonRpc(["jsonrpc": "2.0", "id": reqId, "error": ["code": -32000, "message": error.localizedDescription]])
+                }
+                return
+                
+            case "fs/write_text_file":
+                guard let path = params["path"] as? String,
+                      let content = params["content"] as? String else {
+                    writeJsonRpc(["jsonrpc": "2.0", "id": reqId, "error": ["code": -32602, "message": "Missing path or content"]])
+                    return
+                }
+                let resolved = resolveWorkspacePath(path)
+                guard isPathInsideWorkspace(resolved) else {
+                    writeJsonRpc(["jsonrpc": "2.0", "id": reqId, "error": ["code": -32602, "message": "Path outside workspace"]])
+                    return
+                }
+                do {
+                    let url = URL(fileURLWithPath: resolved)
+                    try FileManager.default.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
+                    try content.write(to: url, atomically: true, encoding: .utf8)
+                    writeJsonRpc(["jsonrpc": "2.0", "id": reqId, "result": [:] as [String: Any]])
+                } catch {
+                    writeJsonRpc(["jsonrpc": "2.0", "id": reqId, "error": ["code": -32000, "message": error.localizedDescription]])
+                }
+                return
+                
+            case "session/request_permission":
+                if config.permissionMode == .fullAuto {
+                    let options = (params["options"] as? [[String: Any]]) ?? []
+                    let allowId = options.first(where: { ($0["kind"] as? String)?.hasPrefix("allow") == true })?["optionId"] as? String ?? "allow_once"
+                    writeJsonRpc(ACPStandardJsonRpcParser.buildPermissionResponse(requestId: reqId, optionId: allowId))
+                    return
+                }
+            default:
+                break
+            }
+        }
+        
+        // Progress handshake state machine (`initialize` -> `session/new` -> `session/prompt`)
+        if let respId = json["id"] as? Int, let result = json["result"] as? [String: Any] {
+            if respId == initializeReqId {
+                let newSessId = jsonRpcIdCounter
+                jsonRpcIdCounter += 1
+                sessionNewReqId = newSessId
+                let cwd = activeWorkspacePath.isEmpty ? FileManager.default.currentDirectoryPath : activeWorkspacePath
+                writeJsonRpc(ACPStandardJsonRpcParser.buildSessionNewRequest(id: newSessId, cwd: cwd))
+                return
+            } else if respId == sessionNewReqId, let sid = result["sessionId"] as? String {
+                self.sessionId = sid
+                self.state = .running(taskId: sid)
+                processEvent(.sessionInit(ACPSessionInit(sessionId: sid, model: self.model, tools: [], capabilities: ["acp-v1"])))
+                if let prompt = pendingAcpPromptText {
+                    pendingAcpPromptText = nil
+                    let promptId = jsonRpcIdCounter
+                    jsonRpcIdCounter += 1
+                    writeJsonRpc(ACPStandardJsonRpcParser.buildSessionPromptRequest(id: promptId, sessionId: sid, text: prompt))
+                }
+                return
+            }
+        }
+        
+        for ev in ACPStandardJsonRpcParser.parseEvents(json) {
+            processEvent(ev)
+        }
+    }
+    
+    private func resolveWorkspacePath(_ path: String) -> String {
+        if path.hasPrefix("/") { return path }
+        let base = activeWorkspacePath.isEmpty ? FileManager.default.currentDirectoryPath : activeWorkspacePath
+        return URL(fileURLWithPath: base).appendingPathComponent(path).standardizedFileURL.path
+    }
+    
+    private func isPathInsideWorkspace(_ targetPath: String) -> Bool {
+        guard !activeWorkspacePath.isEmpty else { return true }
+        let wsURL = URL(fileURLWithPath: activeWorkspacePath).standardizedFileURL.resolvingSymlinksInPath()
+        let targetURL = URL(fileURLWithPath: targetPath).standardizedFileURL.resolvingSymlinksInPath()
+        return targetURL.path == wsURL.path || targetURL.path.hasPrefix(wsURL.path + "/")
+    }
+    
     private func processEvent(_ event: ACPStreamEvent) {
+        if config.type == .codexEngine, case .complete(let result) = event {
+            codexCompletion = result
+            return // emit completion once, after the process actually exits
+        }
         events.append(event)
         eventContinuation?.yield(event)
         
@@ -505,16 +767,19 @@ class ACPAgentSession: ObservableObject, Identifiable {
             pendingPermissions.append(req)
             
         case .error(let msg):
+            state = .error(msg)
             print("[ACP/\(config.type.rawValue)] Error: \(msg)")
             
         case .complete(let result):
-            sessionId = result.sessionId
+            if !result.sessionId.hasPrefix("acp_turn_") && result.sessionId != "completed" && result.sessionId != "unknown" {
+                sessionId = result.sessionId
+            }
             state = .ready
             stopTimer()
             
         case .sessionInit(let init_):
             sessionId = init_.sessionId
-            model = init_.model
+            if let reportedModel = init_.model { model = reportedModel }
             state = .running(taskId: init_.sessionId)
             
         case .systemInfo, .progress:
@@ -555,6 +820,15 @@ class ACPHostService: ObservableObject {
     
     init() {
         loadConfigs()
+        NotificationCenter.default.addObserver(
+            forName: NSApplication.willTerminateNotification,
+            object: nil,
+            queue: .main
+        ) { [weak self] _ in
+            Task { @MainActor in
+                self?.stopActiveAgent()
+            }
+        }
         Task { @MainActor in
             self.detectInstalledAgents()
         }
@@ -564,6 +838,11 @@ class ACPHostService: ObservableObject {
     var activeSession: ACPAgentSession? {
         guard let id = activeAgentId else { return nil }
         return sessions[id]
+    }
+    
+    /// Whether any ACP external agent session is currently executing
+    var isAnySessionRunning: Bool {
+        sessions.values.contains { $0.state.isActive }
     }
     
     // MARK: - Agent Detection
@@ -578,19 +857,28 @@ class ACPHostService: ObservableObject {
     }
     
     /// Resolve command name or path to a verified executable path on disk
-    static func resolveExecutablePath(_ command: String) -> String? {
+    nonisolated static func resolveExecutablePath(_ command: String) -> String? {
         let trimmed = command.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { return nil }
         
-        // If already an absolute path, verify it is an executable file
+        // If already an absolute path, verify it is an executable file; if stale, fallback to basename lookup
         if trimmed.hasPrefix("/") {
-            return FileManager.default.isExecutableFile(atPath: trimmed) ? trimmed : nil
+            if FileManager.default.isExecutableFile(atPath: trimmed) {
+                return trimmed
+            }
+            let basename = URL(fileURLWithPath: trimmed).lastPathComponent
+            if !basename.isEmpty, basename != trimmed {
+                return resolveExecutablePath(basename)
+            }
+            return nil
         }
         
         let home = FileManager.default.homeDirectoryForCurrentUser.path
         let checkPaths = [
             "\(home)/.local/bin/\(trimmed)",
             "\(home)/.opencode/bin/\(trimmed)",
+            "\(home)/.codex/plugins/.plugin-appserver/codex-cli/bin/\(trimmed)",
+            "\(home)/.codex/plugins/.plugin-appserver/codex-cli/CodexCLI.app/Contents/MacOS/\(trimmed)",
             "/opt/homebrew/bin/\(trimmed)",
             "/usr/local/bin/\(trimmed)",
             "\(home)/.cargo/bin/\(trimmed)",
@@ -632,7 +920,12 @@ class ACPHostService: ObservableObject {
         if let path = Self.resolveExecutablePath(command) {
             detectedAgents[type] = path
             print("[ACP] Detected \(type.displayName) at \(path)")
-            if !registeredConfigs.contains(where: { $0.type == type }) {
+            if let existingIdx = registeredConfigs.firstIndex(where: { $0.type == type }) {
+                if !FileManager.default.isExecutableFile(atPath: registeredConfigs[existingIdx].command) {
+                    registeredConfigs[existingIdx].command = path
+                    saveConfigs()
+                }
+            } else {
                 let cfg = ACPAgentConfig.defaultConfig(for: type, command: path)
                 registeredConfigs.append(cfg)
                 saveConfigs()
@@ -651,6 +944,14 @@ class ACPHostService: ObservableObject {
         } else {
             registeredConfigs.append(config)
         }
+        saveConfigs()
+    }
+
+    func setPermissionMode(_ mode: ACPPermissionMode, for id: UUID) {
+        guard let index = registeredConfigs.firstIndex(where: { $0.id == id }) else { return }
+        guard registeredConfigs[index].permissionMode != mode else { return }
+        registeredConfigs[index].permissionMode = mode
+        sessions[id]?.updatePermissionMode(mode)
         saveConfigs()
     }
     
@@ -678,12 +979,15 @@ class ACPHostService: ObservableObject {
         // Check if already registered
         if let existing = registeredConfigs.first(where: { $0.type == type }) {
             var updated = existing
+            if !FileManager.default.isExecutableFile(atPath: updated.command) {
+                updated.command = path
+            }
             if let effort = effort, !effort.isEmpty, effort.lowercased() != "agent default" {
                 var args = updated.arguments.filter { $0 != "--effort" && $0 != "low" && $0 != "medium" && $0 != "high" }
                 args += ["--effort", effort.lowercased()]
                 updated.arguments = args
-                registerAgent(updated)
             }
+            registerAgent(updated)
             activeAgentId = updated.id
             return updated
         }
@@ -758,7 +1062,13 @@ class ACPHostService: ObservableObject {
     
     private func loadConfigs() {
         if let data = UserDefaults.standard.data(forKey: configKey),
-           let configs = try? JSONDecoder().decode([ACPAgentConfig].self, from: data) {
+           var configs = try? JSONDecoder().decode([ACPAgentConfig].self, from: data) {
+            for i in configs.indices {
+                if !FileManager.default.isExecutableFile(atPath: configs[i].command),
+                   let healed = Self.resolveExecutablePath(configs[i].type.defaultCommand) {
+                    configs[i].command = healed
+                }
+            }
             registeredConfigs = configs
         }
     }

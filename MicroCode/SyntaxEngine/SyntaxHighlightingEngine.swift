@@ -500,19 +500,24 @@ public final class SyntaxHighlightingEngine: @unchecked Sendable {
     
     /// Currently running highlight task
     private var currentHighlightTask: Task<Void, Never>?
+    /// Currently running chunked attribute-application task on MainActor
+    private var currentApplyTask: Task<Void, Never>?
     
     /// Cancel any in-flight highlighting task
     public func cancelHighlighting() {
         currentHighlightTask?.cancel()
         currentHighlightTask = nil
+        currentApplyTask?.cancel()
+        currentApplyTask = nil
     }
     
     /// Asynchronously apply highlighting to an existing NSTextStorage.
     /// Performs lexing on a background thread and updates attributes on the main thread.
     @MainActor
     public func applyHighlightingAsync(to textStorage: NSTextStorage, fontSize: CGFloat, font: NSFont? = nil, completion: (@MainActor @Sendable () -> Void)? = nil) {
-        // Cancel previous task to prevent "task explosion" and race conditions
+        // Cancel previous tasks to prevent "task explosion" and race conditions
         currentHighlightTask?.cancel()
+        currentApplyTask?.cancel()
         
         lock.lock()
         let content = documentContent
@@ -535,13 +540,10 @@ public final class SyntaxHighlightingEngine: @unchecked Sendable {
         let lineCount = content.filter({ $0 == "\n" }).count
         if lineCount < 150 && content.utf16.count < 6000 {
             // SYNC PATH (Zero Flash) — small files only
-            CrashReporter.shared.breadcrumb("Engine.applyHighlightingAsync sync: retokenize lang=\(currentLanguage) lines=\(lineCount)")
             let tokens = lexer.retokenizeDirtyRegions(in: content)
-            CrashReporter.shared.breadcrumb("Engine.applyHighlightingAsync sync: applyTokens count=\(tokens.count)")
-             self.applyTokens(tokens, to: textStorage, fontSize: fontSize, font: font)
-            CrashReporter.shared.breadcrumb("Engine.applyHighlightingAsync sync: done")
-             completion?()
-             return
+            self.applyTokens(tokens, to: textStorage, fontSize: fontSize, font: font, expectedVersion: version)
+            completion?()
+            return
         }
         
         // ASYNC PATH (Large Docs)
@@ -581,7 +583,7 @@ public final class SyntaxHighlightingEngine: @unchecked Sendable {
                 self.lock.unlock()
                 
                 if isStillValid {
-                    self.applyTokens(tokens, to: textStorage, fontSize: fontSize, font: font)
+                    self.applyTokens(tokens, to: textStorage, fontSize: fontSize, font: font, expectedVersion: version)
                 }
             }
         }
@@ -591,10 +593,10 @@ public final class SyntaxHighlightingEngine: @unchecked Sendable {
     /// CRITICAL: Must be called on the main thread.
     /// Uses chunking to prevent Main Thread blocking on large updates.
     @MainActor
-    private func applyTokens(_ tokens: [SyntaxToken], to textStorage: NSTextStorage, fontSize: CGFloat, font: NSFont?) {
+    private func applyTokens(_ tokens: [SyntaxToken], to textStorage: NSTextStorage, fontSize: CGFloat, font: NSFont?, expectedVersion: Int? = nil) {
         assert(Thread.isMainThread, "applyTokens must be called on the main thread")
+        currentApplyTask?.cancel()
         
-        let fgColor = themeManager.editorForegroundColor
         let defaultFont = font ?? NSFont.monospacedSystemFont(ofSize: fontSize, weight: .regular)
         
         // CHUNK SIZE: Apply 2000 tokens at a time to keep frame rate high
@@ -609,23 +611,29 @@ public final class SyntaxHighlightingEngine: @unchecked Sendable {
         }
         
         // Large update: Chunk it asynchronously on Main Actor to allow UI events to interleave
-        Task { @MainActor in
+        currentApplyTask = Task { @MainActor [weak self] in
+            guard let self = self else { return }
             var startIndex = 0
             while startIndex < tokens.count {
-                // Check if document changed underneath us or task cancelled
                 if Task.isCancelled { return }
+                if let expectedVersion = expectedVersion {
+                    self.lock.lock()
+                    let valid = (self.currentVersion == expectedVersion && self.documentContent.utf16.count == textStorage.length)
+                    self.lock.unlock()
+                    if !valid { return }
+                }
                 
                 let endIndex = min(startIndex + chunkSize, tokens.count)
                 let chunk = Array(tokens[startIndex..<endIndex])
                 
                 textStorage.beginEditing()
-                applyTokensBatch(chunk, to: textStorage, defaultFont: defaultFont, fontSize: fontSize)
+                self.applyTokensBatch(chunk, to: textStorage, defaultFont: defaultFont, fontSize: fontSize)
                 textStorage.endEditing()
                 
                 startIndex += chunkSize
                 
                 // Allow UI to breathe
-                await Task.yield() 
+                await Task.yield()
             }
         }
     }
@@ -633,26 +641,30 @@ public final class SyntaxHighlightingEngine: @unchecked Sendable {
     private func applyTokensBatch(_ tokens: [SyntaxToken], to textStorage: NSTextStorage, defaultFont: NSFont, fontSize: CGFloat) {
          // NOTE: Callers (applyTokens / applyHighlighting) are responsible for wrapping in beginEditing/endEditing.
          // Do NOT call beginEditing/endEditing here to avoid double-nesting which triggers NSTextStorage assertions.
+         let boldFont = NSFont(descriptor: defaultFont.fontDescriptor.withSymbolicTraits(.bold), size: fontSize) ?? defaultFont
+         let italicFont = NSFont(descriptor: defaultFont.fontDescriptor.withSymbolicTraits(.italic), size: fontSize) ?? defaultFont
+         let boldItalicFont = NSFont(descriptor: defaultFont.fontDescriptor.withSymbolicTraits([.bold, .italic]), size: fontSize) ?? defaultFont
+         let storageLength = textStorage.length
+         let forceUpdateSmall = storageLength < 500
          
          for token in tokens {
              let nsRange = token.range.nsRange
              
              // Ensure range is within bounds
-             if nsRange.location + nsRange.length <= textStorage.length {
+             if nsRange.location >= 0 && nsRange.length > 0 && nsRange.location + nsRange.length <= storageLength {
+                 let targetColor = themeManager.color(for: token.type)
                  var attributes: [NSAttributedString.Key: Any] = [
-                     .foregroundColor: themeManager.color(for: token.type),
+                     .foregroundColor: targetColor,
                      .ligature: 0
                  ]
                  
                  let style = themeManager.style(for: token.type)
-                 if style.isBold || style.isItalic {
-                     var traits: NSFontDescriptor.SymbolicTraits = []
-                     if style.isBold { traits.insert(.bold) }
-                     if style.isItalic { traits.insert(.italic) }
-                     
-                     let descriptor = defaultFont.fontDescriptor.withSymbolicTraits(traits)
-                     let styledFont = NSFont(descriptor: descriptor, size: fontSize) ?? defaultFont
-                     attributes[.font] = styledFont
+                 if style.isBold && style.isItalic {
+                     attributes[.font] = boldItalicFont
+                 } else if style.isBold {
+                     attributes[.font] = boldFont
+                 } else if style.isItalic {
+                     attributes[.font] = italicFont
                  }
                  
                  if style.isUnderline {
@@ -660,14 +672,11 @@ public final class SyntaxHighlightingEngine: @unchecked Sendable {
                  }
                  
                  // Optimization: Skip update if color matches (Prevent Flicker)
-                 // BUT: For small files (New Files), we force update to ensure consistency and prevent "White Flash" if defaults are wrong.
-                 if textStorage.length < 500 {
+                 if forceUpdateSmall {
                      textStorage.addAttributes(attributes, range: nsRange)
                  } else {
                      let currentAttrs = textStorage.attributes(at: nsRange.location, effectiveRange: nil)
                      let currentColor = currentAttrs[.foregroundColor] as? NSColor
-                     let targetColor = attributes[.foregroundColor] as? NSColor
-                     
                      if currentColor != targetColor {
                          textStorage.addAttributes(attributes, range: nsRange)
                      }
@@ -767,21 +776,55 @@ public final class SyntaxHighlightingEngine: @unchecked Sendable {
     
     // MARK: - Convenience Methods
     
-    /// Quick highlight for a single string (non-incremental)
+    private static let quickHighlightLock = NSLock()
+    private static let sharedQuickEngine = SyntaxHighlightingEngine()
+    private static var swiftUIAttributedCache: [Int: AttributedString] = [:]
+    
+    /// Quick highlight for a single string (non-incremental), reusing a shared engine instance.
     public static func highlight(
         _ code: String,
         language: String,
         fontSize: CGFloat,
         isDark: Bool = true
     ) -> NSAttributedString {
-        let engine = SyntaxHighlightingEngine()
+        quickHighlightLock.lock()
+        defer { quickHighlightLock.unlock() }
         
-        // Set theme
-        engine.themeManager.setActiveTheme(isDark ? "default-dark" : "default-light")
+        sharedQuickEngine.themeManager.setActiveTheme(isDark ? "dark" : "light")
+        sharedQuickEngine.setDocument(code, language: language)
+        return sharedQuickEngine.highlightedAttributedString(fontSize: fontSize)
+    }
+    
+    /// Cached SwiftUI AttributedString for read-only code blocks (e.g. AI Chat NativeCodeBlockView).
+    public static func cachedSwiftUIAttributedString(
+        _ code: String,
+        language: String,
+        fontSize: CGFloat,
+        isDark: Bool = true
+    ) -> AttributedString {
+        var hasher = Hasher()
+        hasher.combine(code)
+        hasher.combine(language.lowercased())
+        hasher.combine(Int(fontSize * 10))
+        hasher.combine(isDark)
+        let key = hasher.finalize()
         
-        // Set document and highlight
-        engine.setDocument(code, language: language)
-        return engine.highlightedAttributedString(fontSize: fontSize)
+        quickHighlightLock.lock()
+        if let cached = swiftUIAttributedCache[key] {
+            quickHighlightLock.unlock()
+            return cached
+        }
+        
+        sharedQuickEngine.themeManager.setActiveTheme(isDark ? "dark" : "light")
+        sharedQuickEngine.setDocument(code, language: language)
+        let nsAttr = sharedQuickEngine.highlightedAttributedString(fontSize: fontSize)
+        let swiftAttr = (try? AttributedString(nsAttr, including: \.appKit)) ?? AttributedString(code)
+        if swiftUIAttributedCache.count > 256 {
+            swiftUIAttributedCache.removeAll(keepingCapacity: true)
+        }
+        swiftUIAttributedCache[key] = swiftAttr
+        quickHighlightLock.unlock()
+        return swiftAttr
     }
 }
 
@@ -827,10 +870,27 @@ class NoIntrinsicScrollView: NSScrollView {
         let w = contentSize.width
         let h = contentSize.height
         guard w > 1 else { return }
+        var didResize = false
         if abs(tv.frame.width - w) > 0.5 {
             tv.setFrameSize(NSSize(width: w, height: max(tv.frame.height, h)))
+            didResize = true
         } else if tv.frame.height < h {
             tv.setFrameSize(NSSize(width: tv.frame.width, height: h))
+            didResize = true
+        }
+        if let tc = tv.textContainer {
+            let insetW = tv.textContainerInset.width * 2
+            let targetContainerWidth = max(1, w - insetW)
+            if abs(tc.containerSize.width - targetContainerWidth) > 1.0 {
+                tc.containerSize = NSSize(width: targetContainerWidth, height: .greatestFiniteMagnitude)
+                didResize = true
+            }
+            if didResize {
+                tv.layoutManager?.ensureLayout(for: tc)
+                tv.needsDisplay = true
+                contentView.needsDisplay = true
+                lineNumberGutter?.needsDisplay = true
+            }
         }
     }
 
@@ -935,13 +995,16 @@ public struct SyntaxHighlightedCodeView: NSViewRepresentable {
         // ─────────────────────────────────────────────────────────────────
         CrashReporter.shared.breadcrumb("SHCV.makeNSView lang=\(language) start id=\(editorID ?? "nil")")
 
-        // REUSE: SwiftUI keeps recreating this representable's NSView (identity
-        // churn). Return the SAME cached scroll view (it already holds the
-        // content + ruler) so a fresh empty view never replaces it on screen.
+        // REUSE: Only reuse a cached scroll view if it is NOT currently mounted
+        // in an active superview/window. Handing the same NSView instance to
+        // two live AppKitPlatformViewHosts simultaneously corrupts AppKit's view
+        // hierarchy and causes two Coordinators to fight over the same textView.
         if let id = editorID, let cached = Self.viewCache[id],
+           cached.superview == nil, cached.window == nil,
            let tv = cached.documentView as? NSTextView {
             let engine = SyntaxHighlightingEngine()
             context.coordinator.engine = engine
+            context.coordinator.textView = tv
             tv.delegate = context.coordinator
             tv.textStorage?.delegate = context.coordinator
             CrashReporter.shared.breadcrumb("SHCV.makeNSView REUSE id=\(id) tsLen=\(tv.textStorage?.length ?? -1)")
@@ -1227,68 +1290,6 @@ public struct SyntaxHighlightedCodeView: NSViewRepresentable {
             tv.scrollRangeToVisible(NSRange(location: finalIndex, length: 0))
         }
 
-        /// One-shot render self-test. Runs ~0.7s after content is applied and
-        /// the view is in a window, when AppKit has actually drawn. Captures
-        /// the concrete reason glyphs are invisible: occluding sibling views,
-        /// layer/alpha/mask, clip bounds vs glyph used-rect, container metrics.
-        func scheduleRenderSelfTest(_ textView: NSTextView, _ scrollView: NSScrollView) {
-            guard !didRenderSelfTest else { return }
-            didRenderSelfTest = true
-            DispatchQueue.main.asyncAfter(deadline: .now() + 0.7) { [weak self, weak textView, weak scrollView] in
-                guard let self = self, !self.isInvalidated,
-                      let tv = textView, let sv = scrollView else { return }
-                func r(_ rc: NSRect) -> String { "\(Int(rc.origin.x)),\(Int(rc.origin.y)) \(Int(rc.width))x\(Int(rc.height))" }
-
-                var lines: [String] = ["=== RENDER SELF-TEST id=\(self.parent.editorID ?? "nil") ==="]
-                lines.append("win=\(tv.window != nil) winVisible=\(tv.window?.isVisible ?? false) occ=\(tv.window?.occlusionState.contains(.visible) ?? false)")
-                lines.append("tv.frame=\(r(tv.frame)) bounds=\(r(tv.bounds)) flipped=\(tv.isFlipped) hidden=\(tv.isHidden) alpha=\(tv.alphaValue) opaque=\(tv.isOpaque)")
-                lines.append("tv.wantsLayer=\(tv.wantsLayer) layer=\(tv.layer != nil) layerOpacity=\(tv.layer?.opacity ?? -1) layerHidden=\(tv.layer?.isHidden ?? false) layerMask=\(tv.layer?.mask != nil) layerBounds=\(tv.layer.map { r($0.bounds) } ?? "nil")")
-                lines.append("tv.string.count=\(tv.string.count) prefix=\(tv.string.prefix(24).replacingOccurrences(of: "\n", with: "\\n"))")
-                if let lm = tv.layoutManager, let tc = tv.textContainer {
-                    let glyphs = lm.numberOfGlyphs
-                    let used = lm.usedRect(for: tc)
-                    let gr = lm.glyphRange(for: tc)
-                    lm.ensureLayout(for: tc)
-                    let firstFrag = glyphs > 0 ? lm.lineFragmentRect(forGlyphAt: 0, effectiveRange: nil) : .zero
-                    lines.append("glyphs=\(glyphs) usedRect=\(r(used)) glyphRange=\(gr) firstFrag=\(r(firstFrag)) inset=\(tv.textContainerInset) origin=\(tv.textContainerOrigin) container=\(tc.size) pad=\(tc.lineFragmentPadding) widthTracks=\(tc.widthTracksTextView)")
-                }
-                if let clip = sv.contentView as NSClipView? {
-                    lines.append("clip=\(type(of: clip)) bounds=\(r(clip.bounds)) docVisible=\(r(sv.documentVisibleRect)) clipDraws=\(clip.drawsBackground) svDraws=\(sv.drawsBackground) doc==tv:\(sv.documentView === tv)")
-                }
-                // Ancestor chain — detect a covering/opaque/zero-alpha parent.
-                var v: NSView? = tv
-                var depth = 0
-                while let cur = v, depth < 12 {
-                    lines.append("  ANC[\(depth)] \(type(of: cur)) frame=\(r(cur.frame)) hidden=\(cur.isHidden) alpha=\(cur.alphaValue) layerOpacity=\(cur.layer?.opacity ?? -1) subviews=\(cur.superview?.subviews.count ?? 0)")
-                    v = cur.superview; depth += 1
-                }
-                // Occlusion: siblings drawn AFTER our branch overlapping the tv.
-                if let win = tv.window, let content = win.contentView {
-                    let tvInWin = tv.convert(tv.bounds, to: content)
-                    var occluders: [String] = []
-                    func scan(_ view: NSView, _ path: String) {
-                        for (i, sub) in view.subviews.enumerated() {
-                            // Skip tv itself, ancestors of tv, and views inside tv.
-                            let isAncestorOfTV = tv.isDescendant(of: sub)
-                            let isInsideTV = sub.isDescendant(of: tv)
-                            let f = sub.convert(sub.bounds, to: content)
-                            if sub !== tv, !isAncestorOfTV, !isInsideTV,
-                               !sub.isHidden, sub.alphaValue > 0.01,
-                               f.intersects(tvInWin), f.width > 50, f.height > 50 {
-                                let hasBG = sub.layer?.backgroundColor != nil
-                                occluders.append("\(path)[\(i)] \(type(of: sub)) f=\(r(f)) opaque=\(sub.isOpaque) bg=\(hasBG) a=\(sub.alphaValue)")
-                            }
-                            if !isInsideTV { scan(sub, "\(path)[\(i)]") }
-                        }
-                    }
-                    scan(content, "win")
-                    lines.append("tvInWin=\(r(tvInWin)) possibleOccluders(\(occluders.count)): \(occluders.prefix(8).joined(separator: " | "))")
-                }
-                CrashReporter.shared.breadcrumb(lines.joined(separator: "\n"))
-                tv.needsDisplay = true
-            }
-        }
-
         /// Single, synchronous code path that configures geometry/theme/font
         /// and pushes the (highlighted) text into the view. Shared by
         /// makeNSView (force=true) and updateNSView (force=false). No async
@@ -1417,13 +1418,22 @@ public struct SyntaxHighlightedCodeView: NSViewRepresentable {
                 // Single highlight pass. The debounced pass is ONLY for live
                 // typing (Coordinator.textDidChange); doing both here doubled
                 // every retokenization and compounded the open-file freeze.
-                engine.applyHighlightingAsync(to: ts, fontSize: p.fontSize, font: textView.font)
+                engine.applyHighlightingAsync(to: ts, fontSize: p.fontSize, font: textView.font) { [weak textView, weak scrollView] in
+                    if let tv = textView, let tc = tv.textContainer {
+                        tv.layoutManager?.ensureLayout(for: tc)
+                        tv.needsDisplay = true
+                    }
+                    scrollView?.contentView.needsDisplay = true
+                    (scrollView as? NoIntrinsicScrollView)?.lineNumberGutter?.needsDisplay = true
+                }
             }
 
-            let glyphs = textView.layoutManager?.numberOfGlyphs ?? -1
-            CrashReporter.shared.breadcrumb("SHCV.applyContent force=\(force) lang=\(p.language) tvFrame=\(Int(textView.frame.width))x\(Int(textView.frame.height)) content=\(Int(scrollView.contentSize.width))x\(Int(scrollView.contentSize.height)) glyphs=\(glyphs) tsLen=\(textView.textStorage?.length ?? -1) draws=\(textView.drawsBackground) hidden=\(textView.isHidden) win=\(textView.window != nil)")
-
-            scheduleRenderSelfTest(textView, scrollView)
+            if let tc = textView.textContainer {
+                textView.layoutManager?.ensureLayout(for: tc)
+            }
+            textView.needsDisplay = true
+            scrollView.contentView.needsDisplay = true
+            (scrollView as? NoIntrinsicScrollView)?.lineNumberGutter?.needsDisplay = true
         }
 
         func configureTextGeometry(for textView: NSTextView, in scrollView: NSScrollView) {
@@ -1446,12 +1456,6 @@ public struct SyntaxHighlightedCodeView: NSViewRepresentable {
             textView.maxSize = NSSize(width: CGFloat.greatestFiniteMagnitude,
                                       height: CGFloat.greatestFiniteMagnitude)
 
-            if let container = textView.textContainer {
-                container.widthTracksTextView = true
-                container.containerSize = NSSize(width: targetWidth,
-                                                 height: CGFloat.greatestFiniteMagnitude)
-            }
-
             // Make the document view fill the scroll view's width so text is
             // immediately visible. Height only ever grows (the layout manager
             // owns the real height once glyphs are laid out).
@@ -1461,9 +1465,14 @@ public struct SyntaxHighlightedCodeView: NSViewRepresentable {
                 abs(textView.frame.height - newHeight) > 0.5 {
                 textView.setFrameSize(NSSize(width: newWidth, height: newHeight))
             }
-            let fg = textView.textColor?.description ?? "nil"
-            let bg = textView.backgroundColor.description
-            CrashReporter.shared.breadcrumb("SHCV.configureTextGeometry content=\(Int(contentSize.width))x\(Int(contentSize.height)) tvFrame=\(Int(textView.frame.width))x\(Int(textView.frame.height)) tsLen=\(textView.textStorage?.length ?? -1) draws=\(textView.drawsBackground) fg=\(fg) bg=\(bg)")
+
+            if let container = textView.textContainer {
+                let insetW = textView.textContainerInset.width * 2
+                let containerWidth = max(1, targetWidth - insetW)
+                container.widthTracksTextView = true
+                container.containerSize = NSSize(width: containerWidth,
+                                                 height: CGFloat.greatestFiniteMagnitude)
+            }
         }
         
         deinit {

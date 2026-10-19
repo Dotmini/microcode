@@ -37,7 +37,8 @@ struct EmbeddedAndroidDeviceView: View {
                     officialMask: runtime.embeddedAndroidMask ?? DeviceFrameAssets.loadAndroidDeviceMask(for: runtime.selectedAndroidSkin),
                     availableSize: proxy.size,
                     runtime: runtime,
-                    streamService: streamService
+                    streamService: streamService,
+                    onHide: onHide
                 )
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity)
@@ -56,6 +57,7 @@ private struct AndroidDeviceSurface: View {
     let availableSize: CGSize
     @ObservedObject var runtime: DeviceRuntimeService
     @ObservedObject var streamService: AndroidStreamService
+    var onHide: (() -> Void)? = nil
 
     private var skin: AndroidDeviceSkin {
         runtime.selectedAndroidSkin
@@ -68,6 +70,15 @@ private struct AndroidDeviceSurface: View {
     private var screenX: CGFloat { skin.displayRect.origin.x }
     private var screenY: CGFloat { skin.displayRect.origin.y }
     private var cornerRadius: CGFloat { skin.cornerRadius }
+
+    private func closePreview() {
+        runtime.stopEmbeddedAndroid(shutdownEmulator: true)
+        if let onHide {
+            onHide()
+        } else {
+            PreviewDockService.shared.hideDock()
+        }
+    }
 
     var body: some View {
         let frameAspect = bodyWidth / bodyHeight
@@ -104,38 +115,97 @@ private struct AndroidDeviceSurface: View {
                         let isError = status.contains("stopped") ||
                                       status.contains("offline") ||
                                       status.contains("failed") ||
+                                      status.contains("Could not") ||
                                       status.contains("No Android") ||
                                       status.contains("unresponsive") ||
                                       status.contains("unavailable")
+                        let isActivelyConnecting = runtime.isWorking || runtime.isEmbeddedAndroidActive || (!status.isEmpty && !isError)
+
                         if isError {
                             Image(systemName: "exclamationmark.triangle.fill")
                                 .font(.system(size: 26))
                                 .foregroundColor(.orange)
-                        } else {
+                            Text("Android Emulator Unavailable")
+                                .font(.system(size: 12, weight: .semibold))
+                                .foregroundColor(.white)
+                            Text(status)
+                                .font(.system(size: 10.5))
+                                .foregroundColor(.white.opacity(0.8))
+                                .multilineTextAlignment(.center)
+                                .padding(.horizontal, 16)
+
+                            HStack(spacing: 8) {
+                                Button {
+                                    Task { await runtime.startPreferredEmbeddedAndroid() }
+                                } label: {
+                                    HStack(spacing: 4) {
+                                        Image(systemName: "arrow.clockwise")
+                                        Text("Retry")
+                                    }
+                                }
+                                .buttonStyle(.borderedProminent)
+                                .controlSize(.small)
+
+                                Button("Close") {
+                                    closePreview()
+                                }
+                                .buttonStyle(.bordered)
+                                .controlSize(.small)
+                            }
+                            .padding(.top, 4)
+                        } else if isActivelyConnecting {
                             ProgressView()
                                 .controlSize(.regular)
-                        }
-                        
-                        Text(status.isEmpty ? "Connecting to Android Emulator…" : status)
-                            .font(.system(size: 11, weight: .medium))
-                            .foregroundColor(.white.opacity(0.85))
-                            .multilineTextAlignment(.center)
-                            .padding(.horizontal, 20)
+                            Text(status.isEmpty ? "Starting Android Emulator…" : status)
+                                .font(.system(size: 11, weight: .medium))
+                                .foregroundColor(.white.opacity(0.85))
+                                .multilineTextAlignment(.center)
+                                .padding(.horizontal, 16)
 
-                        Button {
-                            Task {
-                                await runtime.startPreferredEmbeddedAndroid()
+                            HStack(spacing: 8) {
+                                Button("Stop & Cancel") {
+                                    runtime.stopEmbeddedAndroid(shutdownEmulator: true)
+                                }
+                                .buttonStyle(.borderedProminent)
+                                .tint(.red)
+                                .controlSize(.small)
+
+                                Button("Close") {
+                                    closePreview()
+                                }
+                                .buttonStyle(.bordered)
+                                .controlSize(.small)
                             }
-                        } label: {
-                            HStack(spacing: 5) {
-                                Image(systemName: "arrow.clockwise")
-                                Text("Attach / Retry")
+                            .padding(.top, 4)
+                        } else {
+                            // Clean Idle State (0% CPU until user clicks Start)
+                            Image(systemName: "candybarphone")
+                                .font(.system(size: 28, weight: .light))
+                                .foregroundColor(.white.opacity(0.75))
+                            Text("Android Emulator Preview")
+                                .font(.system(size: 13, weight: .semibold))
+                                .foregroundColor(.white)
+                            Text("Android Emulator preview is currently idle (0% CPU).")
+                                .font(.system(size: 10.5))
+                                .foregroundColor(.white.opacity(0.65))
+                                .multilineTextAlignment(.center)
+                                .padding(.horizontal, 18)
+
+                            HStack(spacing: 8) {
+                                Button("Start Emulator") {
+                                    Task { await runtime.startPreferredEmbeddedAndroid() }
+                                }
+                                .buttonStyle(.borderedProminent)
+                                .controlSize(.small)
+
+                                Button("Close") {
+                                    closePreview()
+                                }
+                                .buttonStyle(.bordered)
+                                .controlSize(.small)
                             }
-                            .font(.system(size: 10, weight: .medium))
+                            .padding(.top, 4)
                         }
-                        .buttonStyle(.borderedProminent)
-                        .controlSize(.small)
-                        .padding(.top, 4)
                     }
                     .padding(16)
                 }

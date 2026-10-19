@@ -11,9 +11,10 @@ import SwiftUI
 // MARK: - ACP Chat View
 
 struct ACPAgentChatView: View {
-    @StateObject var acpHost = ACPHostService.shared
+    @ObservedObject var acpHost = ACPHostService.shared
     @State private var inputText: String = ""
     @State private var acpMessages: [ACPChatMessage] = []
+    @State private var streamConsumerTask: Task<Void, Never>?
     
     var body: some View {
         VStack(spacing: 0) {
@@ -89,18 +90,61 @@ struct ACPAgentChatView: View {
         }
         .frame(minWidth: 400, minHeight: 500)
         .background(Color.black)
+        .onDisappear {
+            streamConsumerTask?.cancel()
+        }
     }
     
     private func sendACPMessage() {
-        guard !inputText.isEmpty else { return }
-        let userMsg = ACPChatMessage(id: UUID(), role: .user, content: inputText, messageType: .text)
+        let prompt = inputText.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !prompt.isEmpty else { return }
+        let userMsg = ACPChatMessage(id: UUID(), role: .user, content: prompt, messageType: .text)
         acpMessages.append(userMsg)
-        
-        // Send to active agent via ACPHostService
-        let workspace = FileManager.default.currentDirectoryPath
-        acpHost.sendTask(inputText, workspacePath: workspace)
-        
         inputText = ""
+        
+        // Resolve real workspace path from AppState instead of '/'
+        let workspace = AppState.shared?.workspaceFolder?.path
+            ?? AppState.shared?.activeTerminalDirectory
+            ?? AgentService.shared.currentWorkspace
+            ?? FileManager.default.homeDirectoryForCurrentUser.path
+        acpHost.sendTask(prompt, workspacePath: workspace)
+        
+        guard let session = acpHost.activeSession else { return }
+        streamConsumerTask?.cancel()
+        let stream = session.eventStream
+        let responseId = UUID()
+        
+        streamConsumerTask = Task { @MainActor in
+            var accumulatedText = ""
+            for await event in stream {
+                if Task.isCancelled { break }
+                switch event {
+                case .text(let chunk):
+                    accumulatedText += chunk
+                    if let idx = acpMessages.firstIndex(where: { $0.id == responseId }) {
+                        acpMessages[idx] = ACPChatMessage(id: responseId, role: .agent, content: accumulatedText, messageType: .text)
+                    } else {
+                        acpMessages.append(ACPChatMessage(id: responseId, role: .agent, content: accumulatedText, messageType: .text))
+                    }
+                case .thinking(let thought):
+                    acpMessages.append(ACPChatMessage(id: UUID(), role: .agent, content: thought, messageType: .thinking))
+                case .toolCall(let tc):
+                    acpMessages.append(ACPChatMessage(id: UUID(), role: .agent, content: tc.displaySummary, messageType: .toolCall, toolName: tc.name))
+                case .toolResult(let tr):
+                    acpMessages.append(ACPChatMessage(id: UUID(), role: .agent, content: tr.content, messageType: .toolResult, toolName: tr.toolName, isSuccess: !tr.isError))
+                case .permissionRequest(let perm):
+                    acpMessages.append(ACPChatMessage(id: UUID(), role: .agent, content: perm.description, messageType: .permission, permissionRequestId: perm.id))
+                case .error(let err):
+                    acpMessages.append(ACPChatMessage(id: UUID(), role: .agent, content: err, messageType: .error))
+                case .complete(let res):
+                    if accumulatedText.isEmpty && !res.result.isEmpty {
+                        acpMessages.append(ACPChatMessage(id: responseId, role: .agent, content: res.result, messageType: .text))
+                    }
+                case .sessionInit, .systemInfo, .progress:
+                    break
+                }
+            }
+        }
     }
     
     private func formatTime(_ seconds: Int) -> String {
@@ -127,6 +171,7 @@ struct ACPChatMessage: Identifiable {
     let messageType: ACPChatMessageType
     var toolName: String?
     var isSuccess: Bool?
+    var permissionRequestId: String?
 }
 
 // MARK: - ACP Chat Message Row
@@ -134,6 +179,7 @@ struct ACPChatMessage: Identifiable {
 struct ACPChatMessageRow: View {
     let message: ACPChatMessage
     @State private var isExpanded: Bool = false
+    @State private var permissionDecision: Bool? = nil
     
     var body: some View {
         HStack {
@@ -218,15 +264,35 @@ struct ACPChatMessageRow: View {
                                     .stroke(Color.white.opacity(0.2), lineWidth: 1)
                             )
                     case .permission:
-                        Text("Permission requested: \(message.content)")
-                            .padding(10)
-                            .background(Color.white.opacity(0.08))
-                            .foregroundColor(.white)
-                            .cornerRadius(12)
-                            .overlay(
-                                RoundedRectangle(cornerRadius: 12)
-                                    .stroke(Color.white.opacity(0.2), lineWidth: 1)
-                            )
+                        VStack(alignment: .leading, spacing: 8) {
+                            Text("Permission requested: \(message.content)")
+                                .foregroundColor(.white)
+                            if let decision = permissionDecision {
+                                Text(decision ? "Approved" : "Rejected")
+                                    .font(.caption)
+                                    .foregroundColor(decision ? .green : .red)
+                            } else if let reqId = message.permissionRequestId {
+                                HStack(spacing: 8) {
+                                    Button("Approve") {
+                                        permissionDecision = true
+                                        ACPHostService.shared.respondToPermission(reqId, approved: true)
+                                    }
+                                    .buttonStyle(.borderedProminent)
+                                    Button("Reject") {
+                                        permissionDecision = false
+                                        ACPHostService.shared.respondToPermission(reqId, approved: false)
+                                    }
+                                    .buttonStyle(.bordered)
+                                }
+                            }
+                        }
+                        .padding(10)
+                        .background(Color.white.opacity(0.08))
+                        .cornerRadius(12)
+                        .overlay(
+                            RoundedRectangle(cornerRadius: 12)
+                                .stroke(Color.white.opacity(0.2), lineWidth: 1)
+                        )
                     }
                 }
                 Spacer()

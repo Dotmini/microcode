@@ -44,7 +44,21 @@ impl GeminiProvider {
 #[async_trait]
 impl AIProvider for GeminiProvider {
     async fn generate(&self, prompt: &str, config: &AIConfig) -> Result<String> {
-        let (url, auth_header) = if config.use_microrent_proxy
+        let (url, auth_header) = if let Some(ref base) = config.proxy_base_url {
+            if base.contains("aiplatform.googleapis.com") {
+                let clean_model = config.model.strip_prefix("models/").unwrap_or(&config.model);
+                let vertex_url = format!("{}/publishers/google/models/{}:generateContent", base.trim_end_matches('/'), clean_model);
+                let bearer = if config.api_key.starts_with("Bearer ") {
+                    config.api_key.clone()
+                } else {
+                    format!("Bearer {}", config.api_key)
+                };
+                (vertex_url, bearer)
+            } else {
+                let token = config.microrent_token.clone().unwrap_or_else(|| config.api_key.clone());
+                (base.clone(), format!("Bearer {}", token))
+            }
+        } else if config.use_microrent_proxy
             || env::var("USE_DOTMINI_PROXY").unwrap_or_else(|_| "0".to_string()) == "1"
         {
             let proxy_url = env::var("DOTMINI_API_BASE_URL").map_err(|_| {
@@ -58,6 +72,19 @@ impl AIProvider for GeminiProvider {
                     AppError::AIProviderError("DOTMINI_API_TOKEN not found for Gateway".to_string())
                 })?;
             (proxy_url, format!("Bearer {}", token))
+        } else if let Ok(vertex_project) = env::var("VERTEX_PROJECT_ID") {
+            let loc = env::var("VERTEX_LOCATION").unwrap_or_else(|_| "asia-southeast1".to_string());
+            let clean_model = config.model.strip_prefix("models/").unwrap_or(&config.model);
+            let host = if loc == "global" {
+                "https://aiplatform.googleapis.com".to_string()
+            } else {
+                format!("https://{}-aiplatform.googleapis.com", loc)
+            };
+            let vertex_url = format!(
+                "{}/v1/projects/{}/locations/{}/publishers/google/models/{}:generateContent",
+                host, vertex_project, loc, clean_model
+            );
+            (vertex_url, format!("Bearer {}", config.api_key))
         } else {
             let api_key = if config.api_key.is_empty() {
                 env::var("GEMINI_API_KEY").map_err(|_| {
@@ -66,9 +93,10 @@ impl AIProvider for GeminiProvider {
             } else {
                 config.api_key.clone()
             };
+            let clean_model = config.model.strip_prefix("models/").unwrap_or(&config.model);
             let direct_url = format!(
                 "https://generativelanguage.googleapis.com/v1beta/models/{}:generateContent?key={}",
-                config.model, api_key
+                clean_model, api_key
             );
             (direct_url, String::new())
         };
@@ -98,6 +126,7 @@ impl AIProvider for GeminiProvider {
 
         #[derive(Deserialize)]
         struct GeminiResponse {
+            #[serde(default)]
             candidates: Vec<Candidate>,
         }
 
@@ -108,12 +137,16 @@ impl AIProvider for GeminiProvider {
 
         #[derive(Deserialize)]
         struct ResponseContent {
+            #[serde(default)]
             parts: Vec<ResponsePart>,
         }
 
         #[derive(Deserialize)]
         struct ResponsePart {
-            text: String,
+            #[serde(default)]
+            text: Option<String>,
+            #[serde(default)]
+            thought: Option<bool>,
         }
 
         let request = GeminiRequest {
@@ -136,6 +169,11 @@ impl AIProvider for GeminiProvider {
                 .header("x-microrent-provider", "gemini")
                 .header("x-microrent-model", &config.model)
                 .header("x-microrent-stream", "false");
+            if auth_header.contains("sk-dotmini-ent-") {
+                request_builder = request_builder
+                    .header("X-Dotmini-Enterprise", "true")
+                    .header("X-Dotmini-ZDR", "true");
+            }
         }
 
         let response = request_builder
@@ -156,12 +194,27 @@ impl AIProvider for GeminiProvider {
             .await
             .map_err(|e| AppError::AIRequestFailed(e.to_string()))?;
 
-        result
+        let candidate = result
             .candidates
             .first()
-            .and_then(|c| c.content.parts.first())
-            .map(|p| p.text.clone())
-            .ok_or_else(|| AppError::AIRequestFailed("No response from Gemini".to_string()))
+            .ok_or_else(|| AppError::AIRequestFailed("No response from Gemini".to_string()))?;
+
+        let mut combined = String::new();
+        for part in &candidate.content.parts {
+            if let Some(ref text) = part.text {
+                if part.thought.unwrap_or(false) {
+                    combined.push_str(&format!("<thought>{}</thought>\n", text));
+                } else {
+                    combined.push_str(text);
+                }
+            }
+        }
+
+        if combined.is_empty() {
+            Err(AppError::AIRequestFailed("Empty response from Gemini".to_string()))
+        } else {
+            Ok(combined)
+        }
     }
 
     async fn generate_stream(
@@ -191,9 +244,10 @@ impl AIProvider for GeminiProvider {
             } else {
                 config.api_key.clone()
             };
+            let clean_model = config.model.strip_prefix("models/").unwrap_or(&config.model);
             let direct_url = format!(
-                "https://generativelanguage.googleapis.com/v1beta/models/{}:streamGenerateContent?key={}",
-                config.model, api_key
+                "https://generativelanguage.googleapis.com/v1beta/models/{}:streamGenerateContent?alt=sse&key={}",
+                clean_model, api_key
             );
             (direct_url, String::new())
         };
@@ -264,10 +318,11 @@ impl AIProvider for GeminiProvider {
             .eventsource()
             .map(|event| match event {
                 Ok(event) => {
-                    if event.data.is_empty() {
+                    let trimmed = event.data.trim();
+                    if trimmed.is_empty() || trimmed == "[DONE]" {
                         return Ok("".to_string());
                     }
-                    let json: serde_json::Value = serde_json::from_str(&event.data)
+                    let json: serde_json::Value = serde_json::from_str(trimmed)
                         .map_err(|e| AppError::AIRequestFailed(e.to_string()))?;
 
                     if let Some(candidates) = json.get("candidates") {
@@ -305,38 +360,7 @@ impl AIProvider for GeminiProvider {
     }
 
     fn models(&self) -> Vec<AIModel> {
-        vec![
-            AIModel {
-                id: "gemini-3.1-pro".to_string(),
-                name: "Gemini 3.1 Pro".to_string(),
-                provider: "gemini".to_string(),
-                context_length: 2000000,
-            },
-            AIModel {
-                id: "gemini-2.5-pro-preview-05-06".to_string(),
-                name: "Gemini 2.5 Pro".to_string(),
-                provider: "gemini".to_string(),
-                context_length: 2000000,
-            },
-            AIModel {
-                id: "gemini-2.5-flash".to_string(),
-                name: "Gemini 2.5 Flash".to_string(),
-                provider: "gemini".to_string(),
-                context_length: 1048576,
-            },
-            AIModel {
-                id: "gemini-2.5-flash-lite".to_string(),
-                name: "Gemini 2.5 Flash-Lite".to_string(),
-                provider: "gemini".to_string(),
-                context_length: 1048576,
-            },
-            AIModel {
-                id: "gemma-3n-e4".to_string(),
-                name: "Gemma 3n".to_string(),
-                provider: "gemini".to_string(),
-                context_length: 8192,
-            },
-        ]
+        Vec::new()
     }
 }
 
@@ -411,7 +435,10 @@ impl AIProvider for OpenAIProvider {
 
         #[derive(Deserialize)]
         struct ResponseMessage {
-            content: String,
+            #[serde(default)]
+            content: Option<String>,
+            #[serde(default)]
+            reasoning_content: Option<String>,
         }
 
         let request = OpenAIRequest {
@@ -461,7 +488,18 @@ impl AIProvider for OpenAIProvider {
         result
             .choices
             .first()
-            .map(|c| c.message.content.clone())
+            .map(|c| {
+                let mut out = String::new();
+                if let Some(ref reasoning) = c.message.reasoning_content {
+                    if !reasoning.is_empty() {
+                        out.push_str(&format!("<thought>{}</thought>\n", reasoning));
+                    }
+                }
+                if let Some(ref text) = c.message.content {
+                    out.push_str(text);
+                }
+                out
+            })
             .ok_or_else(|| AppError::AIRequestFailed("No response from OpenAI".to_string()))
     }
 
@@ -559,13 +597,15 @@ impl AIProvider for OpenAIProvider {
             .eventsource()
             .map(|event| match event {
                 Ok(event) => {
-                    if event.data == "[DONE]" {
+                    let trimmed = event.data.trim();
+                    if trimmed.is_empty() || trimmed == "[DONE]" {
                         return Ok("".to_string());
                     }
-                    let json: serde_json::Value = serde_json::from_str(&event.data)
+                    let json: serde_json::Value = serde_json::from_str(trimmed)
                         .map_err(|e| AppError::AIRequestFailed(e.to_string()))?;
 
-                    let content = json["choices"][0]["delta"]["content"]
+                    let delta = &json["choices"][0]["delta"];
+                    let content = delta["content"]
                         .as_str()
                         .unwrap_or("")
                         .to_string();
@@ -583,38 +623,7 @@ impl AIProvider for OpenAIProvider {
     }
 
     fn models(&self) -> Vec<AIModel> {
-        vec![
-            AIModel {
-                id: "gpt-5".to_string(),
-                name: "GPT-5".to_string(),
-                provider: "openai".to_string(),
-                context_length: 128000,
-            },
-            AIModel {
-                id: "gpt-4o".to_string(),
-                name: "GPT-4o".to_string(),
-                provider: "openai".to_string(),
-                context_length: 128000,
-            },
-            AIModel {
-                id: "gpt-4o-mini".to_string(),
-                name: "GPT-4o Mini".to_string(),
-                provider: "openai".to_string(),
-                context_length: 128000,
-            },
-            AIModel {
-                id: "o3".to_string(),
-                name: "o3".to_string(),
-                provider: "openai".to_string(),
-                context_length: 128000,
-            },
-            AIModel {
-                id: "o4-mini".to_string(),
-                name: "o4-mini".to_string(),
-                provider: "openai".to_string(),
-                context_length: 128000,
-            },
-        ]
+        Vec::new()
     }
 }
 
@@ -678,12 +687,16 @@ impl AIProvider for ClaudeProvider {
 
         #[derive(Deserialize)]
         struct ClaudeResponse {
+            #[serde(default)]
             content: Vec<ContentBlock>,
         }
 
         #[derive(Deserialize)]
         struct ContentBlock {
-            text: String,
+            #[serde(default)]
+            text: Option<String>,
+            #[serde(default)]
+            thinking: Option<String>,
         }
 
         let request = ClaudeRequest {
@@ -709,7 +722,7 @@ impl AIProvider for ClaudeProvider {
         } else {
             request_builder = request_builder
                 .header("x-api-key", auth_header)
-                .header("anthropic-version", "2024-10-22");
+                .header("anthropic-version", "2023-06-01");
         }
 
         let response = request_builder
@@ -732,11 +745,23 @@ impl AIProvider for ClaudeProvider {
             .await
             .map_err(|e| AppError::AIRequestFailed(e.to_string()))?;
 
-        result
-            .content
-            .first()
-            .map(|c| c.text.clone())
-            .ok_or_else(|| AppError::AIRequestFailed("No response from Claude".to_string()))
+        let mut combined = String::new();
+        for block in &result.content {
+            if let Some(ref thinking) = block.thinking {
+                if !thinking.is_empty() {
+                    combined.push_str(&format!("<thought>{}</thought>\n", thinking));
+                }
+            }
+            if let Some(ref text) = block.text {
+                combined.push_str(text);
+            }
+        }
+
+        if combined.is_empty() {
+            Err(AppError::AIRequestFailed("No response from Claude".to_string()))
+        } else {
+            Ok(combined)
+        }
     }
 
     async fn generate_stream(
@@ -808,7 +833,7 @@ impl AIProvider for ClaudeProvider {
         } else {
             request_builder = request_builder
                 .header("x-api-key", auth_header)
-                .header("anthropic-version", "2024-10-22");
+                .header("anthropic-version", "2023-06-01");
         }
 
         let response = request_builder
@@ -834,7 +859,11 @@ impl AIProvider for ClaudeProvider {
             .eventsource()
             .map(|event| match event {
                 Ok(event) => {
-                    let json: serde_json::Value = serde_json::from_str(&event.data)
+                    let trimmed = event.data.trim();
+                    if trimmed.is_empty() || trimmed == "[DONE]" {
+                        return Ok("".to_string());
+                    }
+                    let json: serde_json::Value = serde_json::from_str(trimmed)
                         .map_err(|e| AppError::AIRequestFailed(e.to_string()))?;
 
                     if json["type"] == "content_block_delta" {
@@ -856,32 +885,7 @@ impl AIProvider for ClaudeProvider {
     }
 
     fn models(&self) -> Vec<AIModel> {
-        vec![
-            AIModel {
-                id: "claude-4.7-opus-20260501".to_string(),
-                name: "Claude 4.7 Opus".to_string(),
-                provider: "anthropic".to_string(),
-                context_length: 200000,
-            },
-            AIModel {
-                id: "claude-sonnet-4-20250514".to_string(),
-                name: "Claude Sonnet 4".to_string(),
-                provider: "anthropic".to_string(),
-                context_length: 200000,
-            },
-            AIModel {
-                id: "claude-3-5-sonnet-20241022".to_string(),
-                name: "Claude 3.5 Sonnet".to_string(),
-                provider: "anthropic".to_string(),
-                context_length: 200000,
-            },
-            AIModel {
-                id: "claude-3-5-haiku-20241022".to_string(),
-                name: "Claude 3.5 Haiku".to_string(),
-                provider: "anthropic".to_string(),
-                context_length: 200000,
-            },
-        ]
+        Vec::new()
     }
 }
 
@@ -958,7 +962,10 @@ impl AIProvider for DeepSeekProvider {
 
         #[derive(Deserialize)]
         struct ResponseMessage {
-            content: String,
+            #[serde(default)]
+            content: Option<String>,
+            #[serde(default)]
+            reasoning_content: Option<String>,
         }
 
         let request = DeepSeekRequest {
@@ -1008,7 +1015,18 @@ impl AIProvider for DeepSeekProvider {
         result
             .choices
             .first()
-            .map(|c| c.message.content.clone())
+            .map(|c| {
+                let mut out = String::new();
+                if let Some(ref reasoning) = c.message.reasoning_content {
+                    if !reasoning.is_empty() {
+                        out.push_str(&format!("<thought>{}</thought>\n", reasoning));
+                    }
+                }
+                if let Some(ref text) = c.message.content {
+                    out.push_str(text);
+                }
+                out
+            })
             .ok_or_else(|| AppError::AIRequestFailed("No response from DeepSeek".to_string()))
     }
 
@@ -1108,13 +1126,15 @@ impl AIProvider for DeepSeekProvider {
             .eventsource()
             .map(|event| match event {
                 Ok(event) => {
-                    if event.data == "[DONE]" {
+                    let trimmed = event.data.trim();
+                    if trimmed.is_empty() || trimmed == "[DONE]" {
                         return Ok("".to_string());
                     }
-                    let json: serde_json::Value = serde_json::from_str(&event.data)
+                    let json: serde_json::Value = serde_json::from_str(trimmed)
                         .map_err(|e| AppError::AIRequestFailed(e.to_string()))?;
 
-                    let content = json["choices"][0]["delta"]["content"]
+                    let delta = &json["choices"][0]["delta"];
+                    let content = delta["content"]
                         .as_str()
                         .unwrap_or("")
                         .to_string();
@@ -1914,22 +1934,181 @@ pub async fn complete(code: &str, context: &str, config: &AIConfig) -> Result<St
     }
 }
 
-/// List all available AI models
+/// List all available AI models dynamically from live provider APIs and local CLI caches
 pub async fn list_models() -> Result<Vec<AIModel>> {
     let mut models = Vec::new();
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(10))
+        .build()
+        .unwrap_or_default();
 
-    let providers: Vec<Box<dyn AIProvider>> = vec![
-        Box::new(GeminiProvider::new()),
-        Box::new(OpenAIProvider::new()),
-        Box::new(ClaudeProvider::new()),
-        get_provider("deepseek").unwrap(),
-        get_provider("glm").unwrap(),
-        get_provider("grok").unwrap(),
-        get_provider("qwen").unwrap(),
-    ];
+    // 1. Live Google Gemini API (v1beta & v1alpha)
+    if let Ok(key) = env::var("GEMINI_API_KEY").or_else(|_| env::var("GOOGLE_API_KEY")) {
+        if !key.trim().is_empty() {
+            for ver in ["v1beta", "v1alpha"] {
+                let url = format!(
+                    "https://generativelanguage.googleapis.com/{}/models?pageSize=1000&key={}",
+                    ver,
+                    key.trim()
+                );
+                if let Ok(resp) = client.get(&url).send().await {
+                    if let Ok(json) = resp.json::<serde_json::Value>().await {
+                        if let Some(items) = json["models"].as_array() {
+                            for item in items {
+                                let raw_name = item["name"].as_str().unwrap_or("");
+                                let id = raw_name.strip_prefix("models/").unwrap_or(raw_name);
+                                if id.is_empty() || models.iter().any(|m: &AIModel| m.id == id) {
+                                    continue;
+                                }
+                                let display = item["displayName"].as_str().unwrap_or(id);
+                                let ctx = item["inputTokenLimit"].as_u64().unwrap_or(1_048_576) as usize;
+                                models.push(AIModel {
+                                    id: id.to_string(),
+                                    name: display.to_string(),
+                                    provider: "gemini".to_string(),
+                                    context_length: ctx,
+                                });
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
 
-    for provider in providers {
-        models.extend(provider.models());
+    // 2. Local Codex cache (~/.codex/models_cache.json) for live OpenAI / Codex models
+    if let Ok(home) = env::var("HOME") {
+        let codex_cache = std::path::Path::new(&home).join(".codex/models_cache.json");
+        if let Ok(raw) = std::fs::read_to_string(codex_cache) {
+            if let Ok(json) = serde_json::from_str::<serde_json::Value>(&raw) {
+                if let Some(items) = json["models"].as_array() {
+                    for item in items {
+                        if let Some(slug) = item["slug"].as_str() {
+                            if !slug.is_empty() && !models.iter().any(|m: &AIModel| m.id == slug) {
+                                let display = item["display_name"].as_str().unwrap_or(slug);
+                                let ctx = item["context_window"].as_u64().unwrap_or(272_000) as usize;
+                                models.push(AIModel {
+                                    id: slug.to_string(),
+                                    name: display.to_string(),
+                                    provider: "openai".to_string(),
+                                    context_length: ctx,
+                                });
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // 3. Live OpenAI API (/v1/models)
+    if let Ok(key) = env::var("OPENAI_API_KEY") {
+        if !key.trim().is_empty() {
+            if let Ok(resp) = client
+                .get("https://api.openai.com/v1/models")
+                .bearer_auth(key.trim())
+                .send()
+                .await
+            {
+                if let Ok(json) = resp.json::<serde_json::Value>().await {
+                    if let Some(items) = json["data"].as_array() {
+                        for item in items {
+                            if let Some(id) = item["id"].as_str() {
+                                if !id.is_empty() && !models.iter().any(|m: &AIModel| m.id == id) {
+                                    models.push(AIModel {
+                                        id: id.to_string(),
+                                        name: id.to_string(),
+                                        provider: "openai".to_string(),
+                                        context_length: 128_000,
+                                    });
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // 4. Live Anthropic API (/v1/models)
+    if let Ok(key) = env::var("ANTHROPIC_API_KEY") {
+        if !key.trim().is_empty() {
+            if let Ok(resp) = client
+                .get("https://api.anthropic.com/v1/models")
+                .header("x-api-key", key.trim())
+                .header("anthropic-version", "2023-06-01")
+                .send()
+                .await
+            {
+                if let Ok(json) = resp.json::<serde_json::Value>().await {
+                    if let Some(items) = json["data"].as_array() {
+                        for item in items {
+                            if let Some(id) = item["id"].as_str() {
+                                let display = item["display_name"].as_str().unwrap_or(id);
+                                if !id.is_empty() && !models.iter().any(|m: &AIModel| m.id == id) {
+                                    models.push(AIModel {
+                                        id: id.to_string(),
+                                        name: display.to_string(),
+                                        provider: "anthropic".to_string(),
+                                        context_length: 200_000,
+                                    });
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // 5. Live DeepSeek API (/models)
+    if let Ok(key) = env::var("DEEPSEEK_API_KEY") {
+        if !key.trim().is_empty() {
+            if let Ok(resp) = client
+                .get("https://api.deepseek.com/models")
+                .bearer_auth(key.trim())
+                .send()
+                .await
+            {
+                if let Ok(json) = resp.json::<serde_json::Value>().await {
+                    if let Some(items) = json["data"].as_array() {
+                        for item in items {
+                            if let Some(id) = item["id"].as_str() {
+                                if !id.is_empty() && !models.iter().any(|m: &AIModel| m.id == id) {
+                                    models.push(AIModel {
+                                        id: id.to_string(),
+                                        name: id.to_string(),
+                                        provider: "deepseek".to_string(),
+                                        context_length: 128_000,
+                                    });
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // 6. Live Ollama local tags
+    let ollama_host = env::var("OLLAMA_HOST").unwrap_or_else(|_| "http://127.0.0.1:11434".to_string());
+    if let Ok(resp) = client.get(format!("{}/api/tags", ollama_host)).send().await {
+        if let Ok(json) = resp.json::<serde_json::Value>().await {
+            if let Some(items) = json["models"].as_array() {
+                for item in items {
+                    if let Some(id) = item["name"].as_str() {
+                        if !id.is_empty() && !models.iter().any(|m: &AIModel| m.id == id) {
+                            models.push(AIModel {
+                                id: id.to_string(),
+                                name: id.to_string(),
+                                provider: "ollama".to_string(),
+                                context_length: 32_768,
+                            });
+                        }
+                    }
+                }
+            }
+        }
     }
 
     Ok(models)

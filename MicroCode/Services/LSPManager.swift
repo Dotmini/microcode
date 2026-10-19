@@ -29,6 +29,9 @@ class LSPManager: ObservableObject {
     /// Document versions for tracking changes
     private var documentVersions: [String: Int] = [:]
     
+    /// Last synced document content hash per URI to avoid redundant JSON-RPC payloads
+    private var documentContentHashes: [String: Int] = [:]
+    
     private init() {}
     
     // MARK: - API
@@ -78,7 +81,12 @@ class LSPManager: ObservableObject {
         guard let serverType = LanguageServer.serverFor(language: language) else { return }
         guard let _ = await LSPClientService.resolveBinaryAsync(serverType.rawValue, searchPaths: serverType.searchPaths) else { return }
         
+        let contentHash = content.hashValue
+        if documentVersions[uri] != nil, documentContentHashes[uri] == contentHash {
+            return
+        }
         documentVersions[uri] = 1
+        documentContentHashes[uri] = contentHash
         
         guard let client = try? await clientFor(language: language) else { return }
         
@@ -93,6 +101,12 @@ class LSPManager: ObservableObject {
     func documentChanged(uri: String, language: String, content: String) async {
         guard let serverType = LanguageServer.serverFor(language: language) else { return }
         guard let _ = await LSPClientService.resolveBinaryAsync(serverType.rawValue, searchPaths: serverType.searchPaths) else { return }
+        
+        let contentHash = content.hashValue
+        if documentContentHashes[uri] == contentHash {
+            return
+        }
+        documentContentHashes[uri] = contentHash
         
         let version = (documentVersions[uri] ?? 0) + 1
         documentVersions[uri] = version
@@ -112,8 +126,9 @@ class LSPManager: ObservableObject {
         
         do {
             return try await client.completion(uri: uri, line: line, character: character)
+        } catch is CancellationError {
+            return []
         } catch {
-            print("❌ [LSPManager] completion failed: \(error)")
             return []
         }
     }

@@ -1,0 +1,49 @@
+{
+  "Ardium Main Function": {
+    "prefix": "fnmain",
+    "body": [
+      "fn main() {",
+      "    print(\"${1:Hello from Ardium v2.3!}\\n\");",
+      "    $0",
+      "}"
+    ],
+    "description": "Create an Ardium main entry point function"
+  },
+  "Ardium @owned RAII Buffer": {
+    "prefix": "owned",
+    "body": [
+      "@owned let ${1:buffer} = alloc(${2:1024});",
+      "poke(${1:buffer} + 0, ${3:0x42});",
+      "let ${4:val} = peek(${1:buffer} + 0);",
+      "// Automatically freed at scope exit"
+    ],
+    "description": "Allocate a scope-managed RAII heap buffer in Ardium v2.3"
+  },
+  "Ardium CoreUI View": {
+    "prefix": "coreui",
+    "body": [
+      "import CoreUI",
+      "",
+      "@State var ${1:counter} = 0;",
+      "",
+      "fn ${2:MainView}() {",
+      "    VStack(fn() {",
+      "        Title(\"${3:Ardium Native App}\");",
+      "        Headline(\"${4:Built with CoreUI}\");",
+      "        HStack(fn() {",
+      "            Button(\"${5:Action}\");",
+      "        });",
+      "    });",
+      "}"
+    ],
+    "description": "Create a declarative CoreUI view in Ardium"
+  },
+  "MicroCode Inline Cell": {
+    "prefix": "cell",
+    "body": [
+      "// %% [MicroCode Cell: ${1:Step 1}]",
+      "$0"
+    ],
+    "description": "Insert an interactive MicroCode executable cell marker"
+  }
+}

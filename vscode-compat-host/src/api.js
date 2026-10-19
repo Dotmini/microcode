@@ -1,630 +1,436 @@
 "use strict";
+var __createBinding = (this && this.__createBinding) || (Object.create ? (function(o, m, k, k2) {
+    if (k2 === undefined) k2 = k;
+    var desc = Object.getOwnPropertyDescriptor(m, k);
+    if (!desc || ("get" in desc ? !m.__esModule : desc.writable || desc.configurable)) {
+      desc = { enumerable: true, get: function() { return m[k]; } };
+    }
+    Object.defineProperty(o, k2, desc);
+}) : (function(o, m, k, k2) {
+    if (k2 === undefined) k2 = k;
+    o[k2] = m[k];
+}));
+var __setModuleDefault = (this && this.__setModuleDefault) || (Object.create ? (function(o, v) {
+    Object.defineProperty(o, "default", { enumerable: true, value: v });
+}) : function(o, v) {
+    o["default"] = v;
+});
+var __importStar = (this && this.__importStar) || (function () {
+    var ownKeys = function(o) {
+        ownKeys = Object.getOwnPropertyNames || function (o) {
+            var ar = [];
+            for (var k in o) if (Object.prototype.hasOwnProperty.call(o, k)) ar[ar.length] = k;
+            return ar;
+        };
+        return ownKeys(o);
+    };
+    return function (mod) {
+        if (mod && mod.__esModule) return mod;
+        var result = {};
+        if (mod != null) for (var k = ownKeys(mod), i = 0; i < k.length; i++) if (k[i] !== "default") __createBinding(result, mod, k[i]);
+        __setModuleDefault(result, mod);
+        return result;
+    };
+})();
 Object.defineProperty(exports, "__esModule", { value: true });
-exports.createMicroCodeShim = exports.microcodeShim = void 0;
-
-class Position {
-    constructor(line, character) {
-        this.line = line || 0;
-        this.character = character || 0;
-    }
-    isEqual(other) { return other && this.line === other.line && this.character === other.character; }
-    isBefore(other) { return other && (this.line < other.line || (this.line === other.line && this.character < other.character)); }
-    isAfter(other) { return other && (this.line > other.line || (this.line === other.line && this.character > other.character)); }
-    translate(lineDelta, charDelta) { return new Position(this.line + (lineDelta || 0), this.character + (charDelta || 0)); }
-    with(change) { return new Position(change && change.line !== undefined ? change.line : this.line, change && change.character !== undefined ? change.character : this.character); }
-}
-
-class Range {
-    constructor(startLineOrPos, startCharOrEndPos, endLine, endChar) {
-        if (typeof startLineOrPos === 'number') {
-            this.start = new Position(startLineOrPos, startCharOrEndPos);
-            this.end = new Position(endLine, endChar);
-        } else {
-            this.start = startLineOrPos || new Position(0, 0);
-            this.end = startCharOrEndPos || this.start;
-        }
-    }
-    get isEmpty() { return this.start.isEqual(this.end); }
-    get isSingleLine() { return this.start.line === this.end.line; }
-    contains(posOrRange) { return true; }
-    isEqual(other) { return other && this.start.isEqual(other.start) && this.end.isEqual(other.end); }
-    union(other) { return this; }
-    with(change) { return new Range(change && change.start || this.start, change && change.end || this.end); }
-}
-
-class Selection extends Range {
-    constructor(anchorLine, anchorCharacter, activeLine, activeCharacter) {
-        if (typeof anchorLine === 'object') {
-            super(anchorLine.line, anchorLine.character, anchorCharacter.line, anchorCharacter.character);
-            this.anchor = anchorLine;
-            this.active = anchorCharacter;
-        } else {
-            super(anchorLine, anchorCharacter, activeLine, activeCharacter);
-            this.anchor = new Position(anchorLine, anchorCharacter);
-            this.active = new Position(activeLine, activeCharacter);
-        }
-    }
-    get isReversed() { return this.anchor.isAfter(this.active); }
-}
-
-class Location {
-    constructor(uri, rangeOrPosition) {
-        this.uri = uri;
-        this.range = rangeOrPosition instanceof Range ? rangeOrPosition : new Range(rangeOrPosition, rangeOrPosition);
-    }
-}
-
-class RelativePattern {
-    constructor(base, pattern) {
-        this.base = base;
-        this.pattern = pattern;
-    }
-}
-
-class Uri {
-    constructor(scheme, authority, path, query, fragment) {
-        this.scheme = scheme || 'file';
-        this.authority = authority || '';
-        this.path = path || '';
-        this.query = query || '';
-        this.fragment = fragment || '';
-        this.fsPath = path || '';
-    }
-    toString() { return `${this.scheme}://${this.authority}${this.path}`; }
-    toJSON() { return { scheme: this.scheme, authority: this.authority, path: this.path, fsPath: this.fsPath }; }
-    static file(path) { return new Uri('file', '', path); }
-    static parse(uriStr) {
-        try {
-            const u = new URL(uriStr);
-            return new Uri(u.protocol.replace(':', ''), u.host, u.pathname);
-        } catch {
-            return new Uri('file', '', uriStr);
-        }
-    }
-    static joinPath(base, ...pathSegments) {
-        const p = [base.path, ...pathSegments].join('/').replace(/\/+/g, '/');
-        return new Uri(base.scheme, base.authority, p);
-    }
-}
-
-class Disposable {
-    constructor(callOnDispose) { this._call = callOnDispose; }
-    dispose() { if (this._call) this._call(); }
-    static from(...disposables) {
-        return new Disposable(() => {
-            for (const d of disposables) {
-                if (d && typeof d.dispose === 'function') d.dispose();
-            }
-        });
-    }
-}
-
+exports.NotebookCellOutput = exports.NotebookCellOutputItem = exports.NotebookData = exports.NotebookCellData = exports.NotebookCellKind = exports.ViewColumn = exports.StatusBarAlignment = exports.CodeLens = exports.Diagnostic = exports.DiagnosticSeverity = exports.Selection = exports.Range = exports.Position = exports.Uri = exports.EventEmitter = void 0;
+exports.createMicroCodeShim = createMicroCodeShim;
+const path = __importStar(require("path"));
 class EventEmitter {
-    constructor() { this.listeners = []; }
-    get event() {
-        return (listener) => {
+    constructor() {
+        this.listeners = [];
+        this.event = (listener) => {
             this.listeners.push(listener);
-            return new Disposable(() => {
-                const idx = this.listeners.indexOf(listener);
-                if (idx >= 0) this.listeners.splice(idx, 1);
-            });
+            return {
+                dispose: () => {
+                    const idx = this.listeners.indexOf(listener);
+                    if (idx >= 0)
+                        this.listeners.splice(idx, 1);
+                }
+            };
         };
     }
     fire(data) {
         for (const l of this.listeners) {
-            try { l(data); } catch (e) { console.error(e); }
+            try {
+                l(data);
+            }
+            catch {
+                // ignore listener errors
+            }
         }
     }
-    dispose() { this.listeners = []; }
-}
-
-class CancellationTokenSource {
-    constructor() {
-        this.token = { isCancellationRequested: false, onCancellationRequested: new EventEmitter().event };
-    }
-    cancel() { this.token.isCancellationRequested = true; }
-    dispose() {}
-}
-
-class ThemeColor {
-    constructor(id) { this.id = id; }
-}
-
-class ThemeIcon {
-    constructor(id, color) { this.id = id; this.color = color; }
-}
-
-class CodeAction {
-    constructor(title, kind) {
-        this.title = title;
-        this.kind = kind;
+    dispose() {
+        this.listeners = [];
     }
 }
-
-class TextEdit {
-    constructor(range, newText) {
-        this.range = range;
-        this.newText = newText;
+exports.EventEmitter = EventEmitter;
+class Uri {
+    constructor(scheme, authority, path, query = '', fragment = '') {
+        this.scheme = scheme;
+        this.authority = authority;
+        this.path = path;
+        this.query = query;
+        this.fragment = fragment;
     }
-    static replace(range, newText) { return new TextEdit(range, newText); }
-    static insert(position, newText) { return new TextEdit(new Range(position, position), newText); }
-    static delete(range) { return new TextEdit(range, ''); }
-}
-
-class WorkspaceEdit {
-    constructor() {
-        this.entries = [];
+    get fsPath() {
+        return this.path;
     }
-    replace(uri, range, newText) { this.entries.push({ uri, range, newText }); }
-    insert(uri, position, newText) { this.entries.push({ uri, position, newText }); }
-    delete(uri, range) { this.entries.push({ uri, range }); }
-    has(uri) { return true; }
-    set(uri, edits) { this.entries.push({ uri, edits }); }
-}
-
-class SnippetString {
-    constructor(value) { this.value = value || ''; }
-    appendText(string) { this.value += string; return this; }
-    appendTabstop(number) { this.value += `$${number || 0}`; return this; }
-    appendPlaceholder(value, number) { this.value += `\${${number || 0}:${value}}`; return this; }
-    appendChoice(values, number) { this.value += `\${${number || 0}|${values.join(',')}|}`; return this; }
-    appendVariable(name, defaultValue) { this.value += `\${${name}${defaultValue ? ':' + defaultValue : ''}}`; return this; }
-}
-
-class Hover {
-    constructor(contents, range) {
-        this.contents = Array.isArray(contents) ? contents : [contents];
-        this.range = range;
+    static file(filePath) {
+        return new Uri('file', '', filePath);
+    }
+    static parse(value) {
+        try {
+            const u = new URL(value);
+            return new Uri(u.protocol.replace(':', ''), u.host, u.pathname, u.search.replace(/^\?/, ''), u.hash.replace(/^#/, ''));
+        }
+        catch {
+            return new Uri('file', '', value);
+        }
+    }
+    static joinPath(base, ...segments) {
+        return new Uri(base.scheme, base.authority, path.join(base.path, ...segments));
+    }
+    toString() {
+        return `${this.scheme}://${this.authority}${this.path}`;
     }
 }
-
+exports.Uri = Uri;
+class Position {
+    constructor(line, character) {
+        this.line = line;
+        this.character = character;
+    }
+}
+exports.Position = Position;
+class Range {
+    constructor(a, b, c, d) {
+        if (typeof a === 'number' && typeof b === 'number') {
+            this.start = new Position(a, b);
+            this.end = new Position(c ?? a, d ?? b);
+        }
+        else {
+            this.start = a;
+            this.end = b;
+        }
+    }
+}
+exports.Range = Range;
+class Selection extends Range {
+    constructor(a, b, c, d) {
+        super(a, b, c, d);
+        this.anchor = this.start;
+        this.active = this.end;
+    }
+    get isEmpty() {
+        return (this.anchor.line === this.active.line &&
+            this.anchor.character === this.active.character);
+    }
+}
+exports.Selection = Selection;
+var DiagnosticSeverity;
+(function (DiagnosticSeverity) {
+    DiagnosticSeverity[DiagnosticSeverity["Error"] = 0] = "Error";
+    DiagnosticSeverity[DiagnosticSeverity["Warning"] = 1] = "Warning";
+    DiagnosticSeverity[DiagnosticSeverity["Information"] = 2] = "Information";
+    DiagnosticSeverity[DiagnosticSeverity["Hint"] = 3] = "Hint";
+})(DiagnosticSeverity || (exports.DiagnosticSeverity = DiagnosticSeverity = {}));
 class Diagnostic {
-    constructor(range, message, severity) {
+    constructor(range, message, severity = DiagnosticSeverity.Error) {
         this.range = range;
         this.message = message;
-        this.severity = severity !== undefined ? severity : DiagnosticSeverity.Error;
+        this.severity = severity;
     }
 }
-
+exports.Diagnostic = Diagnostic;
 class CodeLens {
     constructor(range, command) {
         this.range = range;
         this.command = command;
     }
-    get isResolved() { return Boolean(this.command); }
+    get isResolved() {
+        return Boolean(this.command);
+    }
 }
-
-class CompletionItem {
-    constructor(label, kind) {
-        this.label = label;
+exports.CodeLens = CodeLens;
+var StatusBarAlignment;
+(function (StatusBarAlignment) {
+    StatusBarAlignment[StatusBarAlignment["Left"] = 1] = "Left";
+    StatusBarAlignment[StatusBarAlignment["Right"] = 2] = "Right";
+})(StatusBarAlignment || (exports.StatusBarAlignment = StatusBarAlignment = {}));
+var ViewColumn;
+(function (ViewColumn) {
+    ViewColumn[ViewColumn["Active"] = -1] = "Active";
+    ViewColumn[ViewColumn["Beside"] = -2] = "Beside";
+    ViewColumn[ViewColumn["One"] = 1] = "One";
+    ViewColumn[ViewColumn["Two"] = 2] = "Two";
+    ViewColumn[ViewColumn["Three"] = 3] = "Three";
+})(ViewColumn || (exports.ViewColumn = ViewColumn = {}));
+var NotebookCellKind;
+(function (NotebookCellKind) {
+    NotebookCellKind[NotebookCellKind["Markup"] = 1] = "Markup";
+    NotebookCellKind[NotebookCellKind["Code"] = 2] = "Code";
+})(NotebookCellKind || (exports.NotebookCellKind = NotebookCellKind = {}));
+class NotebookCellData {
+    constructor(kind, value, languageId) {
         this.kind = kind;
-    }
-}
-
-const StatusBarAlignment = { Left: 1, Right: 2 };
-const DiagnosticSeverity = { Error: 0, Warning: 1, Information: 2, Hint: 3 };
-const OverviewRulerLane = { Left: 1, Center: 2, Right: 4, Full: 7 };
-const DecorationRangeBehavior = {
-    OpenOpen: 0,
-    ClosedClosed: 1,
-    OpenClosed: 2,
-    ClosedOpen: 3,
-    OpenBottom: 0
-};
-const ExtensionMode = { Production: 1, Development: 2, Test: 3 };
-const LanguageStatusSeverity = { Information: 0, Warning: 1, Error: 2 };
-class CodeActionKind {
-    constructor(value) {
         this.value = value;
-    }
-    append(parts) {
-        return new CodeActionKind(this.value ? `${this.value}.${parts}` : parts);
-    }
-    intersects(other) {
-        return this.contains(other) || (other && other.contains && other.contains(this));
-    }
-    contains(other) {
-        if (!other) return false;
-        const val = typeof other === 'string' ? other : other.value;
-        return this.value === val || (Boolean(val) && val.startsWith(this.value + '.'));
-    }
-    toString() {
-        return this.value;
+        this.languageId = languageId;
     }
 }
-CodeActionKind.Empty = new CodeActionKind('');
-CodeActionKind.QuickFix = new CodeActionKind('quickfix');
-CodeActionKind.Refactor = new CodeActionKind('refactor');
-CodeActionKind.RefactorExtract = new CodeActionKind('refactor.extract');
-CodeActionKind.RefactorInline = new CodeActionKind('refactor.inline');
-CodeActionKind.RefactorMove = new CodeActionKind('refactor.move');
-CodeActionKind.RefactorRewrite = new CodeActionKind('refactor.rewrite');
-CodeActionKind.Source = new CodeActionKind('source');
-CodeActionKind.SourceOrganizeImports = new CodeActionKind('source.organizeImports');
-CodeActionKind.SourceFixAll = new CodeActionKind('source.fixAll');
-const ViewColumn = { Active: -1, Beside: -2, One: 1, Two: 2, Three: 3 };
-const EndOfLine = { LF: 1, CRLF: 2 };
-const LogLevel = { Off: 0, Trace: 1, Debug: 2, Info: 3, Warning: 4, Error: 5 };
-
-const CompletionItemKind = {
-    Text: 0, Method: 1, Function: 2, Constructor: 3, Field: 4, Variable: 5,
-    Class: 6, Interface: 7, Module: 8, Property: 9, Unit: 10, Value: 11,
-    Enum: 12, Keyword: 13, Snippet: 14, Color: 15, File: 16, Reference: 17,
-    Folder: 18, EnumMember: 19, Constant: 20, Struct: 21, Event: 22, Operator: 23, TypeParameter: 24
-};
-const SymbolKind = {
-    File: 0, Module: 1, Namespace: 2, Package: 3, Class: 4, Method: 5, Property: 6,
-    Field: 7, Constructor: 8, Enum: 9, Interface: 10, Function: 11, Variable: 12,
-    Constant: 13, String: 14, Number: 15, Boolean: 16, Array: 17, Object: 18,
-    Key: 19, Null: 20, EnumMember: 21, Struct: 22, Event: 23, Operator: 24, TypeParameter: 25
-};
-const ProgressLocation = { SourceControl: 1, Window: 10, Notification: 15 };
-const IndentAction = { None: 0, Indent: 1, IndentOutdent: 2, Outdent: 3 };
-
-if (!process.env.VSCODE_NLS_CONFIG) {
-    process.env.VSCODE_NLS_CONFIG = JSON.stringify({ locale: 'en' });
-}
-
-const BUILTIN_DEFAULTS = {
-    'search.exclude': { '**/node_modules': true, '**/bower_components': true, '**/*.code-search': true },
-    'files.exclude': { '**/.git': true, '**/.svn': true, '**/.hg': true, '**/CVS': true, '**/.DS_Store': true, '**/Thumbs.db': true },
-    'editor.tabSize': 4,
-    'editor.insertSpaces': true,
-    'editor.fontSize': 14,
-    'editor.fontFamily': 'Menlo, Monaco, monospace',
-    'editor.codeActionsOnSave': {},
-    'editor.defaultFormatter': null,
-    'files.autoSave': 'off',
-    'files.eol': '\n'
-};
-
-let cachedExtensionDefaults = null;
-function getConfigurationDefault(section, key) {
-    const fullKey = section ? (key ? `${section}.${key}` : section) : key;
-    if (fullKey && BUILTIN_DEFAULTS[fullKey] !== undefined) return BUILTIN_DEFAULTS[fullKey];
-    if (key && BUILTIN_DEFAULTS[key] !== undefined) return BUILTIN_DEFAULTS[key];
-
-    if (!cachedExtensionDefaults) {
-        cachedExtensionDefaults = new Map();
-        try {
-            const fs = require('fs');
-            const path = require('path');
-            const extBase = path.join(process.env.HOME || '', 'Library/Application Support/MicroCode/Extensions');
-            if (fs.existsSync(extBase)) {
-                for (const f of fs.readdirSync(extBase)) {
-                    const p = path.join(extBase, f, 'package.json');
-                    if (fs.existsSync(p)) {
-                        const pkg = JSON.parse(fs.readFileSync(p, 'utf8'));
-                        const configs = pkg.contributes && pkg.contributes.configuration;
-                        const confList = Array.isArray(configs) ? configs : (configs ? [configs] : []);
-                        for (const c of confList) {
-                            if (c.properties) {
-                                for (const [propKey, propVal] of Object.entries(c.properties)) {
-                                    if (propVal && propVal.default !== undefined) {
-                                        cachedExtensionDefaults.set(propKey, propVal.default);
-                                    }
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-        } catch (e) {}
+exports.NotebookCellData = NotebookCellData;
+class NotebookData {
+    constructor(cells) {
+        this.cells = cells;
     }
-
-    if (fullKey && cachedExtensionDefaults.has(fullKey)) return cachedExtensionDefaults.get(fullKey);
-    if (key && cachedExtensionDefaults.has(key)) return cachedExtensionDefaults.get(key);
-    return undefined;
 }
-
+exports.NotebookData = NotebookData;
+class NotebookCellOutputItem {
+    constructor(data, mime) {
+        this.data = data;
+        this.mime = mime;
+    }
+    static text(value, mime = 'text/plain') {
+        return new NotebookCellOutputItem(Buffer.from(value, 'utf8'), mime);
+    }
+    static json(value, mime = 'application/json') {
+        return new NotebookCellOutputItem(Buffer.from(JSON.stringify(value), 'utf8'), mime);
+    }
+    static error(err) {
+        return new NotebookCellOutputItem(Buffer.from(JSON.stringify(err), 'utf8'), 'application/vnd.code.notebook.error');
+    }
+}
+exports.NotebookCellOutputItem = NotebookCellOutputItem;
+class NotebookCellOutput {
+    constructor(items, metadata) {
+        this.items = items;
+        this.metadata = metadata;
+    }
+}
+exports.NotebookCellOutput = NotebookCellOutput;
 function createMicroCodeShim(emit) {
-    const emitter = emit || ((method, params) => {});
     const registeredCommands = new Map();
-
-    const sampleDoc = {
-        uri: Uri.file('/workspace/index.js'),
-        fileName: '/workspace/index.js',
-        isUntitled: false,
-        languageId: 'javascript',
-        version: 1,
-        isDirty: false,
-        isClosed: false,
-        lineCount: 10,
-        getText: () => 'console.log("MicroCode Extension Active");\n',
-        lineAt: (line) => ({ text: 'console.log("MicroCode Extension Active");', lineNumber: line, range: new Range(line, 0, line, 38) }),
-        offsetAt: () => 0,
-        positionAt: () => new Position(0, 0)
-    };
-
-    const sampleEditor = {
-        document: sampleDoc,
-        selection: new Range(0, 0, 0, 0),
-        selections: [new Range(0, 0, 0, 0)],
-        visibleRanges: [new Range(0, 0, 10, 0)],
-        options: { tabSize: 4, insertSpaces: true },
-        edit: (cb) => { cb({ replace: () => {}, insert: () => {}, delete: () => {} }); return Promise.resolve(true); },
-        setDecorations: () => {}
-    };
-
+    const configStore = new Map();
+    const onDidSaveEmitter = new EventEmitter();
+    const onDidOpenEmitter = new EventEmitter();
+    const onDidChangeEmitter = new EventEmitter();
     return {
+        EventEmitter,
+        Uri,
         Position,
         Range,
         Selection,
-        Location,
-        RelativePattern,
-        Uri,
-        Disposable,
-        EventEmitter,
-        CancellationTokenSource,
-        ThemeColor,
-        ThemeIcon,
-        CodeAction,
-        TextEdit,
-        WorkspaceEdit,
-        SnippetString,
-        Hover,
+        DiagnosticSeverity,
         Diagnostic,
         CodeLens,
-        CompletionItem,
         StatusBarAlignment,
-        DiagnosticSeverity,
-        OverviewRulerLane,
-        DecorationRangeBehavior,
-        ExtensionMode,
-        LanguageStatusSeverity,
-        CodeActionKind,
         ViewColumn,
-        EndOfLine,
-        LogLevel,
-        CompletionItemKind,
-        SymbolKind,
-        ProgressLocation,
-        IndentAction,
-
+        NotebookCellKind,
+        NotebookCellData,
+        NotebookData,
+        NotebookCellOutputItem,
+        NotebookCellOutput,
         commands: {
             registerCommand: (command, callback) => {
                 registeredCommands.set(command, callback);
-                emitter('command/register', { command });
-                return new Disposable(() => registeredCommands.delete(command));
+                emit('command/register', { command });
+                return { dispose: () => registeredCommands.delete(command) };
             },
             executeCommand: (command, ...rest) => {
                 const callback = registeredCommands.get(command);
-                if (callback) {
-                    try { return Promise.resolve(callback(...rest)); }
-                    catch (err) { return Promise.reject(err); }
-                }
-                emitter('command/execute', { command, args: rest });
-                return Promise.resolve();
+                emit('command/executed', { command, argsCount: rest.length });
+                return Promise.resolve(callback?.(...rest));
             },
             getCommands: () => Promise.resolve(Array.from(registeredCommands.keys()))
         },
-
         window: {
-            activeTextEditor: sampleEditor,
-            visibleTextEditors: [sampleEditor],
-            onDidChangeActiveTextEditor: new EventEmitter().event,
-            onDidChangeTextEditorSelection: new EventEmitter().event,
-            onDidChangeVisibleTextEditors: new EventEmitter().event,
-
+            activeTextEditor: undefined,
             showInformationMessage: (message, ...items) => {
-                emitter('window/info', { message });
+                emit('window/info', { message, items });
                 return Promise.resolve(items[0]);
             },
             showWarningMessage: (message, ...items) => {
-                emitter('window/warn', { message });
+                emit('window/warning', { message, items });
                 return Promise.resolve(items[0]);
             },
             showErrorMessage: (message, ...items) => {
-                emitter('window/error', { message });
+                emit('window/error', { message, items });
                 return Promise.resolve(items[0]);
-            },
-            showQuickPick: (items, options) => {
-                return Promise.resolve(Array.isArray(items) ? items[0] : undefined);
-            },
-            showInputBox: (options) => {
-                return Promise.resolve(options && options.value ? options.value : '');
             },
             createOutputChannel: (name) => {
                 return {
                     name,
-                    append: (val) => emitter('window/output', { name, value: val }),
-                    appendLine: (val) => emitter('window/output', { name, value: val + '\n' }),
-                    clear: () => {},
-                    show: () => {},
-                    hide: () => {},
-                    dispose: () => {}
+                    append: (val) => emit('window/output', { name, value: val }),
+                    appendLine: (val) => emit('window/output', { name, value: val + '\n' }),
+                    clear: () => emit('window/outputClear', { name }),
+                    show: () => emit('window/outputShow', { name }),
+                    hide: () => { },
+                    dispose: () => { }
                 };
             },
-            createStatusBarItem: (alignmentOrId, priorityOrAlignment, maybePriority) => {
-                let alignment = StatusBarAlignment.Left;
-                let priority = 0;
-                let id = undefined;
-                if (typeof alignmentOrId === 'string') {
-                    id = alignmentOrId;
-                    alignment = priorityOrAlignment || StatusBarAlignment.Left;
-                    priority = maybePriority || 0;
-                } else {
-                    alignment = alignmentOrId || StatusBarAlignment.Left;
-                    priority = priorityOrAlignment || 0;
-                }
-                return {
-                    id,
-                    alignment,
-                    priority,
+            createStatusBarItem: (alignment = StatusBarAlignment.Left, priority = 0) => {
+                const item = {
                     text: '',
                     tooltip: '',
-                    command: '',
-                    color: '',
-                    show: () => {},
-                    hide: () => {},
-                    dispose: () => {}
+                    color: undefined,
+                    command: undefined,
+                    show: () => emit('statusbar/show', { text: item.text, tooltip: item.tooltip, alignment, priority }),
+                    hide: () => emit('statusbar/hide', {}),
+                    dispose: () => emit('statusbar/dispose', {})
                 };
+                return item;
             },
-            setStatusBarMessage: (text, hideAfterTimeout) => {
-                return new Disposable(() => {});
+            registerWebviewViewProvider: (viewId, provider) => {
+                emit('webview/registerProvider', { viewId });
+                return { dispose: () => { } };
             },
-            withProgress: (options, task) => {
-                const progress = { report: (val) => {} };
-                return task(progress, new CancellationTokenSource().token);
-            },
-            createTerminal: (nameOrOptions) => {
-                const name = typeof nameOrOptions === 'string' ? nameOrOptions : (nameOrOptions && nameOrOptions.name || 'Terminal');
+            createWebviewPanel: (viewType, title) => {
+                const msgEmitter = new EventEmitter();
+                const disposeEmitter = new EventEmitter();
+                const webview = {
+                    options: {},
+                    html: '',
+                    cspSource: 'microcode-webview:',
+                    onDidReceiveMessage: msgEmitter.event,
+                    postMessage: (message) => {
+                        emit('webview/postMessage', { viewType, message });
+                        return Promise.resolve(true);
+                    },
+                    asWebviewUri: (uri) => uri
+                };
+                emit('webview/createPanel', { viewType, title });
                 return {
-                    name,
-                    processId: Promise.resolve(1001),
-                    sendText: (text) => emitter('terminal/input', { name, text }),
-                    show: () => {},
-                    hide: () => {},
-                    dispose: () => {}
+                    viewType,
+                    title,
+                    webview,
+                    visible: true,
+                    onDidDispose: disposeEmitter.event,
+                    reveal: () => { },
+                    dispose: () => disposeEmitter.fire()
                 };
             },
-            createTextEditorDecorationType: (options) => ({ key: 'dec_' + Math.random(), dispose: () => {} })
+            showTextDocument: (doc) => {
+                emit('window/showTextDocument', { uri: doc?.uri?.toString?.() ?? String(doc) });
+                return Promise.resolve(undefined);
+            },
+            showNotebookDocument: (doc) => {
+                emit('window/showNotebookDocument', { notebookType: doc?.notebookType });
+                return Promise.resolve(undefined);
+            }
         },
-
         workspace: {
-            workspaceFolders: [{
-                uri: Uri.file(process.cwd()),
-                name: 'MicroCode Workspace',
-                index: 0
-            }],
-            rootPath: process.cwd(),
-            textDocuments: [sampleDoc],
-            onDidOpenTextDocument: new EventEmitter().event,
-            onDidCloseTextDocument: new EventEmitter().event,
-            onDidChangeTextDocument: new EventEmitter().event,
-            onDidSaveTextDocument: new EventEmitter().event,
-            onWillSaveTextDocument: new EventEmitter().event,
-            onDidChangeConfiguration: new EventEmitter().event,
-            onDidChangeWorkspaceFolders: new EventEmitter().event,
-
-            getConfiguration: (section, scope) => {
+            workspaceFolders: [
+                {
+                    uri: Uri.file(process.cwd()),
+                    name: path.basename(process.cwd()),
+                    index: 0
+                }
+            ],
+            onDidSaveTextDocument: onDidSaveEmitter.event,
+            onDidOpenTextDocument: onDidOpenEmitter.event,
+            onDidChangeTextDocument: onDidChangeEmitter.event,
+            getConfiguration: (section) => {
                 return {
                     get: (key, defaultValue) => {
-                        if (defaultValue !== undefined) return defaultValue;
-                        const def = getConfigurationDefault(section, key);
-                        if (def !== undefined) return def;
-                        if (key && key.includes('exclude')) return {};
-                        return defaultValue;
+                        const fullKey = section ? `${section}.${key}` : key;
+                        return configStore.has(fullKey) ? configStore.get(fullKey) : defaultValue;
                     },
-                    has: (key) => {
-                        return getConfigurationDefault(section, key) !== undefined;
-                    },
-                    inspect: (key) => {
-                        const def = getConfigurationDefault(section, key);
-                        return { defaultValue: def, globalValue: def };
-                    },
-                    update: (key, value) => Promise.resolve()
+                    update: (key, value) => {
+                        const fullKey = section ? `${section}.${key}` : key;
+                        configStore.set(fullKey, value);
+                        emit('workspace/configUpdate', { key: fullKey, value });
+                        return Promise.resolve();
+                    }
                 };
             },
-            asRelativePath: (pathOrUri) => {
-                const p = typeof pathOrUri === 'string' ? pathOrUri : pathOrUri.fsPath;
-                return p.replace(process.cwd() + '/', '');
+            openTextDocument: (uriOrOptions) => {
+                return Promise.resolve({
+                    uri: Uri.file(typeof uriOrOptions === 'string' ? uriOrOptions : 'untitled'),
+                    fileName: typeof uriOrOptions === 'string' ? uriOrOptions : 'untitled',
+                    languageId: uriOrOptions?.language ?? 'plaintext',
+                    lineCount: 1,
+                    getText: () => uriOrOptions?.content ?? '',
+                    save: () => Promise.resolve(true)
+                });
             },
-            findFiles: (include, exclude, maxResults) => Promise.resolve([]),
-            fs: {
-                readFile: (uri) => Promise.resolve(Buffer.from('')),
-                writeFile: (uri, content) => Promise.resolve(),
-                stat: (uri) => Promise.resolve({ type: 1, ctime: Date.now(), mtime: Date.now(), size: 0 }),
-                readDirectory: (uri) => Promise.resolve([])
+            openNotebookDocument: (notebookType, content) => {
+                return Promise.resolve({
+                    uri: Uri.file(`untitled.mcn`),
+                    notebookType,
+                    cellCount: content?.cells?.length ?? 0,
+                    getCells: () => []
+                });
             },
-            openTextDocument: (optionsOrUri) => {
-                const uri = typeof optionsOrUri === 'string' ? Uri.file(optionsOrUri) : (optionsOrUri && optionsOrUri.fsPath ? optionsOrUri : Uri.file('/workspace/file.js'));
-                return Promise.resolve(Object.assign({}, sampleDoc, { uri, fileName: uri.fsPath }));
-            },
-            createFileSystemWatcher: () => ({
-                onDidChange: new EventEmitter().event,
-                onDidCreate: new EventEmitter().event,
-                onDidDelete: new EventEmitter().event,
-                dispose: () => {}
-            })
+            registerNotebookSerializer: (notebookType) => {
+                emit('notebook/registerSerializer', { notebookType });
+                return { dispose: () => { } };
+            }
         },
-
         languages: {
-            registerCompletionItemProvider: () => new Disposable(() => {}),
-            registerHoverProvider: () => new Disposable(() => {}),
-            registerDefinitionProvider: () => new Disposable(() => {}),
-            registerDocumentFormattingEditProvider: () => new Disposable(() => {}),
-            registerDocumentRangeFormattingEditProvider: () => new Disposable(() => {}),
-            registerCodeActionsProvider: () => new Disposable(() => {}),
-            registerCodeLensProvider: () => new Disposable(() => {}),
-            registerDocumentSymbolProvider: () => new Disposable(() => {}),
-            registerWorkspaceSymbolProvider: () => new Disposable(() => {}),
-            registerReferenceProvider: () => new Disposable(() => {}),
-            registerRenameProvider: () => new Disposable(() => {}),
-            registerSignatureHelpProvider: () => new Disposable(() => {}),
-            registerColorProvider: () => new Disposable(() => {}),
-            registerDocumentHighlightProvider: () => new Disposable(() => {}),
-            registerFoldingRangeProvider: () => new Disposable(() => {}),
-            registerSelectionRangeProvider: () => new Disposable(() => {}),
-            registerCallHierarchyProvider: () => new Disposable(() => {}),
-            registerTypeHierarchyProvider: () => new Disposable(() => {}),
-            registerInlayHintsProvider: () => new Disposable(() => {}),
-            registerInlineCompletionItemProvider: () => new Disposable(() => {}),
-            createDiagnosticCollection: (name) => ({
-                name: name || 'diagnostics',
-                set: () => {},
-                delete: () => {},
-                clear: () => {},
-                dispose: () => {}
-            }),
-            createLanguageStatusItem: (id, selector) => ({
-                id,
-                selector,
-                text: '',
-                detail: '',
-                severity: LanguageStatusSeverity.Information,
-                command: undefined,
-                busy: false,
-                dispose: () => {}
-            }),
-            getDiagnostics: () => [],
-            setLanguageConfiguration: () => new Disposable(() => {})
-        },
-
-        extensions: {
-            getExtension: (extensionId) => {
-                try {
-                    const fs = require('fs');
-                    const path = require('path');
-                    const extBase = path.join(process.env.HOME || '', 'Library/Application Support/MicroCode/Extensions');
-                    if (fs.existsSync(extBase)) {
-                        for (const f of fs.readdirSync(extBase)) {
-                            if (f.toLowerCase() === extensionId.toLowerCase() || f.toLowerCase().endsWith('.' + extensionId.toLowerCase())) {
-                                const p = path.join(extBase, f, 'package.json');
-                                if (fs.existsSync(p)) {
-                                    return {
-                                        id: f,
-                                        extensionPath: path.join(extBase, f),
-                                        extensionUri: Uri.file(path.join(extBase, f)),
-                                        isActive: true,
-                                        packageJSON: JSON.parse(fs.readFileSync(p, 'utf8')),
-                                        exports: {}
-                                    };
-                                }
-                            }
+            createDiagnosticCollection: (name = 'default') => {
+                const store = new Map();
+                return {
+                    name,
+                    set: (uri, diags) => {
+                        if (diags) {
+                            store.set(uri.toString(), diags);
                         }
-                    }
-                } catch (e) {}
-                return undefined;
+                        else {
+                            store.delete(uri.toString());
+                        }
+                        emit('diagnostics/publish', {
+                            name,
+                            uri: uri.toString(),
+                            count: diags?.length ?? 0
+                        });
+                    },
+                    delete: (uri) => store.delete(uri.toString()),
+                    clear: () => store.clear(),
+                    dispose: () => store.clear()
+                };
             },
-            all: [],
-            onDidChange: new EventEmitter().event
+            registerCodeLensProvider: (selector, provider) => {
+                emit('languages/registerCodeLens', { selector });
+                return { dispose: () => { } };
+            },
+            registerCompletionItemProvider: (selector) => {
+                emit('languages/registerCompletion', { selector });
+                return { dispose: () => { } };
+            },
+            registerHoverProvider: (selector) => {
+                emit('languages/registerHover', { selector });
+                return { dispose: () => { } };
+            }
         },
-
-        env: {
-            appName: 'MicroCode',
-            appRoot: process.cwd(),
-            language: 'en',
-            machineId: 'microcode-mac',
-            sessionId: 'microcode-session',
-            clipboard: {
-                readText: () => Promise.resolve(''),
-                writeText: () => Promise.resolve()
-            },
-            openExternal: (target) => Promise.resolve(true)
+        notebooks: {
+            createNotebookController: (id, notebookType, label) => {
+                emit('notebook/createController', { id, notebookType, label });
+                return {
+                    id,
+                    notebookType,
+                    label,
+                    supportedLanguages: [],
+                    supportsExecutionOrder: true,
+                    description: '',
+                    executeHandler: () => { },
+                    createNotebookCellExecution: (cell) => ({
+                        cell,
+                        executionOrder: 1,
+                        start: () => { },
+                        end: () => { },
+                        clearOutput: () => Promise.resolve(),
+                        replaceOutput: () => Promise.resolve(),
+                        appendOutput: () => Promise.resolve()
+                    }),
+                    dispose: () => { }
+                };
+            }
+        },
+        lm: {
+            registerMcpServerDefinitionProvider: (id, provider) => {
+                emit('lm/registerMcpProvider', { id });
+                return { dispose: () => { } };
+            }
         }
     };
 }
-
-exports.createMicroCodeShim = createMicroCodeShim;
-exports.microcodeShim = createMicroCodeShim((method, params) => {});

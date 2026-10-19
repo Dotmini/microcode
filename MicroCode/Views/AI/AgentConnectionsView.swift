@@ -45,7 +45,7 @@ public enum AgentConnectionType: String, CaseIterable, Identifiable {
     public var subtitle: String {
         switch self {
         case .claudeCode: return "Anthropic CLI agent with hybrid reasoning"
-        case .agy: return "Google Antigravity CLI (Gemini 3.8 / Claude / GPT-OSS)"
+        case .agy: return "Google Antigravity CLI (Live `agy models` discovery)"
         case .openCode: return "Open-source coding agent & local models"
         case .codex: return "OpenAI Codex CLI & flagship coding models"
         case .microcodeNative: return "In-app engine with BYOK / Web Subscription"
@@ -58,7 +58,7 @@ public enum AgentConnectionType: String, CaseIterable, Identifiable {
     public var requirementBadge: String {
         switch self {
         case .claudeCode: return "Needs Claude Pro"
-        case .agy: return "Gemini 3.8 / Claude / GPT-OSS"
+        case .agy: return "Live AGY Models"
         case .openCode: return "Free & Local Models"
         case .codex: return "Needs ChatGPT Plus"
         case .microcodeNative: return "Ready — one click"
@@ -1101,7 +1101,7 @@ public struct AgentSetupWizardView: View {
         case .agy:
             if let _ = acpHost.quickConnect(.agy, effort: effortParam) {
                 appState.aiProvider = "agy"
-                let targetModel = selectedModel == "Agent default" ? (discovery.models(for: "agy").first?.id ?? "gemini-2.0-flash") : selectedModel
+                let targetModel = selectedModel == "Agent default" ? (discovery.models(for: "agy").first?.id ?? AIModelCatalog.shared.provider("gemini")?.models.first?.id ?? "") : selectedModel
                 appState.aiModel = targetModel
                 appState.saveSettings()
                 onConnected()
@@ -1112,7 +1112,7 @@ public struct AgentSetupWizardView: View {
         case .claudeCode:
             if let _ = acpHost.quickConnect(.claudeCode, effort: effortParam) {
                 appState.aiProvider = "claude_code"
-                let targetModel = selectedModel == "Agent default" ? (discovery.models(for: "claude_code").first?.id ?? "haiku") : selectedModel
+                let targetModel = selectedModel == "Agent default" ? (discovery.models(for: "claude_code").first?.id ?? AIModelCatalog.shared.provider("anthropic")?.models.first?.id ?? "") : selectedModel
                 appState.aiModel = targetModel
                 appState.saveSettings()
                 onConnected()
@@ -1123,7 +1123,7 @@ public struct AgentSetupWizardView: View {
         case .openCode:
             if let _ = acpHost.quickConnect(.openCode, effort: effortParam) {
                 appState.aiProvider = "opencode"
-                let targetModel = selectedModel == "Agent default" ? (discovery.models(for: "opencode").first?.id ?? "opencode/nemotron-3.5-lightning-free") : selectedModel
+                let targetModel = selectedModel == "Agent default" ? (discovery.models(for: "opencode").first?.id ?? "") : selectedModel
                 appState.aiModel = targetModel
                 appState.saveSettings()
                 onConnected()
@@ -1134,7 +1134,7 @@ public struct AgentSetupWizardView: View {
         case .codex:
             if let _ = acpHost.quickConnect(.codexEngine, effort: effortParam) {
                 appState.aiProvider = "codex"
-                let targetModel = selectedModel == "Agent default" ? (discovery.models(for: "codex").first?.id ?? "gpt-4o") : selectedModel
+                let targetModel = selectedModel == "Agent default" ? (discovery.models(for: "codex").first?.id ?? AIModelCatalog.shared.provider("openai")?.models.first?.id ?? "") : selectedModel
                 appState.aiModel = targetModel
                 appState.saveSettings()
                 onConnected()
@@ -1144,8 +1144,8 @@ public struct AgentSetupWizardView: View {
             
         case .microcodeNative:
             acpHost.activeAgentId = nil
-            appState.aiProvider = "deepseek"
-            appState.aiModel = "deepseek-chat"
+            appState.aiProvider = "gemini"
+            appState.aiModel = AIModelCatalog.shared.provider("gemini")?.models.first?.id ?? ""
             appState.saveSettings()
             onConnected()
             

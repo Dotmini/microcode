@@ -484,6 +484,36 @@ class MCPServer: ObservableObject {
                     ],
                     "required": ["operation"]
                 ]
+            ],
+            [
+                "name": "microcode_skill_router",
+                "description": "MicroCode Autonomous Skill Engine 2.0: Semantic JIT skill discovery, zero-round-trip SKILL.md distillation, bundled script execution, and autonomous skill crystallization.",
+                "inputSchema": [
+                    "type": "object",
+                    "properties": [
+                        "action": ["type": "string", "description": "Action: 'match' (rank skills for query), 'read' (distill skill instructions), 'run_script' (execute bundled script), 'crystallize' (save reusable skill)"],
+                        "query": ["type": "string", "description": "Task query or skill name/id"],
+                        "script": ["type": "string", "description": "Script filename inside skill's scripts/ directory"],
+                        "args": ["type": "string", "description": "Space-separated script arguments"],
+                        "description": ["type": "string", "description": "Description when crystallizing a new skill"],
+                        "instructions": ["type": "string", "description": "Markdown instructions when crystallizing a new skill"]
+                    ],
+                    "required": ["action"]
+                ]
+            ],
+            [
+                "name": "microcode_swarm_dispatch",
+                "description": "MicroCode SubAgent Swarm Harness 2.0: Dispatch parallel multi-agent swarms, run adversarial Red-Team security/bug reviews, or read/write the shared Swarm Blackboard.",
+                "inputSchema": [
+                    "type": "object",
+                    "properties": [
+                        "action": ["type": "string", "description": "Action: 'adversarial_review', 'post_fact', 'read_blackboard', 'status'"],
+                        "focus": ["type": "string", "description": "Focus area for adversarial review"],
+                        "key": ["type": "string", "description": "Blackboard fact key"],
+                        "value": ["type": "string", "description": "Blackboard fact value"]
+                    ],
+                    "required": ["action"]
+                ]
             ]
         ]
         
@@ -563,6 +593,10 @@ class MCPServer: ObservableObject {
                     x: x, y: y, x2: x2, y2: y2, duration: dur,
                     text: txt, key: key, packageName: pkg, filePath: path, command: cmd
                 )
+            case "microcode_skill_router":
+                result = try await AgentToolBox.shared.execute("skill_engine", params: args)
+            case "microcode_swarm_dispatch", "microcode_blackboard":
+                result = try await AgentToolBox.shared.execute("swarm_orchestrator", params: args)
             default:
                 return MCPResponse(id: request.id, error: .custom("Unknown tool: \(name)"))
             }

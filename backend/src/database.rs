@@ -117,10 +117,14 @@ impl DatabaseManager {
                             Value::String(s)
                         } else if let Ok(n) = row.try_get::<i64, _>(i) {
                             Value::Number(n.into())
+                        } else if let Ok(n) = row.try_get::<i32, _>(i) {
+                            Value::Number(n.into())
                         } else if let Ok(f) = row.try_get::<f64, _>(i) {
                             serde_json::Number::from_f64(f)
                                 .map(Value::Number)
                                 .unwrap_or(Value::Null)
+                        } else if let Ok(b) = row.try_get::<bool, _>(i) {
+                            Value::Bool(b)
                         } else {
                             Value::Null
                         };
@@ -158,6 +162,20 @@ impl DatabaseManager {
                             Value::String(s)
                         } else if let Ok(n) = row.try_get::<i64, _>(i) {
                             Value::Number(n.into())
+                        } else if let Ok(n) = row.try_get::<i32, _>(i) {
+                            Value::Number(n.into())
+                        } else if let Ok(f) = row.try_get::<f64, _>(i) {
+                            serde_json::Number::from_f64(f)
+                                .map(Value::Number)
+                                .unwrap_or(Value::Null)
+                        } else if let Ok(f) = row.try_get::<f32, _>(i) {
+                            serde_json::Number::from_f64(f as f64)
+                                .map(Value::Number)
+                                .unwrap_or(Value::Null)
+                        } else if let Ok(b) = row.try_get::<bool, _>(i) {
+                            Value::Bool(b)
+                        } else if let Ok(j) = row.try_get::<Value, _>(i) {
+                            j
                         } else {
                             Value::Null
                         };
@@ -195,6 +213,20 @@ impl DatabaseManager {
                             Value::String(s)
                         } else if let Ok(n) = row.try_get::<i64, _>(i) {
                             Value::Number(n.into())
+                        } else if let Ok(n) = row.try_get::<i32, _>(i) {
+                            Value::Number(n.into())
+                        } else if let Ok(f) = row.try_get::<f64, _>(i) {
+                            serde_json::Number::from_f64(f)
+                                .map(Value::Number)
+                                .unwrap_or(Value::Null)
+                        } else if let Ok(f) = row.try_get::<f32, _>(i) {
+                            serde_json::Number::from_f64(f as f64)
+                                .map(Value::Number)
+                                .unwrap_or(Value::Null)
+                        } else if let Ok(b) = row.try_get::<bool, _>(i) {
+                            Value::Bool(b)
+                        } else if let Ok(j) = row.try_get::<Value, _>(i) {
+                            j
                         } else {
                             Value::Null
                         };

@@ -63,7 +63,19 @@ struct RuntimeManagerView: View {
             Spacer()
             
             Button {
-                manager.detectAll()
+                for type in [RuntimeType.python, .nodejs, .bun, .go, .java, .c, .cpp] {
+                    if let status = manager.runtimes.first(where: { $0.type == type }), !status.isInstalled, !status.isDownloading {
+                        manager.install(type)
+                    }
+                }
+            } label: {
+                Label("Install Core Pack", systemImage: "shippingbox.and.arrow.backward.fill")
+            }
+            .buttonStyle(.borderedProminent)
+            .disabled(manager.isDetecting)
+            
+            Button {
+                manager.detectAll(force: true)
             } label: {
                 Label("Refresh", systemImage: "arrow.clockwise")
             }

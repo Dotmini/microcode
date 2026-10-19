@@ -50,26 +50,38 @@ class PythonEnvManager: ObservableObject {
     @Published var detectedPackages: [String] = []
     
     private let envsDirectory: URL
-    private let systemPython: String
-    public var systemPythonExecutable: String { systemPython }
+    private var systemPython: String
+    public var systemPythonExecutable: String { resolveExecutablePath(systemPython) }
 
     public func resolveExecutablePath(_ path: String) -> String {
-        if path.hasPrefix("/") && FileManager.default.isExecutableFile(atPath: path) {
+        if path.hasPrefix("/") && DeveloperToolsGuard.isSafeToExecute(path) {
             return path
+        }
+        let appSupport = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first
+        let portablePython = appSupport?.appendingPathComponent("MicroCode/Runtimes/python/bin/python3").path
+        let bundledPython = Bundle.main.resourceURL?.appendingPathComponent("RuntimeLib/python/bin/python3").path
+        
+        var candidates: [String] = []
+        if let b = bundledPython { candidates.append(b) }
+        if let p = portablePython { candidates.append(p) }
+        candidates.append(contentsOf: [
+            "\(NSHomeDirectory())/.microcode/runtimes/python/bin/python3",
+            "/opt/homebrew/bin/python3",
+            "/usr/local/bin/python3",
+            "\(NSHomeDirectory())/.pyenv/shims/python3",
+            "/Library/Frameworks/Python.framework/Versions/Current/bin/python3"
+        ])
+        if DeveloperToolsGuard.hasCommandLineTools {
+            candidates.append("/usr/bin/python3")
+        }
+        if let found = candidates.first(where: { DeveloperToolsGuard.isSafeToExecute($0) }) {
+            self.systemPython = found
+            return found
         }
         if DeveloperToolsGuard.isSafeToExecute(self.systemPython) {
             return self.systemPython
         }
-        let candidates = [
-            "/opt/homebrew/bin/python3",
-            "/usr/local/bin/python3",
-            "\(NSHomeDirectory())/.pyenv/shims/python3",
-            "/usr/bin/python3"
-        ]
-        if let found = candidates.first(where: { DeveloperToolsGuard.isSafeToExecute($0) }) {
-            return found
-        }
-        return DeveloperToolsGuard.hasCommandLineTools ? "/usr/bin/python3" : "python3"
+        return portablePython ?? (DeveloperToolsGuard.hasCommandLineTools ? "/usr/bin/python3" : "python3")
     }
     
     private init() {
@@ -79,9 +91,8 @@ class PythonEnvManager: ObservableObject {
         
         // Resolve Python:
         // 1. Full-Bundle embedded Python (App.app/Contents/Resources/RuntimeLib/python/bin/python3)
-        // 2. Common system / Homebrew locations
-        // 3. The user's login shell (covers pyenv / asdf / custom installs;
-        //    a GUI app has a stripped PATH so bare "python3" fails at runtime)
+        // 2. Portable downloaded Python (~/Library/Application Support/MicroCode/Runtimes/python/bin/python3)
+        // 3. Common system / Homebrew locations (safe from CLT prompt)
         let fm = FileManager.default
         var resolved: String?
         if let res = Bundle.main.resourceURL {
@@ -89,33 +100,23 @@ class PythonEnvManager: ObservableObject {
             if fm.isExecutableFile(atPath: embedded) { resolved = embedded }
         }
         if resolved == nil {
-            let candidates = [
-                "/opt/homebrew/bin/python3",
-                "/usr/local/bin/python3",
-                "/usr/bin/python3",
-                "\(NSHomeDirectory())/.pyenv/shims/python3"
-            ]
-            resolved = candidates.first { DeveloperToolsGuard.isSafeToExecute($0) }
+            let portable = appSupport.appendingPathComponent("MicroCode/Runtimes/python/bin/python3").path
+            if fm.isExecutableFile(atPath: portable) { resolved = portable }
         }
         if resolved == nil {
-            let shell = ProcessInfo.processInfo.environment["SHELL"] ?? "/bin/zsh"
-            if fm.isExecutableFile(atPath: shell) {
-                let p = Process()
-                p.executableURL = URL(fileURLWithPath: shell)
-                p.arguments = ["-l", "-c", "command -v python3 2>/dev/null"]
-                let pipe = Pipe()
-                p.standardOutput = pipe
-                p.standardError = Pipe()
-                if (try? p.run()) != nil {
-                    p.waitUntilExit()
-                    let out = String(data: pipe.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8)?
-                        .split(separator: "\n").first.map(String.init)?
-                        .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
-                    if !out.isEmpty, DeveloperToolsGuard.isSafeToExecute(out) { resolved = out }
-                }
+            var candidates = [
+                "\(NSHomeDirectory())/.microcode/runtimes/python/bin/python3",
+                "/opt/homebrew/bin/python3",
+                "/usr/local/bin/python3",
+                "\(NSHomeDirectory())/.pyenv/shims/python3",
+                "/Library/Frameworks/Python.framework/Versions/Current/bin/python3"
+            ]
+            if DeveloperToolsGuard.hasCommandLineTools {
+                candidates.append("/usr/bin/python3")
             }
+            resolved = candidates.first { DeveloperToolsGuard.isSafeToExecute($0) }
         }
-        systemPython = resolved ?? "python3"
+        systemPython = resolved ?? appSupport.appendingPathComponent("MicroCode/Runtimes/python/bin/python3").path
         
         // Ensure envs directory exists
         try? FileManager.default.createDirectory(at: envsDirectory, withIntermediateDirectories: true)
@@ -478,17 +479,25 @@ class PythonEnvManager: ObservableObject {
         
         isWorking = true
         
-        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+        Task.detached(priority: .userInitiated) { [weak self] in
             guard let self = self else { return }
             
+            var resolvedPath = self.resolveExecutablePath(pythonPath)
+            if !DeveloperToolsGuard.isSafeToExecute(resolvedPath) {
+                let provisioned = await RuntimeManager.shared.ensureRuntime(forLanguage: "python")
+                if provisioned {
+                    resolvedPath = self.resolveExecutablePath(pythonPath)
+                }
+            }
+            
             let process = Process()
-            let resolvedPath = self.resolveExecutablePath(pythonPath)
             process.executableURL = URL(fileURLWithPath: resolvedPath)
             process.arguments = ["-c", sanitizedCode]
             
             var env = ProcessInfo.processInfo.environment
             env["MICROCODE_LOCAL_API_TOKEN"] = LocalBackendAuth.token
-            let standardPath = "/opt/homebrew/bin:/opt/homebrew/sbin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"
+            let runtimeBins = RuntimeManager.shared.allRuntimeBinDirectories()
+            let standardPath = (runtimeBins + ["/opt/homebrew/bin", "/opt/homebrew/sbin", "/usr/local/bin", "/usr/bin", "/bin", "/usr/sbin", "/sbin"]).joined(separator: ":")
             let existingPath = env["PATH"] ?? ""
             env["PATH"] = existingPath.isEmpty ? standardPath : "\(standardPath):\(existingPath)"
             env["PYTORCH_ENABLE_MPS_FALLBACK"] = "1"
@@ -537,8 +546,6 @@ class PythonEnvManager: ObservableObject {
                 
                 DispatchQueue.main.async {
                     self.isWorking = false
-                    // If terminated manually (e.g. new keystroke), don't show error?
-                    // But here we can't easily distinguish. We'll show logic error if any.
                     completion("Error: \(error.localizedDescription)", false)
                 }
             }
@@ -558,7 +565,7 @@ class PythonEnvManager: ObservableObject {
     func executeCodeStreaming(code: String, language: String, pythonPath: String? = nil, progress: @escaping (String) -> Void) async throws -> String {
         let lang = language.lowercased()
         
-        let executablePath: String
+        var executablePath: String
         var arguments: [String] = []
         var forceUnbuffered = false
         
@@ -571,15 +578,27 @@ class PythonEnvManager: ObservableObject {
             
         switch lang {
         case "python":
-            executablePath = pythonPath ?? systemPython
+            var candidate = resolveExecutablePath(pythonPath ?? systemPython)
+            if !DeveloperToolsGuard.isSafeToExecute(candidate) {
+                let ok = await RuntimeManager.shared.ensureRuntime(forLanguage: "python") { status in
+                    progress(status + "\n")
+                }
+                if ok {
+                    candidate = resolveExecutablePath(pythonPath ?? systemPython)
+                }
+            }
+            executablePath = candidate
             arguments = ["-c", sanitizedCode]
             forceUnbuffered = true
         case "r":
-            // Attempt to find Rscript in standard locations
-            executablePath = ["/opt/homebrew/bin/Rscript", "/usr/local/bin/Rscript", "/usr/bin/Rscript"].first { FileManager.default.fileExists(atPath: $0) } ?? "Rscript"
+            executablePath = RuntimeManager.shared.selectedExecutable(for: .r)
+                ?? ["/opt/homebrew/bin/Rscript", "/usr/local/bin/Rscript", "/usr/bin/Rscript"].first { FileManager.default.fileExists(atPath: $0) }
+                ?? "Rscript"
             arguments = ["-e", sanitizedCode]
         case "julia":
-            executablePath = ["/opt/homebrew/bin/julia", "/usr/local/bin/julia", "/usr/bin/julia"].first { FileManager.default.fileExists(atPath: $0) } ?? "julia"
+            executablePath = RuntimeManager.shared.selectedExecutable(for: .julia)
+                ?? ["/opt/homebrew/bin/julia", "/usr/local/bin/julia", "/usr/bin/julia"].first { FileManager.default.fileExists(atPath: $0) }
+                ?? "julia"
             arguments = ["-e", sanitizedCode]
         default:
             throw NSError(domain: "EnvManager", code: 400, userInfo: [NSLocalizedDescriptionKey: "Unsupported language: \(language)"])
@@ -601,6 +620,10 @@ class PythonEnvManager: ObservableObject {
                 // Inherit environment and patch if needed
                 var env = ProcessInfo.processInfo.environment
                 env["MICROCODE_LOCAL_API_TOKEN"] = LocalBackendAuth.token
+                let runtimeBins = RuntimeManager.shared.allRuntimeBinDirectories()
+                let standardPath = (runtimeBins + ["/opt/homebrew/bin", "/opt/homebrew/sbin", "/usr/local/bin", "/usr/bin", "/bin", "/usr/sbin", "/sbin"]).joined(separator: ":")
+                let existingPath = env["PATH"] ?? ""
+                env["PATH"] = existingPath.isEmpty ? standardPath : "\(standardPath):\(existingPath)"
                 if forceUnbuffered {
                     env["PYTHONUNBUFFERED"] = "1" // Force unbuffered stdout to stream immediately
                 }
@@ -618,6 +641,10 @@ class PythonEnvManager: ObservableObject {
                 // Set up streaming
                 outputPipe.fileHandleForReading.readabilityHandler = { handle in
                     let data = handle.availableData
+                    if data.isEmpty {
+                        handle.readabilityHandler = nil
+                        return
+                    }
                     if let text = String(data: data, encoding: .utf8), !text.isEmpty {
                         progress(text)
                     }
@@ -625,6 +652,10 @@ class PythonEnvManager: ObservableObject {
                 
                 errorPipe.fileHandleForReading.readabilityHandler = { handle in
                     let data = handle.availableData
+                    if data.isEmpty {
+                        handle.readabilityHandler = nil
+                        return
+                    }
                     if let text = String(data: data, encoding: .utf8), !text.isEmpty {
                         progress(text)
                     }

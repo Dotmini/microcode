@@ -515,11 +515,13 @@ public class ShadowWorkspace: ObservableObject {
 
             pipe.fileHandleForReading.readabilityHandler = { handle in
                 let available = handle.availableData
-                if !available.isEmpty {
-                    dataLock.lock()
-                    outputData.append(available)
-                    dataLock.unlock()
+                if available.isEmpty {
+                    handle.readabilityHandler = nil
+                    return
                 }
+                dataLock.lock()
+                outputData.append(available)
+                dataLock.unlock()
             }
 
             var didTimeout = false

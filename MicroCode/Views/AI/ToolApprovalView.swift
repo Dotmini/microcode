@@ -191,17 +191,62 @@ struct ToolApprovalView: View {
 struct ToolApprovalModePickerView: View {
     @ObservedObject var manager: ToolApprovalManager
     
-    var body: some View {
-        Picker("Tool Approval Mode", selection: $manager.mode) {
-            ForEach(ToolApprovalMode.allCases, id: \.self) { mode in
-                HStack {
-                    Image(systemName: mode.icon)
-                    Text(mode.displayName)
-                }
-                .tag(mode)
-            }
+    private var shortModeName: String {
+        switch manager.mode {
+        case .yolo: return "Auto"
+        case .smart: return "Smart"
+        case .safe: return "Safe"
         }
-        .pickerStyle(.menu)
+    }
+    
+    private var modeTint: Color {
+        switch manager.mode {
+        case .yolo: return .green
+        case .smart: return .accentColor
+        case .safe: return .orange
+        }
+    }
+    
+    var body: some View {
+        Menu {
+            Section("Agent Tool Autonomy") {
+                ForEach(ToolApprovalMode.allCases, id: \.self) { mode in
+                    Button {
+                        manager.mode = mode
+                    } label: {
+                        HStack {
+                            Label(mode.displayName, systemImage: mode.icon)
+                            if manager.mode == mode {
+                                Spacer()
+                                Image(systemName: "checkmark")
+                            }
+                        }
+                    }
+                }
+            }
+        } label: {
+            HStack(spacing: 4) {
+                Image(systemName: manager.mode.icon)
+                    .font(.system(size: 9.5, weight: .semibold))
+                    .foregroundColor(modeTint)
+                Text(shortModeName)
+                    .font(.system(size: 10, weight: .semibold))
+                    .foregroundColor(.primary.opacity(0.85))
+                    .lineLimit(1)
+            }
+            .padding(.horizontal, 6)
+            .padding(.vertical, 3)
+            .frame(height: 22)
+            .background(modeTint.opacity(0.10))
+            .overlay(
+                RoundedRectangle(cornerRadius: 5)
+                    .stroke(modeTint.opacity(0.25), lineWidth: 0.6)
+            )
+            .cornerRadius(5)
+        }
+        .menuStyle(.borderlessButton)
+        .fixedSize()
         .help(manager.mode.description)
     }
 }
+

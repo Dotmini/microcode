@@ -172,6 +172,8 @@ final class RemoteGPUService: ObservableObject {
 
     // MARK: - Connect / Disconnect
 
+    private var lastTarget: Target?
+
     func connect(sshCommand: String, keyPath: String?) {
         guard status != .connecting else { return }
         disconnect(silent: true)
@@ -179,17 +181,36 @@ final class RemoteGPUService: ObservableObject {
             status = .failed("Couldn't read the SSH command. Paste the exact line your provider shows.")
             return
         }
+        lastTarget = t
         status = .connecting
         log = ""
-        token = UUID().uuidString.replacingOccurrences(of: "-", with: "")
+        let generatedToken = UUID().uuidString.replacingOccurrences(of: "-", with: "")
+        token = generatedToken
         CrashReporter.shared.breadcrumb("RemoteGPU.connect \(t.user)@\(t.host):\(t.port) key=\(t.keyPath ?? "none")")
         append("→ \(t.user)@\(t.host):\(t.port)\(t.keyPath.map { " (key: \(($0 as NSString).lastPathComponent))" } ?? "")\n")
 
-        // 1) Launch Jupyter remotely (this ssh stays alive = the server).
+        // 1) Launch or attach to a persistent detached Jupyter server on the remote instance
+        //    so network drops or disconnecting the local tunnel never kills running GPU jobs.
         let remoteCmd = """
-        (command -v jupyter >/dev/null 2>&1 || python3 -m pip install -q jupyter-server jupyterlab) ; \
-        jupyter server --no-browser --ip=127.0.0.1 --port=\(remotePort) \
-        --ServerApp.token='\(token)' --ServerApp.disable_check_xsrf=True --ServerApp.allow_origin='*'
+        set -e
+        TOKEN_FILE="$HOME/.microcode_jupyter.token"
+        LOG_FILE="$HOME/.microcode_jupyter.log"
+        if [ -f "$TOKEN_FILE" ] && pgrep -f "jupyter.*--port=\(remotePort)" >/dev/null 2>&1; then
+            EXISTING_TOK=$(cat "$TOKEN_FILE" | tr -d '[:space:]')
+            if [ -n "$EXISTING_TOK" ]; then
+                echo "MC_TOKEN:$EXISTING_TOK"
+                echo "• Reusing running persistent Jupyter server on port \(remotePort)"
+                exit 0
+            fi
+        fi
+        (command -v jupyter >/dev/null 2>&1 || python3 -m pip install -q jupyter-server jupyterlab ipykernel)
+        echo '\(generatedToken)' > "$TOKEN_FILE"
+        chmod 600 "$TOKEN_FILE"
+        nohup jupyter server --no-browser --ip=127.0.0.1 --port=\(remotePort) \
+            --ServerApp.token='\(generatedToken)' --ServerApp.disable_check_xsrf=True --ServerApp.allow_origin='*' \
+            > "$LOG_FILE" 2>&1 < /dev/null &
+        echo "MC_TOKEN:\(generatedToken)"
+        echo "• Persistent Jupyter daemon started (nohup, log: ~/.microcode_jupyter.log)"
         """
         let jp = Process()
         jp.executableURL = URL(fileURLWithPath: sshPath)
@@ -200,15 +221,28 @@ final class RemoteGPUService: ObservableObject {
         jpPipe.fileHandleForReading.readabilityHandler = { [weak self] h in
             let d = h.availableData
             guard !d.isEmpty, let s = String(data: d, encoding: .utf8) else { return }
-            Task { @MainActor in self?.append(s); self?.checkAuthFailure(s) }
+            Task { @MainActor in
+                guard let self else { return }
+                for line in s.components(separatedBy: .newlines) {
+                    if line.hasPrefix("MC_TOKEN:") {
+                        let remoteTok = String(line.dropFirst("MC_TOKEN:".count)).trimmingCharacters(in: .whitespacesAndNewlines)
+                        if !remoteTok.isEmpty {
+                            self.token = remoteTok
+                        }
+                    } else if !line.isEmpty {
+                        self.append(line + "\n")
+                    }
+                }
+                self.checkAuthFailure(s)
+            }
         }
-        do { try jp.run(); jupyterProc = jp; append("• starting jupyter on the instance…\n") }
+        do { try jp.run(); jupyterProc = jp; append("• bootstrapping persistent jupyter daemon on instance…\n") }
         catch { status = .failed("ssh failed: \(error.localizedDescription)"); return }
 
-        // 2) After a moment, open the port-forward and poll readiness.
+        // 2) Open the port-forward and poll readiness.
         Task { [weak self] in
             guard let self else { return }
-            try? await Task.sleep(nanoseconds: 3_500_000_000)
+            try? await Task.sleep(nanoseconds: 2_500_000_000)
             await self.openTunnelAndProbe(t)
         }
     }
@@ -247,7 +281,7 @@ final class RemoteGPUService: ObservableObject {
                     localURL = base
                     status = .connected
                     CrashReporter.shared.breadcrumb("RemoteGPU.connected → \(base) (hpcEndpoint/hpcToken set)")
-                    append("✅ Connected. Cells now run on the remote GPU.\n")
+                    append("✅ Connected. Cells now run on the remote GPU (persistent daemon).\n")
                     return
                 }
             }
@@ -258,13 +292,27 @@ final class RemoteGPUService: ObservableObject {
         disconnect(silent: true)
     }
 
+    /// Disconnects the local SSH port-forward tunnel while keeping the remote
+    /// Jupyter server and any in-flight GPU training jobs running on the host.
     func disconnect(silent: Bool = false) {
         tunnelProc?.terminate(); tunnelProc = nil
         jupyterProc?.terminate(); jupyterProc = nil
         localURL = ""
         if !silent {
             status = .disconnected
-            append("• Disconnected.\n")
+            append("• Tunnel disconnected (remote Jupyter daemon remains alive for running jobs).\n")
         }
+    }
+
+    /// Explicitly stops the remote persistent Jupyter server on the GPU host.
+    func stopRemoteJupyter() {
+        let target = lastTarget
+        disconnect(silent: false)
+        guard let t = target else { return }
+        let killProc = Process()
+        killProc.executableURL = URL(fileURLWithPath: sshPath)
+        killProc.arguments = sshBaseArgs(t) + ["\(t.user)@\(t.host)", "pkill -f 'jupyter.*--port=\(remotePort)' || true; rm -f ~/.microcode_jupyter.token"]
+        try? killProc.run()
+        append("• Stopped remote Jupyter daemon on \(t.host).\n")
     }
 }

@@ -81,8 +81,10 @@ impl McpContext {
             parts.push(format!("[Active File: {}]", file));
         }
         if let Some(ref content) = self.active_content {
-            let truncated = if content.len() > 8000 {
-                format!("{}...[truncated]", &content[..8000])
+            let char_count = content.chars().count();
+            let truncated = if char_count > 8000 {
+                let prefix: String = content.chars().take(8000).collect();
+                format!("{}...[truncated]", prefix)
             } else {
                 content.clone()
             };

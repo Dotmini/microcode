@@ -13,10 +13,25 @@ public final class SubAgentHarness: ObservableObject {
     @Published public private(set) var recentLogs: [String] = []
     @Published public var showSubAgentMonitor: Bool = false
     @Published private(set) var subagentEvents: [SubAgentEvent] = []
+    @Published public private(set) var blackboard: [String: SwarmFact] = [:]
     
     // Background execution tasks keyed by SubAgent ID
     private var runningTasks: [String: Task<Void, Never>] = [:]
     private var subagentInboxes: [String: [String]] = [:]
+    private var verifiedChanges: Set<String> = []
+
+    public struct SwarmFact: Identifiable, Codable {
+        public var id: String { key }
+        public let key: String
+        public let value: String
+        public let authorRole: String
+        public let updatedAt: Date
+    }
+
+    public struct Outcome {
+        public let instance: SubAgentInstance
+        public let verifiedWorkspaceChange: Bool
+    }
     
     private init() {
         registerBuiltinArchetypes()
@@ -59,8 +74,8 @@ public final class SubAgentHarness: ObservableObject {
                 description: "Performs root cause analysis, compiler error diagnostics, crash report inspection, and automated code patching.",
                 systemPrompt: "You are an expert Code Debugger and Diagnostician. Trace errors to their exact source, analyze stack traces, identify edge-case faults, and generate surgical fixes.",
                 allowedTools: ["file_read", "multi_file_read", "grep_search", "find_symbol", "replace_in_file", "patch_file", "shell", "inspect_image", "extract_pdf", "mcp"],
-                preferredProvider: "gemini",
-                preferredModel: "gemini-2.5-flash"
+                preferredProvider: nil,
+                preferredModel: nil
             ),
             SubAgentDefinition(
                 name: "test_runner",
@@ -68,8 +83,8 @@ public final class SubAgentHarness: ObservableObject {
                 description: "Writes comprehensive unit, integration, and property-based test suites and verifies pass rates.",
                 systemPrompt: "You are a Test Automation Specialist. Write rigorous unit and integration tests covering edge cases, assertions, and mocks.",
                 allowedTools: ["file_read", "file_write", "replace_in_file", "patch_file", "shell", "mcp"],
-                preferredProvider: "gemini",
-                preferredModel: "gemini-2.5-flash"
+                preferredProvider: nil,
+                preferredModel: nil
             ),
             SubAgentDefinition(
                 name: "security_auditor",
@@ -77,8 +92,8 @@ public final class SubAgentHarness: ObservableObject {
                 description: "Audits source code for vulnerabilities, injection vectors, memory safety issues, and performance bottlenecks.",
                 systemPrompt: "You are a Cyber Security and Performance Auditor. Review code for security flaws, unsanitized inputs, auth bypasses, resource leaks, and unoptimized queries.",
                 allowedTools: ["file_read", "multi_file_read", "grep_search", "find_symbol", "extract_pdf", "mcp"],
-                preferredProvider: "anthropic",
-                preferredModel: "claude-sonnet-4"
+                preferredProvider: nil,
+                preferredModel: nil
             ),
             SubAgentDefinition(
                 name: "mobile_device_controller",
@@ -86,8 +101,8 @@ public final class SubAgentHarness: ObservableObject {
                 description: "Controls and interacts with real Android devices, Android Emulators, and iOS Simulators via ADB and simctl to perform automated testing, UI walkthroughs, gesture actions, and app debugging.",
                 systemPrompt: "You are an expert Mobile QA and Automation Engineer. Control real Android phones, emulators, and iOS simulators using `device_runtime` (tap, swipe, type, keyevent, screenshot, app launch/install, adb_shell). Verify every step visually or through device logs.",
                 allowedTools: ["device_runtime", "file_read", "file_write", "replace_in_file", "patch_file", "shell", "inspect_image", "extract_pdf", "get_diagnostics", "mcp"],
-                preferredProvider: "gemini",
-                preferredModel: "gemini-2.5-flash"
+                preferredProvider: nil,
+                preferredModel: nil
             ),
             SubAgentDefinition(
                 name: "autonomous_loop",
@@ -183,6 +198,18 @@ public final class SubAgentHarness: ObservableObject {
         
         return instance
     }
+
+    public func waitForSubagent(id: String) async throws -> Outcome? {
+        let task = runningTasks[id]
+        await withTaskCancellationHandler {
+            if let task { await task.value }
+        } onCancel: {
+            Task { @MainActor in self.killSubagent(id: id) }
+        }
+        try Task.checkCancellation()
+        guard let instance = activeSubagents.first(where: { $0.id == id }) else { return nil }
+        return Outcome(instance: instance, verifiedWorkspaceChange: verifiedChanges.contains(id))
+    }
     
     // MARK: - Execution Loop for SubAgent
     
@@ -217,22 +244,37 @@ public final class SubAgentHarness: ObservableObject {
         await MCPClient.shared.ensureConnected(workspacePath: workspacePath)
         
         let client = AIClient.shared
+        let jitSkillsSnippet = AgentSkillsStore.shared.activeSkillsPromptSnippet(
+            forPrompt: taskPrompt,
+            workspacePath: executionWorkspace
+        )
+        let projectRulesSnippet = MultiPlatformRulesEngine.shared.formatPromptSection(maxTokens: 500)
+        let blackboardSnippet = readBlackboardSummary()
+        
         let systemPrompt = """
         \(definition.systemPrompt)
         
-        Workspace: \(workspacePath ?? "Default")
+        Workspace: \(executionWorkspace ?? "Default")
         Objective:
         \(taskPrompt)
         
-        Available MCP Tools: You and all SubAgents have full access to workspace MCP tools (namespaced as `mcp__local__*`, including `web_fetch`, `cell_*`, `ardium_*`, `computer_use_*`, `device_*`, `adb_execute`).
-        Execute the required actions to complete the objective. When finished, provide a concise final report of changes made.
+        \(blackboardSnippet.isEmpty ? "" : "## Shared Swarm Blackboard (Cross-Agent Facts)\n\(blackboardSnippet)\n")
+        \(projectRulesSnippet)
+        \(jitSkillsSnippet)
+        
+        Available Tools & Engines:
+        - You have full access to workspace MCP tools (`mcp__*`), `skill_engine` (discover/run/crystallize skills), `mcp_orchestrator` (discover/synthesize MCP servers), and `swarm_orchestrator` (post/read shared facts on the Swarm Blackboard).
+        - Whenever you discover an important architectural contract, port, schema, or root cause, post it to `swarm_orchestrator` (`action='post_fact'`) so other SubAgents and the Main Agent see it immediately.
+        - Execute the required actions to complete the objective. When finished, provide a concise final report of changes made.
         """
         
+        let universalMetaTools: Set<String> = ["skill_engine", "mcp_orchestrator", "swarm_orchestrator"]
         let toolSchemas = toolbox.toolSchemas().filter { dict in
             let name = dict["name"] as? String ?? ""
+            if universalMetaTools.contains(name) { return true }
             // All MicroCode SubAgents have access to MCP tools in addition to role-specific tools
             if name.hasPrefix("mcp__") { return definition.allowedTools.contains("mcp") || definition.allowedTools.contains("*") || definition.allowedTools.contains(name) }
-            if definition.allowedTools.contains("mcp") || definition.allowedTools.contains("*") { return true }
+            if definition.allowedTools.contains("*") { return true }
             return definition.allowedTools.contains(name)
         }
         
@@ -276,12 +318,10 @@ public final class SubAgentHarness: ObservableObject {
             skills: AgentSkillsStore.shared.enabledSkillIds(),
             mcpServers: MCPClient.shared.isConnected ? ["local"] : []
         ) != nil
-        var successfulTools = 0
-        var failedTools = 0
         var recoveryAttempts = 0
-        let requiresMutation = Self.taskRequiresMutation(taskPrompt)
-        var mutationTools = 0
-        var verificationTools = 0
+        let canMutate = permittedTools.contains("shell") || permittedTools.contains { AgentExecutionEvidence.mutates(name: $0, arguments: [:]) }
+        let requiresMutation = canMutate && AgentExecutionEvidence.taskRequiresMutation(taskPrompt)
+        var evidence = AgentExecutionEvidence()
 
         while true {
             if Task.isCancelled {
@@ -343,22 +383,20 @@ public final class SubAgentHarness: ObservableObject {
                         output: result.text
                     ) : nil
                     let hasAnswer = !result.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
-                    let canVerify = hasAnswer
-                        && failedTools == 0
-                        && (successfulTools > 0 || !requiresMutation)
-                    if canVerify || candidate?.directive.action == "complete" {
+                    let canVerify = hasAnswer && evidence.satisfies(requiresMutation: requiresMutation || evidence.hasMutation)
+                    if canVerify {
                         let verified = kernelOnline ? await AgentKernelClient.shared.observe(
                             runID: kernelRunID,
                             kind: "verification",
                             success: true,
-                            output: "Subagent produced a report backed by \(successfulTools) successful tool results",
+                            output: "Subagent produced a report backed by \(evidence.successfulTools) successful tool results",
                             madeProgress: true
                         ) : nil
-                        if !kernelOnline || verified?.directive.action == "complete" || candidate?.directive.action == "complete" || hasAnswer {
+                        if !kernelOnline || verified?.directive.action == "complete" || candidate?.directive.action == "complete" {
                             break
                         }
                     }
-                    if recoveryAttempts < 3, candidate?.directive.action != "blocked", !hasAnswer {
+                    if recoveryAttempts < 3, candidate?.directive.action != "blocked" {
                         recoveryAttempts += 1
                         history.append([
                             ("_role", "user"),
@@ -366,19 +404,20 @@ public final class SubAgentHarness: ObservableObject {
                         ])
                         continue
                     }
-                    if hasAnswer {
-                        break
-                    }
                     updateSubagentState(
                         instanceId: instanceId,
                         state: .waitingForInput,
-                        detail: candidate?.directive.reason ?? "No verifiable completion evidence"
+                        detail: "Missing verified \(requiresMutation ? "mutation and post-change test" : "tool result") after \(recoveryAttempts) recovery attempts"
                     )
                     runningTasks.removeValue(forKey: instanceId)
                     return
                 }
                 
-                // Execute tools
+                // Execute tools in this turn and record a single assistant + user turn pair
+                var calledToolsSummary: [String] = []
+                var turnToolOutputs: [String] = []
+                var kernelSuggestions: [String] = []
+                
                 for toolCall in result.toolCalls {
                     if Task.isCancelled { break }
                     
@@ -387,7 +426,7 @@ public final class SubAgentHarness: ObservableObject {
                     
                     do {
                         guard permittedTools.contains(toolName) else {
-                            throw ToolBoxError.executionFailed("Tool is not authorized for this subagent")
+                            throw ToolBoxError.executionFailed("Tool '\(toolName)' is not authorized for this subagent")
                         }
                         guard toolbox.workspaceRoot == executionWorkspace else {
                             throw ToolBoxError.executionFailed("Subagent workspace is no longer active")
@@ -397,14 +436,13 @@ public final class SubAgentHarness: ObservableObject {
                             return
                         }
                         toolAttempts += 1
-                        let toolOutput = try await toolbox.execute(toolName, params: toolCall.arguments)
+                        let rawOutput = try await toolbox.execute(toolName, params: toolCall.arguments)
+                        let toolOutput = TokenOptimizer.shared.compressToolOutput(rawOutput, toolName: toolName, budget: 12_000)
                         let logEntry = "✓ \(toolName): \(toolOutput.prefix(80))"
                         if let idx = activeSubagents.firstIndex(where: { $0.id == instanceId }) {
                             activeSubagents[idx].logMessages.append(logEntry)
                         }
-                        successfulTools += 1
-                        if Self.isMutationTool(toolName) { mutationTools += 1 }
-                        if Self.isVerificationTool(toolName) { verificationTools += 1 }
+                        evidence.record(name: toolName, arguments: toolCall.arguments, success: true, output: toolOutput)
                         if kernelOnline {
                             let response = await AgentKernelClient.shared.observe(
                                 runID: kernelRunID,
@@ -416,18 +454,18 @@ public final class SubAgentHarness: ObservableObject {
                                 madeProgress: Self.toolMakesProgress(toolName)
                             )
                             if let prompt = response?.directive.suggestedPrompt {
-                                history.append([("_role", "user"), ("text", "[Kernel]: \(prompt)")])
+                                kernelSuggestions.append(prompt)
                             }
                         }
                         
-                        history.append([("_role", "assistant"), ("text", "Calling \(toolName)")])
-                        history.append([("_role", "user"), ("text", "Tool output for \(toolName):\n\(toolOutput)")])
+                        calledToolsSummary.append("[Called tool: \(toolName)]")
+                        turnToolOutputs.append("✅ \(toolName) output:\n\(toolOutput)")
                     } catch {
                         let errEntry = "✗ \(toolName) failed: \(error.localizedDescription)"
                         if let idx = activeSubagents.firstIndex(where: { $0.id == instanceId }) {
                             activeSubagents[idx].logMessages.append(errEntry)
                         }
-                        failedTools += 1
+                        evidence.record(name: toolName, arguments: toolCall.arguments, success: false)
                         if kernelOnline {
                             let response = await AgentKernelClient.shared.observe(
                                 runID: kernelRunID,
@@ -439,14 +477,46 @@ public final class SubAgentHarness: ObservableObject {
                                 transient: Self.isTransient(error.localizedDescription)
                             )
                             if let prompt = response?.directive.suggestedPrompt ?? response?.directive.reason {
-                                history.append([("_role", "user"), ("text", "[Kernel]: \(prompt)")])
+                                kernelSuggestions.append(prompt)
                             }
                         }
-                        history.append([("_role", "user"), ("text", "Tool error: \(error.localizedDescription)")])
+                        var detailedError = "❌ \(toolName) error: \(error.localizedDescription)"
+                        // Surgical Auto-Heal Context Injection: if an edit fails, attach target file lines automatically
+                        if ["replace_in_file", "patch_file", "multi_replace_in_file"].contains(Self.normalizeToolName(toolName)),
+                           let relPath = toolCall.arguments["path"] as? String {
+                            let fullPath = relPath.hasPrefix("/") ? relPath : ((executionWorkspace ?? "") as NSString).appendingPathComponent(relPath)
+                            if let content = try? String(contentsOfFile: fullPath, encoding: .utf8) {
+                                let lines = content.components(separatedBy: "\n")
+                                let preview = lines.prefix(60).enumerated().map { "\($0.offset + 1): \($0.element)" }.joined(separator: "\n")
+                                detailedError += "\n[Auto-Heal Context: Top 60 lines of \(relPath) for exact string matching]\n\(preview)"
+                            }
+                        }
+                        calledToolsSummary.append("[Called tool: \(toolName) (failed)]")
+                        turnToolOutputs.append(detailedError)
                     }
                 }
-                if history.count > 24 { history.removeFirst(history.count - 24) }
+                
+                let assistantTurnText = result.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+                    ? calledToolsSummary.joined(separator: "\n")
+                    : result.text + "\n" + calledToolsSummary.joined(separator: "\n")
+                history.append([("_role", "assistant"), ("text", assistantTurnText)])
+                
+                var combinedUserFeedback = turnToolOutputs.joined(separator: "\n\n---\n\n")
+                if let lastKernelNote = kernelSuggestions.last {
+                    combinedUserFeedback += "\n\n[Kernel]: \(lastKernelNote)"
+                }
+                history.append([("_role", "user"), ("text", combinedUserFeedback)])
+                
+                // Preserve history[0] (the original taskPrompt) and keep recent turn pairs intact
+                if history.count > 25, let firstPrompt = history.first {
+                    let recent = Array(history.suffix(22))
+                    history = [firstPrompt] + recent
+                }
             } catch {
+                if Task.isCancelled {
+                    updateSubagentState(instanceId: instanceId, state: .killed, detail: "Task cancelled")
+                    return
+                }
                 let response = kernelOnline ? await AgentKernelClient.shared.observe(
                     runID: kernelRunID,
                     kind: "provider_error",
@@ -473,7 +543,10 @@ public final class SubAgentHarness: ObservableObject {
             // Single mutation: copy → modify → assign back. @Published fires once.
             var snapshot = activeSubagents[idx]
             snapshot.state = .completed
-            snapshot.stateDetail = "Finished successfully"
+            if evidence.hasVerifiedMutation { verifiedChanges.insert(instanceId) }
+            snapshot.stateDetail = evidence.hasVerifiedMutation
+                ? "Finished successfully with verified workspace change"
+                : "Finished successfully"
             snapshot.finalReport = finalSummary
             snapshot.finishedAt = Date()
             snapshot.currentToolExecution = nil
@@ -496,34 +569,9 @@ public final class SubAgentHarness: ObservableObject {
             "shell", "device_runtime", "agent_plan", "preview_control", "cell_create",
             "cell_update", "cell_run", "playground_run", "ardium_run", "ardium_compile",
             "computer_use_click", "computer_use_type", "computer_use_shortcut",
-            "device_interact", "device_app_manage", "adb_execute"
+            "device_interact", "device_app_manage", "adb_execute",
+            "skill_engine", "mcp_orchestrator", "swarm_orchestrator"
         ].contains(base)
-    }
-
-    private static func isMutationTool(_ name: String) -> Bool {
-        let base = normalizeToolName(name)
-        return [
-            "file_write", "replace_in_file", "patch_file", "rename_file", "create_directory",
-            "cell_create", "cell_update", "cell_delete"
-        ].contains(base)
-    }
-
-    private static func isVerificationTool(_ name: String) -> Bool {
-        let base = normalizeToolName(name)
-        return [
-            "shell", "get_diagnostics", "device_runtime", "playground_run", "cell_run",
-            "ardium_run", "ardium_compile", "ardium_test", "ardium_diagnose", "preview_control"
-        ].contains(base)
-    }
-
-    private static func taskRequiresMutation(_ task: String) -> Bool {
-        let lower = task.lowercased()
-        let indicators = [
-            "fix", "implement", "add", "create", "edit", "modify", "change", "redesign",
-            "refactor", "rewrite", "patch", "remove", "delete", "write", "update",
-            "แก้", "ทำให้", "เพิ่ม", "สร้าง", "เขียน", "เปลี่ยน", "ออกแบบใหม่", "ลบ", "อัปเดต"
-        ]
-        return indicators.contains { lower.contains($0) }
     }
 
     private static func isTransient(_ message: String) -> Bool {
@@ -601,6 +649,100 @@ public final class SubAgentHarness: ObservableObject {
         return activeSubagents.map { sub in
             "- [\(sub.id.prefix(6))] \(sub.role) (\(sub.typeName)): \(sub.state.displayName) - \(sub.stateDetail ?? "")"
         }.joined(separator: "\n")
+    }
+    
+    // MARK: - Swarm Blackboard & Multi-Agent Parallel Swarm Orchestration
+    
+    public func postFact(key: String, value: String, authorRole: String = "MainAgent") {
+        let trimmedKey = key.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmedKey.isEmpty else { return }
+        let fact = SwarmFact(
+            key: trimmedKey,
+            value: value.trimmingCharacters(in: .whitespacesAndNewlines),
+            authorRole: authorRole,
+            updatedAt: Date()
+        )
+        blackboard[trimmedKey] = fact
+        log("[BLACKBOARD] \(authorRole) posted '\(trimmedKey)': \(value.prefix(60))")
+    }
+    
+    public func readBlackboardSummary() -> String {
+        if blackboard.isEmpty { return "" }
+        return blackboard.values
+            .sorted { $0.key < $1.key }
+            .map { "- **\($0.key)** (\($0.authorRole)): \($0.value)" }
+            .joined(separator: "\n")
+    }
+    
+    public func clearBlackboard() {
+        blackboard.removeAll()
+    }
+    
+    /// Dispatches multiple specialized SubAgents concurrently and synthesizes their verified reports.
+    public func runParallelSwarm(
+        tasks: [(typeName: String, role: String, prompt: String)],
+        workspacePath: String?
+    ) async -> String {
+        let capped = Array(tasks.prefix(6))
+        guard !capped.isEmpty else { return "No swarm tasks provided." }
+        
+        var spawnedIds: [(id: String, role: String, typeName: String)] = []
+        for item in capped {
+            let instance = invokeSubagent(
+                typeName: item.typeName,
+                role: item.role,
+                prompt: item.prompt,
+                workspacePath: workspacePath
+            )
+            spawnedIds.append((instance.id, item.role, item.typeName))
+        }
+        
+        var reports: [String] = []
+        await withTaskGroup(of: (Int, String).self) { group in
+            for (index, meta) in spawnedIds.enumerated() {
+                group.addTask {
+                    let outcome = try? await SubAgentHarness.shared.waitForSubagent(id: meta.id)
+                    let report = await MainActor.run { () -> String in
+                        guard let outcome else {
+                            return "### [\(meta.role)] (#\(meta.id.prefix(6)))\nStatus: Lost/Cancelled"
+                        }
+                        let badge = outcome.verifiedWorkspaceChange ? "VERIFIED CHANGE" : outcome.instance.state.displayName
+                        return "### [\(meta.role)] (`\(meta.typeName)` #\((meta.id.prefix(6)))) — \(badge)\n\(outcome.instance.finalReport ?? outcome.instance.stateDetail ?? "Completed")"
+                    }
+                    return (index, report)
+                }
+            }
+            var indexed: [(Int, String)] = []
+            for await pair in group {
+                indexed.append(pair)
+            }
+            reports = indexed.sorted { $0.0 < $1.0 }.map(\.1)
+        }
+        
+        let bb = readBlackboardSummary()
+        return """
+        🐝 **Parallel SubAgent Swarm Completed (\(spawnedIds.count) agents)**
+        
+        \(reports.joined(separator: "\n\n"))
+        \(bb.isEmpty ? "" : "\n\n### Shared Swarm Blackboard\n\(bb)")
+        """
+    }
+    
+    /// Runs an adversarial Red-Team review (Security Auditor + Bug Hunter in parallel) on recent workspace changes.
+    public func runAdversarialReview(workspacePath: String?, focus: String) async -> String {
+        let tasks: [(typeName: String, role: String, prompt: String)] = [
+            (
+                typeName: "security_auditor",
+                role: "Red-Team Security & Concurrency Critic",
+                prompt: "Perform an adversarial review of recent changes in the workspace (focus: \(focus)). Run `git_status` or inspect modified files for race conditions, MainActor violations, memory leaks, command injection, or broken invariants. Post key findings to `swarm_orchestrator` (`action='post_fact'`)."
+            ),
+            (
+                typeName: "bug_hunter",
+                role: "Red-Team Edge-Case & Regression Hunter",
+                prompt: "Inspect recent changes in the workspace (focus: \(focus)) and check diagnostics/compilation edge cases, missing imports, nil-handling flaws, or UI state bugs. Post any defects to `swarm_orchestrator` (`action='post_fact'`)."
+            )
+        ]
+        return await runParallelSwarm(tasks: tasks, workspacePath: workspacePath)
     }
     
     private func log(_ msg: String) {

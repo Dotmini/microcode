@@ -391,34 +391,42 @@ class LSPClientService: ObservableObject {
     
     private var readTask: Task<Void, Never>?
     
-    // Thread-safe cache for resolved binaries
-    private static var resolvedBinariesCache: [String: String] = [:]
-    private static let cacheLock = NSLock()
+    // Thread-safe cache for resolved binaries (stores Optional<String> so missing binaries are also cached)
+    nonisolated(unsafe) private static var resolvedBinariesCache: [String: String?] = [:]
+    nonisolated private static let cacheLock = NSLock()
     
-    static func getCachedBinary(for name: String) -> String? {
+    nonisolated static func getCachedBinaryLookup(for name: String) -> (foundInCache: Bool, path: String?) {
         cacheLock.lock()
         defer { cacheLock.unlock() }
-        return resolvedBinariesCache[name]
+        if let entry = resolvedBinariesCache[name] {
+            return (true, entry)
+        }
+        return (false, nil)
     }
     
-    static func setCachedBinary(_ path: String, for name: String) {
+    nonisolated static func setCachedBinary(_ path: String?, for name: String) {
         cacheLock.lock()
         defer { cacheLock.unlock() }
         resolvedBinariesCache[name] = path
     }
     
+    static func clearBinaryCache() {
+        cacheLock.lock()
+        defer { cacheLock.unlock() }
+        resolvedBinariesCache.removeAll()
+    }
+    
     static func resolveBinaryAsync(_ name: String, searchPaths: [String]) async -> String? {
-        if let cached = getCachedBinary(for: name) {
-            return cached
+        let lookup = getCachedBinaryLookup(for: name)
+        if lookup.foundInCache {
+            return lookup.path
         }
         
-        let resolved = await Task.detached(priority: .userInitiated) {
+        let resolved = await Task.detached(priority: .utility) {
             LSPClientService.resolveBinary(name, searchPaths: searchPaths)
         }.value
         
-        if let resolved = resolved {
-            setCachedBinary(resolved, for: name)
-        }
+        setCachedBinary(resolved, for: name)
         return resolved
     }
     
@@ -454,13 +462,14 @@ class LSPClientService: ObservableObject {
         
         // Server-specific arguments
         switch serverType {
-        case .pyright:
+        case .pyright, .typescriptServer, .intelephense:
             process.arguments = ["--stdio"]
-        case .typescriptServer:
-            process.arguments = ["--stdio"]
+        case .dart:
+            process.arguments = ["language-server", "--protocol=lsp"]
+        case .solargraph:
+            process.arguments = ["stdio"]
         case .sourcekitLSP:
-            // sourcekit-lsp uses stdio by default, but we can be explicit or add logging if needed
-            process.arguments = [] 
+            process.arguments = []
         default:
             process.arguments = []
         }
@@ -476,8 +485,14 @@ class LSPClientService: ObservableObject {
         
         process.terminationHandler = { [weak self] _ in
             Task { @MainActor in
-                self?.isRunning = false
-                print("⚠️ [LSP] \(self?.serverType.rawValue ?? "Unknown") terminated")
+                guard let self else { return }
+                self.isRunning = false
+                let pending = self.pendingRequests
+                self.pendingRequests.removeAll()
+                for (_, continuation) in pending {
+                    continuation.resume(throwing: LSPError.notConnected)
+                }
+                print("⚠️ [LSP] \(self.serverType.rawValue) terminated")
             }
         }
         
@@ -522,7 +537,11 @@ class LSPClientService: ObservableObject {
         stdout = nil
         stderr = nil
         isRunning = false
+        let pending = pendingRequests
         pendingRequests.removeAll()
+        for (_, continuation) in pending {
+            continuation.resume(throwing: LSPError.notConnected)
+        }
     }
     
     // MARK: - Server Binary Detection
@@ -532,31 +551,20 @@ class LSPClientService: ObservableObject {
     }
 
     /// Resolve a language-server binary the user installed by ANY means.
-    /// A GUI .app has a stripped PATH (no Homebrew/npm-global/pyenv/nvm/asdf),
-    /// so a bare `which` misses most installs. Strategy: explicit known paths
-    /// → user LOGIN shell `command -v` (honours their real PATH/version mgrs)
-    /// → common version-manager dirs → plain which.
+    /// Uses `resolvedBinariesCache` so negative lookups never respawn shells.
     nonisolated static func resolveBinary(_ name: String, searchPaths: [String]) -> String? {
-        let fm = FileManager.default
-        for path in searchPaths where fm.isExecutableFile(atPath: path) { return path }
-
-        // Login shell — picks up Homebrew, npm -g, pyenv, nvm, asdf, volta…
-        let shell = ProcessInfo.processInfo.environment["SHELL"] ?? "/bin/zsh"
-        if fm.isExecutableFile(atPath: shell) {
-            let p = Process()
-            p.executableURL = URL(fileURLWithPath: shell)
-            p.arguments = ["-l", "-c", "command -v \(name) 2>/dev/null"]
-            let pipe = Pipe(); p.standardOutput = pipe; p.standardError = Pipe()
-            if (try? p.run()) != nil {
-                p.waitUntilExit()
-                if let out = String(data: pipe.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8)?
-                    .split(separator: "\n").first.map(String.init)?
-                    .trimmingCharacters(in: .whitespaces), !out.isEmpty,
-                   fm.isExecutableFile(atPath: out) { return out }
-            }
+        let lookup = getCachedBinaryLookup(for: name)
+        if lookup.foundInCache {
+            return lookup.path
         }
 
-        // Common version-manager / global bin locations.
+        let fm = FileManager.default
+        for path in searchPaths where fm.isExecutableFile(atPath: path) {
+            setCachedBinary(path, for: name)
+            return path
+        }
+
+        // Common version-manager / global bin locations (fast filesystem check before spawning shell).
         let home = fm.homeDirectoryForCurrentUser.path
         var dirs = [
             "/opt/homebrew/bin", "/usr/local/bin", "/usr/bin",
@@ -570,20 +578,32 @@ class LSPClientService: ObservableObject {
         }
         for d in dirs {
             let cand = (d as NSString).appendingPathComponent(name)
-            if fm.isExecutableFile(atPath: cand) { return cand }
-        }
-
-        let w = Process()
-        w.executableURL = URL(fileURLWithPath: "/usr/bin/which")
-        w.arguments = [name]
-        let pipe = Pipe(); w.standardOutput = pipe
-        if (try? w.run()) != nil {
-            w.waitUntilExit()
-            if let path = String(data: pipe.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8)?
-                .trimmingCharacters(in: .whitespacesAndNewlines), !path.isEmpty {
-                return path
+            if fm.isExecutableFile(atPath: cand) {
+                setCachedBinary(cand, for: name)
+                return cand
             }
         }
+
+        // Login shell fallback — picks up custom PATH / version managers
+        let shell = ProcessInfo.processInfo.environment["SHELL"] ?? "/bin/zsh"
+        if fm.isExecutableFile(atPath: shell) {
+            let p = Process()
+            p.executableURL = URL(fileURLWithPath: shell)
+            p.arguments = ["-l", "-c", "command -v \(name) 2>/dev/null"]
+            let pipe = Pipe(); p.standardOutput = pipe; p.standardError = Pipe()
+            if (try? p.run()) != nil {
+                p.waitUntilExit()
+                if let out = String(data: pipe.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8)?
+                    .split(separator: "\n").first.map(String.init)?
+                    .trimmingCharacters(in: .whitespaces), !out.isEmpty,
+                   fm.isExecutableFile(atPath: out) {
+                    setCachedBinary(out, for: name)
+                    return out
+                }
+            }
+        }
+
+        setCachedBinary(nil, for: name)
         return nil
     }
     
@@ -597,22 +617,18 @@ class LSPClientService: ObservableObject {
             var buffer = Data()
             
             while !Task.isCancelled {
-                do {
-                    // Read available data (blocks the background thread, not the Main Actor!)
-                    let newData = handle.availableData
-                    if newData.isEmpty {
-                        try await Task.sleep(nanoseconds: 10_000_000) // 10ms
-                        continue
-                    }
-                    buffer.append(newData)
-                    
-                    // Parse messages from buffer
-                    while let message = LSPClientService.extractMessage(from: &buffer) {
-                        guard let self = self else { break }
-                        await self.handleIncomingMessage(message)
-                    }
-                } catch {
+                // Read available data (blocks on Unix pipe until bytes arrive or EOF)
+                let newData = handle.availableData
+                if newData.isEmpty {
+                    // EOF reached (child process closed stdout) — exit loop instead of spinning
                     break
+                }
+                buffer.append(newData)
+                
+                // Parse messages from buffer
+                while let message = LSPClientService.extractMessage(from: &buffer) {
+                    guard let self = self else { break }
+                    await self.handleIncomingMessage(message)
                 }
             }
         }
@@ -629,9 +645,22 @@ class LSPClientService: ObservableObject {
         }
         
         let headerData = buffer.subdata(in: 0..<headerEnd.lowerBound)
-        guard let headerString = String(data: headerData, encoding: .utf8),
-              headerString.hasPrefix(LSPMessage.contentLengthHeader),
-              let contentLength = Int(headerString.dropFirst(LSPMessage.contentLengthHeader.count).trimmingCharacters(in: .whitespaces)) else {
+        guard let headerString = String(data: headerData, encoding: .utf8) else {
+            buffer.removeSubrange(0..<headerEnd.upperBound)
+            return nil
+        }
+        
+        var parsedLength: Int?
+        for line in headerString.components(separatedBy: "\r\n") {
+            let lower = line.lowercased()
+            if lower.hasPrefix("content-length:") {
+                let valStr = line.dropFirst("content-length:".count).trimmingCharacters(in: .whitespaces)
+                parsedLength = Int(valStr)
+                break
+            }
+        }
+        guard let contentLength = parsedLength, contentLength >= 0 else {
+            buffer.removeSubrange(0..<headerEnd.upperBound)
             return nil
         }
         
@@ -662,7 +691,6 @@ class LSPClientService: ObservableObject {
             if method == "textDocument/publishDiagnostics" {
                 if let notification = try? decoder.decode(JSONRPCNotification<PublishDiagnosticsParams>.self, from: data),
                    let params = notification.params {
-                    print("✅ [LSP] Diagnostics for \(params.uri): \(params.diagnostics.count) items")
                     // Propagate to LSPManager -> UI
                     Task { @MainActor in
                         LSPManager.shared.fileDiagnostics[params.uri] = params.diagnostics
@@ -679,7 +707,20 @@ class LSPClientService: ObservableObject {
     
     // MARK: - Request/Response
     
-    private func sendRequest<P: Encodable, R: Decodable>(method: String, params: P) async throws -> R {
+    private struct CancelParams: Codable {
+        let id: Int
+    }
+    
+    private func cancelPendingRequest(id: Int) {
+        if let continuation = pendingRequests.removeValue(forKey: id) {
+            continuation.resume(throwing: CancellationError())
+            Task { [weak self] in
+                try? await self?.sendNotification(method: "$/cancelRequest", params: CancelParams(id: id))
+            }
+        }
+    }
+    
+    private func sendRawRequest<P: Encodable>(method: String, params: P) async throws -> Data {
         let id = nextRequestId()
         let request = JSONRPCRequest(id: id, method: method, params: params)
         
@@ -690,10 +731,33 @@ class LSPClientService: ObservableObject {
         
         try await sendMessage(requestData)
         
-        // Wait for response
-        let responseData = try await withCheckedThrowingContinuation { continuation in
-            pendingRequests[id] = continuation
+        let timeoutNanoseconds: UInt64 = (method == "initialize") ? 15_000_000_000 : 5_000_000_000
+        let timeoutTask = Task { @MainActor [weak self] in
+            try? await Task.sleep(nanoseconds: timeoutNanoseconds)
+            guard !Task.isCancelled else { return }
+            if let continuation = self?.pendingRequests.removeValue(forKey: id) {
+                continuation.resume(throwing: LSPError.noResult)
+            }
         }
+        defer { timeoutTask.cancel() }
+        
+        return try await withTaskCancellationHandler {
+            try await withCheckedThrowingContinuation { continuation in
+                if Task.isCancelled {
+                    continuation.resume(throwing: CancellationError())
+                } else {
+                    pendingRequests[id] = continuation
+                }
+            }
+        } onCancel: {
+            Task { @MainActor [weak self] in
+                self?.cancelPendingRequest(id: id)
+            }
+        }
+    }
+
+    private func sendRequest<P: Encodable, R: Decodable>(method: String, params: P) async throws -> R {
+        let responseData = try await sendRawRequest(method: method, params: params)
         
         let response = try await Task.detached(priority: .userInitiated) {
             let decoder = JSONDecoder()
@@ -796,22 +860,24 @@ class LSPClientService: ObservableObject {
         try await sendNotification(method: "textDocument/didChange", params: params)
     }
     
-    /// Request completions at a position
+    /// Request completions at a position (single RPC call, supports both CompletionList and [CompletionItem])
     func completion(uri: String, line: Int, character: Int) async throws -> [CompletionItem] {
         let params = CompletionParams(
             textDocument: TextDocumentIdentifier(uri: uri),
             position: LSPPosition(line: line, character: character)
         )
         
-        // Response can be either CompletionList or [CompletionItem]
-        do {
-            let result: CompletionList = try await sendRequest(method: "textDocument/completion", params: params)
-            return result.items
-        } catch {
-            // Try as array
-            let items: [CompletionItem] = try await sendRequest(method: "textDocument/completion", params: params)
-            return items
-        }
+        let responseData = try await sendRawRequest(method: "textDocument/completion", params: params)
+        return try await Task.detached(priority: .userInitiated) {
+            let decoder = JSONDecoder()
+            if let listResp = try? decoder.decode(JSONRPCResponse<CompletionList>.self, from: responseData) {
+                if let error = listResp.error { throw LSPError.serverError(error.code, error.message) }
+                if let result = listResp.result { return result.items }
+            }
+            let arrResp = try decoder.decode(JSONRPCResponse<[CompletionItem]>.self, from: responseData)
+            if let error = arrResp.error { throw LSPError.serverError(error.code, error.message) }
+            return arrResp.result ?? []
+        }.value
     }
     
     /// Request hover information
@@ -824,22 +890,26 @@ class LSPClientService: ObservableObject {
         return try await sendRequest(method: "textDocument/hover", params: params)
     }
     
-    /// Request go-to-definition
+    /// Request go-to-definition (single RPC call, supports both [LSPLocation] and LSPLocation)
     func definition(uri: String, line: Int, character: Int) async throws -> [LSPLocation] {
         let params = DefinitionParams(
             textDocument: TextDocumentIdentifier(uri: uri),
             position: LSPPosition(line: line, character: character)
         )
         
-        // Response can be Location, [Location], or null
-        do {
-            let locations: [LSPLocation] = try await sendRequest(method: "textDocument/definition", params: params)
-            return locations
-        } catch {
-            // Try as single location
-            let location: LSPLocation = try await sendRequest(method: "textDocument/definition", params: params)
-            return [location]
-        }
+        let responseData = try await sendRawRequest(method: "textDocument/definition", params: params)
+        return try await Task.detached(priority: .userInitiated) {
+            let decoder = JSONDecoder()
+            if let arrResp = try? decoder.decode(JSONRPCResponse<[LSPLocation]>.self, from: responseData) {
+                if let error = arrResp.error { throw LSPError.serverError(error.code, error.message) }
+                if let result = arrResp.result { return result }
+            }
+            if let singleResp = try? decoder.decode(JSONRPCResponse<LSPLocation>.self, from: responseData) {
+                if let error = singleResp.error { throw LSPError.serverError(error.code, error.message) }
+                if let result = singleResp.result { return [result] }
+            }
+            return []
+        }.value
     }
 }
 

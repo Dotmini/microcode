@@ -112,7 +112,7 @@ class CollaborationService: ObservableObject {
         let shareCode = generateShareCode()
         
         let session = CollaborationSession(
-            id: UUID().uuidString,
+            id: shareCode,
             projectId: projectId,
             hostUserId: user.id,
             participants: [
@@ -133,9 +133,11 @@ class CollaborationService: ObservableObject {
         
         self.currentSession = session
         self.participants = session.participants
+        crdtEngine.startSession(siteId: user.id)
+        crdtEngine.updatePeerCount(participants.count)
         
-        // Connect to collaboration server
-        try await connect(sessionId: session.id, shareCode: shareCode)
+        // Connect to collaboration server using shareCode as the canonical room key
+        try await connect(sessionId: shareCode, shareCode: shareCode)
         
         return session
     }
@@ -144,16 +146,16 @@ class CollaborationService: ObservableObject {
         guard let user = AuthService.shared.currentUser else {
             throw CollaborationError.notAuthenticated
         }
+        let normalizedCode = shareCode.trimmingCharacters(in: .whitespacesAndNewlines).uppercased()
         
-        // In production, this would fetch session from server
         let session = CollaborationSession(
-            id: UUID().uuidString,
+            id: normalizedCode,
             projectId: "shared-project",
             hostUserId: "host-user",
             participants: [],
             isActive: true,
             createdAt: Date(),
-            shareCode: shareCode
+            shareCode: normalizedCode
         )
         
         self.currentSession = session
@@ -168,10 +170,12 @@ class CollaborationService: ObservableObject {
             isOnline: true,
             joinedAt: Date()
         )
-        self.participants.append(participant)
+        self.participants = [participant]
+        crdtEngine.startSession(siteId: user.id)
+        crdtEngine.updatePeerCount(participants.count)
         
-        // Connect
-        try await connect(sessionId: session.id, shareCode: shareCode)
+        // Connect using the canonical shareCode room
+        try await connect(sessionId: normalizedCode, shareCode: normalizedCode)
         
         // Send join message
         await sendMessage(.join(userId: user.id, displayName: user.displayName))
@@ -184,6 +188,8 @@ class CollaborationService: ObservableObject {
         
         await sendMessage(.leave(userId: user.id))
         disconnect()
+        crdtEngine.stopSession()
+        crdtDocuments.removeAll()
         currentSession = nil
         participants = []
     }
@@ -193,12 +199,22 @@ class CollaborationService: ObservableObject {
     private func connect(sessionId: String, shareCode: String) async throws {
         connectionStatus = .connecting
         
-        guard let url = URL(string: "\(serverURL)?session=\(sessionId)&code=\(shareCode)") else {
+        let encodedSession = sessionId.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) ?? sessionId
+        let encodedCode = shareCode.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) ?? shareCode
+        guard let url = URL(string: "\(serverURL)?session=\(encodedSession)&code=\(encodedCode)") else {
             throw CollaborationError.invalidURL
         }
         
+        var request = URLRequest(url: url)
+        if let token = SupabaseAuthService.shared.session?.accessToken, !token.isEmpty {
+            request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
+        }
+        if let user = AuthService.shared.currentUser {
+            request.setValue(user.id, forHTTPHeaderField: "X-User-Id")
+        }
+        
         let session = URLSession(configuration: .default)
-        webSocketTask = session.webSocketTask(with: url)
+        webSocketTask = session.webSocketTask(with: request)
         webSocketTask?.resume()
         
         // Start receiving messages
@@ -240,7 +256,6 @@ class CollaborationService: ObservableObject {
             }
         } catch {
             connectionStatus = .error(error.localizedDescription)
-            // Attempt reconnect
             attemptReconnect()
         }
     }
@@ -266,26 +281,50 @@ class CollaborationService: ObservableObject {
                 )
                 if !participants.contains(where: { $0.userId == userId }) {
                     participants.append(participant)
+                    crdtEngine.updatePeerCount(participants.count)
+                }
+                // Host broadcasts open file state to newly joined peer
+                if let currentUser = AuthService.shared.currentUser,
+                   currentSession?.hostUserId == currentUser.id,
+                   userId != currentUser.id,
+                   let openFiles = AppState.shared?.openFiles, !openFiles.isEmpty {
+                    var snapshot: [String: String] = [:]
+                    for f in openFiles {
+                        snapshot[f.path] = f.content
+                    }
+                    await sendMessage(.sync(files: snapshot))
                 }
                 
             case .leave(let userId):
                 participants.removeAll { $0.userId == userId }
+                crdtEngine.updatePeerCount(participants.count)
                 
             case .cursorMove(let userId, let position):
                 if let index = participants.firstIndex(where: { $0.userId == userId }) {
                     participants[index].cursorPosition = position
                 }
                 
-            case .textChange(_, let change):
+            case .textChange(let userId, let change):
+                guard userId != AuthService.shared.currentUser?.id else { return }
                 pendingChanges.append(change)
+                applyRemoteTextChange(change)
                 
-            case .fileOpen(_, _):
-                // Handle file open
-                break
+            case .fileOpen(let userId, let filePath):
+                guard userId != AuthService.shared.currentUser?.id else { return }
+                if let index = participants.firstIndex(where: { $0.userId == userId }) {
+                    participants[index].cursorPosition = CollaborationSession.CursorPosition(filePath: filePath, line: 1, column: 1)
+                }
                 
-            case .sync(_):
-                // Handle full sync
-                break
+            case .sync(let files):
+                for (path, content) in files {
+                    let doc = crdtEngine.createDocument(content: content, filePath: path, id: path)
+                    crdtDocuments[path] = doc
+                    if let appState = AppState.shared,
+                       let idx = appState.openFiles.firstIndex(where: { $0.path == path || $0.name == (path as NSString).lastPathComponent }) {
+                        appState.openFiles[idx].content = content
+                        appState.openFiles[idx].isUnsaved = true
+                    }
+                }
                 
             case .chat(let userId, let message):
                 let displayName = participants.first(where: { $0.userId == userId })?.displayName ?? "Unknown"
@@ -298,6 +337,30 @@ class CollaborationService: ObservableObject {
             }
         } catch {
             print("Failed to decode message: \(error)")
+        }
+    }
+
+    private func applyRemoteTextChange(_ change: CollaborationMessage.TextChange) {
+        let path = change.filePath
+        let initialContent: String = {
+            if let existing = crdtDocuments[path] {
+                return crdtEngine.getText(from: existing)
+            }
+            if let appState = AppState.shared,
+               let file = appState.openFiles.first(where: { $0.path == path || $0.name == (path as NSString).lastPathComponent }) {
+                return file.content
+            }
+            return ""
+        }()
+        var doc = crdtDocuments[path] ?? crdtEngine.createDocument(content: initialContent, filePath: path, id: path)
+        _ = crdtEngine.applyTextChange(change, to: &doc)
+        crdtDocuments[path] = doc
+        let mergedText = crdtEngine.getText(from: doc)
+
+        if let appState = AppState.shared,
+           let idx = appState.openFiles.firstIndex(where: { $0.path == path || $0.name == (path as NSString).lastPathComponent }) {
+            appState.openFiles[idx].content = mergedText
+            appState.openFiles[idx].isUnsaved = true
         }
     }
     
@@ -332,6 +395,7 @@ class CollaborationService: ObservableObject {
     
     func sendTextChange(_ change: CollaborationMessage.TextChange) async {
         guard let user = AuthService.shared.currentUser else { return }
+        applyRemoteTextChange(change)
         await sendMessage(.textChange(userId: user.id, change: change))
     }
     
@@ -376,7 +440,7 @@ class CollaborationService: ObservableObject {
     private func startHeartbeat() {
         heartbeatTimer = Timer.scheduledTimer(withTimeInterval: 30, repeats: true) { [weak self] _ in
             Task { @MainActor in
-                await self?.webSocketTask?.sendPing { error in
+                self?.webSocketTask?.sendPing { error in
                     if let error = error {
                         print("Heartbeat failed: \(error)")
                     }

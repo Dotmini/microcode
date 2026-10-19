@@ -187,12 +187,17 @@ struct GitPanelView: View {
     private func changesTab(status: GitStatus) -> some View {
         ScrollView {
             VStack(spacing: 0) {
-                let staged = status.files.filter { $0.status == "added" || $0.status == "modified" || $0.status == "deleted" || $0.status == "renamed" }
+                let staged = status.files.filter { $0.status.hasPrefix("staged_") }
+                let unstaged = status.files.filter { $0.status == "added" || $0.status == "modified" || $0.status == "deleted" || $0.status == "renamed" }
                 let untracked = status.files.filter { $0.status == "untracked" }
                 
                 if !staged.isEmpty {
-                    fileSection(title: "Changes", files: staged, icon: "checkmark.circle.fill", color: .green,
+                    fileSection(title: "Staged Changes", files: staged, icon: "checkmark.circle.fill", color: .green,
                                 expanded: $expandStaged, isStaged: true)
+                }
+                if !unstaged.isEmpty {
+                    fileSection(title: "Changes", files: unstaged, icon: "pencil.circle.fill", color: .yellow,
+                                expanded: $expandUnstaged, isStaged: false)
                 }
                 if !untracked.isEmpty {
                     fileSection(title: "Untracked", files: untracked, icon: "plus.circle.fill", color: .orange,
@@ -213,8 +218,8 @@ struct GitPanelView: View {
                     Image(systemName: icon).font(.system(size: 10)).foregroundColor(color)
                     Text(title).font(.system(size: 11, weight: .medium))
                     Spacer()
-                    // Stage/Unstage all
-                    if isStaged {
+                    // Stage All button on unstaged/untracked sections
+                    if !isStaged {
                         Button { appState.gitStageAll() } label: {
                             Image(systemName: "plus.circle").font(.system(size: 10))
                         }.buttonStyle(.borderless).help("Stage All")
@@ -298,10 +303,10 @@ struct GitPanelView: View {
     private func statusBadge(_ status: String) -> some View {
         let (letter, color): (String, Color) = {
             switch status {
-            case "added": return ("A", .green)
-            case "modified": return ("M", .orange)
-            case "deleted": return ("D", .red)
-            case "renamed": return ("R", .blue)
+            case "added", "staged_added": return ("A", .green)
+            case "modified", "staged_modified": return ("M", .orange)
+            case "deleted", "staged_deleted": return ("D", .red)
+            case "renamed", "staged_renamed": return ("R", .blue)
             case "untracked": return ("U", .secondary)
             default: return ("?", .secondary)
             }

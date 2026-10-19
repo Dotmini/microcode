@@ -9,6 +9,7 @@ final class IOSDeviceCaptureService: NSObject, ObservableObject {
     static let shared = IOSDeviceCaptureService()
     
     @Published private(set) var isCapturing = false
+    @Published private(set) var isScanning = false
     @Published private(set) var connectedDeviceName: String?
     @Published private(set) var deviceResolution: CGSize = .zero
     @Published private(set) var measuredFPS: Double = 0
@@ -34,7 +35,7 @@ final class IOSDeviceCaptureService: NSObject, ObservableObject {
     // MARK: - CoreMediaIO Screen Capture Activation
     
     /// Tells CoreMediaIO DAL system to expose iOS USB screen capture devices (same as QuickTime)
-    private func enableScreenCaptureDevices() {
+    nonisolated private static func enableScreenCaptureDevicesStatic() {
         var prop = CMIOObjectPropertyAddress(
             mSelector: CMIOObjectPropertySelector(kCMIOHardwarePropertyAllowScreenCaptureDevices),
             mScope: CMIOObjectPropertyScope(kCMIOObjectPropertyScopeGlobal),
@@ -51,13 +52,17 @@ final class IOSDeviceCaptureService: NSObject, ObservableObject {
             &allow
         )
     }
+
+    private func enableScreenCaptureDevices() {
+        Self.enableScreenCaptureDevicesStatic()
+    }
     
     // MARK: - Device Discovery
     
     /// Scan for connected iOS devices that expose screen capture over USB
-    func discoverDevices() -> [AVCaptureDevice] {
+    nonisolated static func discoverDevicesStatic() -> [AVCaptureDevice] {
         guard #available(macOS 14.0, *) else { return [] }
-        enableScreenCaptureDevices()
+        enableScreenCaptureDevicesStatic()
         
         // 1. Primary: Muxed device (This is the official iOS USB screen recording device)
         let muxedSession = AVCaptureDevice.DiscoverySession(
@@ -74,33 +79,45 @@ final class IOSDeviceCaptureService: NSObject, ObservableObject {
             return screenDevices
         }
         
-        // 2. Secondary fallback: External video devices
+        // 2. Secondary fallback: External video devices only (never built-in Mac webcam)
         let videoSession = AVCaptureDevice.DiscoverySession(
-            deviceTypes: [.external, .builtInWideAngleCamera],
+            deviceTypes: [.external],
             mediaType: .video,
             position: .unspecified
         )
         return videoSession.devices.filter { device in
             let name = device.localizedName.lowercased()
-            let model = (device.modelID ?? "").lowercased()
+            let model = device.modelID.lowercased()
             return name.contains("iphone") || name.contains("ipad") || name.contains("ipod") ||
                    model.contains("iphone") || model.contains("ipad")
         }
     }
+
+    func discoverDevices() -> [AVCaptureDevice] {
+        Self.discoverDevicesStatic()
+    }
     
-    /// Manual scan triggered by user
+    /// Non-blocking scan triggered by user or tab appearance
     func scanForDevices() {
-        let found = discoverDevices()
-        self.availableDevices = found
-        if let first = found.first {
-            self.state = .connected
-            self.connectedDeviceName = first.localizedName
-            self.statusMessage = "\(first.localizedName) ready via USB"
-            // Auto-start capture immediately!
-            startCapture(device: first)
-        } else {
-            self.state = .searching
-            self.statusMessage = "No iPhone or iPad detected. Connect via USB and tap 'Trust This Computer'."
+        guard !isScanning else { return }
+        isScanning = true
+        statusMessage = "Scanning USB ports for iPhone / iPad…"
+        captureQueue.async { [weak self] in
+            let found = Self.discoverDevicesStatic()
+            DispatchQueue.main.async {
+                guard let self else { return }
+                self.isScanning = false
+                self.availableDevices = found
+                if let first = found.first {
+                    self.state = .connected
+                    self.connectedDeviceName = first.localizedName
+                    self.statusMessage = "\(first.localizedName) ready via USB"
+                    self.startCapture(device: first)
+                } else {
+                    self.state = .searching
+                    self.statusMessage = "No iPhone or iPad detected over USB. Plug in your cable and tap 'Trust This Computer'."
+                }
+            }
         }
     }
     

@@ -357,6 +357,8 @@ struct AuthenticFileTree: NSViewRepresentable {
                 } else {
                     expandFolder(item, in: sender)
                 }
+            } else {
+                parent.onAction(.openFile(item.node))
             }
         }
         

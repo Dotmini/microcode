@@ -49,10 +49,10 @@ final class DeviceStreamDecoder {
     }
 
     /// Feed a complete Annex B access unit (frame).
-    func decodeAccessUnit(_ data: Data) {
+    func decodeAccessUnit(_ data: Data, ptsMicroseconds: UInt64 = 0) {
         let nalUnits = splitAnnexBNALUnits(data)
         for nal in nalUnits {
-            processNALUnit(nal)
+            processNALUnit(nal, ptsMicroseconds: ptsMicroseconds)
         }
     }
 
@@ -79,24 +79,11 @@ final class DeviceStreamDecoder {
     private func extractAndProcessNALUnits() {
         let nalUnits = splitAnnexBNALUnits(nalBuffer)
         guard !nalUnits.isEmpty else { return }
-
-        // Keep any trailing incomplete NAL data
-        if let lastStartCode = findLastStartCode(in: nalBuffer) {
-            // Check if the last NAL is complete (has end marker or next start code)
-            let remaining = nalBuffer.suffix(from: lastStartCode)
-            let innerUnits = splitAnnexBNALUnits(remaining)
-            if innerUnits.count <= 1 {
-                // Last NAL might be incomplete — keep it
-                nalBuffer = Data(remaining)
-            } else {
-                nalBuffer.removeAll(keepingCapacity: true)
-            }
-        } else {
-            nalBuffer.removeAll(keepingCapacity: true)
-        }
+        // Clear buffer after extracting complete Annex B NAL units so P-frames are never decoded twice
+        nalBuffer.removeAll(keepingCapacity: true)
 
         for nal in nalUnits {
-            processNALUnit(nal)
+            processNALUnit(nal, ptsMicroseconds: 0)
         }
     }
 
@@ -168,7 +155,7 @@ final class DeviceStreamDecoder {
 
     // MARK: - NAL Unit Processing
 
-    private func processNALUnit(_ nalData: Data) {
+    private func processNALUnit(_ nalData: Data, ptsMicroseconds: UInt64 = 0) {
         guard !nalData.isEmpty else { return }
 
         let nalType = nalData[nalData.startIndex] & 0x1F
@@ -186,9 +173,9 @@ final class DeviceStreamDecoder {
                 recreateDecompressionSession()
             }
         case 5: // IDR (keyframe)
-            decodeVideoNAL(nalData, isKeyFrame: true)
+            decodeVideoNAL(nalData, isKeyFrame: true, ptsMicroseconds: ptsMicroseconds)
         case 1: // Non-IDR (P/B frame)
-            decodeVideoNAL(nalData, isKeyFrame: false)
+            decodeVideoNAL(nalData, isKeyFrame: false, ptsMicroseconds: ptsMicroseconds)
         default:
             break // SEI, AUD, etc — skip
         }
@@ -296,7 +283,7 @@ final class DeviceStreamDecoder {
 
     // MARK: - Decode Video Frame
 
-    private func decodeVideoNAL(_ nalData: Data, isKeyFrame: Bool) {
+    private func decodeVideoNAL(_ nalData: Data, isKeyFrame: Bool, ptsMicroseconds: UInt64 = 0) {
         guard let session = decompressionSession,
               let format = formatDescription else {
             // If we get video data without a session, request keyframe
@@ -337,11 +324,12 @@ final class DeviceStreamDecoder {
 
         guard let buffer = blockBuffer else { return }
 
-        // Create CMSampleBuffer
+        // Create CMSampleBuffer with real microsecond PTS (masking scrcpy top 2 flags bits)
         var sampleBuffer: CMSampleBuffer?
+        let cleanPts = Int64(ptsMicroseconds & 0x3FFF_FFFF_FFFF_FFFF)
         var timingInfo = CMSampleTimingInfo(
             duration: CMTime.invalid,
-            presentationTimeStamp: CMTime(value: 0, timescale: 1000),
+            presentationTimeStamp: CMTime(value: cleanPts, timescale: 1_000_000),
             decodeTimeStamp: CMTime.invalid
         )
 
@@ -359,12 +347,12 @@ final class DeviceStreamDecoder {
 
         guard let sample = sampleBuffer else { return }
 
-        // Decode
+        // Decode immediately without temporal reordering delay for zero-latency screen streaming
         var flags: VTDecodeInfoFlags = []
         let decodeStatus = VTDecompressionSessionDecodeFrame(
             session,
             sampleBuffer: sample,
-            flags: [._EnableAsynchronousDecompression, ._EnableTemporalProcessing],
+            flags: [._EnableAsynchronousDecompression],
             frameRefcon: nil,
             infoFlagsOut: &flags
         )

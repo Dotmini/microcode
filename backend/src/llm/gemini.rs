@@ -47,18 +47,32 @@ impl LlmProvider for GeminiProvider {
             format!("{}\n\n{}", system_prompt, ctx_str)
         };
 
-        // Build Gemini contents format
-        let mut contents: Vec<serde_json::Value> = Vec::new();
+        // Build Gemini contents format (filter empty & coalesce consecutive same-role turns)
+        let mut coalesced: Vec<(&str, String)> = Vec::new();
         for msg in messages {
-            if msg.role == "system" {
+            if msg.role == "system" || msg.content.trim().is_empty() {
                 continue;
             }
             let role = if msg.role == "user" { "user" } else { "model" };
-            contents.push(serde_json::json!({
-                "role": role,
-                "parts": [{"text": msg.content}]
-            }));
+            if let Some(last) = coalesced.last_mut() {
+                if last.0 == role {
+                    last.1.push_str("\n\n");
+                    last.1.push_str(&msg.content);
+                    continue;
+                }
+            }
+            coalesced.push((role, msg.content.clone()));
         }
+
+        let contents: Vec<serde_json::Value> = coalesced
+            .into_iter()
+            .map(|(role, text)| {
+                serde_json::json!({
+                    "role": role,
+                    "parts": [{"text": text}]
+                })
+            })
+            .collect();
 
         let body = serde_json::json!({
             "contents": contents,
@@ -71,9 +85,10 @@ impl LlmProvider for GeminiProvider {
             }
         });
 
+        let clean_model = model.strip_prefix("models/").unwrap_or(model);
         let url = format!(
             "https://generativelanguage.googleapis.com/v1beta/models/{}:streamGenerateContent?alt=sse&key={}",
-            model, self.api_key
+            clean_model, self.api_key
         );
 
         let response = self

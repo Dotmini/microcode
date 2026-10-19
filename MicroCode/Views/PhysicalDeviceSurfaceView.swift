@@ -149,6 +149,10 @@ final class DeviceMetalNSView: NSView {
 
     override func mouseUp(with event: NSEvent) {
         let pt = normalizedPoint(event)
+        if let onInput {
+            onInput(pt.x, pt.y, .up)
+            return
+        }
         let durationMs = Int(Date().timeIntervalSince(downTime) * 1000)
         let dist = hypot(pt.x - downPoint.x, pt.y - downPoint.y)
 
@@ -157,8 +161,6 @@ final class DeviceMetalNSView: NSView {
         } else {
             onSwipe?(downPoint.x, downPoint.y, pt.x, pt.y, max(120, min(500, durationMs)))
         }
-
-        onInput?(pt.x, pt.y, .up)
     }
 
     override func scrollWheel(with event: NSEvent) {
@@ -585,6 +587,12 @@ struct PhysicalIOSDeviceTabView: View {
                                     }
                                     .buttonStyle(.borderedProminent)
                                 }
+
+                                Button("Close") {
+                                    capture.stopCapture()
+                                    PreviewDockService.shared.hideDock()
+                                }
+                                .buttonStyle(.bordered)
                             }
                         }
                         .frame(maxWidth: .infinity, maxHeight: .infinity)
@@ -605,18 +613,42 @@ struct PhysicalIOSDeviceTabView: View {
                                 .multilineTextAlignment(.center)
                                 .padding(.horizontal, 20)
 
-                            // Scan button
-                            Button {
-                                capture.scanForDevices()
-                                control.discoverPhysicalUDID()
-                            } label: {
+                            if capture.isScanning {
                                 HStack(spacing: 6) {
-                                    Image(systemName: "arrow.clockwise")
-                                    Text("Scan for Devices")
+                                    ProgressView()
+                                        .controlSize(.small)
+                                    Text("Scanning USB media devices…")
+                                        .font(.system(size: 10))
+                                        .foregroundColor(.white.opacity(0.75))
                                 }
+                            } else if capture.availableDevices.isEmpty {
+                                Text("No USB iPhone/iPad detected.")
+                                    .font(.system(size: 10, weight: .medium))
+                                    .foregroundColor(.white.opacity(0.45))
                             }
-                            .buttonStyle(.borderedProminent)
-                            .controlSize(.regular)
+
+                            HStack(spacing: 8) {
+                                // Scan button
+                                Button {
+                                    capture.scanForDevices()
+                                    control.discoverPhysicalUDID()
+                                } label: {
+                                    HStack(spacing: 6) {
+                                        Image(systemName: "arrow.clockwise")
+                                        Text("Scan for Devices")
+                                    }
+                                }
+                                .buttonStyle(.borderedProminent)
+                                .controlSize(.regular)
+                                .disabled(capture.isScanning)
+
+                                Button("Close") {
+                                    capture.stopCapture()
+                                    PreviewDockService.shared.hideDock()
+                                }
+                                .buttonStyle(.bordered)
+                                .controlSize(.regular)
+                            }
 
                             // Show discovered devices
                             if !capture.availableDevices.isEmpty {
@@ -833,23 +865,49 @@ struct PhysicalAndroidDeviceTabView: View {
                                 .multilineTextAlignment(.center)
                                 .padding(.horizontal, 24)
 
-                            Button {
-                                Task {
-                                    await androidStream.scanDevices()
-                                    if let first = androidStream.availableDevices.first(where: { !$0.isEmulator }) ?? androidStream.availableDevices.first {
-                                        if let adb = androidStream.resolvedAdbPath {
-                                            await androidStream.startStreaming(serial: first.id, adbPath: adb)
+                            if androidStream.isScanning {
+                                HStack(spacing: 6) {
+                                    ProgressView()
+                                        .controlSize(.small)
+                                    Text("Scanning ADB for Android devices…")
+                                        .font(.system(size: 10))
+                                        .foregroundColor(.white.opacity(0.75))
+                                }
+                            } else if !androidStream.statusMessage.isEmpty {
+                                Text(androidStream.statusMessage)
+                                    .font(.system(size: 10, weight: .medium))
+                                    .foregroundColor(.white.opacity(0.55))
+                                    .multilineTextAlignment(.center)
+                                    .padding(.horizontal, 20)
+                            }
+
+                            HStack(spacing: 8) {
+                                Button {
+                                    Task {
+                                        await androidStream.scanDevices()
+                                        if let first = androidStream.availableDevices.first(where: { !$0.isEmulator }) ?? androidStream.availableDevices.first {
+                                            if let adb = androidStream.resolvedAdbPath {
+                                                await androidStream.startStreaming(serial: first.id, adbPath: adb)
+                                            }
                                         }
                                     }
+                                } label: {
+                                    HStack(spacing: 6) {
+                                        Image(systemName: "arrow.clockwise")
+                                        Text("Scan Devices")
+                                    }
                                 }
-                            } label: {
-                                HStack(spacing: 6) {
-                                    Image(systemName: "arrow.clockwise")
-                                    Text("Scan for Android Devices")
+                                .buttonStyle(.borderedProminent)
+                                .controlSize(.regular)
+                                .disabled(androidStream.isScanning)
+
+                                Button("Close") {
+                                    androidStream.stopStreaming()
+                                    PreviewDockService.shared.hideDock()
                                 }
+                                .buttonStyle(.bordered)
+                                .controlSize(.regular)
                             }
-                            .buttonStyle(.borderedProminent)
-                            .controlSize(.regular)
 
                             if !androidStream.availableDevices.isEmpty {
                                 VStack(spacing: 6) {

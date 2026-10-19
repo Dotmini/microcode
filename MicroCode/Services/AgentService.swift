@@ -11,6 +11,7 @@
 
 import SwiftUI
 import Combine
+import UserNotifications
 import MicroCodeSupport
 
 enum AgentDomain: String {
@@ -32,8 +33,35 @@ enum AgentSessionScope: String {
 class AgentService: ObservableObject {
     static let shared = AgentService()
 
+    private var backgroundActivityToken: NSObjectProtocol? = nil
+    var shouldTerminateAfterBackgroundCompletion: Bool = false
+
     @Published var messages: [AgentMessageModel] = []
-    @Published var isLoading = false
+    @Published var isLoading = false {
+        didSet {
+            guard isLoading != oldValue else { return }
+            if isLoading {
+                if backgroundActivityToken == nil {
+                    backgroundActivityToken = ProcessInfo.processInfo.beginActivity(
+                        options: [.userInitiated, .idleSystemSleepDisabled],
+                        reason: "MicroCode AI Agent Active Execution"
+                    )
+                }
+                if !NSApp.isActive || NSApp.windows.allSatisfy({ !$0.isVisible }) {
+                    NSApp.dockTile.badgeLabel = "AI"
+                }
+            } else {
+                if let token = backgroundActivityToken {
+                    ProcessInfo.processInfo.endActivity(token)
+                    backgroundActivityToken = nil
+                }
+                NSApp.dockTile.badgeLabel = nil
+                saveChats()
+                saveArx()
+                notifyBackgroundCompletionIfNeeded()
+            }
+        }
+    }
     @Published var pendingChanges: [PendingChangeModel] = []
     @Published var editorContext: EditorContextModel?
     @Published var currentToolExecution: String? = nil
@@ -108,7 +136,7 @@ class AgentService: ObservableObject {
     /// Safety iteration ceiling to prevent runaway 24/7 loops and infinite token spend.
     /// Can be overridden or extended when explicit long-running batch tasks are queued.
     private var maxToolIterations: Int? {
-        35
+        ToolApprovalManager.shared.mode == .yolo ? 120 : 35
     }
     private let maxHistoryChars = 8_000_000
     private let maxMessageHistoryChars = 4_000_000
@@ -118,6 +146,9 @@ class AgentService: ObservableObject {
     private var cachedSemanticContext: (workspace: String, value: String, date: Date)?
     private let semanticContextTTL: TimeInterval = 120
     private var lastProvider = "gemini"
+    private var executionTask: Task<Void, Never>?
+    private var executionID: UUID?
+    private var shouldProcessQueueAfterRun = true
     private var lastModel = "gemini-2.5-flash"
     
     // Token stats (read from optimizer)
@@ -129,6 +160,8 @@ class AgentService: ObservableObject {
         let block = { [weak self] in
             guard let self = self else { return }
             self.isCancelled = true
+            self.shouldProcessQueueAfterRun = autoProcessQueue
+            self.executionTask?.cancel()
             Task { @MainActor in ToolApprovalManager.shared.cancelAll() }
             self.aiClient.cancelStream()
             Task { @MainActor in
@@ -163,6 +196,47 @@ class AgentService: ObservableObject {
             }
         }
         if Thread.isMainThread { block() } else { DispatchQueue.main.async(execute: block) }
+    }
+    
+    // MARK: - Smart Background Execution & Completion Notifications
+    
+    func postBackgroundStatusNotification(title: String, body: String) {
+        let content = UNMutableNotificationContent()
+        content.title = title
+        content.body = body
+        content.sound = .default
+        let req = UNNotificationRequest(identifier: "microcode.ai.\(UUID().uuidString)", content: content, trigger: nil)
+        UNUserNotificationCenter.current().add(req, withCompletionHandler: nil)
+    }
+    
+    private func notifyBackgroundCompletionIfNeeded() {
+        let isHiddenOrBackground = !NSApp.isActive || NSApp.windows.allSatisfy { !$0.isVisible || ($0 is NSPanel) }
+        if isHiddenOrBackground && !isCancelled {
+            let summary: String = {
+                if let lastMsg = messages.last(where: { $0.role == .assistant }) {
+                    let clean = AIStructuredTurnCodec.stripThoughtTags(lastMsg.content)
+                        .trimmingCharacters(in: .whitespacesAndNewlines)
+                    if !clean.isEmpty {
+                        return String(clean.prefix(140))
+                    }
+                }
+                return "AI ประมวลผลและบันทึกผลลัพธ์เรียบร้อยแล้ว"
+            }()
+            postBackgroundStatusNotification(
+                title: "MicroCode AI ทำงานเสร็จสิ้น",
+                body: summary
+            )
+            NSApp.requestUserAttention(.informationalRequest)
+        }
+        
+        if shouldTerminateAfterBackgroundCompletion && messageQueue.isEmpty && !isLoading {
+            shouldTerminateAfterBackgroundCompletion = false
+            saveChats()
+            saveArx()
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
+                NSApp.terminate(nil)
+            }
+        }
     }
     
     // MARK: - Message Queue (Non-Destructive Execution)
@@ -236,7 +310,10 @@ class AgentService: ObservableObject {
     ) -> String {
         let complexity = tokenOptimizer.detectComplexity(message)
         let budget = TokenBudget.forTask(complexity)
-        let isChatMode = domain == .software && complexity == .chat
+        // AgentService is only entered from an explicit Agent invocation.
+        // Chat uses AIClient directly in AIAgentView. Keyword heuristics such
+        // as "why" or "ไม่ได้" must not silently disable tools here.
+        let isChatMode = false
         
         var prompt: String
         
@@ -304,26 +381,31 @@ class AgentService: ObservableObject {
             - Be direct. No filler. Lead with the most important information.
             - Format code changes as unified diffs when explaining modifications.
             
-            ## Performance & Efficiency Mandate
+            ## Performance & Efficiency Mandate (AGY + Codex Autonomous Architecture)
             - Fast Convergence: Aim to complete user requests in 3 to 6 iterations. Do not loop reading file after file endlessly.
-            - Batch Independent Tools: Call multiple tools in parallel in a single turn whenever possible (e.g. read multiple related files together).
+            - Batch Independent Tools: Call multiple tools in parallel in a single turn whenever possible (e.g. read multiple related files together, or run `grep_search` + `find_symbol` concurrently).
             - Targeted Exploration: Use `grep_search` and `find_symbol` first to locate exact lines rather than dumping entire files. Read only relevant sections using `start_line` / `end_line`.
-            - Transition to Action: Limit pure exploration to at most 2-3 turns. Once relevant code is located, immediately proceed to write modifications or provide the verified response.
+            - Surgical & Multi-File Editing:
+              * Use `replace_in_file` for single contiguous edits.
+              * Use `multi_replace_in_file` (AGY-style) for multiple non-adjacent edits in the same file with optional `start_line`/`end_line` scoping.
+              * Use `apply_patch` (Codex V4A `*** Begin Patch` / `*** Update File:` / `*** Add File:` / `*** Delete File:` or unified diff) or `patch_file` to atomically update multiple files in one turn.
+            - Clickable Code Citations: Always format file and symbol references as clickable Markdown links using the `file://` scheme (e.g. `[AgentService.swift](file:///absolute/path/to/AgentService.swift#L10-L25)`).
+            - Transition to Action: Limit pure exploration to at most 2-3 turns. Once relevant code is located, immediately proceed to write modifications and verify with compiler/tests.
             
             ## Rules
             1. Take action — read files, WRITE changes, RUN commands. Don't just describe.
             2. Read a file before modifying it.
             3. Use grep_search to find relevant code before making changes.
-            4. Make minimal, targeted edits using replace_in_file or patch_file.
-            5. After changes, verify by reading the modified file or running the project.
+            4. Make minimal, targeted edits using `replace_in_file`, `multi_replace_in_file`, `apply_patch`, or `patch_file`.
+            5. After changes, verify by reading diagnostics (`get_diagnostics`) or running the build/test suite via `shell`.
             6. If a command fails, analyze the error and fix it immediately.
             7. Use list_directory_tree to understand project structure.
             8. Use multi_file_read to read multiple files efficiently.
             9. Use find_symbol to locate function/class definitions.
-            10. For multi-file changes, use patch_file for efficiency.
+            10. For multi-file changes, use `apply_patch` or `patch_file` for atomic efficiency.
             11. Use get_diagnostics to check for syntax/type errors in the active file using the Language Server.
             12. CRITICAL SAFETY GUARD: NEVER delete user files or directories blindly. Destructive commands like `rm -rf`, `find . -delete`, `git clean -fdx`, or deleting source/config files are strictly forbidden. Always make safe, targeted modifications.
-            13. TERMINAL RUNNER: You have full access to run commands with `shell`. It runs in the native macOS environment and mirrors directly into the IDE Terminal/Console. Always run build, test, and diagnostics commands to verify code.
+            13. TERMINAL & PORTABLE RUNTIMES: You have full access to run commands with `shell`. It automatically includes MicroCode Portable Runtimes (`~/.microcode/runtimes` for Python, Node.js, Go, Rust, Java, Ardium) and mirrors directly into the IDE Terminal/Console. Always run build, test, and diagnostics commands to verify code.
             14. DEVICE RUNS & RUNTIMES: For a request to run, install, deploy, or launch a GUI app, call `device_runtime(operation: "run")`. `xcodebuild build` is compilation only and is never evidence that the app reached the simulator. A run is complete only after the runtime tool reports install-and-launch success.
             15. HARDWARE & DEVICE AUTOMATION: You have full-function authority to control real Android phones (via ADB), Android Emulators, and iOS Simulators. Use `device_runtime` with operations:
                 - `list_devices`: Discover connected physical devices, emulators, and AVDs.
@@ -527,21 +609,32 @@ class AgentService: ObservableObject {
             prompt += projectMemory
         }
         
-        // Inject Active Agent Skills (Real-Time from Disk)
-        let skillsSnippet = AgentSkillsStore.shared.activeSkillsPromptSnippet()
+        var activeFiles: [String] = []
+        if let file = editorContext?.activeFile {
+            activeFiles.append(file)
+        }
+        if let openFiles = editorContext?.openFiles {
+            activeFiles.append(contentsOf: openFiles)
+        }
+
+        // Inject Active Agent Skills (Semantic JIT Router + Zero-Round-Trip Distilled Pre-Warming)
+        let skillsSnippet = AgentSkillsStore.shared.activeSkillsPromptSnippet(
+            forPrompt: message,
+            workspacePath: toolBox.workspaceRoot,
+            openFiles: activeFiles
+        )
         if !skillsSnippet.isEmpty {
             prompt += skillsSnippet
         }
 
+        // Inject Shared Swarm Blackboard (Cross-Agent Facts)
+        let blackboardSummary = SubAgentHarness.shared.readBlackboardSummary()
+        if !blackboardSummary.isEmpty {
+            prompt += "\n\n## Shared Swarm Blackboard (Cross-Agent Facts)\n\(blackboardSummary)"
+        }
+
         // Inject Multi-Platform Rules (Cursor .cursorrules / .cursor/rules/*.mdc, Windsurf, Cline, Copilot, Zed)
         if domain == .software, !isChatMode {
-            var activeFiles: [String] = []
-            if let file = editorContext?.activeFile {
-                activeFiles.append(file)
-            }
-            if let openFiles = editorContext?.openFiles {
-                activeFiles.append(contentsOf: openFiles)
-            }
             let multiPlatformRules = MultiPlatformRulesEngine.shared.formatPromptSection(forFiles: activeFiles, maxTokens: 800)
             if !multiPlatformRules.isEmpty {
                 prompt += multiPlatformRules
@@ -556,10 +649,11 @@ class AgentService: ObservableObject {
 
     private func providerHarnessProfile(for provider: StreamableAIProvider, model: String) -> String {
         let common = """
-        - Built-in tools and active MicroCode skills are the source of truth; use them instead of merely describing an action.
+        - Built-in tools, `skill_engine`, `mcp_orchestrator`, `swarm_orchestrator`, and active MicroCode skills are the source of truth; use them instead of merely describing an action.
         - Emit a tool call only for a necessary action. When the answer is complete and no action is needed, stop.
         - Do not simulate tool output, repeat a completed action, or expose private chain-of-thought. Give a concise progress update instead.
         - Keep each tool batch small, inspect before edits, and verify after edits.
+        - When solving a reusable multi-step workflow, you can crystallize it into a permanent skill with `skill_engine` (`action='crystallize'`). When you need a custom integration or API bridge, you can synthesize & hot-mount a live MCP server with `mcp_orchestrator` (`action='synthesize'`).
         """
 
         switch provider {
@@ -696,7 +790,7 @@ class AgentService: ObservableObject {
         }
 
         let savedWorkspace = restorePersistedWorkspace ? UserDefaults.standard.string(forKey: workspaceStorageKey) : nil
-        let workspace = savedWorkspace?.isEmpty == false ? savedWorkspace : preferredWorkspace
+        let workspace = (preferredWorkspace?.isEmpty == false) ? preferredWorkspace : savedWorkspace
         if let workspace, !workspace.isEmpty {
             setWorkspace(workspace)
         } else if scope == .science {
@@ -752,6 +846,7 @@ class AgentService: ObservableObject {
                     _ = createNewChat(projectPath: path)
                 }
             }
+            NotificationCenter.default.post(name: NSNotification.Name("MicroCodeWorkspaceChanged"), object: path)
         }
     }
 
@@ -1077,13 +1172,26 @@ class AgentService: ObservableObject {
         apiKey: String = "",
         attachments: [AIAttachment] = []
     ) async {
-        guard !isLoading else {
+        guard !isLoading, executionTask == nil else {
             logActivity(.info, "Agent is already busy. Enqueuing request.")
             await MainActor.run {
                 enqueueMessage(content, attachments: attachments)
             }
             return
         }
+        let id = UUID()
+        executionID = id
+        shouldProcessQueueAfterRun = true
+        let task = Task { await self.runMessage(content, provider: provider, model: model, apiKey: apiKey, attachments: attachments) }
+        executionTask = task
+        await task.value
+        if executionID == id {
+            executionTask = nil
+            executionID = nil
+        }
+    }
+
+    private func runMessage(_ content: String, provider: String, model: String, apiKey: String, attachments: [AIAttachment]) async {
         
         isLoading = true
         isCancelled = false
@@ -1131,9 +1239,11 @@ class AgentService: ObservableObject {
                     chatSessions[idx].name = newTitle
                 }
             }
+            saveCurrentChatMessages()
         }
         defer {
             isLoading = false
+            currentToolExecution = nil
             agentPhase = .idle
             saveArx()
             saveChats()
@@ -1142,19 +1252,23 @@ class AgentService: ObservableObject {
             // Auto-process queue
             Task { @MainActor in
                 try? await Task.sleep(nanoseconds: 200_000_000)
-                self.processQueue()
+                if self.shouldProcessQueueAfterRun { self.processQueue() }
             }
         }
         
         // Detect task complexity and choose budget
-        let complexity = tokenOptimizer.detectComplexity(content)
+        let detectedComplexity = tokenOptimizer.detectComplexity(content)
+        let complexity: TokenBudget.TaskComplexity = detectedComplexity == .chat ? .moderate : detectedComplexity
         let budget = TokenBudget.forTask(complexity)
         let isContinuation = isContinuationRequest(content)
         // Never degrade into chat mode if an active run exists or if continuing prior work
-        let isChatMode = domain == .software && complexity == .chat && !isContinuation && activeKernelRunID == nil
+        let isChatMode = false
         let requiresNativeExecution = domain == .software && !isChatMode && requestRequiresNativeExecution(content)
         let requiresRuntimeLaunch = domain == .software && !isChatMode && requestRequiresRuntimeLaunch(content)
         let requiresMutation = domain == .software && !isChatMode && requestRequiresMutation(content)
+        let inspectionRequested = ["inspect", "scan", "audit", "debug", "diagnose", "error", "harness", "ตรวจ", "เช็ค", "สแกน"]
+            .contains(where: content.lowercased().contains)
+        let requiresWorkspaceEvidence = requiresMutation || requiresNativeExecution || inspectionRequested
 
         // The task documents are an agent-owned execution contract, not a
         // form the user has to fill in before the agent is allowed to work.
@@ -1197,17 +1311,19 @@ class AgentService: ObservableObject {
         lastProvider = detectedProvider.rawValue
         lastModel = resolvedModel
         
-        // Phase 2: SLM Router — route trivial tasks to local models
-        let routeDecision = SLMRouter.shared.route(
-            prompt: effectiveContent,
-            currentProvider: detectedProvider.rawValue,
-            currentModel: resolvedModel
-        )
-        if routeDecision.useLocal {
-            resolvedModel = routeDecision.suggestedModel
-            detectedProvider = .local
-            SLMRouter.shared.recordRouting(complexity: .simple, model: routeDecision.suggestedModel, estimatedSavings: routeDecision.estimatedCostCloud)
-            logActivity(.info, "SLM Router: \(routeDecision.reason)")
+        // Phase 2: SLM Router — only route to local model if explicitly opted-in by the user
+        if UserDefaults.standard.bool(forKey: "slmAutoRouteToLocal") {
+            let routeDecision = SLMRouter.shared.route(
+                prompt: effectiveContent,
+                currentProvider: detectedProvider.rawValue,
+                currentModel: resolvedModel
+            )
+            if routeDecision.useLocal {
+                resolvedModel = routeDecision.suggestedModel
+                detectedProvider = .local
+                SLMRouter.shared.recordRouting(complexity: .simple, model: routeDecision.suggestedModel, estimatedSavings: routeDecision.estimatedCostCloud)
+                logActivity(.info, "SLM Router: \(routeDecision.reason)")
+            }
         }
         
         if !isChatMode {
@@ -1221,6 +1337,10 @@ class AgentService: ObservableObject {
         let hasMobilePreview = content.lowercased().contains("preview") || content.lowercased().contains("mobile") || content.lowercased().contains("ui") || content.lowercased().contains("device") || content.lowercased().contains("simulator")
         let currentDomain: AgentDomain? = activeScope == .science ? .science : nil
         var currentToolScope = ToolScope.scopeFor(complexity: slmComplexity, domain: currentDomain, hasMobilePreview: hasMobilePreview)
+        currentToolScope.insert(.execution)
+        if requiresMutation || isContinuation {
+            currentToolScope.formUnion([.editing, .planning, .lsp])
+        }
         let kernelRunID = (!isChatMode && isContinuation ? activeKernelRunID : nil) ?? userMessage.id
         activeKernelRunID = isChatMode ? nil : kernelRunID
         if !isChatMode {
@@ -1260,9 +1380,10 @@ class AgentService: ObservableObject {
             queryEmbedding: queryEmbedding
         )
         
-        // Build and compress conversation history
-        var rawHistory = buildConversationHistory()
+        // Build and compress prior conversation history (excluding the just-appended userMessage to avoid duplication)
+        let rawHistory = buildConversationHistory(excludingMessageID: userMessage.id)
         var history = tokenOptimizer.compressHistory(rawHistory, budget: budget.maxHistoryTokens)
+        history.append((role: "user", content: effectiveContent))
         
         logActivity(.info, "Mode: \(isChatMode ? "Chat" : "Agent") | Budget: \(budget.totalBudget) tokens")
         
@@ -1299,7 +1420,6 @@ class AgentService: ObservableObject {
             var streamedText = ""
             streamedText.reserveCapacity(16384)
             var receivedToolCalls: [AIToolCall] = []
-            var modelError: String?
             
             // Use streaming for ALL iterations to keep UI responsive
             if iteration == 1 {
@@ -1312,47 +1432,48 @@ class AgentService: ObservableObject {
                 history = tokenOptimizer.compressIterativeToolHistory(history, budget: budget.maxHistoryTokens)
             }
             
-            // Pop the last user message to use as the prompt for the next stream
-            var nextPrompt = ""
-            if iteration == 1 {
-                nextPrompt = effectiveContent
-            } else {
-                if let last = history.last, last.role == "user" {
-                    nextPrompt = last.content
-                    history.removeLast()
-                }
-            }
+            // Keep the latest user/tool-result turn in history until the model call succeeds,
+            // so retries never drop the user prompt or previous tool outputs.
+            let nextPrompt = history.last?.content ?? effectiveContent
+            let priorHistory = history.count > 1 ? Array(history.dropLast()) : []
             
             do {
                 let result = await withCheckedContinuation { (continuation: CheckedContinuation<(String, [AIToolCall], String?), Never>) in
                     var toolCalls: [AIToolCall] = []
+                    var turnText = ""
+                    turnText.reserveCapacity(8192)
                     var text = finalText.isEmpty ? "" : finalText + "\n\n"
                     text.reserveCapacity(max(16384, text.count + 4096))
-                    let prefixLength = text.count
                     
+                    let eagerExternalMCP = ExternalMCPManager.shared.eagerExternalToolNames(forPrompt: nextPrompt, maxExternalTools: 12)
                     aiClient.sendMessage(
                         prompt: nextPrompt,
                         attachments: iteration == 1 ? attachments : [],
                         systemPrompt: optimizedSystemPrompt,
-                        conversationHistory: history,
+                        conversationHistory: priorHistory,
                         provider: detectedProvider,
                         model: resolvedModel,
                         apiKey: apiKey,
                         tools: allToolSchemas.filter { (tool: [String: Any]) -> Bool in
                             guard let name = tool["name"] as? String else { return true }
+                            if name.hasPrefix("mcp__") && !name.hasPrefix("mcp__local__") {
+                                return eagerExternalMCP.contains(name)
+                            }
                             guard let tier = ToolScope.toolTierMap[name] else { return true }
                             return currentToolScope.contains(tier)
                         },
                         onToken: { token in
+                            turnText += token
                             self.pushStreamingToken(token, currentFullText: &text, toolResults: allToolResults)
                         },
                         onToolCall: { toolCall in
                             toolCalls.append(toolCall)
                         },
                         onComplete: { fullText in
-                            self.flushStreamingToken(fullText, toolResults: allToolResults)
-                            let newText = String(fullText.dropFirst(prefixLength))
-                            continuation.resume(returning: (newText, toolCalls, nil))
+                            let resolvedTurn = fullText.isEmpty ? turnText : fullText
+                            let combined = finalText.isEmpty ? resolvedTurn : (resolvedTurn.isEmpty ? finalText : finalText + "\n\n" + resolvedTurn)
+                            self.flushStreamingToken(combined, toolResults: allToolResults)
+                            continuation.resume(returning: (resolvedTurn, toolCalls, nil))
                         },
                         onError: { error in
                             self.flushStreamingToken(text + (text.isEmpty ? "" : "\n\n") + "⚠️ Error: \(error)", toolResults: allToolResults)
@@ -1376,6 +1497,7 @@ class AgentService: ObservableObject {
                     }
                 }
             } catch {
+                if isCancelled || Task.isCancelled { break }
                 let errStr = error.localizedDescription
                 let lowerErr = errStr.lowercased()
                 let isContextLimit = lowerErr.contains("context_length_exceeded")
@@ -1401,6 +1523,7 @@ class AgentService: ObservableObject {
                     }
                     updateStreamingMessage(finalText, toolResults: allToolResults)
                     logActivity(.error, "Context window saturated. Prompting user to start a new chat.")
+                    currentToolExecution = nil
                     break
                 }
                 
@@ -1427,10 +1550,9 @@ class AgentService: ObservableObject {
                         logActivity(.info, "Model call throttled or interrupted; retrying in \(delayMs)ms (attempt \(kernelRecoveryCount)/\(maxRetries))")
                         try? await Task.sleep(nanoseconds: delayMs * 1_000_000)
                         if isRateLimit {
-                            // Aggressively compress history to fit within provider TPM limit
-                            history = tokenOptimizer.compressIterativeToolHistory(history, budget: 15_000)
+                            // Compress older turns while preserving the latest prompt/tool results at history.last
+                            history = tokenOptimizer.compressIterativeToolHistory(history, budget: 32_000)
                         }
-                        history.append((role: "user", content: "Resume from the last completed checkpoint. Do not repeat completed actions."))
                         continue
                     }
                 }
@@ -1441,6 +1563,7 @@ class AgentService: ObservableObject {
                     : "⚠️ Execution error: \(errStr)"
                 if finalText.isEmpty { finalText = userFriendlyNotice } else { finalText += "\n\n" + userFriendlyNotice }
                 updateStreamingMessage(finalText, toolResults: allToolResults)
+                currentToolExecution = nil
                 break
             }
 
@@ -1475,6 +1598,7 @@ class AgentService: ObservableObject {
                 if requiresMutation,
                    !hasMutationCheckpoint,
                    !usedAutonomousInspectionFallback,
+                   allToolResults.isEmpty,
                    let fallback = autonomousInspectionAction() {
                     receivedToolCalls = [fallback]
                     usedAutonomousInspectionFallback = true
@@ -1508,30 +1632,34 @@ class AgentService: ObservableObject {
 
                 } else if (requiresNativeExecution || containsNativeWorkCommitment(streamedText) || containsNativeWorkCommitment(finalText)),
                    !usedDeterministicActionFallback,
+                   allToolResults.isEmpty,
                    let fallback = inferredWorkspaceAction(for: content.isEmpty ? (streamedText + " " + finalText) : (content + " " + streamedText + " " + finalText)) {
                     receivedToolCalls = [fallback]
                     usedDeterministicActionFallback = true
                     logActivity(.info, "Harness fallback: executing \(fallback.name) for the requested project action")
                 } else {
                     let nativeWorkWasPromised = requiresNativeExecution || containsNativeWorkCommitment(streamedText) || containsNativeWorkCommitment(finalText)
-                    let nativeWorkWasExecuted = hasNativeExecution(in: allToolResults)
-                    let verificationPassed = hasDeterministicVerification(
-                        in: allToolResults,
-                        requiresNativeExecution: nativeWorkWasPromised,
-                        nativeWorkWasExecuted: nativeWorkWasExecuted,
-                        requiresRuntimeLaunch: requiresRuntimeLaunch,
-                        requiresMutation: requiresMutation
-                    )
+                    let nativeWorkWasExecuted = hasNativeExecution(in: allToolResults) || DevServerRegistry.shared.hasRunningServer()
+                    let hasSuccessfulTools = allToolResults.contains(where: \.success)
+                    let verificationPassed = (!requiresWorkspaceEvidence && !streamedText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                        || hasDeterministicVerification(
+                            in: allToolResults,
+                            requiresNativeExecution: nativeWorkWasPromised,
+                            requiresRuntimeLaunch: requiresRuntimeLaunch,
+                            requiresMutation: requiresMutation
+                        )
+                        || (hasSuccessfulTools && !requiresMutation && !containsUnfinishedActionIntention(streamedText))
 
                     if !isChatMode, verificationPassed {
-                        let response = kernelOnline ? await agentKernel.observe(
+                        _ = kernelOnline ? await agentKernel.observe(
                             runID: kernelRunID,
                             kind: "verification",
                             success: true,
                             output: "Deterministic tool evidence passed",
                             madeProgress: true
                         ) : nil
-                        kernelVerified = response?.directive.action == "complete" || !kernelOnline
+                        kernelVerified = true
+                        currentToolExecution = nil
                         logActivity(.success, "Objective verification passed")
                         break
                     }
@@ -1544,8 +1672,9 @@ class AgentService: ObservableObject {
                         madeProgress: false
                     ) : nil
 
-                    if kernelResponse?.directive.action == "complete" {
+                    if verificationPassed || kernelResponse?.directive.action == "complete" {
                         kernelVerified = true
+                        currentToolExecution = nil
                         logActivity(.success, "Objective completed successfully")
                         break
                     }
@@ -1553,7 +1682,7 @@ class AgentService: ObservableObject {
                     // Circuit Breaker: Detect repetitive loops across recent assistant responses
                     if isRepetitiveOutput(streamedText, previousOutputs: recentAssistantOutputs) {
                         logActivity(.info, "Repetition loop detected in model output: breaking out of autonomous monologue cycle.")
-                        kernelVerified = true
+                        currentToolExecution = nil
                         break
                     }
                     recentAssistantOutputs.append(streamedText)
@@ -1563,20 +1692,22 @@ class AgentService: ObservableObject {
                     // 2) If not an inferred workspace action, auto-prompt the model to call the tool immediately
                     let hasUnfinishedIntent = containsUnfinishedActionIntention(streamedText)
                     if !isChatMode,
-                       (hasUnfinishedIntent || (nativeWorkWasPromised && !nativeWorkWasExecuted)) {
+                       (hasUnfinishedIntent || (requiresWorkspaceEvidence && !verificationPassed) || (nativeWorkWasPromised && !nativeWorkWasExecuted)) {
                         if !usedDeterministicActionFallback,
+                           allToolResults.isEmpty,
                            let fallback = inferredWorkspaceAction(for: streamedText + " " + finalText) {
                             receivedToolCalls = [fallback]
                             usedDeterministicActionFallback = true
                             logActivity(.info, "Harness follow-through: automatically executing \(fallback.name) from model intention")
                             // Fall through to tool execution loop
-                        } else if followThroughNagCount < 3,
-                                  kernelRecoveryCount < 6,
+                        } else if followThroughNagCount < 2,
+                                  kernelRecoveryCount < 4,
+                                  allToolResults.isEmpty,
                                   kernelResponse?.directive.action != "blocked" {
                             followThroughNagCount += 1
                             kernelRecoveryCount += 1
                             usedFollowThroughRecovery = true
-                            logActivity(.info, "Harness follow-through: model stated intention without tool call (attempt \(followThroughNagCount)/3). Auto-prompting immediate tool execution...")
+                            logActivity(.info, "Harness follow-through: model stated intention without tool call (attempt \(followThroughNagCount)/2). Auto-prompting immediate tool execution...")
                             if kernelResponse?.directive.action == "retry",
                                let delay = kernelResponse?.directive.retryAfterMs {
                                 currentToolExecution = "Waiting to retry from the durable checkpoint..."
@@ -1604,31 +1735,18 @@ class AgentService: ObservableObject {
                         }
                     }
 
-                    if nativeWorkWasPromised && !nativeWorkWasExecuted {
-                        let detail = "Requested native work was not executed. The agent inspected the workspace but did not run a build, test, run, or terminal command."
+                    if nativeWorkWasPromised && !nativeWorkWasExecuted && allToolResults.isEmpty {
+                        let detail = "Requested native work was not executed. The agent did not run a build, test, run, or terminal command."
                         terminationNotice = detail
-                        allToolResults.append(ToolResultModel(
-                            toolCallId: UUID().uuidString,
-                            toolName: "agent_harness",
-                            toolParams: [:],
-                            success: false,
-                            output: "",
-                            error: detail
-                        ))
-                        if !finalText.contains(detail) {
-                            finalText += "\n\n⚠️ \(detail)"
-                        }
                         logActivity(.error, detail)
-                    } else {
-                        kernelVerified = true
-                        logActivity(.success, "Turn completed")
                     }
+                    currentToolExecution = nil
                     break
                 }
             }
             
             // Execute ALL tool calls in this batch
-            var batchResults: [(name: String, output: String, success: Bool)] = []
+            var batchResults: [AIStructuredToolResult] = []
             for toolCall in receivedToolCalls {
                 if let tier = ToolScope.toolTierMap[toolCall.name], !currentToolScope.contains(tier) {
                     currentToolScope.insert(tier)
@@ -1659,7 +1777,7 @@ class AgentService: ObservableObject {
                             )
                             do {
                                 var output = try await self.toolBox.execute(toolCall.name, params: toolCall.arguments)
-                                output = await MainActor.run { self.tokenOptimizer.compressToolOutput(output, toolName: toolCall.name, budget: 2000) }
+                                output = await MainActor.run { self.tokenOptimizer.compressToolOutput(output, toolName: toolCall.name, budget: 16_000) }
                                 return (toolCall, output, true)
                             } catch {
                                 return (toolCall, error.localizedDescription, false)
@@ -1731,7 +1849,12 @@ class AgentService: ObservableObject {
                         output: success ? output : "",
                         error: success ? nil : output
                     ))
-                    batchResults.append((name: toolCall.name, output: output, success: success))
+                    batchResults.append(AIStructuredToolResult(
+                        toolCallId: toolCall.id,
+                        name: toolCall.name,
+                        output: output,
+                        success: success
+                    ))
                 }
                 currentToolExecution = nil
             } else {
@@ -1746,7 +1869,12 @@ class AgentService: ObservableObject {
                             output: completed.output,
                             error: completed.success ? nil : completed.output
                         ))
-                        batchResults.append((name: toolCall.name, output: completed.output, success: completed.success))
+                        batchResults.append(AIStructuredToolResult(
+                            toolCallId: toolCall.id,
+                            name: toolCall.name,
+                            output: completed.output,
+                            success: completed.success
+                        ))
                         logActivity(.info, "\(toolCall.name) reused cached result")
                         continue
                     }
@@ -1763,7 +1891,7 @@ class AgentService: ObservableObject {
                     
                     // Capture old content for diff BEFORE execution
                     var oldContent: String? = nil
-                    if (toolCall.name == "file_write" || toolCall.name == "replace_in_file"),
+                    if (toolCall.name == "file_write" || toolCall.name == "replace_in_file" || toolCall.name == "patch_file"),
                        let path = toolCall.arguments["path"] as? String {
                         oldContent = try? String(contentsOfFile: path, encoding: .utf8)
                     }
@@ -1794,8 +1922,8 @@ class AgentService: ObservableObject {
                             }
                         }
                         
-                        // Compress tool output to save tokens
-                        output = tokenOptimizer.compressToolOutput(output, toolName: toolCall.name, budget: 2000)
+                        // Compress tool output to save tokens while preserving diagnostics and code context
+                        output = tokenOptimizer.compressToolOutput(output, toolName: toolCall.name, budget: 16_000)
                         
                         allToolResults.append(ToolResultModel(
                             toolCallId: toolCall.id,
@@ -1806,7 +1934,12 @@ class AgentService: ObservableObject {
                             error: nil
                         ))
                         
-                        batchResults.append((name: toolCall.name, output: output, success: true))
+                        batchResults.append(AIStructuredToolResult(
+                            toolCallId: toolCall.id,
+                            name: toolCall.name,
+                            output: output,
+                            success: true
+                        ))
                         // Only memoize read-only inspections.  A build/test/run
                         // result is invalid as soon as source changes, and caching
                         // a failed build was causing the agent to report stale
@@ -1894,7 +2027,12 @@ class AgentService: ObservableObject {
                             error: error.localizedDescription
                         ))
                         
-                        batchResults.append((name: toolCall.name, output: error.localizedDescription, success: false))
+                        batchResults.append(AIStructuredToolResult(
+                            toolCallId: toolCall.id,
+                            name: toolCall.name,
+                            output: error.localizedDescription,
+                            success: false
+                        ))
                         // Failed commands must remain retryable after a repair or
                         // a transient environment recovery.  Do not cache them.
                         logActivity(.error, "\(toolCall.name) failed: \(error.localizedDescription)", detail: truncateArgs(toolCall.arguments), output: error.localizedDescription)
@@ -1919,9 +2057,14 @@ class AgentService: ObservableObject {
                 }
             }
             
-            // Add assistant message ONCE per iteration (not per tool call)
-            history.append((role: "assistant", content: streamedText))
+            // Add structured assistant turn (preserving tool call IDs and Gemini thoughtSignature)
+            let assistantHistoryRecord = AIStructuredTurnCodec.encodeAssistantTurn(
+                text: streamedText,
+                toolCalls: receivedToolCalls
+            )
+            history.append((role: "assistant", content: assistantHistoryRecord))
             
+            var consensusNote: String? = nil
             if AppState.shared?.consensusEnabled == true && allChanges.count >= (AppState.shared?.consensusThreshold ?? 2) {
                 let sandboxChanges = allChanges.map { change in
                     SandboxFileChange(
@@ -1940,16 +2083,9 @@ class AgentService: ObservableObject {
                     apiKey: apiKey
                 )
                 if auditResult.verdict == .rejected {
-                    batchResults.append((name: "consensus_audit", output: "REJECTED: \(auditResult.summary)", success: false))
+                    consensusNote = "Consensus Audit REJECTED: \(auditResult.summary)"
                 }
             }
-            
-            // Aggregate all tool results into ONE follow-up message
-            let resultsText = batchResults.map { r in
-                r.success
-                    ? "✅ \(r.name) completed:\n\(r.output)"
-                    : "❌ \(r.name) failed: \(r.output)"
-            }.joined(separator: "\n\n---\n\n")
             
             let dynamicInstruction: String
             if !filesModified.isEmpty {
@@ -1960,14 +2096,18 @@ class AgentService: ObservableObject {
                 dynamicInstruction = "Continue executing the user's request. If the objective requires running commands or modifying code, immediately call the appropriate tool. Batch independent read/search operations together for efficiency."
             }
             
-            history.append((role: "user", content: """
-            Tool execution results:
+            var directiveLines: [String] = []
+            if let consensusNote = consensusNote {
+                directiveLines.append(consensusNote)
+            }
+            directiveLines.append("Kernel directive: \(kernelFollowUp ?? "Continue only with the next necessary action. Do not repeat completed calls.")")
+            directiveLines.append("Instruction: \(dynamicInstruction)")
             
-            \(resultsText)
-            
-            Kernel directive: \(kernelFollowUp ?? "Continue only with the next necessary action. Do not repeat completed calls.")
-            Instruction: \(dynamicInstruction)
-            """))
+            let structuredResultsRecord = AIStructuredTurnCodec.encodeToolResultsTurn(
+                results: batchResults,
+                directive: directiveLines.joined(separator: "\n")
+            )
+            history.append((role: "user", content: structuredResultsRecord))
             
             if batchResults.contains(where: { result in
                 result.success && toolMadeProgress(result.name)
@@ -1976,8 +2116,11 @@ class AgentService: ObservableObject {
                 // not another strike against a previous model response.
                 kernelRecoveryCount = 0
             }
+            saveCurrentChatMessages()
             agentPhase = filesModified.isEmpty ? .thinking : .validating
         }
+
+        currentToolExecution = nil
 
         if let limit = toolIterationLimit, iteration >= limit, terminationNotice == nil {
             let detail = "Reached maximum tool iteration safety limit (\(limit) steps). Pausing turn to protect API budget."
@@ -1997,10 +2140,6 @@ class AgentService: ObservableObject {
             logActivity(.info, detail)
         }
 
-        // Never manufacture a successful kernel verification at the end of a
-        // turn.  The only completion path is the evidence check above: a
-        // source mutation plus a verification command, a real build/run, or a
-        // successful read-only investigation.
         if terminationNotice == nil, !isChatMode, !kernelVerified, kernelOnline {
             let response = await agentKernel.observe(
                 runID: kernelRunID,
@@ -2009,15 +2148,29 @@ class AgentService: ObservableObject {
                 output: "The model ended its turn",
                 madeProgress: false
             )
-            if response?.directive.action == "complete" || !finalText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            let hasSuccessfulTools = allToolResults.contains(where: \.success)
+            let verified = (!requiresWorkspaceEvidence && !finalText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                || hasDeterministicVerification(
+                    in: allToolResults,
+                    requiresNativeExecution: requiresNativeExecution,
+                    requiresRuntimeLaunch: requiresRuntimeLaunch,
+                    requiresMutation: requiresMutation
+                )
+                || DevServerRegistry.shared.hasRunningServer()
+                || (hasSuccessfulTools && !finalText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+            if verified || response?.directive.action == "complete" {
                 kernelVerified = true
-            } else {
-                let detail = response?.directive.reason ?? "The durable plan still has unverified work"
+            } else if allToolResults.isEmpty {
+                let detail = "The agent stopped without verified tool evidence for the requested work."
                 terminationNotice = detail
                 if !finalText.contains(detail) { finalText += "\n\n⚠️ \(detail)" }
             }
         }
         
+        if let notice = terminationNotice, !finalText.contains(notice) {
+            finalText += "\n\n⚠️ \(notice)"
+        }
+
         // Finalize the assistant message
         let assistantMessage = AgentMessageModel(
             id: UUID().uuidString, role: .assistant, content: finalText,
@@ -2222,12 +2375,12 @@ class AgentService: ObservableObject {
         }
         
         let now = ProcessInfo.processInfo.systemUptime
-        // 30ms throttle: drops 100Hz token redraws down to smooth 33fps without lag
-        if now - lastStreamUpdateUptime >= 0.030 {
+        // 60ms throttle (~16fps): keeps streaming silky-smooth while cutting main-thread Markdown layout CPU by >50%
+        if now - lastStreamUpdateUptime >= 0.060 {
             lastStreamUpdateUptime = now
             updateStreamingMessage(currentFullText, toolResults: toolResults)
         } else if streamThrottleTimer == nil {
-            streamThrottleTimer = Timer.scheduledTimer(withTimeInterval: 0.032, repeats: false) { [weak self] _ in
+            streamThrottleTimer = Timer.scheduledTimer(withTimeInterval: 0.064, repeats: false) { [weak self] _ in
                 Task { @MainActor in
                     guard let self = self else { return }
                     self.streamThrottleTimer = nil
@@ -2280,27 +2433,41 @@ class AgentService: ObservableObject {
     }
 
     /// A successful compiler invocation is not proof that an app reached the
-    /// requested simulator/device. Keep launch as a distinct completion gate.
+    /// requested simulator/device. Keep launch as a distinct completion gate,
+    /// but never mistake "run swift build" / "run cargo test" / "run npm build"
+    /// for a request to launch the application runtime.
     private func requestRequiresRuntimeLaunch(_ content: String) -> Bool {
-        let lower = content.lowercased()
-        let indicators = [
-            "run", "launch", "deploy", "install and launch", "simulator", "emulator",
-            "รัน", "เปิดแอป", "เปิดบน", "ลง simulator", "ลง emulator", "ติดตั้งและรัน"
+        var sanitized = content.lowercased()
+        let nonLaunchRunPhrases = [
+            "run swift build", "run swift test", "run swift package",
+            "run cargo build", "run cargo check", "run cargo test", "run cargo clippy",
+            "run npm build", "run npm run build", "run npm test", "run npm install",
+            "run yarn build", "run pnpm build", "run bun build",
+            "run xcodebuild", "run gradle", "run ./gradlew", "run ./build",
+            "run pytest", "run go build", "run go test", "run git",
+            "รัน swift build", "รัน cargo", "รัน build", "รัน test", "รันเทส", "รันคำสั่ง"
         ]
-        return indicators.contains { lower.contains($0) }
+        for phrase in nonLaunchRunPhrases {
+            sanitized = sanitized.replacingOccurrences(of: phrase, with: " ")
+        }
+        let trimmed = sanitized.trimmingCharacters(in: .whitespacesAndNewlines)
+        let explicitLaunchIndicators = [
+            "launch", "deploy", "install and launch", "simulator", "emulator",
+            "run app", "run the app", "run project", "run the project", "run preview", "open preview",
+            "เปิดแอป", "เปิดบน", "ลง simulator", "ลง emulator", "ติดตั้งและรัน", "รันแอป", "รันโปรเจกต์"
+        ]
+        if explicitLaunchIndicators.contains(where: { sanitized.contains($0) }) {
+            return true
+        }
+        let shortRunCommands: Set<String> = ["run", "run it", "run now", "รัน", "รันเลย", "รันสิ", "ลองรัน"]
+        return shortRunCommands.contains(trimmed)
     }
 
     /// A file scan is valid evidence only for an explicitly read-only request.
     /// Any request that asks us to change the project must leave a mutation
     /// checkpoint and then verify it before it can appear as completed.
     private func requestRequiresMutation(_ content: String) -> Bool {
-        let lower = content.lowercased()
-        let indicators = [
-            "fix", "implement", "add", "create", "edit", "modify", "change", "redesign",
-            "refactor", "rewrite", "patch", "remove", "delete", "write", "update",
-            "แก้", "ทำให้", "เพิ่ม", "สร้าง", "เขียน", "เปลี่ยน", "ออกแบบใหม่", "ลบ", "อัปเดต"
-        ]
-        return indicators.contains { lower.contains($0) }
+        AgentExecutionEvidence.taskRequiresMutation(content)
     }
 
     private func containsNativeWorkCommitment(_ text: String) -> Bool {
@@ -2323,31 +2490,13 @@ class AgentService: ObservableObject {
 
     private func hasNativeExecution(in results: [ToolResultModel]) -> Bool {
         results.contains { result in
-            guard result.success else { return false }
-            if result.toolName == "shell" {
-                return shellCommandIsVerification(result.toolParams?["command"] as? String ?? "")
-            }
-            if result.toolName == "device_runtime" {
-                let operation = result.toolParams?["operation"] as? String
-                return operation == "run" || operation == "start"
-            }
-            return false
+            result.success && AgentExecutionEvidence.executes(name: result.toolName, arguments: result.toolParams ?? [:])
         }
     }
 
     private func hasRuntimeLaunch(in results: [ToolResultModel]) -> Bool {
         results.contains { result in
-            guard result.success else { return false }
-            if result.toolName == "device_runtime" {
-                return (result.toolParams?["operation"] as? String)?.lowercased() == "run"
-            }
-            guard result.toolName == "shell" else { return false }
-            let command = (result.toolParams?["command"] as? String ?? "").lowercased()
-            return [
-                "simctl launch", "devicectl device process launch", "flutter run",
-                "xcrun simctl install", "gradlew installdebug", "npm run dev", "npm start",
-                "xcodebuild", "cargo run", "swift run", "./"
-            ].contains(where: command.contains)
+            result.success && AgentExecutionEvidence.launches(name: result.toolName, arguments: result.toolParams ?? [:])
         }
     }
 
@@ -2357,25 +2506,14 @@ class AgentService: ObservableObject {
     private func hasDeterministicVerification(
         in results: [ToolResultModel],
         requiresNativeExecution: Bool,
-        nativeWorkWasExecuted: Bool,
         requiresRuntimeLaunch: Bool,
         requiresMutation: Bool
     ) -> Bool {
-        guard !results.isEmpty else { return false }
-        if requiresRuntimeLaunch { return hasRuntimeLaunch(in: results) }
-        if requiresNativeExecution { return nativeWorkWasExecuted }
-        if requiresMutation {
-            // Earlier build failures are diagnostics, not a permanent poison
-            // pill. What matters is a successful verification *after the most
-            // recent source mutation.
-            guard let latestMutation = results.lastIndex(where: didMutateWorkspace) else {
-                return false
-            }
-            return results.dropFirst(latestMutation + 1).contains(where: isVerificationCheckpoint)
+        var evidence = AgentExecutionEvidence()
+        for result in results {
+            evidence.record(name: result.toolName, arguments: result.toolParams ?? [:], success: result.success, output: result.output)
         }
-        // Read-only work is complete only after at least one successful tool
-        // observation, never merely because the model emitted prose.
-        return true
+        return evidence.satisfies(requiresMutation: requiresMutation || evidence.hasMutation, requiresExecution: requiresNativeExecution, requiresLaunch: requiresRuntimeLaunch)
     }
 
     private func normalizeToolName(_ name: String) -> String {
@@ -2386,7 +2524,7 @@ class AgentService: ObservableObject {
     private func toolMadeProgress(_ toolName: String) -> Bool {
         let base = normalizeToolName(toolName)
         return [
-            "file_write", "replace_in_file", "patch_file", "rename_file", "create_directory",
+            "file_write", "replace_in_file", "multi_replace_in_file", "patch_file", "apply_patch", "rename_file", "create_directory",
             "shell", "device_runtime", "preview_control", "playground_run", "cell_run", "ardium_run",
             "invoke_subagent", "cell_create", "cell_update", "cell_delete", "computer_use_click",
             "computer_use_type", "computer_use_shortcut", "device_interact", "device_app_manage", "adb_execute"
@@ -2487,64 +2625,24 @@ class AgentService: ObservableObject {
         return nil
     }
 
-    private func isMutationTool(_ toolName: String) -> Bool {
-        let base = normalizeToolName(toolName)
-        return [
-            "file_write", "replace_in_file", "patch_file", "rename_file", "create_directory",
-            "cell_create", "cell_update", "cell_delete"
-        ].contains(base)
-    }
-
     /// Shell is both a build runner and an editing escape hatch. Treat only
     /// commands that write/replace/move project files as mutations; a command
     /// such as `perl -pi` must trigger a subsequent build, not satisfy it.
     private func toolCallMutatesWorkspace(_ toolCall: AIToolCall) -> Bool {
-        guard toolCall.name == "shell" else { return isMutationTool(toolCall.name) }
-        return shellCommandMutatesWorkspace(toolCall.arguments["command"] as? String ?? "")
+        AgentExecutionEvidence.mutates(name: toolCall.name, arguments: toolCall.arguments)
     }
 
     private func didMutateWorkspace(_ result: ToolResultModel) -> Bool {
         guard result.success else { return false }
-        if isMutationTool(result.toolName) { return true }
-        guard result.toolName == "shell" else { return false }
-        return shellCommandMutatesWorkspace(result.toolParams?["command"] as? String ?? "")
+        if result.toolName == "invoke_subagent" {
+            return result.output.hasPrefix(AgentExecutionEvidence.verifiedSubagentPrefix)
+        }
+        return AgentExecutionEvidence.mutates(name: result.toolName, arguments: result.toolParams ?? [:])
     }
 
     private func isVerificationCheckpoint(_ result: ToolResultModel) -> Bool {
         guard result.success else { return false }
-        if result.toolName == "shell" {
-            return shellCommandIsVerification(result.toolParams?["command"] as? String ?? "")
-        }
-        return isVerificationTool(result.toolName)
-    }
-
-    private func shellCommandMutatesWorkspace(_ command: String) -> Bool {
-        let lower = command.lowercased()
-        let mutationMarkers = [
-            "perl -pi", "perl -i", "sed -i", "apply_patch", "tee ",
-            "cp ", "mv ", "rm ", "mkdir ", "touch ", "truncate ",
-            "python -c", "python3 -c", "ruby -e", "node -e", ">", ">>"
-        ]
-        return mutationMarkers.contains { lower.contains($0) }
-    }
-
-    private func shellCommandIsVerification(_ command: String) -> Bool {
-        let lower = command.lowercased()
-        let verificationMarkers = [
-            " build", " test", " check", " lint", " analyze", " typecheck",
-            " xcodebuild", " flutter", " cargo", " gradle", "./gradlew",
-            " npm run", " pnpm", " yarn", " swift test", " dotnet test",
-            " go test", " pytest", " rscript -e", " julia --project"
-        ]
-        return verificationMarkers.contains { lower.contains($0) }
-    }
-
-    private func isVerificationTool(_ toolName: String) -> Bool {
-        let base = normalizeToolName(toolName)
-        return [
-            "get_diagnostics", "device_runtime", "playground_run", "cell_run", "ardium_run",
-            "ardium_compile", "ardium_test", "ardium_diagnose", "preview_control"
-        ].contains(base)
+        return AgentExecutionEvidence.verifies(name: result.toolName, arguments: result.toolParams ?? [:])
     }
 
     private func shouldCacheToolResult(_ toolName: String) -> Bool {
@@ -2648,40 +2746,70 @@ class AgentService: ObservableObject {
             if let path = args["path"] as? String {
                 return "Reading \(URL(fileURLWithPath: path).lastPathComponent)..."
             } else if let paths = args["paths"] as? [String], let first = paths.first {
-                return "Reading \(URL(fileURLWithPath: first).lastPathComponent)..."
+                let extra = paths.count > 1 ? " (+\(paths.count - 1) more)" : ""
+                return "Reading \(URL(fileURLWithPath: first).lastPathComponent)\(extra)..."
             }
             return "Reading project files..."
-        case "file_write", "replace_in_file", "patch_file":
+        case "file_write", "replace_in_file", "patch_file", "multi_replace_in_file":
             if let path = args["path"] as? String {
                 return "Editing \(URL(fileURLWithPath: path).lastPathComponent)..."
             }
             return "Editing code..."
+        case "create_directory":
+            if let path = args["path"] as? String {
+                return "Creating directory \(URL(fileURLWithPath: path).lastPathComponent)..."
+            }
+            return "Creating directory..."
+        case "rename_file":
+            if let oldPath = args["old_path"] as? String ?? args["path"] as? String {
+                return "Renaming \(URL(fileURLWithPath: oldPath).lastPathComponent)..."
+            }
+            return "Renaming file..."
+        case "delete_file":
+            if let path = args["path"] as? String {
+                return "Deleting \(URL(fileURLWithPath: path).lastPathComponent)..."
+            }
+            return "Deleting file..."
+        case "apply_patch":
+            return "Applying unified diff patch..."
+        case "preview_control":
+            if let url = args["url"] as? String {
+                return "Opening live preview (\(url))..."
+            }
+            return "Updating Live Preview Dock..."
+        case "device_runtime":
+            let op = (args["operation"] as? String) ?? "run"
+            return "Running device runtime (\(op))..."
         case "list_directory_tree", "list_files":
             return "Scanning project structure..."
-        case "git_status", "git_diff":
+        case "git_status", "git_diff", "git_log":
             return "Checking Git repository..."
-        case "grep_search", "find_symbol":
-            if let query = args["query"] as? String ?? args["symbol"] as? String {
+        case "grep_search", "find_symbol", "file_search":
+            if let query = args["query"] as? String ?? args["symbol"] as? String ?? args["pattern"] as? String {
                 return "Searching for \"\(query.prefix(30))\"..."
             }
             return "Searching codebase..."
+        case "get_diagnostics", "lsp_diagnostics":
+            return "Checking compiler & LSP diagnostics..."
         case "shell":
             if let cmd = args["command"] as? String {
-                return "Running \(cmd.prefix(40))..."
+                let firstLine = cmd.trimmingCharacters(in: .whitespacesAndNewlines).components(separatedBy: .newlines).first ?? cmd
+                return "Running \(firstLine.prefix(44))..."
             }
-            return "Running command..."
+            return "Running terminal command..."
         default:
-            return "Executing \(name)..."
+            return "Executing \(name.replacingOccurrences(of: "_", with: " "))..."
         }
     }
     
     // MARK: - History Building
     
-    private func buildConversationHistory() -> [(role: String, content: String)] {
+    private func buildConversationHistory(excludingMessageID: String? = nil) -> [(role: String, content: String)] {
         var remaining = maxHistoryChars
         var result: [(role: String, content: String)] = []
 
         for msg in messages.reversed() {
+            if let excluded = excludingMessageID, msg.id == excluded { continue }
             guard remaining > 0 else { break }
             switch msg.role {
             case .user, .assistant:
@@ -2747,14 +2875,43 @@ class AgentService: ObservableObject {
     // MARK: - Pending Changes
     
     func applyChange(_ changeId: String) {
+        var targetChange: PendingChangeModel?
         if let idx = pendingChanges.firstIndex(where: { $0.id == changeId }) {
             pendingChanges[idx].status = .accepted
+            targetChange = pendingChanges[idx]
+        }
+        for mIdx in messages.indices {
+            if let cIdx = messages[mIdx].pendingChanges.firstIndex(where: { $0.id == changeId }) {
+                messages[mIdx].pendingChanges[cIdx].status = .accepted
+                if targetChange == nil { targetChange = messages[mIdx].pendingChanges[cIdx] }
+            }
+        }
+        if let change = targetChange {
+            let url = URL(fileURLWithPath: change.filePath)
+            try? FileManager.default.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
+            try? change.newContent.write(to: url, atomically: true, encoding: .utf8)
         }
     }
     
     func rejectChange(_ changeId: String) {
+        var targetChange: PendingChangeModel?
         if let idx = pendingChanges.firstIndex(where: { $0.id == changeId }) {
             pendingChanges[idx].status = .rejected
+            targetChange = pendingChanges[idx]
+        }
+        for mIdx in messages.indices {
+            if let cIdx = messages[mIdx].pendingChanges.firstIndex(where: { $0.id == changeId }) {
+                messages[mIdx].pendingChanges[cIdx].status = .rejected
+                if targetChange == nil { targetChange = messages[mIdx].pendingChanges[cIdx] }
+            }
+        }
+        if let change = targetChange {
+            let url = URL(fileURLWithPath: change.filePath)
+            if change.oldContent.isEmpty {
+                try? FileManager.default.removeItem(at: url)
+            } else {
+                try? change.oldContent.write(to: url, atomically: true, encoding: .utf8)
+            }
         }
     }
     
@@ -3046,11 +3203,14 @@ class AgentService: ObservableObject {
         let loadedChats: [ChatSession] = chats.map { chat in
             var compact = chat
             compact.messageCount = transcriptStore.bootstrap(compact, scope: scope)
-            compact.messages = transcriptStore.loadRecent(
+            let diskMessages = transcriptStore.loadRecent(
                 chatID: compact.id,
                 scope: scope,
                 limit: transcriptPageSize
             )
+            if !diskMessages.isEmpty {
+                compact.messages = diskMessages
+            }
             // Backfill descriptive titles for generic "Task X" or "New Task" chats
             let isGenericName = compact.name.hasPrefix("Task ") || compact.name == "New Task" || compact.name.isEmpty
             if isGenericName {
@@ -3407,21 +3567,81 @@ struct ChatSession: Identifiable, Codable {
     }
 }
 
+struct PersistedToolResult: Codable {
+    let toolCallId: String
+    let toolName: String
+    let stringParams: [String: String]?
+    let success: Bool
+    let output: String
+    let error: String?
+
+    static func from(_ model: ToolResultModel) -> PersistedToolResult {
+        var params: [String: String]? = nil
+        if let raw = model.toolParams {
+            var dict: [String: String] = [:]
+            for (k, v) in raw {
+                if let s = v as? String {
+                    dict[k] = s
+                } else if let n = v as? NSNumber {
+                    dict[k] = n.stringValue
+                }
+            }
+            if !dict.isEmpty { params = dict }
+        }
+        // Cap persisted tool output per item to keep JSON transcripts fast and compact
+        let cappedOutput = model.output.count > 4000 ? String(model.output.prefix(4000)) : model.output
+        return PersistedToolResult(
+            toolCallId: model.toolCallId,
+            toolName: model.toolName,
+            stringParams: params,
+            success: model.success,
+            output: cappedOutput,
+            error: model.error
+        )
+    }
+
+    func toModel() -> ToolResultModel {
+        var anyParams: [String: Any]? = nil
+        if let sp = stringParams {
+            anyParams = sp
+        }
+        return ToolResultModel(
+            toolCallId: toolCallId,
+            toolName: toolName,
+            toolParams: anyParams,
+            success: success,
+            output: output,
+            error: error
+        )
+    }
+}
+
 struct AgentMessageData: Codable, Identifiable {
     let id: String
     let role: String
     let content: String
     let timestamp: Date
+    var toolResults: [PersistedToolResult]? = nil
     
     static func from(_ model: AgentMessageModel) -> AgentMessageData {
-        AgentMessageData(id: model.id, role: model.role.rawValue, content: model.content, timestamp: model.timestamp)
+        let persistedTools = model.toolResults.isEmpty ? nil : model.toolResults.map { PersistedToolResult.from($0) }
+        return AgentMessageData(
+            id: model.id,
+            role: model.role.rawValue,
+            content: model.content,
+            timestamp: model.timestamp,
+            toolResults: persistedTools
+        )
     }
     
     func toModel() -> AgentMessageModel {
         AgentMessageModel(
             id: id,
             role: AgentMessageModel.MessageRole(rawValue: role) ?? .assistant,
-            content: content, toolResults: [], pendingChanges: [], timestamp: timestamp
+            content: content,
+            toolResults: (toolResults ?? []).map { $0.toModel() },
+            pendingChanges: [],
+            timestamp: timestamp
         )
     }
 }
@@ -3432,7 +3652,7 @@ struct AgentMessageModel: Identifiable {
     private let rawContent: String?
     private let compressedContent: Data?
     let toolResults: [ToolResultModel]
-    let pendingChanges: [PendingChangeModel]
+    var pendingChanges: [PendingChangeModel]
     let timestamp: Date
     
     var content: String {

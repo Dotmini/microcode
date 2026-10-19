@@ -656,6 +656,20 @@ final class NotebookViewModel: ObservableObject {
 
         let effectiveTarget: ComputeTarget = cell.computeTargetOverride ?? computeTarget ?? AppState.shared?.currentComputeTarget ?? .localCPU
 
+        // If the cell is already executing, clicking the Stop button cancels/interrupts the kernel
+        if cell.isExecuting {
+            Task {
+                let kernel = ComputeKernelRouter.shared.getKernel(for: effectiveTarget)
+                try? await kernel.cancel()
+                await MainActor.run {
+                    cell.appendOutput("\n⏹ Interrupted by user.\n")
+                    cell.isExecuting = false
+                    self.kernelStatus = "Idle"
+                }
+            }
+            return
+        }
+
         // Auto-detect 3rd-party imports so the env manager always reflects what
         // the code actually needs without the user typing anything.
         if cell.language == .python {
@@ -665,7 +679,13 @@ final class NotebookViewModel: ObservableObject {
         cell.isExecuting = true
         cell.clearOutput()
         kernelStatus = "Running"
-        
+
+        // Agent cells always run through the AI Agent (which respects remote executionTarget)
+        if cell.type == .agent {
+            runAgentCell(cell)
+            return
+        }
+
         // If it's not a local execution, route to the Compute Kernel
         if effectiveTarget != .localCPU && effectiveTarget != .localMLX && effectiveTarget != .localNvidia {
             Task {
@@ -675,7 +695,6 @@ final class NotebookViewModel: ObservableObject {
                     }
                     if effectiveTarget == .googleColab {
                         if !GoogleColabService.shared.status.isConnected {
-                            // Check if Colab session is already in clipboard before erroring out
                             if GoogleColabService.shared.checkAndConnectFromClipboardIfValid() {
                                 for _ in 0..<8 {
                                     if GoogleColabService.shared.status.isConnected { break }
@@ -694,8 +713,27 @@ final class NotebookViewModel: ObservableObject {
                     }
                     
                     DispatchQueue.main.async {
+                        let rawOutput = cell.output
+                        let pattern = "\\[IMAGE:([^\\]]+)\\]"
+                        if let regex = try? NSRegularExpression(pattern: pattern) {
+                            let matches = regex.matches(in: rawOutput, range: NSRange(rawOutput.startIndex..., in: rawOutput))
+                            var images: [URL] = cell.outputImages
+                            for match in matches {
+                                if let range = Range(match.range(at: 1), in: rawOutput) {
+                                    let filename = String(rawOutput[range])
+                                    let imageURL = filename.hasPrefix("/")
+                                        ? URL(fileURLWithPath: filename)
+                                        : self.workingDirectory.appendingPathComponent(filename)
+                                    if FileManager.default.fileExists(atPath: imageURL.path) && !images.contains(imageURL) {
+                                        images.append(imageURL)
+                                    }
+                                }
+                            }
+                            cell.outputImages = images
+                            cell.output = regex.stringByReplacingMatches(in: rawOutput, range: NSRange(rawOutput.startIndex..., in: rawOutput), withTemplate: "")
+                        }
                         let clean = result.trimmingCharacters(in: .whitespacesAndNewlines)
-                        if cell.output.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                        if cell.output.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty && cell.outputImages.isEmpty {
                             cell.output = clean.isEmpty ? "(Executed with no output)" : clean
                         }
                         cell.isExecuting = false
@@ -714,11 +752,6 @@ final class NotebookViewModel: ObservableObject {
                     }
                 }
             }
-            return
-        }
-        
-        if cell.type == .agent {
-            runAgentCell(cell)
             return
         }
         
@@ -752,11 +785,31 @@ final class NotebookViewModel: ObservableObject {
         case .objc:
             runObjcCell(cell)
         case .java, .csharp:
+            let langKey = (cell.language == .java) ? "java" : "csharp"
+            let cellID = cell.id
+            let content = cell.content
             Task { @MainActor in
                 cell.isExecuting = true
                 cell.output = ""
-                cell.appendOutput("❌ Local execution for \(cell.language.rawValue) is not supported natively. Open MicroCode Cloud (cloud icon in toolbar) and Connect to a GPU.\n")
-                cell.isExecuting = false
+                let ready = await RuntimeManager.shared.ensureRuntime(forLanguage: langKey) { msg in
+                    DispatchQueue.main.async {
+                        cell.appendOutput(msg + "\n")
+                    }
+                }
+                if !ready {
+                    self.handleCellOutput(
+                        cellID: cellID,
+                        result: "❌ \(cell.language.rawValue) runtime is not installed. Run `curl -fsSL https://microcode.dotmini.net/install.sh | bash` in Terminal."
+                    )
+                    return
+                }
+                guard let appState = AppState.shared else {
+                    self.handleCellOutput(cellID: cellID, result: "❌ AppState is not ready.")
+                    return
+                }
+                let res = await appState.executeScript(code: content, language: langKey)
+                let combined = res.stdout + (res.stderr.isEmpty ? "" : (res.stdout.isEmpty ? "" : "\n") + res.stderr)
+                self.handleCellOutput(cellID: cellID, result: combined.isEmpty ? "(Executed with no output)" : combined)
             }
         }
     }
@@ -764,6 +817,32 @@ final class NotebookViewModel: ObservableObject {
     private func runProcedureCell(_ cell: NotebookCellModel) {
         // Procedure cells always run as Python with generated code
         runPythonCell(cell)
+    }
+    
+    nonisolated private func buildCellProcessEnvironment() -> [String: String] {
+        var env = ProcessInfo.processInfo.environment
+        let home = NSHomeDirectory()
+        let portableBins = RuntimeManager.shared.allRuntimeBinDirectories()
+        let extraPaths = portableBins + [
+            "/opt/homebrew/bin",
+            "/opt/homebrew/sbin",
+            "/usr/local/bin",
+            "\(home)/.cargo/bin",
+            "\(home)/.bun/bin",
+            "\(home)/.deno/bin",
+            "\(home)/.local/bin",
+            "\(home)/go/bin",
+            "/usr/local/go/bin"
+        ]
+        let existingPath = env["PATH"] ?? "/usr/bin:/bin:/usr/sbin:/sbin"
+        env["PATH"] = (extraPaths + [existingPath]).joined(separator: ":")
+        if env["JAVA_HOME"] == nil, let javaHome = RuntimeManager.shared.portableJavaHome() {
+            env["JAVA_HOME"] = javaHome
+        }
+        if env["GOROOT"] == nil, let goRoot = RuntimeManager.shared.portableGoRoot() {
+            env["GOROOT"] = goRoot
+        }
+        return env
     }
     
     private func runAgentCell(_ cell: NotebookCellModel) {
@@ -811,8 +890,6 @@ final class NotebookViewModel: ObservableObject {
                 }
             },
             onComplete: { fullResponse in
-                // Extremely simple tool execution regex fallback
-                // If the response contains <call:shell_command>{"command": "..."}</call:shell_command>
                 let regex = try? NSRegularExpression(pattern: "<call:(shell_command|file_write|file_read)>\\s*\\{(.*?)\\}\\s*</call:\\1>", options: [.dotMatchesLineSeparators])
                 let nsString = fullResponse as NSString
                 
@@ -830,7 +907,6 @@ final class NotebookViewModel: ObservableObject {
                            let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] {
                             args = json
                         } else {
-                            // Basic fallback if JSON parsing fails
                             if toolName == "shell_command" {
                                 let cmdRegex = try? NSRegularExpression(pattern: "\"command\"\\s*:\\s*\"([^\"]+)\"")
                                 if let cmdMatch = cmdRegex?.firstMatch(in: argsString, range: NSRange(location: 0, length: argsString.utf16.count)) {
@@ -850,7 +926,7 @@ final class NotebookViewModel: ObservableObject {
                                 self.totalExecutions += 1
                             }
                         }
-                        return // Wait for tool execution
+                        return
                     }
                 } else {
                     DispatchQueue.main.async {
@@ -872,12 +948,6 @@ final class NotebookViewModel: ObservableObject {
     }
     
     private func runRustCell(_ cell: NotebookCellModel) {
-        // Find rustc
-        var rustcPath = "rustc"
-        if let runtime = RuntimeManager.shared.runtimes.first(where: { $0.type == .rust }), let path = runtime.path {
-             rustcPath = path
-        }
-        
         let uuid = UUID().uuidString.prefix(8)
         let workingDir = workingDirectory
         let tempRs = workingDir.appendingPathComponent("temp_\(uuid).rs")
@@ -885,26 +955,28 @@ final class NotebookViewModel: ObservableObject {
         let content = cell.content
         let cellID = cell.id
         
-        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+        Task.detached(priority: .userInitiated) { [weak self] in
             guard let self = self else { return }
+            
+            _ = await RuntimeManager.shared.ensureRuntime(forLanguage: "rust") { msg in
+                DispatchQueue.main.async { cell.appendOutput(msg + "\n") }
+            }
+            let rustcPath = RuntimeManager.shared.selectedExecutable(for: .rust) ?? "rustc"
+            let env = self.buildCellProcessEnvironment()
             
             do {
                 try content.write(to: tempRs, atomically: true, encoding: .utf8)
                 
                 // 1. Compile
                 let compileProcess = Process()
-                // Handle if rustcPath is just command or full path
+                compileProcess.environment = env
                 if rustcPath.contains("/") {
                     compileProcess.executableURL = URL(fileURLWithPath: rustcPath)
+                    compileProcess.arguments = [tempRs.path, "-o", tempBin.path]
                 } else {
                     compileProcess.executableURL = URL(fileURLWithPath: "/usr/bin/env")
                     compileProcess.arguments = ["rustc", tempRs.path, "-o", tempBin.path]
                 }
-                
-                if compileProcess.arguments == nil { // If using absolute path
-                    compileProcess.arguments = [tempRs.path, "-o", tempBin.path]
-                }
-                
                 compileProcess.currentDirectoryURL = workingDir
                 
                 let compileErrorPipe = Pipe()
@@ -921,6 +993,7 @@ final class NotebookViewModel: ObservableObject {
                     let runProcess = Process()
                     runProcess.executableURL = tempBin
                     runProcess.currentDirectoryURL = workingDir
+                    runProcess.environment = env
                     
                     let outputPipe = Pipe()
                     let errorPipe = Pipe()
@@ -936,63 +1009,51 @@ final class NotebookViewModel: ObservableObject {
                     let output = String(data: outputData, encoding: .utf8) ?? ""
                     let error = String(data: errorData, encoding: .utf8) ?? ""
                     
-                    // Cleanup binary
                     try? FileManager.default.removeItem(at: tempBin)
                     
                     let result = output + (error.isEmpty ? "" : "\n" + error)
                     self.handleCellOutput(cellID: cellID, result: result)
-                    
                 } else {
-                    // Compile failed
                     let result = "❌ Compilation Failed:\n" + compileError
                     self.handleCellOutput(cellID: cellID, result: result)
                 }
                 
-                // Cleanup source
                 try? FileManager.default.removeItem(at: tempRs)
-                
             } catch {
                 let result = "❌ Error: \(error.localizedDescription)"
                 self.handleCellOutput(cellID: cellID, result: result)
             }
         }
     }
-    
-
 
     private func runGoCell(_ cell: NotebookCellModel) {
-        // Find go
-        var goPath = "go"
-        if let runtime = RuntimeManager.shared.runtimes.first(where: { $0.type == .go }), let path = runtime.path {
-             goPath = path
-             // Helper: if path points to 'go' binary inside bin, use it.
-             // Usually RuntimeManager returns path to binary.
-        }
-        
         let uuid = UUID().uuidString.prefix(8)
         let workingDir = workingDirectory
         let tempGo = workingDir.appendingPathComponent("temp_\(uuid).go")
         let content = cell.content
         let cellID = cell.id
         
-        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+        Task.detached(priority: .userInitiated) { [weak self] in
             guard let self = self else { return }
+            
+            _ = await RuntimeManager.shared.ensureRuntime(forLanguage: "go") { msg in
+                DispatchQueue.main.async { cell.appendOutput(msg + "\n") }
+            }
+            let goPath = RuntimeManager.shared.selectedExecutable(for: .go) ?? "go"
+            let env = self.buildCellProcessEnvironment()
             
             do {
                 try content.write(to: tempGo, atomically: true, encoding: .utf8)
                 
                 let process = Process()
+                process.environment = env
                 if goPath.contains("/") {
                     process.executableURL = URL(fileURLWithPath: goPath)
-                } else {
-                     process.executableURL = URL(fileURLWithPath: "/usr/bin/env")
-                     process.arguments = ["go", "run", tempGo.path]
-                }
-                
-                if process.arguments == nil {
                     process.arguments = ["run", tempGo.path]
+                } else {
+                    process.executableURL = URL(fileURLWithPath: "/usr/bin/env")
+                    process.arguments = ["go", "run", tempGo.path]
                 }
-                
                 process.currentDirectoryURL = workingDir
                 
                 let outputPipe = Pipe()
@@ -1009,12 +1070,10 @@ final class NotebookViewModel: ObservableObject {
                 let output = String(data: outputData, encoding: .utf8) ?? ""
                 let error = String(data: errorData, encoding: .utf8) ?? ""
                 
-                // Cleanup
                 try? FileManager.default.removeItem(at: tempGo)
                 
                 let result = output + (error.isEmpty ? "" : "\n" + error)
                 self.handleCellOutput(cellID: cellID, result: result)
-                
             } catch {
                 let result = "❌ Error: \(error.localizedDescription)"
                 self.handleCellOutput(cellID: cellID, result: result)
@@ -1030,16 +1089,27 @@ final class NotebookViewModel: ObservableObject {
         let content = cell.content
         let cellID = cell.id
         
-        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+        Task.detached(priority: .userInitiated) { [weak self] in
             guard let self = self else { return }
+            
+            _ = await RuntimeManager.shared.ensureRuntime(forLanguage: "cpp") { msg in
+                DispatchQueue.main.async { cell.appendOutput(msg + "\n") }
+            }
+            let clangppPath = RuntimeManager.shared.selectedExecutable(for: .cpp) ?? "clang++"
+            let env = self.buildCellProcessEnvironment()
             
             do {
                 try content.write(to: tempCpp, atomically: true, encoding: .utf8)
                 
-                // 1. Compile: clang++ -o tempBin tempCpp
                 let compileProcess = Process()
-                compileProcess.executableURL = URL(fileURLWithPath: "/usr/bin/env")
-                compileProcess.arguments = ["clang++", tempCpp.path, "-o", tempBin.path]
+                compileProcess.environment = env
+                if clangppPath.contains("/") {
+                    compileProcess.executableURL = URL(fileURLWithPath: clangppPath)
+                    compileProcess.arguments = ["-std=c++20", tempCpp.path, "-o", tempBin.path]
+                } else {
+                    compileProcess.executableURL = URL(fileURLWithPath: "/usr/bin/env")
+                    compileProcess.arguments = ["clang++", "-std=c++20", tempCpp.path, "-o", tempBin.path]
+                }
                 compileProcess.currentDirectoryURL = workingDir
                 
                 let compileErrorPipe = Pipe()
@@ -1052,10 +1122,10 @@ final class NotebookViewModel: ObservableObject {
                 let compileError = String(data: compileErrorData, encoding: .utf8) ?? ""
                 
                 if compileProcess.terminationStatus == 0 {
-                    // 2. Run
                     let runProcess = Process()
                     runProcess.executableURL = tempBin
                     runProcess.currentDirectoryURL = workingDir
+                    runProcess.environment = env
                     
                     let outputPipe = Pipe()
                     let errorPipe = Pipe()
@@ -1071,21 +1141,16 @@ final class NotebookViewModel: ObservableObject {
                     let output = String(data: outputData, encoding: .utf8) ?? ""
                     let error = String(data: errorData, encoding: .utf8) ?? ""
                     
-                    // Cleanup binary
                     try? FileManager.default.removeItem(at: tempBin)
                     
                     let result = output + (error.isEmpty ? "" : "\n" + error)
                     self.handleCellOutput(cellID: cellID, result: result)
-                    
                 } else {
-                    // Compile failed
                     let result = "❌ Compilation Failed:\n" + compileError
                     self.handleCellOutput(cellID: cellID, result: result)
                 }
                 
-                // Cleanup source
                 try? FileManager.default.removeItem(at: tempCpp)
-                
             } catch {
                 let result = "❌ Error: \(error.localizedDescription)"
                 self.handleCellOutput(cellID: cellID, result: result)
@@ -1101,14 +1166,15 @@ final class NotebookViewModel: ObservableObject {
         let content = cell.content
         let cellID = cell.id
         
-        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+        Task.detached(priority: .userInitiated) { [weak self] in
             guard let self = self else { return }
+            let env = self.buildCellProcessEnvironment()
             
             do {
                 try content.write(to: tempObjc, atomically: true, encoding: .utf8)
                 
-                // 1. Compile: clang -framework Foundation -o tempBin tempObjc
                 let compileProcess = Process()
+                compileProcess.environment = env
                 compileProcess.executableURL = URL(fileURLWithPath: "/usr/bin/env")
                 compileProcess.arguments = ["clang", "-framework", "Foundation", tempObjc.path, "-o", tempBin.path]
                 compileProcess.currentDirectoryURL = workingDir
@@ -1123,10 +1189,10 @@ final class NotebookViewModel: ObservableObject {
                 let compileError = String(data: compileErrorData, encoding: .utf8) ?? ""
                 
                 if compileProcess.terminationStatus == 0 {
-                    // 2. Run
                     let runProcess = Process()
                     runProcess.executableURL = tempBin
                     runProcess.currentDirectoryURL = workingDir
+                    runProcess.environment = env
                     
                     let outputPipe = Pipe()
                     let errorPipe = Pipe()
@@ -1142,21 +1208,16 @@ final class NotebookViewModel: ObservableObject {
                     let output = String(data: outputData, encoding: .utf8) ?? ""
                     let error = String(data: errorData, encoding: .utf8) ?? ""
                     
-                    // Cleanup binary
                     try? FileManager.default.removeItem(at: tempBin)
                     
                     let result = output + (error.isEmpty ? "" : "\n" + error)
                     self.handleCellOutput(cellID: cellID, result: result)
-                    
                 } else {
-                    // Compile failed
                     let result = "❌ Compilation Failed:\n" + compileError
                     self.handleCellOutput(cellID: cellID, result: result)
                 }
                 
-                // Cleanup source
                 try? FileManager.default.removeItem(at: tempObjc)
-                
             } catch {
                 let result = "❌ Error: \(error.localizedDescription)"
                 self.handleCellOutput(cellID: cellID, result: result)
@@ -1382,7 +1443,9 @@ final class NotebookViewModel: ObservableObject {
                 for match in matches {
                     if let range = Range(match.range(at: 1), in: result) {
                         let filename = String(result[range])
-                        let imageURL = self.workingDirectory.appendingPathComponent(filename)
+                        let imageURL = filename.hasPrefix("/")
+                            ? URL(fileURLWithPath: filename)
+                            : self.workingDirectory.appendingPathComponent(filename)
                         if FileManager.default.fileExists(atPath: imageURL.path) {
                             images.append(imageURL)
                         }

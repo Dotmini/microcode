@@ -128,6 +128,14 @@ final class SupabaseAuthService: ObservableObject {
         static let unknown = Entitlement(plan: "", role: "", tokensRemaining: 0, tokensUsed: 0, isLoaded: false)
     }
 
+    private struct PersistedEntitlement: Codable {
+        let userID: String
+        let plan: String
+        let role: String
+        let tokensRemaining: Int
+        let tokensUsed: Int
+    }
+
     enum AuthError: LocalizedError {
         case unconfigured
         case invalidResponse
@@ -151,6 +159,7 @@ final class SupabaseAuthService: ObservableObject {
     private let accessTokenAccount = "supabase.access-token"
     private let refreshTokenAccount = "supabase.refresh-token"
     private let sessionAccount = "supabase.session.v1"
+    private let entitlementAccount = "supabase.entitlement.v1"
 
     private let defaults: UserDefaults
     private let network: URLSession
@@ -180,6 +189,13 @@ final class SupabaseAuthService: ObservableObject {
     var isConfigured: Bool { configurationProvider() != nil }
     var accessToken: String? { session?.accessToken }
     var currentEmail: String { session?.email ?? defaults.string(forKey: "dotminiUserEmail") ?? "" }
+
+    /// Strictly true ONLY when an active session has server-verified Admin/Provider role.
+    var isAdminProvider: Bool {
+        guard session != nil, entitlement.isLoaded else { return false }
+        let role = entitlement.role.lowercased()
+        return role == "admin" || role == "provider" || role == "owner"
+    }
 
     /// The public Supabase anon key is configuration, not a user credential.
     /// It is fetched from the MicroCode host on first launch so distributed
@@ -351,7 +367,7 @@ final class SupabaseAuthService: ObservableObject {
             var request = URLRequest(url: configuration.baseURL.appending(path: "auth/v1/token")
                 .appending(queryItems: [URLQueryItem(name: "grant_type", value: "refresh_token")]))
             request.httpMethod = "POST"
-            request.timeoutInterval = 20
+            request.timeoutInterval = 4
             request.setValue(configuration.anonKey, forHTTPHeaderField: "apikey")
             request.setValue("application/json", forHTTPHeaderField: "Content-Type")
             request.httpBody = try? JSONSerialization.data(withJSONObject: ["refresh_token": existing.refreshToken])
@@ -366,16 +382,31 @@ final class SupabaseAuthService: ObservableObject {
         refreshTask = task
         let value = await task.value
         if generation == sessionGeneration { refreshTask = nil }
-        return value
+        return value ?? existing.accessToken
+    }
+
+    private nonisolated static func curlIPv4JSON(arguments: [String]) -> Data? {
+        let proc = Process()
+        proc.executableURL = URL(fileURLWithPath: "/usr/bin/curl")
+        proc.arguments = ["-4", "-sS", "--connect-timeout", "3", "--max-time", "5"] + arguments
+        let out = Pipe()
+        proc.standardOutput = out
+        proc.standardError = Pipe()
+        do {
+            try proc.run()
+            let data = out.fileHandleForReading.readDataToEndOfFile()
+            proc.waitUntilExit()
+            return proc.terminationStatus == 0 && !data.isEmpty ? data : nil
+        } catch {
+            return nil
+        }
     }
 
     func refreshEntitlement() async {
-        guard let configuration = configurationProvider(),
-              let token = await refreshAccessTokenIfNeeded(),
+        _ = await bootstrapConfiguration()
+        guard let configuration = configurationProvider() ?? Configuration.cached(),
               let userID = session?.userID, !userID.isEmpty else { return }
-        // Dotmini Cloud stores roles and plans in public.users. The old
-        // profiles table does not exist in production, so a failed lookup
-        // must never be presented as a verified Free entitlement.
+        let token = await refreshAccessTokenIfNeeded() ?? session?.accessToken ?? configuration.anonKey
         var components = URLComponents(url: configuration.baseURL.appending(path: "rest/v1/users"), resolvingAgainstBaseURL: false)!
         components.queryItems = [
             URLQueryItem(name: "select", value: "role,plan,ai_quota,ai_used"),
@@ -383,25 +414,90 @@ final class SupabaseAuthService: ObservableObject {
         ]
         guard let url = components.url else { return }
         var request = URLRequest(url: url)
+        request.timeoutInterval = 4
         request.setValue(configuration.anonKey, forHTTPHeaderField: "apikey")
         request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
-        guard let (data, response) = try? await network.data(for: request),
-              (response as? HTTPURLResponse)?.statusCode == 200,
-              let rows = try? JSONSerialization.jsonObject(with: data) as? [[String: Any]],
-              let profile = rows.first else {
-            if session?.userID == userID { entitlement = .unknown }
+
+        var profile: [String: Any]?
+        if let (data, response) = try? await network.data(for: request),
+           (response as? HTTPURLResponse)?.statusCode == 200,
+           let rows = try? JSONSerialization.jsonObject(with: data) as? [[String: Any]],
+           let first = rows.first {
+            profile = first
+        }
+
+        if profile == nil {
+            let urlStr = url.absoluteString
+            let anonKey = configuration.anonKey
+            let fallbackData = await Task.detached(priority: .userInitiated) {
+                Self.curlIPv4JSON(arguments: [
+                    urlStr,
+                    "-H", "apikey: \(anonKey)",
+                    "-H", "Authorization: Bearer \(token)"
+                ])
+            }.value
+            if let fallbackData,
+               let rows = try? JSONSerialization.jsonObject(with: fallbackData) as? [[String: Any]],
+               let first = rows.first {
+                profile = first
+            }
+        }
+
+        if profile == nil, let jwt = session?.accessToken, !jwt.isEmpty,
+           let bodyData = try? JSONSerialization.data(withJSONObject: ["token": jwt]),
+           let bodyStr = String(data: bodyData, encoding: .utf8) {
+            let syncData = await Task.detached(priority: .userInitiated) {
+                Self.curlIPv4JSON(arguments: [
+                    "-X", "POST", "https://microcode.dotmini.net/api/auth/sync",
+                    "-H", "Content-Type: application/json",
+                    "-d", bodyStr
+                ])
+            }.value
+            if let syncData,
+               let obj = try? JSONSerialization.jsonObject(with: syncData) as? [String: Any],
+               (obj["status"] as? String) == "success",
+               let dataObj = obj["data"] as? [String: Any],
+               let verifiedRole = dataObj["role"] as? String {
+                profile = [
+                    "role": verifiedRole,
+                    "plan": verifiedRole == "admin" ? "advanced" : "free",
+                    "ai_quota": verifiedRole == "admin" ? 12000 : 0,
+                    "ai_used": 0
+                ]
+            }
+        }
+
+        guard let profile else {
+            if session?.userID == userID, !entitlement.isLoaded {
+                entitlement = .unknown
+            }
             return
         }
         guard session?.userID == userID, session != nil else { return }
         let quota = max(0, profile["ai_quota"] as? Int ?? 0)
         let used = max(0, profile["ai_used"] as? Int ?? 0)
-        entitlement = Entitlement(
+        let newEntitlement = Entitlement(
             plan: profile["plan"] as? String ?? "",
             role: profile["role"] as? String ?? "",
             tokensRemaining: max(0, quota - used),
             tokensUsed: used,
             isLoaded: true
         )
+        entitlement = newEntitlement
+        let persisted = PersistedEntitlement(
+            userID: userID,
+            plan: newEntitlement.plan,
+            role: newEntitlement.role,
+            tokensRemaining: newEntitlement.tokensRemaining,
+            tokensUsed: newEntitlement.tokensUsed
+        )
+        if let data = try? JSONEncoder().encode(persisted),
+           let encoded = String(data: data, encoding: .utf8) {
+            _ = KeychainManager.shared.saveIntegrationSecret(encoded, account: entitlementAccount)
+        }
+        if !isAdminProvider {
+            TelemetryService.shared.clearAdminCache()
+        }
     }
 
     func signOut() {
@@ -416,10 +512,12 @@ final class SupabaseAuthService: ObservableObject {
         KeychainManager.shared.deleteIntegrationSecret(account: sessionAccount)
         KeychainManager.shared.deleteIntegrationSecret(account: accessTokenAccount)
         KeychainManager.shared.deleteIntegrationSecret(account: refreshTokenAccount)
+        KeychainManager.shared.deleteIntegrationSecret(account: entitlementAccount)
         let defaults = defaults
         ["cloudGPUAuthToken", "cloudGPURefreshToken", "microRentToken", "dotminiLicenseKey", "dotminiUserEmail"].forEach { defaults.removeObject(forKey: $0) }
         session = nil
         entitlement = .unknown
+        TelemetryService.shared.clearAdminCache()
     }
 
     private func consumeSessionResponse(_ request: URLRequest) async throws -> Session {
@@ -435,12 +533,32 @@ final class SupabaseAuthService: ObservableObject {
     }
 
     private func fetchSession(_ request: URLRequest) async throws -> Session {
-        let (data, response) = try await network.data(for: request)
-        guard let http = response as? HTTPURLResponse else { throw AuthError.invalidResponse }
-        guard (200..<300).contains(http.statusCode) else {
-            throw AuthError.rejected("Authentication failed (HTTP \(http.statusCode)). Please sign in again.")
+        if let (data, response) = try? await network.data(for: request),
+           let http = response as? HTTPURLResponse {
+            guard (200..<300).contains(http.statusCode) else {
+                throw AuthError.rejected("Authentication failed (HTTP \(http.statusCode)). Please sign in again.")
+            }
+            guard let raw = try JSONSerialization.jsonObject(with: data) as? [String: Any] else { throw AuthError.invalidResponse }
+            return try decodeSession(raw)
         }
-        guard let raw = try JSONSerialization.jsonObject(with: data) as? [String: Any] else { throw AuthError.invalidResponse }
+        guard let urlStr = request.url?.absoluteString else { throw AuthError.invalidResponse }
+        let method = request.httpMethod ?? "POST"
+        let headers = request.allHTTPHeaderFields ?? [:]
+        let bodyStr = request.httpBody.flatMap { String(data: $0, encoding: .utf8) }
+        let fallbackData = await Task.detached(priority: .userInitiated) { () -> Data? in
+            var args = ["-X", method, urlStr]
+            for (k, v) in headers {
+                args.append(contentsOf: ["-H", "\(k): \(v)"])
+            }
+            if let bodyStr {
+                args.append(contentsOf: ["-d", bodyStr])
+            }
+            return Self.curlIPv4JSON(arguments: args)
+        }.value
+        guard let fallbackData,
+              let raw = try? JSONSerialization.jsonObject(with: fallbackData) as? [String: Any] else {
+            throw AuthError.invalidResponse
+        }
         return try decodeSession(raw)
     }
 
@@ -471,7 +589,10 @@ final class SupabaseAuthService: ObservableObject {
         guard KeychainManager.shared.saveIntegrationSecret(encoded, account: sessionAccount) else {
             throw AuthError.rejected("Could not save your session to macOS Keychain.")
         }
-        if session?.userID != newSession.userID { entitlement = .unknown }
+        if session?.userID != newSession.userID {
+            entitlement = .unknown
+            KeychainManager.shared.deleteIntegrationSecret(account: entitlementAccount)
+        }
         session = newSession
         KeychainManager.shared.deleteIntegrationSecret(account: accessTokenAccount)
         KeychainManager.shared.deleteIntegrationSecret(account: refreshTokenAccount)
@@ -485,6 +606,19 @@ final class SupabaseAuthService: ObservableObject {
            let data = encoded.data(using: .utf8),
            let restored = try? JSONDecoder().decode(Session.self, from: data) {
             session = restored
+            if !restored.userID.isEmpty,
+               let entEncoded = KeychainManager.shared.readIntegrationSecret(account: entitlementAccount),
+               let entData = entEncoded.data(using: .utf8),
+               let persisted = try? JSONDecoder().decode(PersistedEntitlement.self, from: entData),
+               persisted.userID == restored.userID {
+                entitlement = Entitlement(
+                    plan: persisted.plan,
+                    role: persisted.role,
+                    tokensRemaining: persisted.tokensRemaining,
+                    tokensUsed: persisted.tokensUsed,
+                    isLoaded: true
+                )
+            }
             return
         }
         guard let access = KeychainManager.shared.readIntegrationSecret(account: accessTokenAccount), !access.isEmpty else { return }

@@ -61,6 +61,8 @@ struct AuthenticTerminal: NSViewRepresentable {
         Coordinator(onSessionTerminated: onSessionTerminated)
     }
     
+    private static let cwdLock = NSLock()
+
     func makeNSView(context: Context) -> LocalProcessTerminalView {
         let terminalView = LocalProcessTerminalView(frame: .zero)
         
@@ -68,16 +70,19 @@ struct AuthenticTerminal: NSViewRepresentable {
         terminalView.configureNativeLook(fontName: fontName, fontSize: fontSize, textColor: textColor, backgroundColor: isTransparent ? .clear : backgroundColor)
         terminalView.processDelegate = context.coordinator
         
-        // Set working directory before spawning child process so posix_spawn/forkpty inherits it
+        // Safely scope working directory during forkpty and immediately restore host process CWD
+        Self.cwdLock.lock()
+        let previousDir = FileManager.default.currentDirectoryPath
         if let dir = workingDirectory, !dir.isEmpty, FileManager.default.fileExists(atPath: dir) {
             FileManager.default.changeCurrentDirectoryPath(dir)
-            dir.withCString { chdir($0) }
-            setenv("PWD", dir, 1)
         }
-        
-        // Start shell
         terminalView.startProcess(executable: executable, args: args)
-        context.coordinator.attach(terminalView)
+        if !previousDir.isEmpty {
+            FileManager.default.changeCurrentDirectoryPath(previousDir)
+        }
+        Self.cwdLock.unlock()
+
+        context.coordinator.attach(terminalView, initialDirectory: workingDirectory)
         
         return terminalView
     }
@@ -86,6 +91,7 @@ struct AuthenticTerminal: NSViewRepresentable {
         nsView.nativeBackgroundColor = isTransparent ? .clear : backgroundColor
         nsView.nativeForegroundColor = textColor
         nsView.font = NSFont(name: fontName, size: fontSize) ?? NSFont.monospacedSystemFont(ofSize: fontSize, weight: .regular)
+        context.coordinator.updateWorkingDirectoryIfNeeded(workingDirectory)
     }
 
     static func dismantleNSView(_ nsView: LocalProcessTerminalView, coordinator: Coordinator) {
@@ -99,6 +105,7 @@ struct AuthenticTerminal: NSViewRepresentable {
     final class Coordinator: NSObject, LocalProcessTerminalViewDelegate {
         private weak var terminalView: LocalProcessTerminalView?
         private var observer: NSObjectProtocol?
+        private var currentDirectory: String?
         var onSessionTerminated: ((Int32) -> Void)?
 
         init(onSessionTerminated: ((Int32) -> Void)? = nil) {
@@ -119,8 +126,17 @@ struct AuthenticTerminal: NSViewRepresentable {
             }
         }
 
-        func attach(_ terminal: LocalProcessTerminalView) {
+        func attach(_ terminal: LocalProcessTerminalView, initialDirectory: String?) {
             terminalView = terminal
+            currentDirectory = initialDirectory
+        }
+
+        func updateWorkingDirectoryIfNeeded(_ newDirectory: String?) {
+            guard let dir = newDirectory, !dir.isEmpty, dir != currentDirectory,
+                  FileManager.default.fileExists(atPath: dir) else { return }
+            currentDirectory = dir
+            let escaped = dir.replacingOccurrences(of: "'", with: "'\\''")
+            terminalView?.send(txt: "cd '\(escaped)'\n")
         }
 
         func detach() {

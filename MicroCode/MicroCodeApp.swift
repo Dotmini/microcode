@@ -10,6 +10,7 @@
 
 import SwiftUI
 import AppKit
+import UserNotifications
 
 @main
 struct MicroCodeApp: App {
@@ -27,6 +28,21 @@ struct MicroCodeApp: App {
         // signals and exceptions during startup are recorded too.
         CrashReporter.shared.install()
         CrashReporter.shared.breadcrumb("MicroCodeApp.init")
+        
+        // Launch ACP 1.0 JSON-RPC stdio server when invoked with `--acp-server`
+        let args = CommandLine.arguments
+        if args.contains("--acp-server") {
+            let wsIdx = args.firstIndex(of: "--workspace")
+            let workspacePath: String
+            if let idx = wsIdx, idx + 1 < args.count {
+                workspacePath = args[idx + 1]
+            } else {
+                workspacePath = FileManager.default.currentDirectoryPath
+            }
+            Task { @MainActor in
+                ACPServerService.shared.startServing(workspacePath: workspacePath)
+            }
+        }
     }
 
     var body: some Scene {
@@ -45,6 +61,28 @@ struct MicroCodeApp: App {
                     // Defer heavy non-critical setup to background
                     Task.detached(priority: .background) {
                         await performBackgroundStartup()
+                    }
+                    
+                    // Handle any files/folders passed via CLI or open -a MicroCode before view appeared
+                    for url in appDelegate.consumePendingOpenURLs() {
+                        handleIncomingDeepLink(url)
+                    }
+                    let args = Array(CommandLine.arguments.dropFirst())
+                    if !args.contains("--acp-server") {
+                        var skipNext = false
+                        for arg in args {
+                            if skipNext { skipNext = false; continue }
+                            if arg == "-NSDocumentRevisionsDebugMode" || arg == "-ApplePersistenceIgnoreState" {
+                                skipNext = true
+                                continue
+                            }
+                            guard !arg.hasPrefix("-") else { continue }
+                            let expanded = (arg as NSString).expandingTildeInPath
+                            if FileManager.default.fileExists(atPath: expanded) {
+                                openLocalFileOrFolder(URL(fileURLWithPath: expanded))
+                                break
+                            }
+                        }
                     }
                 }
                 .onOpenURL { url in
@@ -66,7 +104,9 @@ struct MicroCodeApp: App {
                 .onChange(of: appState.appTheme) { _ in
                     setupWindow()
                 }
+                .handlesExternalEvents(preferring: Set(arrayLiteral: "*"), allowing: Set(arrayLiteral: "*"))
         }
+        .handlesExternalEvents(matching: Set(arrayLiteral: "*"))
         .windowStyle(.hiddenTitleBar)
         .windowToolbarStyle(.unified)
         .commands {
@@ -104,11 +144,13 @@ struct MicroCodeApp: App {
             _ = AutoHealerService.shared
             _ = LocalEcosystemDiscovery.shared
             
-            // Start Local MCP & HTTP Daemon Bridge for Omni AI on low-priority thread
-            MCPServer.shared.startLocalHttpBridge(port: 18888)
-            
             // Background refresh of live models & local ecosystem engines
             await AIModelCatalog.shared.refreshIfNeeded(force: false)
+            await MainActor.run {
+                // Start Local MCP & HTTP Daemon Bridge for Omni AI
+                MCPServer.shared.startLocalHttpBridge(port: 18888)
+                TelemetryService.shared.start()
+            }
         }
         
         // A license must be issued and signed by Dotmini's entitlement service.
@@ -147,6 +189,11 @@ struct MicroCodeApp: App {
     private func handleIncomingDeepLink(_ url: URL) {
         NSApp.activate(ignoringOtherApps: true)
 
+        if url.isFileURL {
+            openLocalFileOrFolder(url)
+            return
+        }
+
         // Supabase OAuth uses the app URL scheme. Its browser callback carries
         // real access/refresh tokens; do not treat it as a human license key.
         if url.scheme?.lowercased() == "microcode", url.host?.lowercased() == "auth" {
@@ -158,6 +205,8 @@ struct MicroCodeApp: App {
                     token: session?.accessToken ?? "",
                     displayName: session?.email.components(separatedBy: "@").first ?? "User"
                 )
+                TelemetryService.shared.record(name: "account_signed_in")
+                TelemetryService.shared.flush()
                 NotificationCenter.default.post(name: NSNotification.Name("MicroCodeAccountLoggedIn"), object: nil)
             }
             return
@@ -225,6 +274,11 @@ struct MicroCodeApp: App {
         
         // Code Execution / Open
         if host == "open" || host == "run" || host == "playground" || host.contains("snippet") {
+            if let path = queryValue(for: "path"), !path.isEmpty {
+                let expanded = (path as NSString).expandingTildeInPath
+                openLocalFileOrFolder(URL(fileURLWithPath: expanded))
+                return
+            }
             var rawCode = queryValue(for: "code") ?? ""
             if let b64 = queryValue(for: "base64"), let data = Data(base64Encoded: b64), let decoded = String(data: data, encoding: .utf8) {
                 rawCode = decoded
@@ -239,12 +293,60 @@ struct MicroCodeApp: App {
             }
         }
     }
+
+    private func openLocalFileOrFolder(_ url: URL) {
+        var isDir: ObjCBool = false
+        guard FileManager.default.fileExists(atPath: url.path, isDirectory: &isDir) else { return }
+        if isDir.boolValue {
+            Task { @MainActor in
+                await appState.openWorkspace(url: url)
+                AgentService.shared.setWorkspace(url.path)
+            }
+        } else {
+            let parentDir = url.deletingLastPathComponent()
+            Task { @MainActor in
+                if appState.workspaceFolder == nil {
+                    await appState.openWorkspace(url: parentDir)
+                    AgentService.shared.setWorkspace(parentDir.path)
+                }
+                await appState.loadFile(url: url)
+            }
+        }
+    }
 }
 
 // MARK: - App Delegate
 
-class AppDelegate: NSObject, NSApplicationDelegate {
+@MainActor
+class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     private var signalSources: [DispatchSourceSignal] = []
+    private var windowObserver: NSObjectProtocol?
+    private weak var mainWorkspaceWindow: NSWindow?
+    private var pendingOpenURLs: [URL] = []
+    private var hasConsumedInitialOpenURLs = false
+
+    func consumePendingOpenURLs() -> [URL] {
+        hasConsumedInitialOpenURLs = true
+        let urls = pendingOpenURLs
+        pendingOpenURLs.removeAll()
+        return urls
+    }
+
+    func application(_ application: NSApplication, open urls: [URL]) {
+        for url in urls {
+            if !hasConsumedInitialOpenURLs {
+                pendingOpenURLs.append(url)
+            }
+            NotificationCenter.default.post(name: Notification.Name("MicroCodeOAuthCallback"), object: url)
+        }
+    }
+
+    var isAnyAITaskRunning: Bool {
+        AgentService.shared.isLoading ||
+        AgentService.shared.isProcessingQueue ||
+        AIClient.shared.isStreaming ||
+        ACPHostService.shared.isAnySessionRunning
+    }
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         // Optimization: Don't block main thread with heavy inits here
@@ -256,6 +358,21 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         NSApp.appearance = NSAppearance(named: .darkAqua)
         NSApp.activate(ignoringOtherApps: true)
 
+        // Request user notification permission softly for background AI completion alerts
+        UNUserNotificationCenter.current().requestAuthorization(options: [.alert, .sound, .badge]) { _, _ in }
+
+        // Attach window delegate to primary workspace windows so closing the window (Cmd+W / red close button)
+        // hides the window instead of destroying the view hierarchy or killing in-flight AI work.
+        attachWindowDelegates()
+        windowObserver = NotificationCenter.default.addObserver(
+            forName: NSWindow.didBecomeMainNotification,
+            object: nil,
+            queue: .main
+        ) { [weak self] note in
+            guard let self = self, let win = note.object as? NSWindow else { return }
+            self.configureManagedWindow(win)
+        }
+
         // applicationWillTerminate is NOT called on SIGTERM/SIGINT (e.g. a
         // `kill`, IDE stop, logout). Trap them so we still reap the backend
         // instead of leaving a re-parented CPU-spinning orphan.
@@ -263,35 +380,145 @@ class AppDelegate: NSObject, NSApplicationDelegate {
             signal(sig, SIG_IGN) // disable default termination; let the source run
             let src = DispatchSource.makeSignalSource(signal: sig, queue: .main)
             src.setEventHandler {
-                ReportLogManager.shared.log("Signal \(sig) — stopping backend", type: .info)
-                DeviceRuntimeService.shared.shutdownAllRuntimes()
+                ReportLogManager.shared.log("Signal \(sig) — flushing AI checkpoints and stopping backend", type: .info)
+                MainActor.assumeIsolated {
+                    AgentService.shared.saveChats()
+                    AgentService.shared.saveArx()
+                    UserDefaults.standard.synchronize()
+                    DeviceRuntimeService.shared.shutdownAllRuntimes()
+                }
                 BackendService.shared.stopBackend()
                 exit(0)
             }
             src.resume()
             signalSources.append(src)
         }
+    }
 
-        // Pre-load critical singletons if needed, but prefer lazy
+    private func attachWindowDelegates() {
+        for win in NSApp.windows {
+            configureManagedWindow(win)
+        }
+    }
+
+    private func configureManagedWindow(_ window: NSWindow) {
+        // Only manage standard titled document/workspace windows (not panels, popovers, or sheets)
+        guard window.styleMask.contains(.titled),
+              window.styleMask.contains(.closable),
+              !(window is NSPanel),
+              window.sheetParent == nil else { return }
+        if mainWorkspaceWindow == nil {
+            mainWorkspaceWindow = window
+        }
+        if window.delegate !== self {
+            window.delegate = self
+        }
+    }
+
+    func windowShouldClose(_ sender: NSWindow) -> Bool {
+        // Keep the main workspace window alive in memory by hiding it instead of destroying it.
+        // This guarantees any active AI streaming / tool execution continues uninterrupted in the background,
+        // and reopening from the Dock restores the exact live UI state immediately.
+        mainWorkspaceWindow = sender
+        sender.orderOut(nil)
+        if isAnyAITaskRunning {
+            NSApp.dockTile.badgeLabel = "AI"
+            AgentService.shared.postBackgroundStatusNotification(
+                title: "MicroCode AI กำลังทำงานต่อเบื้องหลัง",
+                body: "หน้าต่างถูกซ่อนไว้โดยไม่ตัดการทำงานของ AI คลิกไอคอน MicroCode บน Dock เพื่อกลับมาดูผลลัพธ์ได้ตลอดเวลา"
+            )
+        }
+        return false
+    }
+
+    func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool {
+        NSApp.dockTile.badgeLabel = isAnyAITaskRunning ? "AI" : nil
+        if !flag {
+            if let win = mainWorkspaceWindow {
+                win.makeKeyAndOrderFront(nil)
+                NSApp.activate(ignoringOtherApps: true)
+                return false
+            }
+            for win in sender.windows where win.styleMask.contains(.titled) && !(win is NSPanel) {
+                win.makeKeyAndOrderFront(nil)
+                NSApp.activate(ignoringOtherApps: true)
+                return false
+            }
+        }
+        return true
     }
 
     func applicationWillTerminate(_ notification: Notification) {
         ReportLogManager.shared.log("App Terminating", type: .info)
+        AgentService.shared.saveChats()
+        AgentService.shared.saveArx()
         DeviceRuntimeService.shared.shutdownAllRuntimes()
         // Stop backend server
         BackendService.shared.stopBackend()
     }
 
     func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
-        // Terminate runtime children before AppKit tears down the final
-        // window. Without this, an embedded AVD/dev-server could keep the
-        // process responsive-but-unclosable and force users to Force Quit.
+        if isAnyAITaskRunning && !AgentService.shared.shouldTerminateAfterBackgroundCompletion {
+            let alert = NSAlert()
+            alert.alertStyle = .informational
+            alert.messageText = "AI Agent กำลังทำงานอยู่เบื้องหลัง"
+            alert.informativeText = "ขณะนี้ AI กำลังประมวลผลหรือแก้ไขโค้ดอยู่ คุณต้องการซ่อนหน้าต่างเพื่อให้ AI ทำงานต่อเบื้องหลังจนเสร็จแบบไม่ตัดจบ หรือต้องการบันทึก Checkpoint แล้วปิดแอปทันที?"
+            alert.addButton(withTitle: "ทำงานต่อเบื้องหลัง (ซ่อนหน้าต่าง)")
+            alert.addButton(withTitle: "ทำจนเสร็จแล้วปิดแอปอัตโนมัติ")
+            alert.addButton(withTitle: "บันทึก Checkpoint แล้วปิดทันที")
+            alert.addButton(withTitle: "ยกเลิก")
+
+            let response = alert.runModal()
+            switch response {
+            case .alertFirstButtonReturn:
+                // Hide windows and continue running in background
+                for win in sender.windows where win.isVisible && !(win is NSPanel) {
+                    if mainWorkspaceWindow == nil { mainWorkspaceWindow = win }
+                    win.orderOut(nil)
+                }
+                NSApp.dockTile.badgeLabel = "AI"
+                AgentService.shared.postBackgroundStatusNotification(
+                    title: "MicroCode AI กำลังทำงานต่อเบื้องหลัง",
+                    body: "ระบบจะแจ้งเตือนเมื่อ AI ทำงานเสร็จสิ้น"
+                )
+                return .terminateCancel
+
+            case .alertSecondButtonReturn:
+                // Hide windows, let AI finish its current task + queue, then auto-quit
+                AgentService.shared.shouldTerminateAfterBackgroundCompletion = true
+                for win in sender.windows where win.isVisible && !(win is NSPanel) {
+                    if mainWorkspaceWindow == nil { mainWorkspaceWindow = win }
+                    win.orderOut(nil)
+                }
+                NSApp.dockTile.badgeLabel = "AI"
+                AgentService.shared.postBackgroundStatusNotification(
+                    title: "MicroCode AI จะปิดแอปอัตโนมัติเมื่อทำเสร็จ",
+                    body: "ระบบกำลังทำงานต่อเบื้องหลังและจะบันทึกข้อมูลก่อนปิดแอปให้อัตโนมัติ"
+                )
+                return .terminateCancel
+
+            case .alertThirdButtonReturn:
+                // Flush checkpoints and terminate now
+                AgentService.shared.saveChats()
+                AgentService.shared.saveArx()
+                DeviceRuntimeService.shared.shutdownAllRuntimes()
+                return .terminateNow
+
+            default:
+                return .terminateCancel
+            }
+        }
+
+        // Always flush latest chat & ARX state before terminating
+        AgentService.shared.saveChats()
+        AgentService.shared.saveArx()
         DeviceRuntimeService.shared.shutdownAllRuntimes()
         return .terminateNow
     }
 
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool {
-        return true
+        // Never kill the app when the last window is closed so background AI tasks and state survive
+        return false
     }
 }
 

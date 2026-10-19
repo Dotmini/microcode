@@ -90,6 +90,8 @@ class AgentToolBox: ObservableObject {
         register(RenameFileTool())
         register(FindSymbolTool())
         register(PatchFileTool())
+        register(ApplyPatchTool())
+        register(MultiReplaceInFileTool())
         register(MultiFileReadTool())
         register(GetDiagnosticsTool())
         register(ScienceInspectTool())
@@ -119,6 +121,10 @@ class AgentToolBox: ObservableObject {
         register(BackgroundAgentControlTool())
         // Feature 10: Voice Coding
         register(VoiceCodingTool())
+        // Feature 11: Autonomous Skill Engine 2.0, Hyper-Mesh MCP 2.0 & SubAgent Swarm 2.0
+        register(SkillEngineTool())
+        register(MCPOrchestratorTool())
+        register(SwarmOrchestratorTool())
     }
     
     func register(_ tool: any AgentTool) {
@@ -142,32 +148,54 @@ class AgentToolBox: ObservableObject {
         
         let executionWorkspace = workspaceRoot
         var resolvedParams = params
+        let isRemoteTarget: Bool = {
+            if case .remote = executionTarget { return true }
+            return false
+        }()
         
-        // Auto-resolve relative paths
-        if let root = workspaceRoot {
-            let resolvePath = { (p: String) -> String in
-                if p.hasPrefix("/") { return p }
-                if p.hasPrefix("~") { return (p as NSString).expandingTildeInPath }
-                return (root as NSString).appendingPathComponent(p)
+        if !isRemoteTarget {
+            // Auto-resolve relative paths against local workspaceRoot
+            if let root = workspaceRoot {
+                let resolvePath = { (p: String) -> String in
+                    if p.hasPrefix("/") { return p }
+                    if p.hasPrefix("~") { return (p as NSString).expandingTildeInPath }
+                    return (root as NSString).appendingPathComponent(p)
+                }
+                
+                for key in ["path", "directory", "old_path", "new_path", "cwd"] {
+                    if let path = params[key] as? String { resolvedParams[key] = resolvePath(path) }
+                }
+                if let pathsStr = params["paths"] as? String {
+                    let paths = pathsStr.components(separatedBy: ",").map { $0.trimmingCharacters(in: .whitespaces) }
+                    resolvedParams["paths"] = paths.map { resolvePath($0) }.joined(separator: ",")
+                }
             }
             
+            // Validate every declared local path, including list and rename arguments.
             for key in ["path", "directory", "old_path", "new_path", "cwd"] {
-                if let path = params[key] as? String { resolvedParams[key] = resolvePath(path) }
+                if let path = resolvedParams[key] as? String { try validateSandbox(path) }
             }
-            if let pathsStr = params["paths"] as? String {
-                let paths = pathsStr.components(separatedBy: ",").map { $0.trimmingCharacters(in: .whitespaces) }
-                resolvedParams["paths"] = paths.map { resolvePath($0) }.joined(separator: ",")
+            if let paths = resolvedParams["paths"] as? String {
+                for path in paths.components(separatedBy: ",") {
+                    try validateSandbox(path.trimmingCharacters(in: .whitespacesAndNewlines))
+                }
             }
-        }
-        
-        // Validate every declared local path, including list and rename arguments.
-        // Shell approval authorizes a host process; cwd validation is not OS isolation.
-        for key in ["path", "directory", "old_path", "new_path", "cwd"] {
-            if let path = resolvedParams[key] as? String { try validateSandbox(path) }
-        }
-        if let paths = resolvedParams["paths"] as? String {
-            for path in paths.components(separatedBy: ",") {
-                try validateSandbox(path.trimmingCharacters(in: .whitespacesAndNewlines))
+        } else if let remoteBase = RemoteWorkspaceManager.shared.currentWorkspace?.remotePath, !remoteBase.isEmpty {
+            let cleanBase = remoteBase.hasSuffix("/") ? String(remoteBase.dropLast()) : remoteBase
+            let resolveRemotePath = { (p: String) -> String in
+                if p.isEmpty || p.hasPrefix("/") || p.hasPrefix("~") { return p }
+                return "\(cleanBase)/\(p)"
+            }
+            for key in ["path", "directory", "old_path", "new_path", "cwd"] {
+                if let path = params[key] as? String {
+                    // Do not forward local macOS /Users/... workspace path to remote Linux server
+                    if let localRoot = workspaceRoot, path.hasPrefix(localRoot) {
+                        let rel = path.replacingOccurrences(of: localRoot, with: "").trimmingCharacters(in: CharacterSet(charactersIn: "/"))
+                        resolvedParams[key] = rel.isEmpty ? cleanBase : "\(cleanBase)/\(rel)"
+                    } else {
+                        resolvedParams[key] = resolveRemotePath(path)
+                    }
+                }
             }
         }
 
@@ -187,16 +215,23 @@ class AgentToolBox: ObservableObject {
             throw ToolBoxError.executionFailed("Workspace changed while awaiting tool approval")
         }
 
-        // Auto-commit safety net: checkpoint before file-modifying tools
-        let fileModifyingTools: Set<String> = ["file_write", "replace_in_file", "patch_file", "rename_file", "create_directory", "shell"]
-        if fileModifyingTools.contains(toolName) {
+        // Auto-commit safety net: checkpoint before file-modifying tools (local only)
+        let fileModifyingTools: Set<String> = ["file_write", "replace_in_file", "patch_file", "apply_patch", "multi_replace_in_file", "rename_file", "create_directory", "shell"]
+        let isMutatingCall: Bool = {
+            guard fileModifyingTools.contains(toolName) else { return false }
+            if toolName == "shell", let cmd = resolvedParams["command"] as? String {
+                return !Self.isReadOnlyShellCommand(cmd)
+            }
+            return true
+        }()
+        if !isRemoteTarget && isMutatingCall {
             AutoCommitService.shared.workspaceRoot = workspaceRoot
             let targetPath = resolvedParams["path"] as? String ?? resolvedParams["directory"] as? String
             await AutoCommitService.shared.createCheckpoint(toolName: toolName, targetPath: targetPath)
         }
         
         let startTime = Date()
-        let cacheKey = executionCacheKey(toolName: toolName, params: resolvedParams)
+        let cacheKey = executionCacheKey(toolName: toolName, params: resolvedParams) + (isRemoteTarget ? "::remote" : "::local")
         let cacheable = ["file_read", "grep_search", "list_directory_tree", "git_status", "find_symbol", "multi_file_read", "get_diagnostics", "science_inspect", "alphafold_input_validate"].contains(toolName)
         if cacheable, let cached = readCache[cacheKey], Date().timeIntervalSince(cached.date) < readCacheTTL {
             TokenOptimizer.shared.recordContextCache(hit: true, tokens: TokenOptimizer.shared.estimateTokens(cached.value))
@@ -205,17 +240,25 @@ class AgentToolBox: ObservableObject {
         if cacheable { TokenOptimizer.shared.recordContextCache(hit: false, tokens: 0) }
         
         do {
-            let rawResult = try await executeWithTimeout(tool: tool, params: resolvedParams)
+            let rawResult: String
+            if case .remote(let server) = executionTarget,
+               let remoteHandled = try await executeRemoteToolIfApplicable(toolName: toolName, server: server, params: resolvedParams) {
+                rawResult = remoteHandled
+            } else {
+                rawResult = try await executeWithTimeout(tool: tool, params: resolvedParams)
+            }
             let result = AgentPrivacyGuard.sanitize(rawResult)
             let execution = ToolExecution(toolName: toolName, params: resolvedParams, result: result, success: true, duration: Date().timeIntervalSince(startTime))
             executionHistory.append(execution)
             if executionHistory.count > 300 { executionHistory.removeFirst(executionHistory.count - 300) }
             if cacheable { readCache[cacheKey] = (result, Date()) }
-            if ["file_write", "replace_in_file", "patch_file", "rename_file", "create_directory", "shell"].contains(toolName) {
+            if isMutatingCall {
                 readCache.removeAll(keepingCapacity: true)
-                // Track modified file in auto-commit service
-                if let path = resolvedParams["path"] as? String {
+                if !isRemoteTarget, let path = resolvedParams["path"] as? String {
                     AutoCommitService.shared.modifiedFiles.insert(path)
+                    if RemoteWorkspaceManager.shared.currentWorkspace != nil {
+                        await RemoteWorkspaceManager.shared.syncFile(localURL: URL(fileURLWithPath: path))
+                    }
                 }
             }
             
@@ -228,6 +271,176 @@ class AgentToolBox: ObservableObject {
             let execution = ToolExecution(toolName: toolName, params: params, result: error.localizedDescription, success: false, duration: Date().timeIntervalSince(startTime))
             executionHistory.append(execution)
             throw error
+        }
+    }
+
+    nonisolated static func posixQuote(_ value: String) -> String {
+        return "'" + value.replacingOccurrences(of: "'", with: "'\\''") + "'"
+    }
+
+    nonisolated static func isReadOnlyShellCommand(_ command: String) -> Bool {
+        let trimmed = command.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return true }
+        // Any redirection (> or >>), tee, sed -i, rm, mv, cp, mkdir, touch, chmod, git commit/push/checkout/reset/stash/apply is mutating
+        if trimmed.contains(" >") || trimmed.contains(">>") || trimmed.contains("| tee ") || trimmed.contains("sed -i") {
+            return false
+        }
+        let segments = trimmed
+            .components(separatedBy: CharacterSet(charactersIn: ";&|"))
+            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+            .filter { !$0.isEmpty }
+        let readOnlyPrefixes = [
+            "cd ", "ls", "pwd", "wc", "cat ", "head ", "tail ", "grep ", "egrep ", "fgrep ", "rg ",
+            "sed -n", "awk ", "find ", "which ", "whereis ", "type ", "file ", "stat ", "du ", "df ",
+            "echo ", "printf ", "env", "printenv", "uname", "whoami", "date", "ps ", "pgrep ",
+            "git status", "git diff", "git log", "git show", "git branch", "git rev-parse", "git ls-files", "git remote"
+        ]
+        for seg in segments {
+            if seg == "cd" || seg == "ls" || seg == "pwd" || seg == "wc" || seg == "env" || seg == "true" {
+                continue
+            }
+            if !readOnlyPrefixes.contains(where: { seg == $0 || seg.hasPrefix($0) }) {
+                return false
+            }
+        }
+        return true
+    }
+
+    /// Executes filesystem, search, and git tools directly on the active Remote Server when executionTarget == .remote
+    private func executeRemoteToolIfApplicable(
+        toolName: String,
+        server: RemoteConnectionConfig,
+        params: [String: Any]
+    ) async throws -> String? {
+        let serverId = server.id.uuidString
+        let shellTool = ShellCommandTool()
+        
+        func runRemoteShell(_ cmd: String) async throws -> String {
+            var p = params
+            p["command"] = cmd
+            return try await shellTool.execute(params: p)
+        }
+        
+        switch toolName {
+        case "file_read":
+            guard let path = params["path"] as? String, !path.isEmpty else {
+                throw ToolBoxError.invalidParams("Missing 'path' parameter")
+            }
+            let content: String
+            if let data = try? await BackendService.shared.downloadRemoteFile(id: serverId, path: path),
+               let str = String(data: data, encoding: .utf8) {
+                content = str
+            } else {
+                content = try await runRemoteShell("cat -- \(Self.posixQuote(path))")
+            }
+            let lines = content.components(separatedBy: "\n")
+            let start = max(1, (params["start_line"] as? Int) ?? 1)
+            let end = min(lines.count, (params["end_line"] as? Int) ?? lines.count)
+            guard start <= end, !lines.isEmpty else { return content }
+            return (start...end).map { "\($0): \(lines[$0 - 1])" }.joined(separator: "\n")
+            
+        case "multi_file_read":
+            guard let pathsStr = params["paths"] as? String else {
+                throw ToolBoxError.invalidParams("Missing 'paths' parameter")
+            }
+            let paths = pathsStr.components(separatedBy: ",").map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }.filter { !$0.isEmpty }
+            var outputs: [String] = []
+            for p in paths {
+                let text = (try? await executeRemoteToolIfApplicable(toolName: "file_read", server: server, params: ["path": p])) ?? "(Failed to read \(p))"
+                outputs.append("=== \(p) ===\n\(text)")
+            }
+            return outputs.joined(separator: "\n\n")
+            
+        case "file_write":
+            guard let path = params["path"] as? String,
+                  let content = params["content"] as? String else {
+                throw ToolBoxError.invalidParams("Missing 'path' or 'content'")
+            }
+            let parentDir = (path as NSString).deletingLastPathComponent
+            if !parentDir.isEmpty && parentDir != "." && parentDir != "/" {
+                _ = try? await runRemoteShell("mkdir -p -- \(Self.posixQuote(parentDir))")
+            }
+            let data = Data(content.utf8)
+            do {
+                try await BackendService.shared.uploadRemoteFile(id: serverId, path: path, content: data)
+            } catch {
+                let b64 = data.base64EncodedString()
+                _ = try await runRemoteShell("printf '%s' \(Self.posixQuote(b64)) | base64 -d > \(Self.posixQuote(path))")
+            }
+            return "Successfully wrote \(data.count) bytes to remote \(path) on \(server.name)"
+            
+        case "replace_in_file", "patch_file":
+            guard let path = params["path"] as? String else {
+                throw ToolBoxError.invalidParams("Missing 'path'")
+            }
+            let search = (params["old_text"] as? String) ?? (params["search"] as? String) ?? (params["target"] as? String) ?? ""
+            let replace = (params["new_text"] as? String) ?? (params["replace"] as? String) ?? (params["replacement"] as? String) ?? ""
+            guard !search.isEmpty else {
+                throw ToolBoxError.invalidParams("Missing search/old_text parameter")
+            }
+            let original: String
+            if let data = try? await BackendService.shared.downloadRemoteFile(id: serverId, path: path),
+               let str = String(data: data, encoding: .utf8) {
+                original = str
+            } else {
+                original = try await runRemoteShell("cat -- \(Self.posixQuote(path))")
+            }
+            guard original.contains(search) else {
+                throw ToolBoxError.executionFailed("Target text not found in remote file \(path)")
+            }
+            let updated = original.replacingOccurrences(of: search, with: replace)
+            _ = try await executeRemoteToolIfApplicable(toolName: "file_write", server: server, params: ["path": path, "content": updated])
+            return "Updated remote file \(path) on \(server.name)"
+            
+        case "create_directory":
+            guard let path = (params["path"] as? String) ?? (params["directory"] as? String) else {
+                throw ToolBoxError.invalidParams("Missing 'path'")
+            }
+            _ = try await runRemoteShell("mkdir -p -- \(Self.posixQuote(path))")
+            return "Created remote directory \(path)"
+            
+        case "rename_file":
+            guard let oldPath = (params["old_path"] as? String) ?? (params["source"] as? String),
+                  let newPath = (params["new_path"] as? String) ?? (params["destination"] as? String) else {
+                throw ToolBoxError.invalidParams("Missing 'old_path' or 'new_path'")
+            }
+            if (try? await BackendService.shared.remoteRename(id: serverId, source: oldPath, destination: newPath)) == nil {
+                _ = try await runRemoteShell("mv -- \(Self.posixQuote(oldPath)) \(Self.posixQuote(newPath))")
+            }
+            return "Renamed remote \(oldPath) -> \(newPath)"
+            
+        case "list_directory_tree":
+            let dir = (params["directory"] as? String) ?? (params["path"] as? String) ?? "."
+            if let files = try? await BackendService.shared.listRemoteFiles(id: serverId, path: dir), !files.isEmpty {
+                return files.map { "\($0.isDirectory ? "[DIR] " : "      ")\($0.name)" }.joined(separator: "\n")
+            }
+            return try await runRemoteShell("find \(Self.posixQuote(dir)) -maxdepth 3 -not -path '*/.*' | head -n 500")
+            
+        case "grep_search":
+            guard let query = (params["query"] as? String) ?? (params["pattern"] as? String) else {
+                throw ToolBoxError.invalidParams("Missing 'query' or 'pattern'")
+            }
+            let dir = (params["path"] as? String) ?? (params["directory"] as? String) ?? "."
+            return try await runRemoteShell("grep -rnI --exclude-dir=.git --exclude-dir=node_modules --exclude-dir=target -- \(Self.posixQuote(query)) \(Self.posixQuote(dir)) | head -n 200 || true")
+            
+        case "file_search":
+            let pattern = (params["pattern"] as? String) ?? (params["query"] as? String) ?? "*"
+            let dir = (params["directory"] as? String) ?? (params["path"] as? String) ?? "."
+            return try await runRemoteShell("find \(Self.posixQuote(dir)) -not -path '*/.*' -iname \(Self.posixQuote("*\(pattern)*")) | head -n 200")
+            
+        case "find_symbol":
+            guard let symbol = (params["symbol"] as? String) ?? (params["name"] as? String) else {
+                throw ToolBoxError.invalidParams("Missing 'symbol'")
+            }
+            let dir = (params["directory"] as? String) ?? (params["path"] as? String) ?? "."
+            return try await runRemoteShell("grep -rnIE --exclude-dir=.git --exclude-dir=node_modules -- \(Self.posixQuote("(func|class|struct|enum|def|interface|type|fn|let|const)\\s+\(symbol)\\b")) \(Self.posixQuote(dir)) | head -n 100 || true")
+            
+        case "git_status":
+            let dir = (params["directory"] as? String) ?? (params["path"] as? String) ?? "."
+            return try await runRemoteShell("git -C \(Self.posixQuote(dir)) status --short --branch && git -C \(Self.posixQuote(dir)) diff --stat")
+            
+        default:
+            return nil
         }
     }
 
@@ -1032,7 +1245,7 @@ struct FileReadTool: AgentTool {
             if let end = endParam {
                 endIdx = min(totalLines, max(startIdx, end))
             } else {
-                endIdx = min(totalLines, startIdx + 250)
+                endIdx = min(totalLines, startIdx + 400)
             }
             if startIdx < totalLines {
                 let slice = lines[startIdx..<endIdx]
@@ -1041,16 +1254,16 @@ struct FileReadTool: AgentTool {
             }
         }
         
-        // If file is large (> 400 lines) and no slice requested, window it smartly to preserve tokens
-        if totalLines > 400 {
-            let headSlice = lines.prefix(300).enumerated().map { "\($0.offset + 1): \($0.element)" }.joined(separator: "\n")
-            let tailSlice = lines.suffix(60).enumerated().map { "\(totalLines - 60 + $0.offset + 1): \($0.element)" }.joined(separator: "\n")
+        // If file is very large (> 800 lines) and no slice requested, window it smartly
+        if totalLines > 800 {
+            let headSlice = lines.prefix(500).enumerated().map { "\($0.offset + 1): \($0.element)" }.joined(separator: "\n")
+            let tailSlice = lines.suffix(100).enumerated().map { "\(totalLines - 100 + $0.offset + 1): \($0.element)" }.joined(separator: "\n")
             return """
-            [File: \(fileName) | Total \(totalLines) lines. Showing lines 1-300 and \(totalLines - 59)-\(totalLines). Use start_line/end_line to inspect specific sections.]
+            [File: \(fileName) | Total \(totalLines) lines. Showing lines 1-500 and \(totalLines - 99)-\(totalLines). Use start_line/end_line to inspect lines 501-\(totalLines - 100).]
             
             \(headSlice)
             
-            ... [\(totalLines - 360) lines omitted: lines 301-\(totalLines - 60)] ...
+            ... [\(totalLines - 600) lines omitted: lines 501-\(totalLines - 100)] ...
             
             \(tailSlice)
             """
@@ -1162,12 +1375,110 @@ struct FileWriteTool: AgentTool {
     }
 }
 
+enum FileEditMatchResult {
+    case updated(String)
+    case notFound
+    case ambiguous(Int)
+}
+
+func smartReplaceInContent(_ content: String, oldText rawOld: String, newText rawNew: String) -> FileEditMatchResult {
+    // Strip accidental line number prefixes (e.g. "123: ") if model copied from file_read
+    func stripLineNumberPrefixes(_ text: String) -> String {
+        let lines = text.components(separatedBy: "\n")
+        let nonEmpty = lines.filter { !$0.trimmingCharacters(in: .whitespaces).isEmpty }
+        guard !nonEmpty.isEmpty else { return text }
+        let allHaveLineNums = nonEmpty.allSatisfy {
+            $0.range(of: #"^\s*\d+:\s?"#, options: .regularExpression) != nil
+        }
+        guard allHaveLineNums else { return text }
+        return lines.map {
+            $0.replacingOccurrences(of: #"^\s*\d+:\s?"#, with: "", options: .regularExpression)
+        }.joined(separator: "\n")
+    }
+    
+    let oldText = stripLineNumberPrefixes(rawOld.replacingOccurrences(of: "\r\n", with: "\n"))
+    let newText = stripLineNumberPrefixes(rawNew.replacingOccurrences(of: "\r\n", with: "\n"))
+    let normalizedContent = content.replacingOccurrences(of: "\r\n", with: "\n")
+    
+    // 1. Exact match
+    var searchRange = normalizedContent.startIndex..<normalizedContent.endIndex
+    var exactRanges: [Range<String.Index>] = []
+    while let range = normalizedContent.range(of: oldText, range: searchRange) {
+        exactRanges.append(range)
+        searchRange = range.upperBound..<normalizedContent.endIndex
+    }
+    if exactRanges.count == 1, let range = exactRanges.first {
+        var result = normalizedContent
+        result.replaceSubrange(range, with: newText)
+        return .updated(result)
+    } else if exactRanges.count > 1 {
+        return .ambiguous(exactRanges.count)
+    }
+    
+    // 2. Line-by-line whitespace-tolerant matching
+    let contentLines = normalizedContent.components(separatedBy: "\n")
+    let oldLines = oldText.components(separatedBy: "\n")
+    guard !oldLines.isEmpty, oldLines.count <= contentLines.count else {
+        return .notFound
+    }
+    
+    // First try trailing-whitespace-insensitive match
+    let rtrimmedOld = oldLines.map { $0.replacingOccurrences(of: #"\s+$"#, with: "", options: .regularExpression) }
+    var matchedIndices: [Int] = []
+    let maxStart = contentLines.count - oldLines.count
+    for startIdx in 0...maxStart {
+        var matches = true
+        for offset in 0..<oldLines.count {
+            let candidate = contentLines[startIdx + offset].replacingOccurrences(of: #"\s+$"#, with: "", options: .regularExpression)
+            if candidate != rtrimmedOld[offset] {
+                matches = false
+                break
+            }
+        }
+        if matches {
+            matchedIndices.append(startIdx)
+        }
+    }
+    
+    // Second fallback: both leading and trailing whitespace normalized (trimmed non-empty lines)
+    if matchedIndices.isEmpty {
+        let trimmedOld = oldLines.map { $0.trimmingCharacters(in: .whitespaces) }
+        // Require at least one non-empty line to avoid matching blank lines
+        if trimmedOld.contains(where: { !$0.isEmpty }) {
+            for startIdx in 0...maxStart {
+                var matches = true
+                for offset in 0..<oldLines.count {
+                    let candidate = contentLines[startIdx + offset].trimmingCharacters(in: .whitespaces)
+                    if candidate != trimmedOld[offset] {
+                        matches = false
+                        break
+                    }
+                }
+                if matches {
+                    matchedIndices.append(startIdx)
+                }
+            }
+        }
+    }
+    
+    if matchedIndices.count == 1, let matchStart = matchedIndices.first {
+        var updatedLines = contentLines
+        let replacementLines = newText.components(separatedBy: "\n")
+        updatedLines.replaceSubrange(matchStart..<(matchStart + oldLines.count), with: replacementLines)
+        return .updated(updatedLines.joined(separator: "\n"))
+    } else if matchedIndices.count > 1 {
+        return .ambiguous(matchedIndices.count)
+    }
+    
+    return .notFound
+}
+
 struct ReplaceInFileTool: AgentTool {
     let name = "replace_in_file"
     let description = "Find and replace text in a file. Use this instead of file_write for targeted edits."
     let parameters = [
         ToolParameter(name: "path", type: "string", description: "Absolute file path", required: true),
-        ToolParameter(name: "old_text", type: "string", description: "Exact text to find (must match exactly)", required: true),
+        ToolParameter(name: "old_text", type: "string", description: "Exact text to find (must match uniquely)", required: true),
         ToolParameter(name: "new_text", type: "string", description: "Replacement text", required: true)
     ]
     
@@ -1179,30 +1490,18 @@ struct ReplaceInFileTool: AgentTool {
         }
         
         let url = URL(fileURLWithPath: path)
-        var content = try String(contentsOf: url, encoding: .utf8)
+        let content = try String(contentsOf: url, encoding: .utf8)
         
-        // Count occurrences
-        var searchRange = content.startIndex..<content.endIndex
-        var count = 0
-        while let range = content.range(of: oldText, range: searchRange) {
-            count += 1
-            searchRange = range.upperBound..<content.endIndex
+        switch smartReplaceInContent(content, oldText: oldText, newText: newText) {
+        case .updated(let updatedContent):
+            try updatedContent.write(to: url, atomically: true, encoding: .utf8)
+            return "✅ Replaced text in \(url.lastPathComponent)"
+        case .notFound:
+            let totalLines = content.components(separatedBy: "\n").count
+            throw ToolBoxError.executionFailed("Error: The specified old_text was not found in \(url.lastPathComponent) (\(totalLines) lines). Use `file_read` with `start_line` and `end_line` to verify the exact current lines before retrying.")
+        case .ambiguous(let count):
+            throw ToolBoxError.executionFailed("Error: Found \(count) occurrences of old_text in \(url.lastPathComponent). Include more surrounding lines in old_text to make the match unique.")
         }
-
-        if count == 0 {
-            return "Error: The specified text was not found in the file."
-        } else if count > 1 {
-            return "Error: Found \(count) occurrences. Include more surrounding context to make the match unique."
-        }
-
-        // Single occurrence - safe to replace
-        if let range = content.range(of: oldText) {
-            content.replaceSubrange(range, with: newText)
-        }
-        
-        try content.write(to: url, atomically: true, encoding: .utf8)
-        
-        return "✅ Replaced text in \(url.lastPathComponent)"
     }
 }
 
@@ -1215,28 +1514,38 @@ struct GrepSearchTool: AgentTool {
         ToolParameter(name: "include", type: "string", description: "File glob pattern e.g. '*.swift'", required: false)
     ]
     
+    static let excludedDirs = [
+        ".git", "node_modules", "target", ".build", "DerivedData",
+        ".codetuner-build", "dist", "build", ".next", "__pycache__",
+        ".venv", "venv", "Pods", ".swiftpm"
+    ]
+    
     func execute(params: [String: Any]) async throws -> String {
-        guard let pattern = params["pattern"] as? String,
-              let directory = params["directory"] as? String else {
+        let patternOpt = (params["pattern"] as? String) ?? (params["query"] as? String)
+        let defaultRoot = await MainActor.run { AgentToolBox.shared.workspaceRoot }
+        let directoryOpt = (params["directory"] as? String) ?? (params["path"] as? String) ?? defaultRoot
+        guard let pattern = patternOpt, !pattern.isEmpty,
+              let directory = directoryOpt, !directory.isEmpty else {
             throw ToolBoxError.invalidParams("pattern and directory are required")
         }
         
         let process = Process()
         process.executableURL = URL(fileURLWithPath: "/usr/bin/grep")
-        var args = ["-rn", "--color=never", "-I"] // recursive, line numbers, no color, skip binary
-        if let include = params["include"] as? String {
+        var args = ["-rn", "--color=never", "-I", "-E"]
+        for dir in Self.excludedDirs {
+            args.append("--exclude-dir=\(dir)")
+        }
+        if let include = params["include"] as? String, !include.isEmpty {
             args.append(contentsOf: ["--include", include])
         }
-        // Limit output
-        args.append(contentsOf: ["-m", "50"]) // max 50 matches per file
-        args.append(pattern)
-        args.append(directory)
+        args.append(contentsOf: ["-m", "50", "-e", pattern, directory])
         process.arguments = args
         
         let pipe = Pipe()
         let stderrPipe = Pipe()
+        process.standardInput = FileHandle.nullDevice
         process.standardOutput = pipe
-        process.standardError = stderrPipe // discard stderr
+        process.standardError = stderrPipe
         
         try process.run()
 
@@ -1246,7 +1555,9 @@ struct GrepSearchTool: AgentTool {
         let data = await stdoutData
         _ = await stderrData
         
-        process.waitUntilExit()
+        while process.isRunning {
+            try? await Task.sleep(nanoseconds: 10_000_000)
+        }
         
         let output = String(data: data, encoding: .utf8) ?? ""
         
@@ -1254,9 +1565,8 @@ struct GrepSearchTool: AgentTool {
             return "No matches found for '\(pattern)' in \(directory)"
         }
         
-        // Truncate if too many results
-        if output.count > 500_000 {
-            return String(output.prefix(500_000)) + "\n... (results truncated at 500K chars)"
+        if output.count > 200_000 {
+            return String(output.prefix(200_000)) + "\n... (results truncated at 200K chars)"
         }
         return output
     }
@@ -1270,8 +1580,14 @@ struct ListDirectoryTreeTool: AgentTool {
         ToolParameter(name: "max_depth", type: "integer", description: "Maximum depth (default: 3)", required: false)
     ]
     
+    private static let skippedDirs: Set<String> = [
+        "node_modules", "target", ".build", "DerivedData", ".codetuner-build",
+        "Pods", "__pycache__", "dist", "build", ".next", ".venv", "venv", ".swiftpm"
+    ]
+    
     func execute(params: [String: Any]) async throws -> String {
-        guard let path = params["path"] as? String else {
+        let defaultRoot = await MainActor.run { AgentToolBox.shared.workspaceRoot }
+        guard let path = (params["path"] as? String) ?? (params["directory"] as? String) ?? defaultRoot else {
             throw ToolBoxError.invalidParams("path is required")
         }
         
@@ -1293,16 +1609,23 @@ struct ListDirectoryTreeTool: AgentTool {
         
         guard let items = try? fm.contentsOfDirectory(at: url, includingPropertiesForKeys: [.isDirectoryKey], options: [.skipsHiddenFiles]) else { return "" }
         
-        let sorted = items.sorted { $0.lastPathComponent < $1.lastPathComponent }
+        let sorted = items
+            .filter { !$0.lastPathComponent.hasPrefix("._") && !$0.lastPathComponent.hasPrefix(".") }
+            .sorted { $0.lastPathComponent < $1.lastPathComponent }
         var result = ""
         
         for (i, item) in sorted.enumerated() {
             let isLast = i == sorted.count - 1
             let connector = isLast ? "└── " : "├── "
             let childPrefix = isLast ? "    " : "│   "
+            let name = item.lastPathComponent
             
             let isDir = (try? item.resourceValues(forKeys: [.isDirectoryKey]))?.isDirectory ?? false
-            result += "\(prefix)\(connector)\(item.lastPathComponent)\(isDir ? "/" : "")\n"
+            if isDir && Self.skippedDirs.contains(name) {
+                result += "\(prefix)\(connector)\(name)/ (build/deps skipped)\n"
+                continue
+            }
+            result += "\(prefix)\(connector)\(name)\(isDir ? "/" : "")\n"
             
             if isDir {
                 result += buildTree(at: item, prefix: prefix + childPrefix, depth: depth + 1, maxDepth: maxDepth, fm: fm)
@@ -1321,17 +1644,34 @@ struct FileSearchTool: AgentTool {
     ]
     
     func execute(params: [String: Any]) async throws -> String {
-        guard let directory = params["directory"] as? String,
-              let pattern = params["pattern"] as? String else {
+        let defaultRoot = await MainActor.run { AgentToolBox.shared.workspaceRoot }
+        let directoryOpt = (params["directory"] as? String) ?? (params["path"] as? String) ?? defaultRoot
+        let patternOpt = (params["pattern"] as? String) ?? (params["query"] as? String)
+        guard let directory = directoryOpt, !directory.isEmpty,
+              let pattern = patternOpt, !pattern.isEmpty else {
             throw ToolBoxError.invalidParams("directory and pattern are required")
         }
         
         let process = Process()
         process.executableURL = URL(fileURLWithPath: "/usr/bin/find")
-        process.arguments = [directory, "-name", pattern, "-type", "f", "-maxdepth", "5"]
+        process.arguments = [
+            directory,
+            "-maxdepth", "6",
+            "-not", "-path", "*/.*",
+            "-not", "-name", "._*",
+            "-not", "-path", "*/node_modules/*",
+            "-not", "-path", "*/target/*",
+            "-not", "-path", "*/DerivedData/*",
+            "-not", "-path", "*/.build/*",
+            "-not", "-path", "*/.codetuner-build/*",
+            "-not", "-path", "*/Pods/*",
+            "-type", "f",
+            "-name", pattern
+        ]
         
         let pipe = Pipe()
         let stderrPipe = Pipe()
+        process.standardInput = FileHandle.nullDevice
         process.standardOutput = pipe
         process.standardError = stderrPipe
         
@@ -1343,9 +1683,12 @@ struct FileSearchTool: AgentTool {
         let data = await stdoutData
         _ = await stderrData
         
-        process.waitUntilExit()
+        while process.isRunning {
+            try? await Task.sleep(nanoseconds: 10_000_000)
+        }
         
-        return String(data: data, encoding: .utf8) ?? ""
+        let out = String(data: data, encoding: .utf8) ?? ""
+        return out.isEmpty ? "No files matching '\(pattern)' found in \(directory)" : out
     }
 }
 
@@ -1542,10 +1885,11 @@ struct ShellCommandTool: AgentTool {
         process.executableURL = URL(fileURLWithPath: "/bin/zsh")
         process.arguments = ["-c", command]
         
-        // Full macOS development toolchain PATH environment
+        // Full macOS development toolchain + Portable MicroCode Runtimes PATH environment
         var env = ProcessInfo.processInfo.environment
         let homeDir = FileManager.default.homeDirectoryForCurrentUser.path
-        let extraPaths = [
+        let portableBins = RuntimeManager.shared.allRuntimeBinDirectories()
+        let extraPaths = (portableBins + [
             "/opt/homebrew/bin",
             "/opt/homebrew/sbin",
             "/usr/local/bin",
@@ -1557,11 +1901,18 @@ struct ShellCommandTool: AgentTool {
             "\(homeDir)/.dotnet/tools",
             "\(homeDir)/.local/bin",
             "\(homeDir)/.nvm/current/bin"
-        ].joined(separator: ":")
+        ]).joined(separator: ":")
         let currentPath = env["PATH"] ?? ""
         env["PATH"] = "\(extraPaths):\(currentPath)"
+        if env["JAVA_HOME"] == nil, let javaHome = RuntimeManager.shared.portableJavaHome() {
+            env["JAVA_HOME"] = javaHome
+        }
+        if env["GOROOT"] == nil, let goRoot = RuntimeManager.shared.portableGoRoot() {
+            env["GOROOT"] = goRoot
+        }
         env["TERM"] = "xterm-256color"
         env["LANG"] = "en_US.UTF-8"
+        env["COPYFILE_DISABLE"] = "1"
         // Auto-resolve working directory (cwd)
         let currentWorkspace = await MainActor.run { AgentToolBox.shared.workspaceRoot }
         let rawCwd = params["cwd"] as? String
@@ -1585,7 +1936,9 @@ struct ShellCommandTool: AgentTool {
         
         // External SSD & Volume Scratch Acceleration:
         // When working on an external SSD volume (/Volumes/*), redirect Gradle/Cargo/TMPDIR
-        // caches to the external drive so the internal SSD is never exhausted (0 bytes free).
+        // caches to the external drive so the internal SSD is never exhausted (0 bytes free),
+        // and strip AppleDouble (._*) resource-fork files that break SwiftPM/codesign on ExFAT.
+        var effectiveCommand = command
         if standardizedCwd.hasPrefix("/Volumes/") {
             let comps = (standardizedCwd as NSString).pathComponents
             if comps.count >= 3 {
@@ -1601,12 +1954,17 @@ struct ShellCommandTool: AgentTool {
                     env["TMPDIR"] = "\(extCacheDir)/tmp"
                 }
             }
+            let lowerCmd = command.lowercased()
+            if lowerCmd.contains("swift ") || lowerCmd.contains("'swift'") || lowerCmd.contains("xcodebuild") || lowerCmd.contains("cargo ") {
+                effectiveCommand = "/usr/sbin/dot_clean -m . 2>/dev/null || true; \(command)"
+            }
         }
-        
+        process.arguments = ["-c", effectiveCommand]
         process.environment = env
         
         let stdoutPipe = Pipe()
         let stderrPipe = Pipe()
+        process.standardInput = FileHandle.nullDevice
         process.standardOutput = stdoutPipe
         process.standardError = stderrPipe
         
@@ -1624,6 +1982,10 @@ struct ShellCommandTool: AgentTool {
         }
         let lower = command.lowercased().trimmingCharacters(in: .whitespacesAndNewlines)
         let normalized = lower.replacingOccurrences(of: "'", with: "").replacingOccurrences(of: "\"", with: "")
+        if (normalized == "swift run" || normalized.hasPrefix("swift run ") || normalized.hasSuffix("&& swift run") || normalized.contains("&& swift run "))
+            && !normalized.contains("--help") && !normalized.contains("--version") && !normalized.contains("--show-bin-path") {
+            return true
+        }
         let devPatterns = [
             "npm run dev", "npm start", "npm run start", "vite", "npx vite",
             "next dev", "next start", "npx next dev",
@@ -1664,11 +2026,17 @@ struct ShellCommandTool: AgentTool {
             "Listening on",
             "Started server",
             "press h + enter to show help",
-            "webpack compiled"
+            "webpack compiled",
+            "Build complete!",
+            "Build of product"
         ]
         
         stdoutHandle.readabilityHandler = { handle in
             let chunk = handle.availableData
+            if chunk.isEmpty {
+                handle.readabilityHandler = nil
+                return
+            }
             if let str = String(data: chunk, encoding: .utf8), !str.isEmpty {
                 collector.appendText(str, readinessMarkers: readinessMarkers)
             }
@@ -1676,6 +2044,10 @@ struct ShellCommandTool: AgentTool {
         
         stderrHandle.readabilityHandler = { handle in
             let chunk = handle.availableData
+            if chunk.isEmpty {
+                handle.readabilityHandler = nil
+                return
+            }
             if let str = String(data: chunk, encoding: .utf8), !str.isEmpty {
                 collector.appendText(str, readinessMarkers: readinessMarkers)
             }
@@ -1694,25 +2066,43 @@ struct ShellCommandTool: AgentTool {
             ]
         )
         
-        // Wait up to 3.5 seconds OR until server signals readiness
+        let isSwiftRun = command.lowercased().replacingOccurrences(of: "'", with: "").contains("swift run")
+        let maxStartupWait: TimeInterval = isSwiftRun ? 30.0 : 3.5
         let startTime = Date()
-        while Date().timeIntervalSince(startTime) < 3.5 {
+        var readySince: Date? = nil
+        while Date().timeIntervalSince(startTime) < maxStartupWait {
             if !process.isRunning {
                 break
             }
-            if collector.ready && Date().timeIntervalSince(startTime) > 0.8 {
-                break
+            if collector.ready {
+                if readySince == nil { readySince = Date() }
+                if let rs = readySince, Date().timeIntervalSince(rs) >= (isSwiftRun ? 1.2 : 0.8) {
+                    break
+                }
             }
             try? await Task.sleep(nanoseconds: 100_000_000)
         }
         
-        // If the process exited within startup window, it failed (e.g. port error, syntax error)
         if !process.isRunning {
             stdoutHandle.readabilityHandler = nil
             stderrHandle.readabilityHandler = nil
-            process.waitUntilExit()
             
             let exitCode = process.terminationStatus
+            let outText = collector.text.trimmingCharacters(in: .whitespacesAndNewlines)
+            if exitCode == 0 {
+                NotificationCenter.default.post(
+                    name: NSNotification.Name("MicroCodeAgentTerminalCommand"),
+                    object: nil,
+                    userInfo: [
+                        "command": command,
+                        "output": outText,
+                        "cwd": targetCwd,
+                        "exitCode": 0,
+                        "phase": "completed"
+                    ]
+                )
+                return outText.isEmpty ? "Command completed successfully (exit code 0)." : outText
+            }
             let failOutput = "[exit code: \(exitCode)]\n\(collector.text)"
             NotificationCenter.default.post(
                 name: NSNotification.Name("MicroCodeAgentTerminalCommand"),
@@ -1725,10 +2115,10 @@ struct ShellCommandTool: AgentTool {
                     "phase": "completed"
                 ]
             )
-            throw ToolBoxError.executionFailed("Dev server exited immediately with status \(exitCode):\n\(failOutput)")
+            throw ToolBoxError.executionFailed("Command exited with status \(exitCode):\n\(failOutput)")
         }
         
-        // Dev server is healthy and running in background
+        // App or dev server is healthy and running in background
         DevServerRegistry.shared.register(process: process, command: command)
         
         stdoutHandle.readabilityHandler = nil
@@ -1736,10 +2126,10 @@ struct ShellCommandTool: AgentTool {
         
         let cleanBanner = collector.text.trimmingCharacters(in: .whitespacesAndNewlines)
         let resultMsg = """
-        ✅ [Dev Server running in background (PID: \(pid))]
-        \(cleanBanner.isEmpty ? "Server process active." : cleanBanner)
+        ✅ [Process running in background (PID: \(pid))]
+        \(cleanBanner.isEmpty ? "Process active." : cleanBanner)
         
-        The development server has been started in the background and is running.
+        The application/server has been launched in the background and is active.
         """
         
         NotificationCenter.default.post(
@@ -1772,14 +2162,18 @@ struct ShellCommandTool: AgentTool {
         
         stdoutHandle.readabilityHandler = { handle in
             let chunk = handle.availableData
-            if !chunk.isEmpty {
+            if chunk.isEmpty {
+                handle.readabilityHandler = nil
+            } else {
                 stdoutCollector.appendData(chunk)
             }
         }
         
         stderrHandle.readabilityHandler = { handle in
             let chunk = handle.availableData
-            if !chunk.isEmpty {
+            if chunk.isEmpty {
+                handle.readabilityHandler = nil
+            } else {
                 stderrCollector.appendData(chunk)
             }
         }
@@ -1816,15 +2210,23 @@ struct ShellCommandTool: AgentTool {
                 }
                 break
             }
-            try? await Task.sleep(nanoseconds: 50_000_000)
+            try? await Task.sleep(nanoseconds: 15_000_000)
         }
         
-        if !process.isRunning {
-            process.waitUntilExit()
-        }
-        
+        // Immediately disarm readabilityHandlers before reading any remaining buffered bytes.
+        // Never call process.waitUntilExit() on a Swift Concurrency cooperative thread,
+        // as -[NSConcreteTask waitUntilExit] spins CFRunLoopInMode and deadlocks when no RunLoop is servicing it.
         stdoutHandle.readabilityHandler = nil
         stderrHandle.readabilityHandler = nil
+        
+        if !timedOut && !Task.isCancelled {
+            if let remOut = try? stdoutHandle.readToEnd(), !remOut.isEmpty {
+                stdoutCollector.appendData(remOut)
+            }
+            if let remErr = try? stderrHandle.readToEnd(), !remErr.isEmpty {
+                stderrCollector.appendData(remErr)
+            }
+        }
         
         let stdout = String(data: stdoutCollector.data, encoding: .utf8) ?? ""
         let stderr = String(data: stderrCollector.data, encoding: .utf8) ?? ""
@@ -1851,7 +2253,7 @@ struct ShellCommandTool: AgentTool {
             throw ToolBoxError.executionFailed(output)
         }
         
-        let exitCode = process.terminationStatus
+        let exitCode = process.isRunning ? -1 : process.terminationStatus
         let didSucceed = exitCode == 0
         if !didSucceed { output = "[exit code: \(exitCode)]\n\(output)" }
         
@@ -1878,10 +2280,19 @@ struct ShellCommandTool: AgentTool {
         return boundedOutput
     }
     
-    /// Remote execution over OpenSSH when a remote server / VPS / RunPod target is active
+    /// Remote execution over russh / OpenSSH when a remote server / VPS / RunPod target is active
     private func executeRemote(command: String, server: RemoteConnectionConfig, params: [String: Any]) async throws -> String {
-        let targetCwd = (params["cwd"] as? String) ?? ""
-        let remoteCommand = targetCwd.isEmpty ? command : "cd \(targetCwd) && \(command)"
+        var rawCwd = (params["cwd"] as? String) ?? ""
+        let (localRoot, remoteWsPath) = await MainActor.run {
+            (AgentToolBox.shared.workspaceRoot, RemoteWorkspaceManager.shared.currentWorkspace?.remotePath)
+        }
+        if let localRoot = localRoot, rawCwd.hasPrefix(localRoot) {
+            rawCwd = remoteWsPath ?? ""
+        }
+        let targetCwd = rawCwd.trimmingCharacters(in: .whitespacesAndNewlines)
+        let remoteCommand = targetCwd.isEmpty
+            ? command
+            : "cd -- \(AgentToolBox.posixQuote(targetCwd)) && \(command)"
         
         // Notify start
         NotificationCenter.default.post(
@@ -1894,24 +2305,45 @@ struct ShellCommandTool: AgentTool {
             ]
         )
         
+        // Fast path: if the Rust russh session is active for this server, execute over existing SSH channel
+        if let backendOut = try? await BackendService.shared.executeRemoteCommand(id: server.id.uuidString, command: remoteCommand),
+           !backendOut.hasPrefix("Error: Session not found") {
+            NotificationCenter.default.post(
+                name: NSNotification.Name("MicroCodeAgentTerminalCommand"),
+                object: nil,
+                userInfo: [
+                    "command": "[SSH: \(server.name)] \(remoteCommand)",
+                    "output": backendOut,
+                    "cwd": targetCwd,
+                    "exitCode": 0,
+                    "phase": "completed"
+                ]
+            )
+            return backendOut
+        }
+        
         // Unlock SSH key in macOS Keychain if present
         let keychainTask = Process()
         keychainTask.executableURL = URL(fileURLWithPath: "/usr/bin/ssh-add")
         keychainTask.arguments = ["--apple-load-keychain"]
+        keychainTask.standardInput = FileHandle.nullDevice
+        keychainTask.standardOutput = FileHandle.nullDevice
+        keychainTask.standardError = FileHandle.nullDevice
         try? keychainTask.run()
-        keychainTask.waitUntilExit()
+        while keychainTask.isRunning {
+            try? await Task.sleep(nanoseconds: 10_000_000)
+        }
         
         var effectivePassword = server.password
         if effectivePassword.isEmpty {
-            if let saved = UserDefaults.standard.dictionary(forKey: "ssh_saved_passwords")?[server.host] as? String {
-                effectivePassword = saved
+            let serverId = server.id.uuidString
+            let serverHost = server.host
+            effectivePassword = await MainActor.run {
+                KeychainManager.shared.readIntegrationSecret(account: "ssh_pwd_\(serverId)")
+                    ?? KeychainManager.shared.readIntegrationSecret(account: "ssh_host_pwd_\(serverHost)")
+                    ?? ""
             }
         }
-        
-        let scriptFeed = """
-        \(remoteCommand)
-        exit $?
-        """
         
         let rawOutput: String
         let exitCode: Int32
@@ -1920,68 +2352,60 @@ struct ShellCommandTool: AgentTool {
         process.executableURL = URL(fileURLWithPath: "/usr/bin/ssh")
         
         var args = [
-            "-tt",
+            "-T",
             "-o", "ServerAliveInterval=15",
             "-o", "TCPKeepAlive=yes",
             "-o", "StrictHostKeyChecking=accept-new",
             "-o", "ConnectTimeout=15",
+            "-o", "ControlMaster=auto",
+            "-o", "ControlPath=/tmp/mc-ssh-%r@%h:%p",
+            "-o", "ControlPersist=10m",
             "-p", "\(server.port)"
         ]
+        if server.forwardAgent {
+            args.append("-A")
+        }
+        if !server.proxyJump.isEmpty {
+            args.append(contentsOf: ["-J", server.proxyJump])
+        }
         if !server.keyPath.isEmpty {
             let expanded = (server.keyPath as NSString).expandingTildeInPath
             if FileManager.default.fileExists(atPath: expanded) {
-                args.append(contentsOf: ["-i", expanded])
+                args.append(contentsOf: ["-i", expanded, "-o", "IdentitiesOnly=yes"])
             }
         }
-        args.append("\(server.username)@\(server.host)")
+        args.append(contentsOf: ["--", "\(server.username)@\(server.host)", "sh -lc \(AgentToolBox.posixQuote(remoteCommand))"])
         process.arguments = args
         
         var env = ProcessInfo.processInfo.environment
         var tempAskPass: String? = nil
-        var tempPassFile: String? = nil
         
         if !effectivePassword.isEmpty {
             let unique = ProcessInfo.processInfo.globallyUniqueString
-            let passPath = "/tmp/mc_pass_\(unique).txt"
             let askPath = "/tmp/mc_ask_\(unique).sh"
-            
-            try? (effectivePassword + "\n").write(toFile: passPath, atomically: true, encoding: .utf8)
-            let chmodP = Process()
-            chmodP.executableURL = URL(fileURLWithPath: "/bin/chmod")
-            chmodP.arguments = ["600", passPath]
-            try? chmodP.run()
-            chmodP.waitUntilExit()
-            
-            let askScript = "#!/bin/sh\ncat \"\(passPath)\"\n"
-            try? askScript.write(toFile: askPath, atomically: true, encoding: .utf8)
-            let chmodA = Process()
-            chmodA.executableURL = URL(fileURLWithPath: "/bin/chmod")
-            chmodA.arguments = ["700", askPath]
-            try? chmodA.run()
-            chmodA.waitUntilExit()
-            
+            // Never write the password to disk; pass via in-memory environment variable MC_SSH_SECRET
+            let askScript = "#!/bin/sh\nprintf '%s\\n' \"$MC_SSH_SECRET\"\n"
+            FileManager.default.createFile(
+                atPath: askPath,
+                contents: Data(askScript.utf8),
+                attributes: [.posixPermissions: 0o700]
+            )
+            env["MC_SSH_SECRET"] = effectivePassword
             env["SSH_ASKPASS"] = askPath
             env["SSH_ASKPASS_REQUIRE"] = "force"
             env["DISPLAY"] = ":0"
             tempAskPass = askPath
-            tempPassFile = passPath
         }
         process.environment = env
         
-        let stdinPipe = Pipe()
         let stdoutPipe = Pipe()
         let stderrPipe = Pipe()
-        process.standardInput = stdinPipe
+        process.standardInput = FileHandle.nullDevice
         process.standardOutput = stdoutPipe
         process.standardError = stderrPipe
         
         do {
             try process.run()
-            
-            if let data = scriptFeed.data(using: .utf8) {
-                stdinPipe.fileHandleForWriting.write(data)
-                try? stdinPipe.fileHandleForWriting.close()
-            }
             
             let timeout = (params["timeout"] as? Int) ?? 120
             let deadline = DispatchTime.now() + .seconds(timeout)
@@ -1994,20 +2418,20 @@ struct ShellCommandTool: AgentTool {
             
             let outData = await outDataTask
             let errData = await errDataTask
-            process.waitUntilExit()
+            while process.isRunning {
+                try? await Task.sleep(nanoseconds: 10_000_000)
+            }
             
             if let tempAskPass = tempAskPass { try? FileManager.default.removeItem(atPath: tempAskPass) }
-            if let tempPassFile = tempPassFile { try? FileManager.default.removeItem(atPath: tempPassFile) }
             
             var combined = String(data: outData, encoding: .utf8) ?? ""
             if let errStr = String(data: errData, encoding: .utf8), !errStr.isEmpty {
-                combined += "\n" + errStr
+                combined += (combined.isEmpty ? "" : "\n") + errStr
             }
             rawOutput = combined
             exitCode = process.terminationStatus
         } catch {
             if let tempAskPass = tempAskPass { try? FileManager.default.removeItem(atPath: tempAskPass) }
-            if let tempPassFile = tempPassFile { try? FileManager.default.removeItem(atPath: tempPassFile) }
             throw ToolBoxError.executionFailed("Failed to launch SSH remote process: \(error.localizedDescription)")
         }
         
@@ -2056,6 +2480,7 @@ struct GitStatusTool: AgentTool {
         process.currentDirectoryURL = URL(fileURLWithPath: path)
         
         let pipe = Pipe()
+        process.standardInput = FileHandle.nullDevice
         process.standardOutput = pipe
         process.standardError = pipe
         
@@ -2063,7 +2488,9 @@ struct GitStatusTool: AgentTool {
         
         let data = await Task.detached { pipe.fileHandleForReading.readDataToEndOfFile() }.value
         
-        process.waitUntilExit()
+        while process.isRunning {
+            try? await Task.sleep(nanoseconds: 10_000_000)
+        }
         
         return String(data: data, encoding: .utf8) ?? "No git status available"
     }
@@ -2145,105 +2572,359 @@ struct FindSymbolTool: AgentTool {
     ]
     
     func execute(params: [String: Any]) async throws -> String {
-        guard let symbol = params["symbol"] as? String,
-              let directory = params["directory"] as? String else {
+        let symbolOpt = (params["symbol"] as? String) ?? (params["query"] as? String)
+        let defaultRoot = await MainActor.run { AgentToolBox.shared.workspaceRoot }
+        let directoryOpt = (params["directory"] as? String) ?? (params["path"] as? String) ?? defaultRoot
+        guard let symbol = symbolOpt, !symbol.isEmpty,
+              let directory = directoryOpt, !directory.isEmpty else {
             throw ToolBoxError.invalidParams("symbol and directory are required")
         }
         
         let symbolType = params["type"] as? String ?? "all"
-        
-        // Build pattern based on symbol type
-        let patterns: [String]
+        let combinedPattern: String
         switch symbolType {
         case "function":
-            patterns = ["func \\b\(symbol)\\b", "fn \\b\(symbol)\\b", "def \\b\(symbol)\\b", "function \\b\(symbol)\\b"]
+            combinedPattern = "(func|fn|def|function)\\s+\\b\(symbol)\\b"
         case "class":
-            patterns = ["class \\b\(symbol)\\b", "interface \\b\(symbol)\\b"]
+            combinedPattern = "(class|interface|actor)\\s+\\b\(symbol)\\b"
         case "struct":
-            patterns = ["struct \\b\(symbol)\\b"]
+            combinedPattern = "struct\\s+\\b\(symbol)\\b"
         case "enum":
-            patterns = ["enum \\b\(symbol)\\b"]
+            combinedPattern = "enum\\s+\\b\(symbol)\\b"
         default:
-            patterns = ["\\b\(symbol)\\b"]
+            combinedPattern = "\\b\(symbol)\\b"
         }
         
-        var allResults = ""
-        for pattern in patterns {
-            let process = Process()
-            process.executableURL = URL(fileURLWithPath: "/usr/bin/grep")
-            process.arguments = ["-rn", "--color=never", "-I", "-E", "-m", "20", pattern, directory]
-            
-            let pipe = Pipe()
-            process.standardOutput = pipe
-            process.standardError = Pipe()
-            
-            try process.run()
-            process.waitUntilExit()
-            
-            let data = pipe.fileHandleForReading.readDataToEndOfFile()
-            if let output = String(data: data, encoding: .utf8), !output.isEmpty {
-                allResults += output
-            }
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: "/usr/bin/grep")
+        var args = ["-rn", "--color=never", "-I", "-E"]
+        for dir in GrepSearchTool.excludedDirs {
+            args.append("--exclude-dir=\(dir)")
+        }
+        args.append(contentsOf: ["-m", "25", "-e", combinedPattern, directory])
+        process.arguments = args
+        
+        let pipe = Pipe()
+        let stderrPipe = Pipe()
+        process.standardInput = FileHandle.nullDevice
+        process.standardOutput = pipe
+        process.standardError = stderrPipe
+        
+        try process.run()
+        
+        async let stdoutData = Task.detached { pipe.fileHandleForReading.readDataToEndOfFile() }.value
+        async let stderrData = Task.detached { stderrPipe.fileHandleForReading.readDataToEndOfFile() }.value
+        let data = await stdoutData
+        _ = await stderrData
+        
+        while process.isRunning {
+            try? await Task.sleep(nanoseconds: 10_000_000)
         }
         
-        return allResults.isEmpty ? "No symbols matching '\(symbol)' found in \(directory)" : allResults
+        let output = String(data: data, encoding: .utf8) ?? ""
+        if output.isEmpty {
+            return "No symbols matching '\(symbol)' found in \(directory)"
+        }
+        return output.count > 100_000 ? String(output.prefix(100_000)) + "\n... (results truncated)" : output
     }
 }
 
 struct PatchFileTool: AgentTool {
     let name = "patch_file"
-    let description = "Apply multiple find-and-replace edits to a file in a single operation. More efficient than multiple replace_in_file calls."
+    let description = "Apply multiple find-and-replace edits to a file atomically in a single operation. More efficient than multiple replace_in_file calls."
     let parameters = [
         ToolParameter(name: "path", type: "string", description: "Absolute file path", required: true),
         ToolParameter(name: "edits", type: "string", description: "JSON array of edits: [{\"old\": \"text to find\", \"new\": \"replacement text\"}, ...]", required: true)
     ]
     
     func execute(params: [String: Any]) async throws -> String {
-        guard let path = params["path"] as? String,
-              let editsStr = params["edits"] as? String else {
-            throw ToolBoxError.invalidParams("path and edits are required")
+        guard let path = params["path"] as? String else {
+            throw ToolBoxError.invalidParams("path is required")
         }
         
         let url = URL(fileURLWithPath: path)
-        var content = try String(contentsOf: url, encoding: .utf8)
+        var workingContent = try String(contentsOf: url, encoding: .utf8)
         
-        // Parse edits JSON
-        guard let editsData = editsStr.data(using: .utf8),
-              let edits = try? JSONSerialization.jsonObject(with: editsData) as? [[String: String]] else {
-            throw ToolBoxError.invalidParams("edits must be a valid JSON array of {old, new} objects")
+        var parsedEdits: [[String: Any]] = []
+        if let editsArray = params["edits"] as? [[String: Any]] {
+            parsedEdits = editsArray
+        } else if let editsStr = params["edits"] as? String,
+                  let editsData = editsStr.data(using: .utf8),
+                  let jsonArr = try? JSONSerialization.jsonObject(with: editsData) as? [[String: Any]] {
+            parsedEdits = jsonArr
+        } else {
+            throw ToolBoxError.invalidParams("edits must be a valid JSON array of {\"old\": ..., \"new\": ...} objects")
+        }
+        
+        guard !parsedEdits.isEmpty else {
+            throw ToolBoxError.invalidParams("edits array cannot be empty")
         }
         
         var appliedCount = 0
         var failedEdits: [String] = []
         
-        for edit in edits {
-            guard let old = edit["old"], let new = edit["new"] else { continue }
-            
-            // Count occurrences
-            var searchRange = content.startIndex..<content.endIndex
-            var count = 0
-            while let range = content.range(of: old, range: searchRange) {
-                count += 1
-                searchRange = range.upperBound..<content.endIndex
+        for (idx, edit) in parsedEdits.enumerated() {
+            let old = (edit["old"] as? String) ?? (edit["old_text"] as? String)
+            let new = (edit["new"] as? String) ?? (edit["new_text"] as? String)
+            guard let oldText = old, let newText = new else {
+                failedEdits.append("Edit #\(idx + 1): missing 'old' or 'new' field")
+                continue
             }
             
-            if count == 0 {
-                failedEdits.append("Could not find: \(old.prefix(60))...")
-            } else if count > 1 {
-                failedEdits.append("Found \(count) occurrences, match not unique: \(old.prefix(60))...")
-            } else if let range = content.range(of: old) {
-                content.replaceSubrange(range, with: new)
+            switch smartReplaceInContent(workingContent, oldText: oldText, newText: newText) {
+            case .updated(let nextContent):
+                workingContent = nextContent
                 appliedCount += 1
+            case .notFound:
+                let preview = oldText.prefix(80).replacingOccurrences(of: "\n", with: "\\n")
+                failedEdits.append("Edit #\(idx + 1) not found: \"\(preview)...\"")
+            case .ambiguous(let count):
+                let preview = oldText.prefix(80).replacingOccurrences(of: "\n", with: "\\n")
+                failedEdits.append("Edit #\(idx + 1) matched \(count) places (not unique): \"\(preview)...\"")
             }
         }
         
-        try content.write(to: url, atomically: true, encoding: .utf8)
-        
-        var result = "✅ Applied \(appliedCount)/\(edits.count) edits to \(url.lastPathComponent)"
+        // Atomic guarantee: never write a half-patched file to disk if any edit failed
         if !failedEdits.isEmpty {
-            result += "\n⚠️ Failed edits:\n" + failedEdits.joined(separator: "\n")
+            throw ToolBoxError.executionFailed("Atomic patch_file aborted on \(url.lastPathComponent) (\(failedEdits.count)/\(parsedEdits.count) edit(s) failed; file was NOT modified):\n" + failedEdits.joined(separator: "\n"))
         }
-        return result
+        
+        try workingContent.write(to: url, atomically: true, encoding: .utf8)
+        return "✅ Applied all \(appliedCount) edit(s) atomically to \(url.lastPathComponent)"
+    }
+}
+
+/// AGY-style multi-chunk atomic replacement tool (`multi_replace_in_file`)
+struct MultiReplaceInFileTool: AgentTool {
+    let name = "multi_replace_in_file"
+    let description = "Apply multiple non-adjacent replacements to a single file atomically (AGY-style). Supports optional start_line/end_line scoping per chunk so identical snippets in different functions never collide."
+    let parameters = [
+        ToolParameter(name: "path", type: "string", description: "Absolute file path (or TargetFile)", required: true),
+        ToolParameter(name: "edits", type: "string", description: "JSON array of replacement chunks: [{\"old_text\": \"...\", \"new_text\": \"...\", \"start_line\": 10, \"end_line\": 25}, ...]", required: true)
+    ]
+
+    func execute(params: [String: Any]) async throws -> String {
+        let rawPath = (params["path"] as? String) ?? (params["TargetFile"] as? String)
+        guard let path = rawPath, !path.isEmpty else {
+            throw ToolBoxError.invalidParams("path (or TargetFile) is required")
+        }
+
+        let url = URL(fileURLWithPath: path)
+        var workingContent = try String(contentsOf: url, encoding: .utf8)
+
+        let rawChunks: Any? = params["edits"] ?? params["replacement_chunks"] ?? params["ReplacementChunks"]
+        var chunks: [[String: Any]] = []
+        if let arr = rawChunks as? [[String: Any]] {
+            chunks = arr
+        } else if let jsonStr = rawChunks as? String,
+                  let data = jsonStr.data(using: .utf8),
+                  let arr = try? JSONSerialization.jsonObject(with: data) as? [[String: Any]] {
+            chunks = arr
+        } else {
+            throw ToolBoxError.invalidParams("edits / replacement_chunks must be a valid JSON array of chunk objects")
+        }
+
+        guard !chunks.isEmpty else {
+            throw ToolBoxError.invalidParams("edits array cannot be empty")
+        }
+
+        var appliedCount = 0
+        var failedChunks: [String] = []
+
+        for (idx, chunk) in chunks.enumerated() {
+            let oldOpt = (chunk["old_text"] as? String) ?? (chunk["old"] as? String) ?? (chunk["TargetContent"] as? String)
+            let newOpt = (chunk["new_text"] as? String) ?? (chunk["new"] as? String) ?? (chunk["ReplacementContent"] as? String)
+            guard let oldText = oldOpt, let newText = newOpt else {
+                failedChunks.append("Chunk #\(idx + 1): missing old_text/TargetContent or new_text/ReplacementContent")
+                continue
+            }
+
+            let startLine = (chunk["start_line"] as? Int) ?? (chunk["StartLine"] as? Int)
+            let endLine = (chunk["end_line"] as? Int) ?? (chunk["EndLine"] as? Int)
+
+            if let sLine = startLine, let eLine = endLine, sLine >= 1, eLine >= sLine {
+                let allLines = workingContent.components(separatedBy: "\n")
+                let clampedStart = max(1, min(sLine, allLines.count)) - 1
+                let clampedEnd = max(clampedStart, min(eLine, allLines.count) - 1)
+                let sliceLines = Array(allLines[clampedStart...clampedEnd])
+                let sliceText = sliceLines.joined(separator: "\n")
+                if case .updated(let updatedSlice) = smartReplaceInContent(sliceText, oldText: oldText, newText: newText) {
+                    var newAllLines = allLines
+                    newAllLines.replaceSubrange(clampedStart...clampedEnd, with: updatedSlice.components(separatedBy: "\n"))
+                    workingContent = newAllLines.joined(separator: "\n")
+                    appliedCount += 1
+                    continue
+                }
+            }
+
+            switch smartReplaceInContent(workingContent, oldText: oldText, newText: newText) {
+            case .updated(let nextContent):
+                workingContent = nextContent
+                appliedCount += 1
+            case .notFound:
+                let preview = oldText.prefix(80).replacingOccurrences(of: "\n", with: "\\n")
+                failedChunks.append("Chunk #\(idx + 1) not found: \"\(preview)...\"")
+            case .ambiguous(let count):
+                let preview = oldText.prefix(80).replacingOccurrences(of: "\n", with: "\\n")
+                failedChunks.append("Chunk #\(idx + 1) matched \(count) places (specify start_line/end_line): \"\(preview)...\"")
+            }
+        }
+
+        if !failedChunks.isEmpty {
+            throw ToolBoxError.executionFailed("Atomic multi_replace_in_file aborted on \(url.lastPathComponent) (\(failedChunks.count)/\(chunks.count) failed):\n" + failedChunks.joined(separator: "\n"))
+        }
+
+        try workingContent.write(to: url, atomically: true, encoding: .utf8)
+        return "✅ Applied \(appliedCount) chunk(s) atomically to \(url.lastPathComponent)"
+    }
+}
+
+/// OpenAI Codex V4A & Unified Diff multi-file patch tool (`apply_patch`)
+struct ApplyPatchTool: AgentTool {
+    let name = "apply_patch"
+    let description = "Apply a multi-file Codex V4A patch (*** Begin Patch ... *** Update/Add/Delete File: ...) or unified git diff across the workspace atomically."
+    let parameters = [
+        ToolParameter(name: "patch", type: "string", description: "The patch string in Codex V4A format (*** Begin Patch ... *** End Patch) or unified diff format", required: true)
+    ]
+
+    func execute(params: [String: Any]) async throws -> String {
+        let rawPatch = (params["patch"] as? String) ?? (params["input"] as? String) ?? (params["diff"] as? String)
+        guard let patchText = rawPatch, !patchText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+            throw ToolBoxError.invalidParams("patch is required")
+        }
+
+        let defaultRoot = await MainActor.run { AgentToolBox.shared.workspaceRoot } ?? FileManager.default.currentDirectoryPath
+        if patchText.contains("*** Begin Patch") || patchText.contains("*** Update File:") || patchText.contains("*** Add File:") {
+            return try applyCodexV4APatch(patchText, workspaceRoot: defaultRoot)
+        } else {
+            return try await applyUnifiedGitDiff(patchText, workspaceRoot: defaultRoot)
+        }
+    }
+
+    private func resolveFilePath(_ raw: String, workspaceRoot: String) -> String {
+        let trimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+        if trimmed.hasPrefix("/") { return trimmed }
+        if trimmed.hasPrefix("~") { return (trimmed as NSString).expandingTildeInPath }
+        return (workspaceRoot as NSString).appendingPathComponent(trimmed)
+    }
+
+    private func applyCodexV4APatch(_ patch: String, workspaceRoot: String) throws -> String {
+        let lines = patch.components(separatedBy: "\n")
+        var idx = 0
+        var updatedFiles: [String] = []
+        var addedFiles: [String] = []
+        var deletedFiles: [String] = []
+
+        while idx < lines.count {
+            let line = lines[idx]
+            if line.hasPrefix("*** Add File:") {
+                let relPath = String(line.dropFirst("*** Add File:".count)).trimmingCharacters(in: .whitespaces)
+                let fullPath = resolveFilePath(relPath, workspaceRoot: workspaceRoot)
+                idx += 1
+                var newLines: [String] = []
+                while idx < lines.count && !lines[idx].hasPrefix("*** ") {
+                    let l = lines[idx]
+                    if l.hasPrefix("+") {
+                        newLines.append(String(l.dropFirst()))
+                    } else {
+                        newLines.append(l)
+                    }
+                    idx += 1
+                }
+                let fileURL = URL(fileURLWithPath: fullPath)
+                try FileManager.default.createDirectory(at: fileURL.deletingLastPathComponent(), withIntermediateDirectories: true)
+                try newLines.joined(separator: "\n").write(to: fileURL, atomically: true, encoding: .utf8)
+                addedFiles.append((fullPath as NSString).lastPathComponent)
+            } else if line.hasPrefix("*** Delete File:") {
+                let relPath = String(line.dropFirst("*** Delete File:".count)).trimmingCharacters(in: .whitespaces)
+                let fullPath = resolveFilePath(relPath, workspaceRoot: workspaceRoot)
+                if FileManager.default.fileExists(atPath: fullPath) {
+                    try FileManager.default.removeItem(atPath: fullPath)
+                    deletedFiles.append((fullPath as NSString).lastPathComponent)
+                }
+                idx += 1
+            } else if line.hasPrefix("*** Update File:") {
+                let relPath = String(line.dropFirst("*** Update File:".count)).trimmingCharacters(in: .whitespaces)
+                let fullPath = resolveFilePath(relPath, workspaceRoot: workspaceRoot)
+                let fileURL = URL(fileURLWithPath: fullPath)
+                var content = try String(contentsOf: fileURL, encoding: .utf8)
+                idx += 1
+
+                var oldHunkLines: [String] = []
+                var newHunkLines: [String] = []
+
+                func flushHunk() throws {
+                    guard !oldHunkLines.isEmpty || !newHunkLines.isEmpty else { return }
+                    let oldBlock = oldHunkLines.joined(separator: "\n")
+                    let newBlock = newHunkLines.joined(separator: "\n")
+                    oldHunkLines.removeAll()
+                    newHunkLines.removeAll()
+                    guard !oldBlock.isEmpty else { return }
+                    switch smartReplaceInContent(content, oldText: oldBlock, newText: newBlock) {
+                    case .updated(let next):
+                        content = next
+                    case .notFound:
+                        throw ToolBoxError.executionFailed("apply_patch hunk not found in \((fullPath as NSString).lastPathComponent):\n\(oldBlock.prefix(160))")
+                    case .ambiguous(let count):
+                        throw ToolBoxError.executionFailed("apply_patch hunk matched \(count) locations in \((fullPath as NSString).lastPathComponent); add more context lines.")
+                    }
+                }
+
+                while idx < lines.count && !lines[idx].hasPrefix("*** ") {
+                    let hLine = lines[idx]
+                    if hLine.hasPrefix("@@") {
+                        try flushHunk()
+                    } else if hLine.hasPrefix("-") {
+                        oldHunkLines.append(String(hLine.dropFirst()))
+                    } else if hLine.hasPrefix("+") {
+                        newHunkLines.append(String(hLine.dropFirst()))
+                    } else if hLine.hasPrefix(" ") {
+                        let ctx = String(hLine.dropFirst())
+                        oldHunkLines.append(ctx)
+                        newHunkLines.append(ctx)
+                    } else if !hLine.trimmingCharacters(in: .whitespaces).isEmpty {
+                        oldHunkLines.append(hLine)
+                        newHunkLines.append(hLine)
+                    }
+                    idx += 1
+                }
+                try flushHunk()
+                try content.write(to: fileURL, atomically: true, encoding: .utf8)
+                updatedFiles.append((fullPath as NSString).lastPathComponent)
+            } else {
+                idx += 1
+            }
+        }
+
+        var summary: [String] = []
+        if !updatedFiles.isEmpty { summary.append("Updated: \(updatedFiles.joined(separator: ", "))") }
+        if !addedFiles.isEmpty { summary.append("Added: \(addedFiles.joined(separator: ", "))") }
+        if !deletedFiles.isEmpty { summary.append("Deleted: \(deletedFiles.joined(separator: ", "))") }
+        return "✅ apply_patch succeeded (\(summary.isEmpty ? "no file changes" : summary.joined(separator: " | ")))"
+    }
+
+    private func applyUnifiedGitDiff(_ diff: String, workspaceRoot: String) async throws -> String {
+        let tmpURL = FileManager.default.temporaryDirectory.appendingPathComponent("microcode_patch_\(UUID().uuidString).diff")
+        try diff.write(to: tmpURL, atomically: true, encoding: .utf8)
+        defer { try? FileManager.default.removeItem(at: tmpURL) }
+
+        let proc = Process()
+        proc.executableURL = URL(fileURLWithPath: "/usr/bin/git")
+        proc.arguments = ["apply", "--whitespace=nowarn", tmpURL.path]
+        proc.currentDirectoryURL = URL(fileURLWithPath: workspaceRoot)
+        let pipe = Pipe()
+        proc.standardInput = FileHandle.nullDevice
+        proc.standardOutput = pipe
+        proc.standardError = pipe
+        try proc.run()
+        let out = String(data: pipe.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? ""
+        while proc.isRunning {
+            try? await Task.sleep(nanoseconds: 5_000_000)
+        }
+        if proc.terminationStatus == 0 {
+            return "✅ Applied unified diff cleanly in \(workspaceRoot)"
+        }
+        throw ToolBoxError.executionFailed("git apply failed (exit \(proc.terminationStatus)): \(out)")
     }
 }
 
@@ -2352,8 +3033,10 @@ class MCPClient: ObservableObject {
             return
         }
         
-        // Safely check for a real Python binary before attempting to spawn
+        // Safely check for a real Python binary (preferring MicroCode Portable Runtime first) before attempting to spawn
+        let portablePython = RuntimeManager.shared.runtimesDir.appendingPathComponent("python/bin/python3").path
         let safePython = [
+            portablePython,
             "/opt/homebrew/bin/python3",
             "/usr/local/bin/python3",
             "\(FileManager.default.homeDirectoryForCurrentUser.path)/.pyenv/shims/python3"
@@ -2385,7 +3068,10 @@ class MCPClient: ObservableObject {
         
         stdout.fileHandleForReading.readabilityHandler = { [weak self] handle in
             let data = handle.availableData
-            guard !data.isEmpty else { return }
+            guard !data.isEmpty else {
+                handle.readabilityHandler = nil
+                return
+            }
             DispatchQueue.main.async {
                 self?.handleOutput(data)
             }
@@ -2788,12 +3474,13 @@ struct DefineSubagentTool: AgentTool {
 
 struct InvokeSubagentTool: AgentTool {
     let name = "invoke_subagent"
-    let description = "Spawns a specialized SubAgent process in the background to execute a designated subtask concurrently."
+    let description = "Runs a specialized SubAgent and waits for verified completion by default. Set wait_for_completion=false only for deliberate background work."
     let parameters = [
         ToolParameter(name: "type_name", type: "string", description: "Name of the subagent archetype (e.g. architect, frontend_engineer, backend_engineer, bug_hunter, test_runner, security_auditor)", required: true),
         ToolParameter(name: "role", type: "string", description: "Brief role description for distinguishing this instance", required: true),
         ToolParameter(name: "prompt", type: "string", description: "Detailed subtask objective and instructions for the subagent", required: true),
-        ToolParameter(name: "model", type: "string", description: "Optional model ID; defaults to the subagent definition or selected model", required: false)
+        ToolParameter(name: "model", type: "string", description: "Optional model ID; defaults to the subagent definition or selected model", required: false),
+        ToolParameter(name: "wait_for_completion", type: "boolean", description: "Wait for the SubAgent result before this tool succeeds (default true)", required: false)
     ]
     
     func execute(params: [String: Any]) async throws -> String {
@@ -2816,7 +3503,19 @@ struct InvokeSubagentTool: AgentTool {
                 preferredModel: model
             )
         }
-        return "SubAgent #\(instance.id.prefix(6)) [\(role)] spawned in background with state: \(instance.state.displayName). Monitoring progress..."
+        if params["wait_for_completion"] as? Bool == false {
+            return "SubAgent #\(instance.id.prefix(6)) [\(role)] started in background. It has not completed yet."
+        }
+        guard let outcome = try await SubAgentHarness.shared.waitForSubagent(id: instance.id) else {
+            throw ToolBoxError.executionFailed("SubAgent result was lost")
+        }
+        let finished = outcome.instance
+        guard finished.state == .completed else {
+            throw ToolBoxError.executionFailed("SubAgent ended as \(finished.state.displayName): \(finished.stateDetail ?? "No verified result")")
+        }
+        let prefix = outcome.verifiedWorkspaceChange
+            ? AgentExecutionEvidence.verifiedSubagentPrefix : AgentExecutionEvidence.completedSubagentPrefix
+        return "\(prefix)SubAgent #\(instance.id.prefix(6)) completed: \(finished.finalReport ?? "No report")"
     }
 }
 
@@ -2872,5 +3571,214 @@ struct SendMessageTool: AgentTool {
             SubAgentHarness.shared.sendMessage(recipientId: recipientId, message: message)
         }
         return success ? "Message delivered to SubAgent #\(recipientId.prefix(6))." : "SubAgent #\(recipientId.prefix(6)) not found."
+    }
+}
+
+// MARK: - Feature 11: Autonomous Skill Engine 2.0, Hyper-Mesh MCP 2.0 & SubAgent Swarm 2.0
+
+struct SkillEngineTool: AgentTool {
+    let name = "skill_engine"
+    let description = "Autonomous Skill Engine 2.0: Rank & discover skills ('match'), read distilled SKILL.md instructions without file_read ('read'), execute a skill's bundled helper script with MicroCode Portable Runtime ('run_script'), or crystallize a solved workflow into a reusable skill ('crystallize')."
+    let parameters = [
+        ToolParameter(name: "action", type: "string", description: "Action: 'match', 'read', 'run_script', or 'crystallize'", required: true),
+        ToolParameter(name: "query", type: "string", description: "Search query, skill name, or skill ID", required: false),
+        ToolParameter(name: "script", type: "string", description: "Script filename inside the skill's scripts/ directory (for 'run_script')", required: false),
+        ToolParameter(name: "args", type: "string", description: "Space-separated arguments for 'run_script'", required: false),
+        ToolParameter(name: "description", type: "string", description: "Skill description (for 'crystallize')", required: false),
+        ToolParameter(name: "instructions", type: "string", description: "Markdown body of the skill (for 'crystallize')", required: false),
+        ToolParameter(name: "helper_script_name", type: "string", description: "Optional helper script filename e.g. 'verify.py' (for 'crystallize')", required: false),
+        ToolParameter(name: "helper_script_content", type: "string", description: "Optional helper script code (for 'crystallize')", required: false)
+    ]
+    
+    func execute(params: [String: Any]) async throws -> String {
+        let action = (params["action"] as? String ?? "match").lowercased()
+        let query = params["query"] as? String ?? ""
+        let ws = await MainActor.run { AgentToolBox.shared.workspaceRoot }
+        
+        switch action {
+        case "match", "search", "list":
+            return await MainActor.run {
+                let ranked = Array(AgentSkillsStore.shared.rankSkills(forPrompt: query, workspacePath: ws).prefix(8))
+                if ranked.isEmpty {
+                    return "No matching skills found for '\(query)'."
+                }
+                return ranked.map { item in
+                    let scripts = AgentSkillsStore.shared.availableScripts(forSkill: item.skill)
+                    let scriptsInfo = scripts.isEmpty ? "" : " | scripts: [\(scripts.joined(separator: ", "))]"
+                    return "- **\(item.skill.name)** (`\(item.skill.id)`, score: \(item.score)): \(item.skill.description)\(scriptsInfo)"
+                }.joined(separator: "\n")
+            }
+        case "read", "distill", "activate":
+            return await MainActor.run {
+                let store = AgentSkillsStore.shared
+                guard let skill = store.skills.first(where: {
+                    $0.id.lowercased() == query.lowercased() ||
+                    $0.name.lowercased() == query.lowercased() ||
+                    $0.name.lowercased().contains(query.lowercased())
+                }) else {
+                    return "Skill '\(query)' not found. Use action='match' to search available skills."
+                }
+                let distilled = store.distilledInstructions(for: skill, maxChars: 4000)
+                let scripts = store.availableScripts(forSkill: skill)
+                return """
+                # Skill: \(skill.name)
+                Path: \(skill.filePath)
+                Bundled Scripts: \(scripts.isEmpty ? "None" : scripts.joined(separator: ", "))
+                
+                \(distilled)
+                """
+            }
+        case "run_script":
+            let scriptName = params["script"] as? String ?? ""
+            let rawArgs = params["args"] as? String ?? ""
+            let argList = rawArgs.isEmpty ? [] : rawArgs.components(separatedBy: " ").filter { !$0.isEmpty }
+            return try await AgentSkillsStore.shared.executeSkillScript(
+                skillId: query,
+                scriptName: scriptName,
+                arguments: argList,
+                workspacePath: ws
+            )
+        case "crystallize", "create":
+            let desc = params["description"] as? String ?? "Autonomously crystallized MicroCode skill"
+            let instructions = params["instructions"] as? String ?? ""
+            let scriptName = params["helper_script_name"] as? String
+            let scriptContent = params["helper_script_content"] as? String
+            let rawName = query.isEmpty ? "custom-workflow" : query
+            return try await MainActor.run {
+                let created = try AgentSkillsStore.shared.crystallizeSkill(
+                    id: rawName,
+                    name: rawName,
+                    description: desc,
+                    instructions: instructions,
+                    scriptName: scriptName,
+                    scriptContent: scriptContent,
+                    scope: ws != nil ? "workspace" : "global",
+                    workspacePath: ws
+                )
+                return "✅ Crystallized new skill '\(created.name)' at \(created.filePath) (auto-enabled for JIT routing)."
+            }
+        default:
+            return "Unknown skill_engine action '\(action)'. Supported: match, read, run_script, crystallize."
+        }
+    }
+}
+
+struct MCPOrchestratorTool: AgentTool {
+    let name = "mcp_orchestrator"
+    let description = "Hyper-Mesh MCP Engine 2.0: Inspect connected external MCP servers and telemetry ('status'), search all external MCP tools across 8 IDE ecosystems ('search_tools'), restart a server ('restart'), or autonomously synthesize & hot-mount a brand-new Python JSON-RPC 2.0 MCP server on the fly ('synthesize')."
+    let parameters = [
+        ToolParameter(name: "action", type: "string", description: "Action: 'status', 'search_tools', 'restart', or 'synthesize'", required: true),
+        ToolParameter(name: "server_name", type: "string", description: "Target or new MCP server name", required: false),
+        ToolParameter(name: "query", type: "string", description: "Keyword query for 'search_tools'", required: false),
+        ToolParameter(name: "description", type: "string", description: "Description of the new MCP server (for 'synthesize')", required: false),
+        ToolParameter(name: "tools_spec_json", type: "string", description: "JSON array of MCP tool definitions [{\"name\":\"...\",\"description\":\"...\",\"inputSchema\":{...}}] (for 'synthesize')", required: false),
+        ToolParameter(name: "python_handler_body", type: "string", description: "Python body for `def handle_tool_call(name, args):` returning a string result (for 'synthesize')", required: false)
+    ]
+    
+    func execute(params: [String: Any]) async throws -> String {
+        let action = (params["action"] as? String ?? "status").lowercased()
+        let ws = await MainActor.run { AgentToolBox.shared.workspaceRoot }
+        
+        switch action {
+        case "status", "list":
+            return await MainActor.run {
+                ExternalMCPManager.shared.meshStatusSummary()
+            }
+        case "search_tools", "search":
+            let q = (params["query"] as? String ?? "").lowercased()
+            return await MainActor.run {
+                let all = ExternalMCPManager.shared.allTools
+                let filtered = q.isEmpty ? all : all.filter {
+                    $0.serverName.lowercased().contains(q) ||
+                    $0.tool.name.lowercased().contains(q) ||
+                    $0.tool.description.lowercased().contains(q)
+                }
+                if filtered.isEmpty {
+                    return "No external MCP tools matched '\(q)'."
+                }
+                return filtered.map {
+                    "- `mcp__\($0.serverName)__\($0.tool.name)`: \($0.tool.description)"
+                }.joined(separator: "\n")
+            }
+        case "restart":
+            let name = params["server_name"] as? String ?? ""
+            return await MainActor.run {
+                ExternalMCPManager.shared.restartServer(name)
+                return "Triggered restart for MCP server '\(name)'."
+            }
+        case "synthesize", "create":
+            let serverName = params["server_name"] as? String ?? "custom_mcp"
+            let desc = params["description"] as? String ?? "Synthesized MicroCode MCP Server"
+            let specJSON = params["tools_spec_json"] as? String ?? "[]"
+            let handlerBody = params["python_handler_body"] as? String ?? "return f'Executed {name} with {args}'"
+            return try await ExternalMCPManager.shared.synthesizeServer(
+                name: serverName,
+                description: desc,
+                toolsSpecJSON: specJSON,
+                pythonHandlerBody: handlerBody,
+                workspacePath: ws
+            )
+        default:
+            return "Unknown mcp_orchestrator action '\(action)'. Supported: status, search_tools, restart, synthesize."
+        }
+    }
+}
+
+struct SwarmOrchestratorTool: AgentTool {
+    let name = "swarm_orchestrator"
+    let description = "SubAgent Swarm Harness 2.0: Dispatch multiple specialized SubAgents concurrently ('parallel_swarm'), run an adversarial Red-Team security & bug review ('adversarial_review'), or post/read shared architectural facts on the cross-agent Swarm Blackboard ('post_fact', 'read_blackboard')."
+    let parameters = [
+        ToolParameter(name: "action", type: "string", description: "Action: 'parallel_swarm', 'adversarial_review', 'post_fact', 'read_blackboard', or 'status'", required: true),
+        ToolParameter(name: "tasks_json", type: "string", description: "JSON array of parallel tasks: [{\"type_name\":\"frontend_engineer\",\"role\":\"UI Builder\",\"prompt\":\"...\"}] (for 'parallel_swarm')", required: false),
+        ToolParameter(name: "focus", type: "string", description: "Focus area or file list for 'adversarial_review'", required: false),
+        ToolParameter(name: "key", type: "string", description: "Blackboard fact key (for 'post_fact')", required: false),
+        ToolParameter(name: "value", type: "string", description: "Blackboard fact value (for 'post_fact')", required: false),
+        ToolParameter(name: "author_role", type: "string", description: "Author role posting the fact (optional)", required: false)
+    ]
+    
+    func execute(params: [String: Any]) async throws -> String {
+        let action = (params["action"] as? String ?? "status").lowercased()
+        let ws = await MainActor.run { AgentToolBox.shared.workspaceRoot }
+        
+        switch action {
+        case "post_fact", "write_blackboard":
+            let key = params["key"] as? String ?? ""
+            let value = params["value"] as? String ?? ""
+            let author = params["author_role"] as? String ?? "Agent"
+            await MainActor.run {
+                SubAgentHarness.shared.postFact(key: key, value: value, authorRole: author)
+            }
+            return "✅ Posted fact '\(key)' to Shared Swarm Blackboard."
+        case "read_blackboard", "blackboard":
+            return await MainActor.run {
+                let summary = SubAgentHarness.shared.readBlackboardSummary()
+                return summary.isEmpty ? "Swarm Blackboard is currently empty." : "## Shared Swarm Blackboard\n\(summary)"
+            }
+        case "adversarial_review", "red_team":
+            let focus = params["focus"] as? String ?? "recent workspace modifications"
+            return await SubAgentHarness.shared.runAdversarialReview(workspacePath: ws, focus: focus)
+        case "parallel_swarm", "swarm":
+            let rawJSON = params["tasks_json"] as? String ?? "[]"
+            guard let data = rawJSON.data(using: .utf8),
+                  let arr = try? JSONSerialization.jsonObject(with: data) as? [[String: Any]],
+                  !arr.isEmpty else {
+                throw ToolBoxError.invalidParams("tasks_json must be a non-empty JSON array of {type_name, role, prompt}")
+            }
+            let tasks: [(typeName: String, role: String, prompt: String)] = arr.compactMap { item in
+                guard let prompt = item["prompt"] as? String, !prompt.isEmpty else { return nil }
+                let typeName = item["type_name"] as? String ?? "autonomous_loop"
+                let role = item["role"] as? String ?? typeName
+                return (typeName, role, prompt)
+            }
+            return await SubAgentHarness.shared.runParallelSwarm(tasks: tasks, workspacePath: ws)
+        case "status":
+            return await MainActor.run {
+                let status = SubAgentHarness.shared.getSubagentStatusSummary()
+                let bb = SubAgentHarness.shared.readBlackboardSummary()
+                return status + (bb.isEmpty ? "" : "\n\n## Shared Swarm Blackboard\n\(bb)")
+            }
+        default:
+            return "Unknown swarm_orchestrator action '\(action)'. Supported: parallel_swarm, adversarial_review, post_fact, read_blackboard, status."
+        }
     }
 }

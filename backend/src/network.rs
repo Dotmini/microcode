@@ -535,11 +535,40 @@ pub struct ProxyResponse {
 }
 
 pub async fn execute_request(req: ProxyRequest) -> Result<ProxyResponse> {
-    let client = reqwest::Client::new();
+    let parsed_url = reqwest::Url::parse(&req.url)
+        .map_err(|e| AppError::BadRequest(format!("Invalid URL: {}", e)))?;
+
+    match parsed_url.scheme() {
+        "http" | "https" => {}
+        other => {
+            return Err(AppError::BadRequest(format!(
+                "Unsupported URL scheme '{}': only http and https are allowed",
+                other
+            )));
+        }
+    }
+
+    if let Some(host) = parsed_url.host_str() {
+        let lower = host.to_lowercase();
+        if lower == "169.254.169.254"
+            || lower == "metadata.google.internal"
+            || lower.starts_with("169.254.")
+        {
+            return Err(AppError::BadRequest(
+                "Access to cloud metadata endpoints is blocked".to_string(),
+            ));
+        }
+    }
+
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(30))
+        .build()
+        .map_err(|e| AppError::InternalError(format!("Failed to build HTTP client: {}", e)))?;
+
     let method = reqwest::Method::from_bytes(req.method.as_bytes())
         .map_err(|e| AppError::BadRequest(format!("Invalid method: {}", e)))?;
 
-    let mut request_builder = client.request(method, &req.url);
+    let mut request_builder = client.request(method, parsed_url);
 
     for (k, v) in req.headers {
         request_builder = request_builder.header(k, v);
@@ -564,10 +593,16 @@ pub async fn execute_request(req: ProxyRequest) -> Result<ProxyResponse> {
         }
     }
 
-    let body = response
-        .text()
+    const MAX_PROXY_BODY_BYTES: usize = 10 * 1024 * 1024; // 10 MB
+    let bytes = response
+        .bytes()
         .await
         .map_err(|e| AppError::InternalError(format!("Failed to read body: {}", e)))?;
+    let body = if bytes.len() > MAX_PROXY_BODY_BYTES {
+        String::from_utf8_lossy(&bytes[..MAX_PROXY_BODY_BYTES]).into_owned()
+    } else {
+        String::from_utf8_lossy(&bytes).into_owned()
+    };
 
     Ok(ProxyResponse {
         status,

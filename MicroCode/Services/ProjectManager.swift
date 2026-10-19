@@ -584,6 +584,10 @@ class ProjectManager: ObservableObject {
         var lineBuffer = ""
         pipe.fileHandleForReading.readabilityHandler = { [weak self] handle in
             let data = handle.availableData
+            if data.isEmpty {
+                handle.readabilityHandler = nil
+                return
+            }
             if let text = String(data: data, encoding: .utf8), !text.isEmpty {
                 DispatchQueue.main.async {
                     self?.output += text

@@ -1,0 +1,231 @@
+{
+  "name": "microcode-vscode",
+  "displayName": "MicroCode",
+  "publisher": "dotmini",
+  "version": "2.5.27",
+  "description": "Official MicroCode Workstation for VS Code, Cursor, Windsurf & Antigravity. Native Autonomous AI Agent with Implementation Plan & Approval Gate, Dotmini Omni O1X, Ardium v2.3 Toolchain, Polyglot Cells, Device Dock, and API/SQL Studio.",
+  "author": {
+    "name": "Tirawat Nantamas | Dotmini Company Limited",
+    "url": "https://microcode.dotmini.net"
+  },
+  "icon": "media/icon.png",
+  "license": "Elastic-2.0",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/Dotmini/microcode.git"
+  },
+  "engines": {
+    "vscode": "^1.85.0"
+  },
+  "categories": [
+    "AI",
+    "Programming Languages",
+    "Notebooks",
+    "Machine Learning",
+    "Other"
+  ],
+  "keywords": [
+    "microcode",
+    "ardium",
+    "ai-agent",
+    "mcp",
+    "polyglot",
+    "notebook",
+    "omni-ai",
+    "dotmini",
+    "cursor",
+    "antigravity"
+  ],
+  "activationEvents": [
+    "onStartupFinished",
+    "onLanguage:ardium",
+    "onNotebook:microcode-polyglot-notebook",
+    "onView:microcode.agentSidebar"
+  ],
+  "main": "./dist/extension.js",
+  "contributes": {
+    "languages": [
+      {
+        "id": "ardium",
+        "aliases": [
+          "Ardium",
+          "ardium",
+          "ar"
+        ],
+        "extensions": [
+          ".ar",
+          ".ardium"
+        ],
+        "configuration": "./language-configuration.json"
+      }
+    ],
+    "grammars": [
+      {
+        "language": "ardium",
+        "scopeName": "source.ardium",
+        "path": "./syntaxes/ardium.tmLanguage.json"
+      }
+    ],
+    "snippets": [
+      {
+        "language": "ardium",
+        "path": "./snippets/ardium.json"
+      }
+    ],
+    "notebooks": [
+      {
+        "type": "microcode-polyglot-notebook",
+        "displayName": "MicroCode Polyglot Notebook (.mcn)",
+        "selector": [
+          {
+            "filenamePattern": "*.mcn"
+          }
+        ]
+      }
+    ],
+    "viewsContainers": {
+      "activitybar": [
+        {
+          "id": "microcode-workstation",
+          "title": "MicroCode",
+          "icon": "media/microcode-activity.svg"
+        }
+      ]
+    },
+    "views": {
+      "microcode-workstation": [
+        {
+          "type": "webview",
+          "id": "microcode.agentSidebar",
+          "name": "AI Agent & Workstation"
+        }
+      ]
+    },
+    "commands": [
+      {
+        "command": "microcode.openWorkstation",
+        "title": "Open Full Workstation (Split View)",
+        "category": "MicroCode",
+        "icon": "$(split-horizontal)"
+      },
+      {
+        "command": "microcode.runArdium",
+        "title": "Ardium: Run Current File (.ar)",
+        "category": "MicroCode",
+        "icon": "$(play)"
+      },
+      {
+        "command": "microcode.compileArdium",
+        "title": "Ardium: Compile to Native Binary",
+        "category": "MicroCode",
+        "icon": "$(package)"
+      },
+      {
+        "command": "microcode.diagnoseArdium",
+        "title": "Ardium: Diagnose & Check @owned RAII",
+        "category": "MicroCode",
+        "icon": "$(pass)"
+      },
+      {
+        "command": "microcode.runCell",
+        "title": "Run Code Cell (# %%)",
+        "category": "MicroCode",
+        "icon": "$(run-below)"
+      },
+      {
+        "command": "microcode.openPlayground",
+        "title": "Open Polyglot Playground",
+        "category": "MicroCode",
+        "icon": "$(code)"
+      },
+      {
+        "command": "microcode.startBackend",
+        "title": "Start / Connect Rust Backend Sidecar",
+        "category": "MicroCode",
+        "icon": "$(server-process)"
+      },
+      {
+        "command": "microcode.installMcpEverywhere",
+        "title": "Configure MicroCode MCP (VS Code / Cursor / Windsurf / Antigravity)",
+        "category": "MicroCode",
+        "icon": "$(plug)"
+      },
+      {
+        "command": "microcode.createPolyglotNotebook",
+        "title": "New Polyglot Shared-Memory Notebook (.mcn)",
+        "category": "MicroCode",
+        "icon": "$(notebook)"
+      }
+    ],
+    "menus": {
+      "view/title": [
+        {
+          "command": "microcode.openWorkstation",
+          "when": "view == microcode.agentSidebar",
+          "group": "navigation@1"
+        },
+        {
+          "command": "microcode.openPlayground",
+          "when": "view == microcode.agentSidebar",
+          "group": "navigation@2"
+        }
+      ],
+      "editor/title": [
+        {
+          "when": "resourceLangId == ardium",
+          "command": "microcode.runArdium",
+          "group": "navigation@1"
+        },
+        {
+          "when": "resourceLangId == ardium",
+          "command": "microcode.compileArdium",
+          "group": "navigation@2"
+        },
+        {
+          "when": "resourceLangId == ardium",
+          "command": "microcode.diagnoseArdium",
+          "group": "navigation@3"
+        }
+      ]
+    },
+    "configuration": {
+      "title": "MicroCode",
+      "properties": {
+        "microcode.backendUrl": {
+          "type": "string",
+          "default": "http://127.0.0.1:3000",
+          "description": "URL of the MicroCode Rust Backend server (Axum)."
+        },
+        "microcode.omniAiUrl": {
+          "type": "string",
+          "default": "http://127.0.0.1:1234/v1",
+          "description": "URL of the local Dotmini Sovereign AI (Omni O1X Lite / Pro) OpenAI-compatible server."
+        },
+        "microcode.autoStartBackend": {
+          "type": "boolean",
+          "default": true,
+          "description": "Automatically spawn the MicroCode Rust backend sidecar if not already running on port 3000."
+        },
+        "microcode.ardiumBinaryPath": {
+          "type": "string",
+          "default": "",
+          "description": "Optional custom path to the Ardium compiler (`arc` or `ardium`). Auto-detected if empty."
+        },
+        "microcode.enableInlineCells": {
+          "type": "boolean",
+          "default": true,
+          "description": "Enable `# %%` and `// %%` interactive Cell Mode CodeLens across Python, Rust, Ardium, TypeScript, C++, and Go files."
+        }
+      }
+    }
+  },
+  "scripts": {
+    "compile": "tsc -p ./",
+    "watch": "tsc -watch -p ./",
+    "package": "node ./scripts/package_vsix.js"
+  },
+  "devDependencies": {
+    "@types/node": "^22.0.0",
+    "typescript": "^5.7.0"
+  }
+}

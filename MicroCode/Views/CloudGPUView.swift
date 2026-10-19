@@ -19,11 +19,11 @@ struct CloudGPUView: View {
 
     @AppStorage("remoteSSHCommand") private var sshCmd = ""
     @AppStorage("remoteSSHKey") private var sshKey = ""
-    @AppStorage("runpodApiKey") private var runpodKey = ""
-    @AppStorage("vastApiKey") private var vastKey = ""
 
     @State private var selectedTab = 0 // 0=Cluster, 1=Wallet, 2=Git Ingest, 3=SSH
     @State private var providerSel: RemoteProviderService.Provider = .runpod
+    @State private var providerApiKey: String = ""
+    @State private var keyUploadMsg: String = ""
     @State private var customAmount: String = "300"
     @State private var topUpMsg = ""
     @State private var topUpBusy = false
@@ -120,7 +120,10 @@ struct CloudGPUView: View {
             }
         }
         .frame(maxWidth: .infinity, alignment: .leading)
-        .task { await svc.refresh() }
+        .task {
+            providerApiKey = prov.apiKey(for: providerSel)
+            await svc.refresh()
+        }
     }
 
     // MARK: - Tab 0: GPU Cluster
@@ -225,6 +228,46 @@ struct CloudGPUView: View {
                     )
                 }
             }
+
+            // Cost Guardrails & Auto-Stop Card
+            HStack(spacing: 14) {
+                Image(systemName: "shield.lefthalf.filled")
+                    .font(.system(size: 14))
+                    .foregroundColor(.green)
+                VStack(alignment: .leading, spacing: 2) {
+                    Text("Cost Guardrails & Auto-Stop")
+                        .font(.system(size: 11, weight: .semibold))
+                    Text("Automatically terminates managed GPU sessions when budget cap or idle timeout is reached.")
+                        .font(.system(size: 10))
+                        .foregroundColor(.secondary)
+                }
+                Spacer()
+                Picker("Budget Cap", selection: $svc.maxSessionBudgetTHB) {
+                    Text("No Cap").tag(0)
+                    Text("฿100").tag(100)
+                    Text("฿300").tag(300)
+                    Text("฿500").tag(500)
+                    Text("฿1,000").tag(1000)
+                }
+                .controlSize(.small)
+                .frame(width: 155)
+
+                Picker("Idle Stop", selection: $svc.idleTimeoutMinutes) {
+                    Text("Off").tag(0)
+                    Text("15 min").tag(15)
+                    Text("30 min").tag(30)
+                    Text("60 min").tag(60)
+                    Text("120 min").tag(120)
+                }
+                .controlSize(.small)
+                .frame(width: 145)
+            }
+            .padding(10)
+            .background(
+                RoundedRectangle(cornerRadius: 8)
+                    .fill(Color(nsColor: .controlBackgroundColor).opacity(0.45))
+                    .overlay(RoundedRectangle(cornerRadius: 8).stroke(Color.secondary.opacity(0.12), lineWidth: 1))
+            )
 
             if !svc.lastError.isEmpty {
                 Text(svc.lastError)
@@ -497,7 +540,148 @@ struct CloudGPUView: View {
     // MARK: - Tab 3: SSH / Custom
     private var sshCustomView: some View {
         VStack(alignment: .leading, spacing: 14) {
-            Text("Connect directly to any custom remote GPU or cluster via SSH command.")
+            // Direct Provider API Integration (RunPod / Vast.ai / Lambda Cloud)
+            VStack(alignment: .leading, spacing: 10) {
+                HStack {
+                    Text("DIRECT CLOUD PROVIDER (RUNPOD / VAST.AI / LAMBDA)")
+                        .font(.system(size: 10, weight: .bold))
+                        .foregroundColor(.secondary)
+                    Spacer()
+                    Picker("", selection: $providerSel) {
+                        ForEach(RemoteProviderService.Provider.allCases) { p in
+                            Text(p.rawValue).tag(p)
+                        }
+                    }
+                    .pickerStyle(.segmented)
+                    .labelsHidden()
+                    .frame(width: 240)
+                    .onChange(of: providerSel) { newProv in
+                        providerApiKey = prov.apiKey(for: newProv)
+                        keyUploadMsg = ""
+                    }
+                }
+
+                HStack(spacing: 8) {
+                    SecureField("\(providerSel.rawValue) API Key (stored in macOS Keychain)", text: $providerApiKey)
+                        .textFieldStyle(.plain)
+                        .font(.system(size: 12, design: .monospaced))
+                        .padding(7)
+                        .background(
+                            RoundedRectangle(cornerRadius: 6)
+                                .fill(Color(nsColor: .textBackgroundColor))
+                                .overlay(RoundedRectangle(cornerRadius: 6).stroke(Color.secondary.opacity(0.2), lineWidth: 1))
+                        )
+                        .onChange(of: providerApiKey) { newKey in
+                            prov.setApiKey(newKey, for: providerSel)
+                        }
+
+                    Button {
+                        Task { await prov.listInstances(provider: providerSel, apiKey: providerApiKey) }
+                    } label: {
+                        HStack(spacing: 4) {
+                            if prov.isLoading { ProgressView().scaleEffect(0.55) }
+                            Text("Fetch Pods")
+                        }
+                    }
+                    .buttonStyle(.bordered)
+                    .controlSize(.small)
+                    .disabled(prov.isLoading || providerApiKey.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+
+                    Button("Sync SSH Key") {
+                        Task {
+                            let ok = await prov.uploadKey(provider: providerSel, apiKey: providerApiKey, publicKey: gpu.managedPublicKey)
+                            keyUploadMsg = ok ? "✅ Uploaded MicroCode SSH key to \(providerSel.rawValue)" : "⚠️ Could not auto-upload key; use Copy SSH Key"
+                        }
+                    }
+                    .buttonStyle(.bordered)
+                    .controlSize(.small)
+                    .disabled(providerApiKey.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+
+                    Button("Copy SSH Key") {
+                        NSPasteboard.general.clearContents()
+                        NSPasteboard.general.setString(gpu.managedPublicKey, forType: .string)
+                        keyUploadMsg = "📋 Copied MicroCode public key to clipboard"
+                    }
+                    .buttonStyle(.bordered)
+                    .controlSize(.small)
+                }
+
+                if !keyUploadMsg.isEmpty {
+                    Text(keyUploadMsg)
+                        .font(.system(size: 10))
+                        .foregroundColor(.secondary)
+                }
+                if !prov.error.isEmpty {
+                    Text(prov.error)
+                        .font(.system(size: 10))
+                        .foregroundColor(.red)
+                }
+                if !prov.statusMessage.isEmpty {
+                    Text(prov.statusMessage)
+                        .font(.system(size: 10))
+                        .foregroundColor(.green)
+                }
+
+                if !prov.instances.isEmpty {
+                    VStack(spacing: 6) {
+                        ForEach(prov.instances) { inst in
+                            HStack(spacing: 8) {
+                                Circle()
+                                    .fill(inst.running ? Color.green : Color.orange)
+                                    .frame(width: 7, height: 7)
+                                Text(inst.label)
+                                    .font(.system(size: 11, weight: .medium, design: .monospaced))
+                                    .lineLimit(1)
+                                Spacer()
+                                if inst.running {
+                                    Button("Connect") {
+                                        let cmd = prov.sshCommand(for: inst)
+                                        sshCmd = cmd
+                                        gpu.connect(sshCommand: cmd, keyPath: nil)
+                                    }
+                                    .buttonStyle(.borderedProminent)
+                                    .controlSize(.mini)
+
+                                    Button("Stop") {
+                                        Task { await prov.stopInstance(provider: providerSel, apiKey: providerApiKey, instanceId: inst.id) }
+                                    }
+                                    .buttonStyle(.bordered)
+                                    .controlSize(.mini)
+                                    .disabled(prov.actionBusyId == inst.id)
+                                } else if providerSel != .lambda {
+                                    Button("Start") {
+                                        Task { await prov.startInstance(provider: providerSel, apiKey: providerApiKey, instanceId: inst.id) }
+                                    }
+                                    .buttonStyle(.bordered)
+                                    .controlSize(.mini)
+                                    .disabled(prov.actionBusyId == inst.id)
+                                }
+
+                                Button(role: .destructive) {
+                                    Task { await prov.terminateInstance(provider: providerSel, apiKey: providerApiKey, instanceId: inst.id) }
+                                } label: {
+                                    Image(systemName: "trash")
+                                }
+                                .buttonStyle(.bordered)
+                                .controlSize(.mini)
+                                .disabled(prov.actionBusyId == inst.id)
+                                .help("Terminate Pod")
+                            }
+                            .padding(.horizontal, 8)
+                            .padding(.vertical, 5)
+                            .background(RoundedRectangle(cornerRadius: 6).fill(Color.primary.opacity(0.035)))
+                        }
+                    }
+                }
+            }
+            .padding(10)
+            .background(
+                RoundedRectangle(cornerRadius: 8)
+                    .fill(Color(nsColor: .controlBackgroundColor).opacity(0.5))
+                    .overlay(RoundedRectangle(cornerRadius: 8).stroke(Color.secondary.opacity(0.15), lineWidth: 1))
+            )
+
+            Text("Or connect directly to any custom remote GPU or cluster via SSH command.")
                 .font(.system(size: 12))
                 .foregroundColor(.secondary)
 
@@ -515,11 +699,11 @@ struct CloudGPUView: View {
             }
 
             VStack(alignment: .leading, spacing: 6) {
-                Text("SSH PRIVATE KEY (OPTIONAL)").font(.system(size: 10, weight: .bold)).foregroundColor(.secondary)
-                TextEditor(text: $sshKey)
+                Text("SSH PRIVATE KEY PATH (OPTIONAL — USES MICROCODE MANAGED KEY BY DEFAULT)").font(.system(size: 10, weight: .bold)).foregroundColor(.secondary)
+                TextField("~/.ssh/id_ed25519", text: $sshKey)
+                    .textFieldStyle(.plain)
                     .font(.system(size: 11, design: .monospaced))
-                    .frame(height: 70)
-                    .padding(4)
+                    .padding(8)
                     .background(
                         RoundedRectangle(cornerRadius: 6)
                             .fill(Color(nsColor: .textBackgroundColor))
@@ -531,7 +715,7 @@ struct CloudGPUView: View {
                 Button {
                     gpu.connect(sshCommand: sshCmd, keyPath: sshKey.isEmpty ? nil : sshKey)
                 } label: {
-                    Text(gpu.status == .connected ? "Connected" : "Connect via SSH")
+                    Text(gpu.status == .connected ? "Connected" : (gpu.status == .connecting ? "Connecting…" : "Connect via SSH"))
                         .font(.system(size: 12, weight: .semibold))
                 }
                 .buttonStyle(.bordered)
@@ -539,15 +723,36 @@ struct CloudGPUView: View {
                 .disabled(gpu.status == .connecting || sshCmd.trimmingCharacters(in: .whitespaces).isEmpty)
 
                 if gpu.status == .connected {
-                    Button(role: .destructive) {
+                    Button {
                         gpu.disconnect()
                     } label: {
-                        Text("Disconnect")
+                        Text("Disconnect Tunnel")
+                            .font(.system(size: 12, weight: .medium))
+                    }
+                    .buttonStyle(.bordered)
+                    .controlSize(.small)
+                    .help("Disconnects local port-forward while leaving remote Jupyter & training jobs running")
+
+                    Button(role: .destructive) {
+                        gpu.stopRemoteJupyter()
+                    } label: {
+                        Text("Stop Remote Daemon")
                             .font(.system(size: 12, weight: .medium))
                     }
                     .buttonStyle(.bordered)
                     .controlSize(.small)
                 }
+            }
+
+            if !gpu.log.isEmpty {
+                ScrollView {
+                    Text(gpu.log)
+                        .font(.system(size: 10, design: .monospaced))
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .padding(6)
+                }
+                .frame(height: 64)
+                .background(RoundedRectangle(cornerRadius: 6).fill(Color.black.opacity(0.25)))
             }
 
             DisclosureGroup("Advanced: Cloudflare / Custom Jupyter URL") {

@@ -113,7 +113,10 @@ final class ExtensionHostService: ObservableObject {
         output = stdout.fileHandleForReading
         output?.readabilityHandler = { [weak self] handle in
             let data = handle.availableData
-            guard !data.isEmpty else { return }
+            guard !data.isEmpty else {
+                handle.readabilityHandler = nil
+                return
+            }
             let lines = String(decoding: data, as: UTF8.self)
                 .split(whereSeparator: \.isNewline)
             Task { @MainActor [weak self] in

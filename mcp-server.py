@@ -104,10 +104,10 @@ def validate_read_only_shell(command: str) -> list[str]:
     args = shlex.split(command)
     if not args:
         raise ValueError("Command is required")
-    allowed = {"git", "rg", "grep", "find", "ls", "pwd", "head", "tail", "sed", "wc", "stat"}
+    allowed = {"git", "rg", "grep", "find", "ls", "pwd", "head", "tail", "wc", "stat"}
     if args[0] not in allowed:
         raise PermissionError("Only read-only workspace inspection commands are available through MCP.")
-    allowed_roots = [WORKSPACE, "/Volumes", "/tmp", "/private/tmp", os.path.expanduser("~")]
+    allowed_roots = [WORKSPACE, "/Volumes", "/tmp", "/private/tmp"]
     for arg in args[1:]:
         if ".." in arg:
             raise PermissionError("Parent traversal is not allowed in MCP terminal commands.")
@@ -115,8 +115,10 @@ def validate_read_only_shell(command: str) -> list[str]:
             raise PermissionError(f"Absolute path '{arg}' is outside allowed workspace/volumes.")
     if args[0] == "git" and len(args) > 1 and args[1] not in {"status", "diff", "log", "branch", "show", "rev-parse"}:
         raise PermissionError("Only read-only git operations are available through MCP.")
-    if args[0] == "find" and any(arg in {"-delete", "-exec", "-execdir"} for arg in args[1:]):
-        raise PermissionError("Mutating find actions are not allowed through MCP.")
+    if args[0] == "rg" and any(arg.startswith("--pre") or arg.startswith("--dfa-size") for arg in args[1:]):
+        raise PermissionError("Preprocessor execution in rg is not allowed through MCP.")
+    if args[0] == "find" and any(arg in {"-delete", "-exec", "-execdir", "-ok", "-okdir", "-fprint", "-fls", "-fprintf"} for arg in args[1:]):
+        raise PermissionError("Mutating or file-writing find actions are not allowed through MCP.")
     return args
 
 # ============================================================
@@ -756,8 +758,10 @@ def tool_ardium_diagnose(params: dict) -> str:
 def _get_computer_use_engine():
     sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
     try:
-        from tools.computer_use_engine import MicroCodeComputerUse
-        return MicroCodeComputerUse()
+        import importlib
+        import tools.computer_use_engine as cue
+        importlib.reload(cue)
+        return cue.MicroCodeComputerUse()
     except Exception as e:
         raise RuntimeError(f"Failed to initialize MicroCode Computer Use engine: {e}")
 
@@ -1442,15 +1446,21 @@ def handle_request(request: dict) -> dict:
     """Handle a single JSON-RPC request."""
     method = request.get("method", "")
     req_id = request.get("id")
-    params = request.get("params", {})
+    params = request.get("params") or {}
+    
+    # JSON-RPC 2.0 notifications (no id) must never receive a response
+    if req_id is None or method.startswith("notifications/"):
+        return None
     
     # --- Lifecycle ---
     if method == "initialize":
+        client_version = params.get("protocolVersion", PROTOCOL_VERSION)
+        negotiated_version = client_version if client_version in ("2025-06-18", "2025-03-26", "2024-11-05") else PROTOCOL_VERSION
         return {
             "jsonrpc": "2.0",
             "id": req_id,
             "result": {
-                "protocolVersion": PROTOCOL_VERSION,
+                "protocolVersion": negotiated_version,
                 "capabilities": {
                     "tools": {"listChanged": False},
                     "resources": {"subscribe": False, "listChanged": False}
@@ -1461,9 +1471,6 @@ def handle_request(request: dict) -> dict:
                 }
             }
         }
-    
-    if method == "notifications/initialized":
-        return None  # No response needed for notifications
     
     # --- Tools ---
     if method == "tools/list":

@@ -162,25 +162,70 @@ fn compact_prompt_text(text: &str, limit: usize) -> String {
         return text.to_string();
     }
 
-    let mut split = (limit * 2) / 3;
-    while split > 0 && !text.is_char_boundary(split) {
-        split -= 1;
+    let mut head_end = (limit * 3) / 5;
+    while head_end > 0 && !text.is_char_boundary(head_end) {
+        head_end -= 1;
     }
     let mut tail_start = text.len().saturating_sub(limit / 3);
     while tail_start < text.len() && !text.is_char_boundary(tail_start) {
         tail_start += 1;
     }
-    format!(
-        "{}\n…[truncated by MicroCode harness]…\n{}",
-        &text[..split],
-        &text[tail_start..]
-    )
+
+    let middle = if head_end < tail_start {
+        &text[head_end..tail_start]
+    } else {
+        ""
+    };
+    let diag_lines: Vec<&str> = middle
+        .lines()
+        .filter(|line| {
+            let l = line.to_ascii_lowercase();
+            l.contains("error:")
+                || l.contains("error[")
+                || l.contains("warning:")
+                || l.contains("fatal")
+                || l.contains("panicked at")
+                || l.contains("traceback")
+                || l.contains("exception")
+                || l.contains("failed")
+        })
+        .take(20)
+        .collect();
+
+    if !diag_lines.is_empty() {
+        let diag_budget = (limit / 6).max(512);
+        let mut diag_joined = diag_lines.join("\n");
+        if diag_joined.len() > diag_budget {
+            let mut end = diag_budget;
+            while end > 0 && !diag_joined.is_char_boundary(end) {
+                end -= 1;
+            }
+            diag_joined.truncate(end);
+        }
+        format!(
+            "{}\n…[middle diagnostics preserved]…\n{}\n…[truncated by MicroCode harness]…\n{}",
+            &text[..head_end],
+            diag_joined,
+            &text[tail_start..]
+        )
+    } else {
+        format!(
+            "{}\n…[truncated by MicroCode harness]…\n{}",
+            &text[..head_end],
+            &text[tail_start..]
+        )
+    }
 }
 
 fn trim_session_messages(messages: &mut Vec<AgentMessage>) {
     if messages.len() > MAX_AGENT_TURNS {
         let remove_count = messages.len() - MAX_AGENT_TURNS;
-        messages.drain(..remove_count);
+        // Always keep messages[0] if it is the initial user prompt
+        if messages.len() > remove_count + 1 {
+            messages.drain(1..=remove_count);
+        } else {
+            messages.drain(..remove_count);
+        }
     }
 
     for message in messages.iter_mut() {
@@ -194,33 +239,142 @@ fn trim_session_messages(messages: &mut Vec<AgentMessage>) {
     }
 }
 
-fn next_agent_turn_prompt(
-    base_prompt: &str,
+fn format_session_history(messages: &[AgentMessage], max_chars: usize) -> String {
+    if messages.is_empty() {
+        return String::new();
+    }
+    let total = messages.len();
+    let recent_start = total.saturating_sub(12);
+    let mut history_blocks = Vec::new();
+
+    for (idx, msg) in messages[recent_start..].iter().enumerate() {
+        let is_very_recent = idx + 4 >= total - recent_start;
+        let msg_limit = if is_very_recent { 16_000 } else { 4_000 };
+        let tool_limit = if is_very_recent { 12_000 } else { 2_500 };
+
+        match msg.role {
+            MessageRole::User => {
+                history_blocks.push(format!(
+                    "User: {}",
+                    compact_prompt_text(&msg.content, msg_limit)
+                ));
+            }
+            MessageRole::Assistant => {
+                let mut block = format!(
+                    "Assistant: {}",
+                    compact_prompt_text(&msg.content, msg_limit)
+                );
+                for tc in &msg.tool_calls {
+                    block.push_str(&format!(
+                        "\n[Called tool: {}({})]",
+                        tc.name,
+                        compact_prompt_text(&tc.arguments.to_string(), 1_200)
+                    ));
+                }
+                for res in &msg.tool_results {
+                    let out = if res.success {
+                        &res.output
+                    } else {
+                        res.error.as_deref().unwrap_or("tool failed")
+                    };
+                    block.push_str(&format!(
+                        "\n[Tool Result ({})]: {}",
+                        if res.success { "OK" } else { "ERROR" },
+                        compact_prompt_text(out, tool_limit)
+                    ));
+                }
+                history_blocks.push(block);
+            }
+            _ => {}
+        }
+    }
+
+    let joined = history_blocks.join("\n\n");
+    compact_prompt_text(&joined, max_chars)
+}
+
+fn format_turn_record(
+    turn_idx: usize,
     assistant_text: &str,
+    calls: &[ToolCall],
     results: &[ToolResult],
 ) -> String {
-    let mut prompt = String::with_capacity(base_prompt.len().min(96_000) + 48_000);
-    prompt.push_str(&compact_prompt_text(base_prompt, 96_000));
-    prompt.push_str("\n\nPrevious assistant response:\n");
-    prompt.push_str(&compact_prompt_text(assistant_text, 24_000));
-    prompt.push_str("\n\nTool results:\n");
-
-    for result in results.iter().take(16) {
+    let mut record = format!("=== Turn {} ===\n", turn_idx);
+    if !assistant_text.trim().is_empty() {
+        record.push_str("Assistant:\n");
+        record.push_str(&compact_prompt_text(assistant_text.trim(), 16_000));
+        record.push('\n');
+    }
+    for (idx, result) in results.iter().take(16).enumerate() {
+        let call_label = calls
+            .get(idx)
+            .map(|tc| {
+                format!(
+                    "{}({})",
+                    tc.name,
+                    compact_prompt_text(&tc.arguments.to_string(), 800)
+                )
+            })
+            .unwrap_or_else(|| result.tool_call_id.clone());
+        let status = if result.success { "SUCCESS" } else { "ERROR" };
         let output = if result.success {
             &result.output
         } else {
             result.error.as_deref().unwrap_or("tool failed")
         };
-        prompt.push_str(&format!(
-            "- {}: {}\n",
-            result.tool_call_id,
-            compact_prompt_text(output, MAX_AGENT_TOOL_OUTPUT_CHARS)
+        record.push_str(&format!(
+            "\n[Tool {} - {}]:\n{}\n",
+            call_label,
+            status,
+            compact_prompt_text(output, 24_000)
         ));
     }
+    record
+}
+
+fn build_agent_turn_prompt(
+    base_prompt: &str,
+    turn_records: &[String],
+    loop_warning: Option<&str>,
+) -> String {
+    let mut prompt = String::with_capacity(base_prompt.len().min(96_000) + 64_000);
+    prompt.push_str(&compact_prompt_text(base_prompt, 96_000));
+    prompt.push_str("\n\n=== Execution History (Current Task) ===\n");
+
+    let total = turn_records.len();
+    let start = total.saturating_sub(12);
+    if start > 0 {
+        prompt.push_str(&format!(
+            "... [{} earlier turns omitted; keep building on the recent turns below] ...\n\n",
+            start
+        ));
+    }
+    for (offset, rec) in turn_records[start..].iter().enumerate() {
+        let is_recent = offset + 3 >= total - start;
+        let per_turn_budget = if is_recent { 32_000 } else { 6_000 };
+        prompt.push_str(&compact_prompt_text(rec, per_turn_budget));
+        prompt.push('\n');
+    }
+
+    if let Some(warning) = loop_warning {
+        prompt.push_str("\n⚠️ SYSTEM LOOP GUARD: ");
+        prompt.push_str(warning);
+        prompt.push('\n');
+    }
+
     prompt.push_str(
-        "Use a new tool call only if another action is necessary; otherwise give the final answer.",
+        "\nReview the tool outputs above carefully. Do NOT repeat identical tool calls that already succeeded. Use another tool call only if further action or verification is required; otherwise provide the complete final answer.",
     );
     prompt
+}
+
+fn next_agent_turn_prompt(
+    base_prompt: &str,
+    assistant_text: &str,
+    results: &[ToolResult],
+) -> String {
+    let rec = format_turn_record(1, assistant_text, &[], results);
+    build_agent_turn_prompt(base_prompt, &[rec], None)
 }
 
 // ==========================================
@@ -273,102 +427,187 @@ pub struct ToolResult {
     pub error: Option<String>,
 }
 
-static RE_CODE_BLOCK: Lazy<regex::Regex> = Lazy::new(|| {
-    regex::Regex::new(r"```(?:json)?\s*([\s\S]*?)\s*```").unwrap()
-});
-static RE_JSON_ARRAY: Lazy<regex::Regex> = Lazy::new(|| {
-    regex::Regex::new(r#"\[\s*\{[\s\S]*?"name"[\s\S]*?\}\s*\]"#).unwrap()
-});
-static RE_JSON_OBJECT: Lazy<regex::Regex> = Lazy::new(|| {
-    regex::Regex::new(r#"\{[\s\S]*?"name"\s*:\s*"[^"]+"[\s\S]*?"arguments"\s*:\s*\{[\s\S]*?\}\s*\}"#).unwrap()
-});
+fn parse_json_value_into_tool_calls(val: &serde_json::Value) -> Vec<ToolCall> {
+    let mut out = Vec::new();
+    match val {
+        serde_json::Value::Array(items) => {
+            for item in items {
+                out.extend(parse_json_value_into_tool_calls(item));
+            }
+        }
+        serde_json::Value::Object(map) => {
+            if let Some(func) = map.get("function").and_then(|f| f.as_object()) {
+                if let Some(name) = func.get("name").and_then(|n| n.as_str()) {
+                    let args_val = func
+                        .get("arguments")
+                        .cloned()
+                        .unwrap_or_else(|| serde_json::json!({}));
+                    let parsed_args = if let Some(s) = args_val.as_str() {
+                        serde_json::from_str(s).unwrap_or_else(|_| serde_json::json!({}))
+                    } else {
+                        args_val
+                    };
+                    out.push(ToolCall {
+                        id: map
+                            .get("id")
+                            .and_then(|v| v.as_str())
+                            .map(|s| s.to_string())
+                            .unwrap_or_else(|| uuid::Uuid::new_v4().to_string()),
+                        name: name.to_string(),
+                        arguments: parsed_args,
+                    });
+                }
+            } else if let Some(name) = map
+                .get("name")
+                .or_else(|| map.get("tool"))
+                .and_then(|n| n.as_str())
+            {
+                if let Some(args_raw) = map
+                    .get("arguments")
+                    .or_else(|| map.get("input"))
+                    .or_else(|| map.get("parameters"))
+                    .or_else(|| map.get("args"))
+                {
+                    let parsed_args = if let Some(s) = args_raw.as_str() {
+                        serde_json::from_str(s).unwrap_or_else(|_| serde_json::json!({}))
+                    } else {
+                        args_raw.clone()
+                    };
+                    if parsed_args.is_object() {
+                        out.push(ToolCall {
+                            id: map
+                                .get("id")
+                                .and_then(|v| v.as_str())
+                                .map(|s| s.to_string())
+                                .unwrap_or_else(|| uuid::Uuid::new_v4().to_string()),
+                            name: name.to_string(),
+                            arguments: parsed_args,
+                        });
+                    }
+                }
+            }
+        }
+        _ => {}
+    }
+    out
+}
+
+/// Scans `text` for top-level balanced JSON `[...]` or `{...}` spans, properly
+/// ignoring brackets/braces inside JSON string literals (`"..."` with `\"` escapes).
+fn scan_balanced_json_spans(text: &str) -> Vec<(usize, usize)> {
+    let bytes = text.as_bytes();
+    let mut spans = Vec::new();
+    let mut i = 0;
+
+    while i < bytes.len() {
+        let b = bytes[i];
+        if b == b'[' || b == b'{' {
+            let start = i;
+            let mut stack = vec![if b == b'[' { b']' } else { b'}' }];
+            let mut in_string = false;
+            let mut escaped = false;
+            i += 1;
+
+            while i < bytes.len() && !stack.is_empty() {
+                let c = bytes[i];
+                if in_string {
+                    if escaped {
+                        escaped = false;
+                    } else if c == b'\\' {
+                        escaped = true;
+                    } else if c == b'"' {
+                        in_string = false;
+                    }
+                } else {
+                    match c {
+                        b'"' => in_string = true,
+                        b'[' => stack.push(b']'),
+                        b'{' => stack.push(b'}'),
+                        b']' | b'}' => {
+                            if stack.last() == Some(&c) {
+                                stack.pop();
+                            } else {
+                                break;
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+                i += 1;
+            }
+
+            if stack.is_empty() {
+                spans.push((start, i));
+                continue;
+            } else {
+                i = start + 1;
+                continue;
+            }
+        }
+        i += 1;
+    }
+
+    spans
+}
 
 /// Robust Multi-Format Tool Call Extractor for enterprise-grade AI models:
-/// 1. Extracts tool calls from markdown code blocks (```json [ ... ] ``` or ```json { ... } ```)
-/// 2. Extracts raw JSON arrays ([ { "name": ..., "arguments": ... } ])
-/// 3. Extracts raw JSON objects ({ "name": ..., "arguments": ... })
-/// 4. Returns both the parsed ToolCalls and the cleaned non-tool assistant text
+/// Uses a balanced string-literal-aware JSON scanner so nested `{}` braces or
+/// embedded markdown fences ` ``` ` inside file content never truncate tool calls.
 pub fn extract_tool_calls(ai_response: &str) -> (Vec<ToolCall>, String) {
     let mut tool_calls = Vec::new();
-    let mut cleaned_content = ai_response.to_string();
+    let mut remove_ranges: Vec<(usize, usize)> = Vec::new();
 
-    // 1. Check for markdown code blocks ```json ... ``` or ``` ... ```
-    for cap in RE_CODE_BLOCK.captures_iter(ai_response) {
-        if let Some(block) = cap.get(1) {
-            let block_str = block.as_str().trim();
-            // Try parsing as array of calls
-            if let Ok(calls) = serde_json::from_str::<Vec<serde_json::Value>>(block_str) {
-                let mut matched = false;
-                for call in calls {
-                    if let (Some(name), Some(args)) = (call["name"].as_str(), call.get("arguments")) {
-                        tool_calls.push(ToolCall {
-                            id: uuid::Uuid::new_v4().to_string(),
-                            name: name.to_string(),
-                            arguments: args.clone(),
-                        });
-                        matched = true;
+    for (start, end) in scan_balanced_json_spans(ai_response) {
+        let candidate = &ai_response[start..end];
+        if !candidate.contains("\"name\"") && !candidate.contains("\"tool\"") {
+            continue;
+        }
+        if let Ok(val) = serde_json::from_str::<serde_json::Value>(candidate) {
+            let extracted = parse_json_value_into_tool_calls(&val);
+            if !extracted.is_empty() {
+                tool_calls.extend(extracted);
+                // Expand range to include surrounding ```json ... ``` fence if present
+                let mut r_start = start;
+                let mut r_end = end;
+                let before = &ai_response[..start];
+                let after = &ai_response[end..];
+                if let Some(fence_pos) = before.rfind("```") {
+                    let between = &before[fence_pos + 3..];
+                    if between
+                        .trim_start_matches(|c: char| c.is_ascii_alphabetic())
+                        .trim()
+                        .is_empty()
+                    {
+                        r_start = fence_pos;
+                        if let Some(close_rel) = after.find("```") {
+                            if after[..close_rel].trim().is_empty() {
+                                r_end = end + close_rel + 3;
+                            }
+                        }
                     }
                 }
-                if matched {
-                    if let Some(full_match) = cap.get(0) {
-                        cleaned_content = cleaned_content.replace(full_match.as_str(), "");
-                    }
-                }
-            } else if let Ok(call) = serde_json::from_str::<serde_json::Value>(block_str) {
-                // Try parsing as single object
-                if let (Some(name), Some(args)) = (call["name"].as_str(), call.get("arguments")) {
-                    tool_calls.push(ToolCall {
-                        id: uuid::Uuid::new_v4().to_string(),
-                        name: name.to_string(),
-                        arguments: args.clone(),
-                    });
-                    if let Some(full_match) = cap.get(0) {
-                        cleaned_content = cleaned_content.replace(full_match.as_str(), "");
-                    }
-                }
+                remove_ranges.push((r_start, r_end));
             }
         }
     }
 
-    // 2. If no tool calls found in markdown blocks, look for raw JSON array: [ { "name": ... } ]
-    if tool_calls.is_empty() {
-        if let Some(mat) = RE_JSON_ARRAY.find(&cleaned_content) {
-            if let Ok(calls) = serde_json::from_str::<Vec<serde_json::Value>>(mat.as_str()) {
-                let mut matched = false;
-                for call in calls {
-                    if let (Some(name), Some(args)) = (call["name"].as_str(), call.get("arguments")) {
-                        tool_calls.push(ToolCall {
-                            id: uuid::Uuid::new_v4().to_string(),
-                            name: name.to_string(),
-                            arguments: args.clone(),
-                        });
-                        matched = true;
-                    }
-                }
-                if matched {
-                    cleaned_content = cleaned_content.replace(mat.as_str(), "");
-                }
-            }
-        }
+    if remove_ranges.is_empty() {
+        return (tool_calls, ai_response.trim().to_string());
     }
 
-    // 3. If still empty, look for raw single JSON object: { "name": ..., "arguments": ... }
-    if tool_calls.is_empty() {
-        if let Some(mat) = RE_JSON_OBJECT.find(&cleaned_content) {
-            if let Ok(call) = serde_json::from_str::<serde_json::Value>(mat.as_str()) {
-                if let (Some(name), Some(args)) = (call["name"].as_str(), call.get("arguments")) {
-                    tool_calls.push(ToolCall {
-                        id: uuid::Uuid::new_v4().to_string(),
-                        name: name.to_string(),
-                        arguments: args.clone(),
-                    });
-                    cleaned_content = cleaned_content.replace(mat.as_str(), "");
-                }
-            }
+    let mut cleaned = String::with_capacity(ai_response.len());
+    let mut cursor = 0;
+    for (r_start, r_end) in remove_ranges {
+        if r_start >= cursor && r_start <= ai_response.len() && r_end <= ai_response.len() {
+            cleaned.push_str(&ai_response[cursor..r_start]);
+            cursor = r_end;
         }
     }
+    if cursor < ai_response.len() {
+        cleaned.push_str(&ai_response[cursor..]);
+    }
 
-    (tool_calls, cleaned_content.trim().to_string())
+    (tool_calls, cleaned.trim().to_string())
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1147,6 +1386,16 @@ pub async fn execute_tool(
     tool_name: &str,
     arguments: &serde_json::Value,
 ) -> Result<ToolResult> {
+    execute_tool_with_mode(state, session_id, tool_name, arguments, false).await
+}
+
+pub async fn execute_tool_with_mode(
+    state: Arc<TokioRwLock<crate::state::AppState>>,
+    session_id: &str,
+    tool_name: &str,
+    arguments: &serde_json::Value,
+    auto_execute: bool,
+) -> Result<ToolResult> {
     let effective_arguments = match HOOK_PIPELINE.read().await.run_pre_tool_call(tool_name, arguments).await {
         AgentHookResult::Allow => arguments.clone(),
         AgentHookResult::Modify(arguments) => arguments,
@@ -1154,9 +1403,20 @@ pub async fn execute_tool(
     };
     let arguments = &effective_arguments;
     match evaluate_tool_policy(tool_name, arguments) {
-        PolicyDecision::Allow => {},
-        PolicyDecision::Deny(reason) | PolicyDecision::AskUser(reason) => {
-            return Err(AppError::ValidationError(reason));
+        PolicyDecision::Allow => {}
+        PolicyDecision::AskUser(reason) => {
+            if !auto_execute {
+                return Err(AppError::ValidationError(reason));
+            }
+        }
+        PolicyDecision::Deny(reason) => {
+            let is_default_gated_tool = matches!(
+                tool_name,
+                "run_command" | "execute_command" | "delete_file" | "git_commit"
+            ) && reason.contains("not in the allow list");
+            if !(auto_execute && is_default_gated_tool) {
+                return Err(AppError::ValidationError(reason));
+            }
         }
     }
     let session = get_session(session_id)
@@ -1233,6 +1493,33 @@ async fn tool_read_file(workspace: &Path, args: &serde_json::Value) -> Result<St
         .await
         .map_err(|e| AppError::IOError(format!("Failed to read file: {}", e)))?;
 
+    let start_line = args.get("start_line").and_then(|v| v.as_u64()).map(|v| v as usize);
+    let end_line = args.get("end_line").and_then(|v| v.as_u64()).map(|v| v as usize);
+
+    if start_line.is_some() || end_line.is_some() {
+        let lines: Vec<&str> = content.lines().collect();
+        let total = lines.len();
+        if total == 0 {
+            return Ok(String::new());
+        }
+        let s = start_line.unwrap_or(1).max(1).min(total);
+        let e = end_line.unwrap_or(total).max(s).min(total);
+        let slice = &lines[(s - 1)..e];
+        let numbered: Vec<String> = slice
+            .iter()
+            .enumerate()
+            .map(|(idx, line)| format!("{}: {}", s + idx, line))
+            .collect();
+        return Ok(format!(
+            "[File: {} | Lines {}-{} of {}]\n{}",
+            path_str,
+            s,
+            e,
+            total,
+            numbered.join("\n")
+        ));
+    }
+
     Ok(content)
 }
 
@@ -1282,6 +1569,108 @@ async fn tool_write_file(
     ))
 }
 
+fn strip_line_number_prefixes(text: &str) -> String {
+    let re = regex::Regex::new(r"(?m)^\s*\d+\s*[:|]\s?").unwrap();
+    re.replace_all(text, "").to_string()
+}
+
+pub(crate) fn smart_replace_in_content(
+    old_content: &str,
+    search: &str,
+    replace: &str,
+    allow_multiple: bool,
+) -> std::result::Result<String, String> {
+    if search.is_empty() {
+        return Err("Search text cannot be empty".to_string());
+    }
+
+    // 1. Exact match
+    let exact_count = old_content.matches(search).count();
+    if exact_count == 1 || (exact_count > 1 && allow_multiple) {
+        return Ok(if allow_multiple {
+            old_content.replace(search, replace)
+        } else {
+            old_content.replacen(search, replace, 1)
+        });
+    }
+    if exact_count > 1 && !allow_multiple {
+        return Err(format!(
+            "Search text was found {} times. To prevent unintended mutations, please provide more surrounding context lines to uniquely target the intended block, or specify allow_multiple: true.",
+            exact_count
+        ));
+    }
+
+    // 2. Strip accidental line-number prefixes (e.g. "42: fn foo()")
+    let stripped_search = strip_line_number_prefixes(search);
+    if stripped_search != search && !stripped_search.trim().is_empty() {
+        let stripped_replace = strip_line_number_prefixes(replace);
+        let stripped_count = old_content.matches(&stripped_search).count();
+        if stripped_count == 1 || (stripped_count > 1 && allow_multiple) {
+            return Ok(if allow_multiple {
+                old_content.replace(&stripped_search, &stripped_replace)
+            } else {
+                old_content.replacen(&stripped_search, &stripped_replace, 1)
+            });
+        }
+    }
+
+    // 3. CRLF normalized match
+    let norm_content = old_content.replace("\r\n", "\n");
+    let norm_search = stripped_search.replace("\r\n", "\n");
+    let norm_replace = strip_line_number_prefixes(replace).replace("\r\n", "\n");
+    let norm_count = norm_content.matches(&norm_search).count();
+    if norm_count == 1 || (norm_count > 1 && allow_multiple) {
+        return Ok(if allow_multiple {
+            norm_content.replace(&norm_search, &norm_replace)
+        } else {
+            norm_content.replacen(&norm_search, &norm_replace, 1)
+        });
+    }
+    if norm_count > 1 && !allow_multiple {
+        return Err(format!(
+            "Search text was found {} times. Please provide more surrounding context lines to uniquely target the intended block.",
+            norm_count
+        ));
+    }
+
+    // 4. Line-by-line trimmed whitespace fallback
+    let content_lines: Vec<&str> = norm_content.split('\n').collect();
+    let search_lines: Vec<&str> = norm_search.split('\n').collect();
+    let has_non_empty = search_lines.iter().any(|l| !l.trim().is_empty());
+    if !search_lines.is_empty() && has_non_empty && search_lines.len() <= content_lines.len() {
+        let mut match_indices = Vec::new();
+        let window = search_lines.len();
+        for i in 0..=(content_lines.len() - window) {
+            let matches_all = (0..window).all(|k| content_lines[i + k].trim() == search_lines[k].trim());
+            if matches_all {
+                match_indices.push(i);
+            }
+        }
+
+        if match_indices.len() == 1 {
+            let idx = match_indices[0];
+            let mut result_lines: Vec<String> = Vec::with_capacity(content_lines.len());
+            for line in &content_lines[..idx] {
+                result_lines.push((*line).to_string());
+            }
+            for line in norm_replace.split('\n') {
+                result_lines.push(line.to_string());
+            }
+            for line in &content_lines[(idx + window)..] {
+                result_lines.push((*line).to_string());
+            }
+            return Ok(result_lines.join("\n"));
+        } else if match_indices.len() > 1 {
+            return Err(format!(
+                "Search text matched {} locations when ignoring indentation. Please provide more surrounding context lines.",
+                match_indices.len()
+            ));
+        }
+    }
+
+    Err("Search text not found in file. Read the target lines with read_file first to verify exact contents.".to_string())
+}
+
 async fn tool_edit_file(
     session_id: &str,
     workspace: &Path,
@@ -1304,26 +1693,9 @@ async fn tool_edit_file(
         .await
         .map_err(|e| AppError::IOError(format!("Failed to read file: {}", e)))?;
 
-    let match_count = old_content.matches(search).count();
-    if match_count == 0 {
-        return Err(AppError::ValidationError(
-            "Search text not found in file".to_string(),
-        ));
-    }
-
     let allow_multiple = args.get("allow_multiple").and_then(|v| v.as_bool()).unwrap_or(false);
-    if match_count > 1 && !allow_multiple {
-        return Err(AppError::ValidationError(format!(
-            "Search text was found {} times in {}. To prevent unintended mutations, please provide more surrounding context lines to uniquely target the intended block, or specify allow_multiple: true.",
-            match_count, path_str
-        )));
-    }
-
-    let new_content = if allow_multiple {
-        old_content.replace(search, replace)
-    } else {
-        old_content.replacen(search, replace, 1)
-    };
+    let new_content = smart_replace_in_content(&old_content, search, replace, allow_multiple)
+        .map_err(AppError::ValidationError)?;
 
     fs::write(&full_path, &new_content)
         .await
@@ -1397,25 +1769,78 @@ async fn tool_search_code(workspace: &Path, args: &serde_json::Value) -> Result<
         .ok_or_else(|| AppError::ValidationError("query is required".to_string()))?;
     let file_pattern = args["file_pattern"].as_str();
 
-    // Use ripgrep if available, otherwise fall back to manual search
+    // Use ripgrep with sensible ignore globs if available, otherwise fall back to grep -rn
     let mut cmd = tokio::process::Command::new("rg");
-    cmd.args(["--line-number", "--no-heading", query])
-        .current_dir(workspace);
+    cmd.args([
+        "--line-number",
+        "--no-heading",
+        "--color",
+        "never",
+        "-g",
+        "!.git",
+        "-g",
+        "!node_modules",
+        "-g",
+        "!target",
+        "-g",
+        "!.build",
+        "-g",
+        "!DerivedData",
+        "-g",
+        "!.codetuner-build",
+        "-g",
+        "!dist",
+        "-g",
+        "!build",
+    ])
+    .current_dir(workspace);
 
     if let Some(pattern) = file_pattern {
-        cmd.args(["-g", pattern]);
+        if !pattern.trim().is_empty() {
+            cmd.args(["-g", pattern]);
+        }
+    }
+    cmd.arg(query);
+
+    if let Ok(o) = cmd.output().await {
+        if o.status.success() {
+            let result = String::from_utf8_lossy(&o.stdout);
+            if result.trim().is_empty() {
+                return Ok("No matches found".to_string());
+            }
+            let lines: Vec<&str> = result.lines().take(80).collect();
+            return Ok(lines.join("\n"));
+        } else if o.status.code() == Some(1) {
+            // Exit code 1 in rg means 0 matches found
+            return Ok("No matches found".to_string());
+        }
     }
 
-    let output = cmd.output().await;
+    // Fallback to grep -rn if rg is not installed
+    let mut grep_cmd = tokio::process::Command::new("grep");
+    grep_cmd
+        .args([
+            "-rn",
+            "-I",
+            "-E",
+            "--exclude-dir=.git",
+            "--exclude-dir=node_modules",
+            "--exclude-dir=target",
+            "--exclude-dir=.build",
+            "--exclude-dir=DerivedData",
+            "--exclude-dir=.codetuner-build",
+            query,
+            ".",
+        ])
+        .current_dir(workspace);
 
-    match output {
+    match grep_cmd.output().await {
         Ok(o) if o.status.success() => {
             let result = String::from_utf8_lossy(&o.stdout);
-            if result.is_empty() {
+            if result.trim().is_empty() {
                 Ok("No matches found".to_string())
             } else {
-                // Limit output
-                let lines: Vec<&str> = result.lines().take(50).collect();
+                let lines: Vec<&str> = result.lines().take(80).collect();
                 Ok(lines.join("\n"))
             }
         }
@@ -1908,23 +2333,43 @@ fn validate_path_in_workspace(workspace: &Path, path: &Path) -> Result<()> {
         .canonicalize()
         .map_err(|e| AppError::IOError(e.to_string()))?;
 
-    // For new files, check parent
-    let check_path = if path.exists() {
-        path.canonicalize()
-            .map_err(|e| AppError::IOError(e.to_string()))?
-    } else if let Some(parent) = path.parent() {
-        if parent.exists() {
-            parent
-                .canonicalize()
-                .map_err(|e| AppError::IOError(e.to_string()))?
-        } else {
-            return Err(AppError::ValidationError(
-                "Parent directory does not exist".to_string(),
-            ));
+    // Reject any explicit ParentDir ("..") component in the target path after workspace resolution
+    if let Ok(rel) = path.strip_prefix(workspace) {
+        for comp in rel.components() {
+            if matches!(comp, std::path::Component::ParentDir) {
+                return Err(AppError::ValidationError(
+                    "Path traversal ('..') is not allowed".to_string(),
+                ));
+            }
         }
     } else {
-        return Err(AppError::ValidationError("Invalid path".to_string()));
-    };
+        for comp in path.components() {
+            if matches!(comp, std::path::Component::ParentDir) {
+                return Err(AppError::ValidationError(
+                    "Path traversal ('..') is not allowed".to_string(),
+                ));
+            }
+        }
+    }
+
+    // Walk up ancestors until we find an existing directory to canonicalize
+    // (allows write_file to create files inside new nested directories like `src/new_dir/file.rs`)
+    let mut current = Some(path);
+    let mut canonical_ancestor = None;
+    while let Some(candidate) = current {
+        if candidate.exists() {
+            canonical_ancestor = Some(
+                candidate
+                    .canonicalize()
+                    .map_err(|e| AppError::IOError(e.to_string()))?,
+            );
+            break;
+        }
+        current = candidate.parent();
+    }
+
+    let check_path = canonical_ancestor
+        .ok_or_else(|| AppError::ValidationError("Invalid path: no existing ancestor directory".to_string()))?;
 
     if !check_path.starts_with(&canonical_workspace) {
         return Err(AppError::ValidationError(
@@ -2243,12 +2688,23 @@ REMEMBER: You are building the future of coding. Make it look magic."#,
         serde_json::to_string_pretty(&tools_json).unwrap_or_default()
     );
 
-    // Build full prompt
-    let full_prompt = format!("System: {}\n\nUser: {}", system_prompt, request.message);
+    // Build full prompt including prior session conversation history
+    let prior_history = format_session_history(&session.messages, 32_000);
+    let full_prompt = if prior_history.is_empty() {
+        format!("System: {}\n\nUser: {}", system_prompt, request.message)
+    } else {
+        format!(
+            "System: {}\n\n=== CONVERSATION HISTORY ===\n{}\n\n=== CURRENT REQUEST ===\nUser: {}",
+            system_prompt, prior_history, request.message
+        )
+    };
 
     // AI Loop for Autonomy & Self-Correction
     let mut current_prompt = full_prompt.clone();
     let base_prompt = full_prompt;
+    let mut turn_records: Vec<String> = Vec::new();
+    let mut last_tool_signature: Option<String> = None;
+    let mut repeated_tool_streak: usize = 0;
     let mut total_tool_calls = Vec::new();
     let mut total_tool_results = Vec::new();
     let mut pending_changes = Vec::new();
@@ -2345,10 +2801,19 @@ REMEMBER: You are building the future of coding. Make it look magic."#,
 
             // Execute tool or create pending change
             if request.auto_execute || !is_destructive_tool(&tc.name) {
-                match execute_tool(state.clone(), &request.session_id, &tc.name, &tc.arguments)
-                    .await
+                match execute_tool_with_mode(
+                    state.clone(),
+                    &request.session_id,
+                    &tc.name,
+                    &tc.arguments,
+                    request.auto_execute,
+                )
+                .await
                 {
-                    Ok(result) => turn_tool_results.push(result),
+                    Ok(mut result) => {
+                        result.tool_call_id = tc.id.clone();
+                        turn_tool_results.push(result);
+                    }
                     Err(e) => turn_tool_results.push(ToolResult {
                         tool_call_id: tc.id.clone(),
                         success: false,
@@ -2384,7 +2849,31 @@ REMEMBER: You are building the future of coding. Make it look magic."#,
             break;
         }
 
-        current_prompt = next_agent_turn_prompt(&base_prompt, &ai_response, &turn_tool_results);
+        let current_sig = turn_tool_calls
+            .iter()
+            .map(|c| format!("{}:{}", c.name, c.arguments))
+            .collect::<Vec<_>>()
+            .join("|");
+        if last_tool_signature.as_deref() == Some(&current_sig) {
+            repeated_tool_streak += 1;
+        } else {
+            last_tool_signature = Some(current_sig);
+            repeated_tool_streak = 0;
+        }
+
+        let loop_warning = if repeated_tool_streak >= 2 {
+            Some("You have repeated the exact same tool call multiple times in a row. Stop repeating it: either inspect the error output carefully, try a different approach, or conclude your response.")
+        } else {
+            None
+        };
+
+        turn_records.push(format_turn_record(
+            loop_count,
+            &ai_response,
+            &turn_tool_calls,
+            &turn_tool_results,
+        ));
+        current_prompt = build_agent_turn_prompt(&base_prompt, &turn_records, loop_warning);
     }
 
     // Update session with final results
@@ -2451,10 +2940,6 @@ pub fn enhanced_chat_stream(
             }
         };
 
-        // Reuse system prompt building logic from enhanced_chat (refactor would be better, but for speed...)
-        // For now, let's just assume we need to rebuild it or passed in.
-        // Actually, to avoid massive duplication, let's keep it simple.
-
         // Build context parts
         let mut context_parts = vec![];
         if let Some(ref editor) = request.editor_context {
@@ -2489,7 +2974,16 @@ pub fn enhanced_chat_stream(
         context_parts.push(format!("Project type: {}", session.context.project_type));
 
         let tools = get_available_tools();
-        let tools_json = serde_json::to_string_pretty(&tools).unwrap_or_default();
+        let tools_json: Vec<serde_json::Value> = tools
+            .iter()
+            .map(|t| {
+                serde_json::json!({
+                    "name": t.name,
+                    "description": t.description,
+                    "arguments": t.parameters
+                })
+            })
+            .collect();
 
         let system_prompt = format!(
             r#"You are an expert AI coding assistant.
@@ -2500,18 +2994,34 @@ AVAILABLE TOOLS:
 {}
 
 INSTRUCTIONS:
-1. Analyze request.
-2. Propose plan if complex.
-3. Use tools.
-4. Verify changes.
-5. Respond in turn with tool blocks: ```json [{{"name": "...", "arguments": {{...}}}}] ```
+1. Analyze the request carefully and inspect files before modifying them.
+2. Propose a clear plan if the task is multi-step.
+3. Execute tools using ONLY JSON tool blocks:
+```json
+[
+  {{"name": "tool_name", "arguments": {{"arg1": "val1"}}}}
+]
+```
+4. Verify your changes after editing files (e.g., read_file or run_command).
+5. If a tool fails, analyze the error output and adjust your approach instead of repeating the identical call.
 "#,
             context_parts.join("\n"),
-            tools_json
+            serde_json::to_string_pretty(&tools_json).unwrap_or_default()
         );
 
-        let base_prompt = format!("System: {}\n\nUser: {}", system_prompt, request.message);
+        let prior_history = format_session_history(&session.messages, 32_000);
+        let base_prompt = if prior_history.is_empty() {
+            format!("System: {}\n\nUser: {}", system_prompt, request.message)
+        } else {
+            format!(
+                "System: {}\n\n=== CONVERSATION HISTORY ===\n{}\n\n=== CURRENT REQUEST ===\nUser: {}",
+                system_prompt, prior_history, request.message
+            )
+        };
         let mut current_prompt = base_prompt.clone();
+        let mut turn_records: Vec<String> = Vec::new();
+        let mut last_tool_signature: Option<String> = None;
+        let mut repeated_tool_streak: usize = 0;
 
         let mut actual_config = ai_config.clone();
         if let Some(p) = &request.provider {
@@ -2643,57 +3153,72 @@ INSTRUCTIONS:
                     }))
                     .await;
 
-                                // Execute tool or create pending change
-                                if request.auto_execute || !is_destructive_tool(name) {
-                                    match execute_tool(
-                                        state.clone(),
-                                        &request.session_id,
-                                        name,
-                                        args,
-                                    )
-                                    .await
-                                    {
-                                        Ok(result) => {
-                                            let _ = tx
-                                                .send(Ok(AgentStreamEvent::ToolEnd {
-                                                    id: tc.id.clone(),
-                                                    success: result.success,
-                                                    output: result.output.clone(),
-                                                    error: result.error.clone(),
-                                                }))
-                                                .await;
-                                            turn_tool_results.push(result);
-                                        }
-                                        Err(e) => {
-                                            let _ = tx
-                                                .send(Ok(AgentStreamEvent::ToolEnd {
-                                                    id: tc.id.clone(),
-                                                    success: false,
-                                                    output: String::new(),
-                                                    error: Some(e.to_string()),
-                                                }))
-                                                .await;
-                                            turn_tool_results.push(ToolResult {
-                                                tool_call_id: tc.id.clone(),
-                                                success: false,
-                                                output: String::new(),
-                                                error: Some(e.to_string()),
-                                            });
-                                        }
-                                    }
-                                } else {
-                                    if let Some(pc) = create_pending_change(
-                                        &request.session_id,
-                                        &tc,
-                                        &session.workspace_path,
-                                    )
-                                    .await
-                                    {
-                                        let _ =
-                                            tx.send(Ok(AgentStreamEvent::PendingChange(pc))).await;
-                                    }
-                                }
+                // Execute tool or create pending change
+                if request.auto_execute || !is_destructive_tool(name) {
+                    match execute_tool_with_mode(
+                        state.clone(),
+                        &request.session_id,
+                        name,
+                        args,
+                        request.auto_execute,
+                    )
+                    .await
+                    {
+                        Ok(mut result) => {
+                            result.tool_call_id = tc.id.clone();
+                            let _ = tx
+                                .send(Ok(AgentStreamEvent::ToolEnd {
+                                    id: tc.id.clone(),
+                                    success: result.success,
+                                    output: result.output.clone(),
+                                    error: result.error.clone(),
+                                }))
+                                .await;
+                            turn_tool_results.push(result);
+                        }
+                        Err(e) => {
+                            let _ = tx
+                                .send(Ok(AgentStreamEvent::ToolEnd {
+                                    id: tc.id.clone(),
+                                    success: false,
+                                    output: String::new(),
+                                    error: Some(e.to_string()),
+                                }))
+                                .await;
+                            turn_tool_results.push(ToolResult {
+                                tool_call_id: tc.id.clone(),
+                                success: false,
+                                output: String::new(),
+                                error: Some(e.to_string()),
+                            });
+                        }
+                    }
+                } else {
+                    if let Some(pc) = create_pending_change(
+                        &request.session_id,
+                        &tc,
+                        &session.workspace_path,
+                    )
+                    .await
+                    {
+                        let _ =
+                            tx.send(Ok(AgentStreamEvent::PendingChange(pc))).await;
+                    }
+                }
             }
+
+            let current_sig = turn_tool_calls
+                .iter()
+                .map(|c| format!("{}:{}", c.name, c.arguments))
+                .collect::<Vec<_>>()
+                .join("|");
+
+            let turn_record = format_turn_record(
+                loop_count,
+                &turn_full_content,
+                &turn_tool_calls,
+                &turn_tool_results,
+            );
 
             total_tool_calls.extend(turn_tool_calls);
             total_tool_results.extend(turn_tool_results.clone());
@@ -2709,8 +3234,21 @@ INSTRUCTIONS:
                 break;
             }
 
-            current_prompt =
-                next_agent_turn_prompt(&base_prompt, &turn_full_content, &turn_tool_results);
+            if last_tool_signature.as_deref() == Some(&current_sig) {
+                repeated_tool_streak += 1;
+            } else {
+                last_tool_signature = Some(current_sig);
+                repeated_tool_streak = 0;
+            }
+
+            let loop_warning = if repeated_tool_streak >= 2 {
+                Some("You have repeated the exact same tool call multiple times in a row. Stop repeating it: either inspect the error output carefully, try a different approach, or conclude your response.")
+            } else {
+                None
+            };
+
+            turn_records.push(turn_record);
+            current_prompt = build_agent_turn_prompt(&base_prompt, &turn_records, loop_warning);
         }
 
         // Final session update
@@ -2786,37 +3324,23 @@ pub fn run_agent_loop_stream(
 
         // 3. Build Context & Prompt
         let system_prompt = construct_system_prompt_sync(&workspace);
-        let mut tools_json = String::new();
-        {
-             let tools = get_available_tools();
-             tools_json = serde_json::to_string_pretty(&tools).unwrap_or_default();
-        }
+        let tools_json = {
+            let tools = get_available_tools();
+            serde_json::to_string_pretty(&tools).unwrap_or_default()
+        };
 
-        // We need to construct the full conversation history
         let mut full_prompt = String::new();
         full_prompt.push_str(&format!("System: {}\n", system_prompt));
         full_prompt.push_str(&format!("TOOLS: {}\n\n", tools_json));
 
-        // Retrieve history
+        // Retrieve compacted history
         {
             let sessions = AGENT_SESSIONS.read().unwrap();
             if let Some(session) = sessions.get(&session_id) {
-                // Simplified history construction for now
-                // In production, we should format this properly with tool outputs
-                for msg in &session.messages {
-                     match msg.role {
-                         MessageRole::User => full_prompt.push_str(&format!("User: {}\n", msg.content)),
-                         MessageRole::Assistant => {
-                             full_prompt.push_str(&format!("Assistant: {}\n", msg.content));
-                             for tool in &msg.tool_calls {
-                                 full_prompt.push_str(&format!("Tool Call: {} {}\n", tool.name, tool.arguments));
-                             }
-                             for res in &msg.tool_results {
-                                 full_prompt.push_str(&format!("Tool Result: {}\n", res.output));
-                             }
-                         },
-                         _ => {}
-                     }
+                let history_text = format_session_history(&session.messages, 32_000);
+                if !history_text.is_empty() {
+                    full_prompt.push_str(&history_text);
+                    full_prompt.push('\n');
                 }
             }
         }
@@ -2826,6 +3350,9 @@ pub fn run_agent_loop_stream(
         let max_loops = MAX_AGENT_LOOPS;
         let mut current_turn_prompt = full_prompt.clone();
         let base_prompt = full_prompt;
+        let mut turn_records: Vec<String> = Vec::new();
+        let mut last_tool_signature: Option<String> = None;
+        let mut repeated_tool_streak: usize = 0;
 
         let max_tokens = std::env::var("MICROCODE_MAX_BUDGET_TOKENS")
             .ok()
@@ -2927,7 +3454,21 @@ pub fn run_agent_loop_stream(
             turn_tool_calls = extracted_calls;
 
             if turn_tool_calls.is_empty() {
-                // No tools called, we are done
+                // Save final assistant turn to session
+                {
+                    let mut sessions = AGENT_SESSIONS.write().unwrap();
+                    if let Some(session) = sessions.get_mut(&session_id) {
+                        session.messages.push(AgentMessage {
+                            id: uuid::Uuid::new_v4().to_string(),
+                            role: MessageRole::Assistant,
+                            content: turn_content.clone(),
+                            tool_calls: vec![],
+                            tool_results: vec![],
+                            timestamp: Utc::now(),
+                        });
+                        trim_session_messages(&mut session.messages);
+                    }
+                }
                 break;
             }
 
@@ -2938,7 +3479,7 @@ pub fn run_agent_loop_stream(
                 yield Ok(AgentStreamEvent::ToolStart { name: tc.name.clone(), id: tc.id.clone() });
 
                 let result = if auto_execute || !is_destructive_tool(&tc.name) {
-                     execute_tool(state.clone(), &session_id, &tc.name, &tc.arguments).await
+                     execute_tool_with_mode(state.clone(), &session_id, &tc.name, &tc.arguments, auto_execute).await
                 } else {
                      // Create pending change instead
                      if let Some(pc) = create_pending_change(&session_id, tc, &workspace).await {
@@ -2961,7 +3502,8 @@ pub fn run_agent_loop_stream(
                 };
 
                 match result {
-                    Ok(res) => {
+                    Ok(mut res) => {
+                         res.tool_call_id = tc.id.clone();
                          yield Ok(AgentStreamEvent::ToolEnd {
                              id: tc.id.clone(),
                              success: res.success,
@@ -2977,15 +3519,44 @@ pub fn run_agent_loop_stream(
                              output: String::new(),
                              error: Some(e.to_string())
                          });
+                         turn_tool_results.push(ToolResult {
+                             tool_call_id: tc.id.clone(),
+                             success: false,
+                             output: String::new(),
+                             error: Some(e.to_string()),
+                         });
                     }
                 }
             }
 
-            current_turn_prompt = next_agent_turn_prompt(&base_prompt, &turn_content, &turn_tool_results);
+            let current_sig = turn_tool_calls
+                .iter()
+                .map(|c| format!("{}:{}", c.name, c.arguments))
+                .collect::<Vec<_>>()
+                .join("|");
+            if last_tool_signature.as_deref() == Some(&current_sig) {
+                repeated_tool_streak += 1;
+            } else {
+                last_tool_signature = Some(current_sig);
+                repeated_tool_streak = 0;
+            }
 
-            // If we executed tools, we loop again.
+            let loop_warning = if repeated_tool_streak >= 2 {
+                Some("You have repeated the exact same tool call multiple times in a row. Stop repeating it: either inspect the error output carefully, try a different approach, or conclude your response.")
+            } else {
+                None
+            };
+
+            turn_records.push(format_turn_record(
+                loop_count,
+                &turn_content,
+                &turn_tool_calls,
+                &turn_tool_results,
+            ));
+            current_turn_prompt = build_agent_turn_prompt(&base_prompt, &turn_records, loop_warning);
+
             // Save this turn to session
-             {
+            {
                 let mut sessions = AGENT_SESSIONS.write().unwrap();
                 if let Some(session) = sessions.get_mut(&session_id) {
                     session.messages.push(AgentMessage {
@@ -2994,7 +3565,7 @@ pub fn run_agent_loop_stream(
                          content: turn_content.clone(),
                          tool_calls: turn_tool_calls,
                          tool_results: turn_tool_results,
-                        timestamp: Utc::now(),
+                         timestamp: Utc::now(),
                     });
                     trim_session_messages(&mut session.messages);
                 }
@@ -3055,7 +3626,9 @@ async fn create_pending_change(
             } else {
                 let search = tool_call.arguments["search"].as_str()?;
                 let replace = tool_call.arguments["replace"].as_str()?;
-                old_content.replace(search, replace)
+                let allow_multiple = tool_call.arguments.get("allow_multiple").and_then(|v| v.as_bool()).unwrap_or(false);
+                smart_replace_in_content(&old_content, search, replace, allow_multiple)
+                    .unwrap_or_else(|_| old_content.replace(search, replace))
             };
 
             let diff = generate_diff(path, &old_content, &new_content);
@@ -3090,8 +3663,22 @@ pub async fn apply_pending_change(change_id: &str) -> Result<String> {
     let change =
         change.ok_or_else(|| AppError::NotFound("Pending change not found".to_string()))?;
 
+    let target_path = if let Some(session) = get_session(&change.session_id) {
+        let resolved = resolve_path(&session.workspace_path, &change.diff.file_path);
+        validate_path_in_workspace(&session.workspace_path, &resolved)?;
+        resolved
+    } else {
+        PathBuf::from(&change.diff.file_path)
+    };
+
+    if let Some(parent) = target_path.parent() {
+        fs::create_dir_all(parent)
+            .await
+            .map_err(|e| AppError::IOError(e.to_string()))?;
+    }
+
     // Write the new content
-    fs::write(&change.diff.file_path, &change.diff.new_content as &str)
+    fs::write(&target_path, &change.diff.new_content as &str)
         .await
         .map_err(|e| AppError::IOError(e.to_string()))?;
 
@@ -3099,7 +3686,7 @@ pub async fn apply_pending_change(change_id: &str) -> Result<String> {
     log_file_operation(
         &change.session_id,
         OperationType::ModifyFile,
-        Path::new(&change.diff.file_path),
+        &target_path,
         Some(change.diff.old_content.clone()),
         Some(change.diff.new_content.clone()),
     );
@@ -3294,3 +3881,101 @@ pub fn update_policy_engine(engine: PolicyEngine) {
 pub fn get_model_recommendation(description: &str, tools: &[String]) -> ModelRecommendation {
     crate::agent_kernel::recommend_model_for_task(description, tools)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn extract_tool_calls_handles_embedded_backticks_and_nested_braces() {
+        let response = r##"I will write the documentation file now.
+```json
+[
+  {
+    "name": "write_file",
+    "arguments": {
+      "path": "docs/README.md",
+      "content": "# Example\n```rust\nfn main() { println!(\"{}\", 42); }\n```\nDone."
+    }
+  }
+]
+```
+Let me know once written."##;
+
+        let (calls, cleaned) = extract_tool_calls(response);
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].name, "write_file");
+        assert_eq!(calls[0].arguments["path"], "docs/README.md");
+        assert!(calls[0].arguments["content"]
+            .as_str()
+            .unwrap()
+            .contains("```rust"));
+        assert!(cleaned.contains("I will write the documentation file now."));
+    }
+
+    #[test]
+    fn smart_replace_handles_line_numbers_and_indentation_drift() {
+        let original = "fn calculate() {\n    let x = 10;\n    let y = 20;\n    return x + y;\n}\n";
+        // Search has accidental line number prefixes and 2-space indentation instead of 4-space
+        let search = "2:   let x = 10;\n3:   let y = 20;";
+        let replace = "    let x = 100;\n    let y = 200;";
+        let updated = smart_replace_in_content(original, search, replace, false).unwrap();
+        assert!(updated.contains("let x = 100;"));
+        assert!(updated.contains("let y = 200;"));
+    }
+
+    #[test]
+    fn validate_path_allows_new_nested_dirs_and_blocks_traversal() {
+        let temp_dir = std::env::temp_dir().join(format!("mc_ws_{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&temp_dir).unwrap();
+
+        let nested_new = resolve_path(&temp_dir, "src/components/deep/NewWidget.tsx");
+        assert!(validate_path_in_workspace(&temp_dir, &nested_new).is_ok());
+
+        let traversal = resolve_path(&temp_dir, "../outside.txt");
+        assert!(validate_path_in_workspace(&temp_dir, &traversal).is_err());
+
+        let _ = std::fs::remove_dir_all(&temp_dir);
+    }
+
+    #[test]
+    fn build_agent_turn_prompt_retains_multiple_turns() {
+        let base = "System: Test\n\nUser: Fix bug";
+        let t1 = format_turn_record(
+            1,
+            "Reading file",
+            &[ToolCall {
+                id: "1".to_string(),
+                name: "read_file".to_string(),
+                arguments: serde_json::json!({"path": "src/main.rs"}),
+            }],
+            &[ToolResult {
+                tool_call_id: "1".to_string(),
+                success: true,
+                output: "fn main() {}".to_string(),
+                error: None,
+            }],
+        );
+        let t2 = format_turn_record(
+            2,
+            "Running cargo check",
+            &[ToolCall {
+                id: "2".to_string(),
+                name: "run_command".to_string(),
+                arguments: serde_json::json!({"command": "cargo check"}),
+            }],
+            &[ToolResult {
+                tool_call_id: "2".to_string(),
+                success: false,
+                output: String::new(),
+                error: Some("error[E0425]: cannot find value `x`".to_string()),
+            }],
+        );
+        let prompt = build_agent_turn_prompt(base, &[t1, t2], Some("Avoid repeating tool"));
+        assert!(prompt.contains("=== Turn 1 ==="));
+        assert!(prompt.contains("=== Turn 2 ==="));
+        assert!(prompt.contains("error[E0425]"));
+        assert!(prompt.contains("Avoid repeating tool"));
+    }
+}
+

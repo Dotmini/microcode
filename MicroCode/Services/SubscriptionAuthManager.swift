@@ -67,14 +67,27 @@ public enum SubscriptionProviderType: String, CaseIterable, Identifiable, Codabl
         }
     }
     
+    @MainActor
     public var defaultModel: String {
+        if let firstLive = Self.liveModelInfos[self]?.first?.modelID {
+            return firstLive
+        }
+        if let firstCatalog = AIModelCatalog.shared.provider(aiProviderID)?.models.first?.id {
+            return firstCatalog
+        }
         switch self {
-        case .chatgpt: return "gpt-4o"
-        case .claude: return "claude-3-7-sonnet-20250219"
-        case .gemini: return "gemini-2.0-flash"
-        case .deepseek: return "deepseek-chat"
-        case .copilot: return "auto"
-        case .glm: return "glm-4-plus"
+        case .chatgpt:
+            return LocalEcosystemDiscovery.shared.models(for: "codex").first?.id ?? ""
+        case .claude:
+            return LocalEcosystemDiscovery.shared.models(for: "claude_code").first?.id ?? "sonnet"
+        case .gemini:
+            return LocalEcosystemDiscovery.shared.models(for: "agy").first(where: { $0.id.lowercased().contains("gemini") })?.id ?? ""
+        case .deepseek:
+            return "deepseek-chat"
+        case .copilot:
+            return "auto"
+        case .glm:
+            return AIModelCatalog.shared.provider("glm")?.models.first?.id ?? ""
         }
     }
     
@@ -135,12 +148,14 @@ public enum SubscriptionProviderType: String, CaseIterable, Identifiable, Codabl
     }
 
     public var modelInfos: [SubscriptionModelInfo] {
+        var res: [SubscriptionModelInfo] = []
         if let live = Self.liveModelInfos[self], !live.isEmpty {
-            return live
+            res = live
+        } else {
+            res = defaultModelInfos
         }
         let customKey = "microcode_sub_custom_models_\(rawValue)"
         let customs = UserDefaults.standard.stringArray(forKey: customKey) ?? []
-        var res = defaultModelInfos
         for cid in customs.reversed() {
             if !res.contains(where: { $0.modelID == cid }) {
                 res.insert(SubscriptionModelInfo(
@@ -157,45 +172,15 @@ public enum SubscriptionProviderType: String, CaseIterable, Identifiable, Codabl
     }
 
     public var defaultModelInfos: [SubscriptionModelInfo] {
-        switch self {
-        case .chatgpt:
+        if let live = Self.liveModelInfos[self], !live.isEmpty {
+            return live
+        }
+        if self == .copilot {
             return [
-                SubscriptionModelInfo(modelID: "gpt-4o", name: "GPT-4o", provider: .chatgpt, badge: "FLAGSHIP", description: "OpenAI flagship multimodal reasoning & code generation", aiProviderID: "openai"),
-                SubscriptionModelInfo(modelID: "gpt-4o-mini", name: "GPT-4o Mini", provider: .chatgpt, badge: "FAST", description: "Affordable and fast multimodal intelligence", aiProviderID: "openai"),
-                SubscriptionModelInfo(modelID: "o1", name: "o1", provider: .chatgpt, badge: "REASONING", description: "Deep architectural reasoning and STEM intelligence", aiProviderID: "openai"),
-                SubscriptionModelInfo(modelID: "o3-mini", name: "o3-mini", provider: .chatgpt, badge: "FAST REASONING", description: "High-speed logic, STEM, and code reasoning", aiProviderID: "openai")
-            ]
-        case .claude:
-            return [
-                SubscriptionModelInfo(modelID: "claude-3-7-sonnet-20250219", name: "Claude 3.7 Sonnet", provider: .claude, badge: "HYBRID", description: "Hybrid thinking and coding frontier via Claude Pro", aiProviderID: "anthropic"),
-                SubscriptionModelInfo(modelID: "claude-3-5-sonnet-20241022", name: "Claude 3.5 Sonnet", provider: .claude, badge: "FLAGSHIP", description: "Industry standard agentic coding & tool use", aiProviderID: "anthropic"),
-                SubscriptionModelInfo(modelID: "claude-3-5-haiku-20241022", name: "Claude 3.5 Haiku", provider: .claude, badge: "FAST", description: "High-speed coding and lightweight processing", aiProviderID: "anthropic")
-            ]
-        case .gemini:
-            return [
-                SubscriptionModelInfo(modelID: "gemini-2.0-flash", name: "Gemini 2.0 Flash", provider: .gemini, badge: "FLAGSHIP", description: "Next-gen multimodal speed, coding, and real-time awareness", aiProviderID: "gemini"),
-                SubscriptionModelInfo(modelID: "gemini-1.5-pro", name: "Gemini 1.5 Pro", provider: .gemini, badge: "LONG CONTEXT", description: "2M token context window for complex codebase analysis", aiProviderID: "gemini"),
-                SubscriptionModelInfo(modelID: "gemini-1.5-flash", name: "Gemini 1.5 Flash", provider: .gemini, badge: "FAST", description: "Fast, versatile multimodal performance", aiProviderID: "gemini")
-            ]
-        case .deepseek:
-            return [
-                SubscriptionModelInfo(modelID: "deepseek-chat", name: "DeepSeek V3 (Chat)", provider: .deepseek, badge: "CHAT", description: "Flagship general coding and chat intelligence", aiProviderID: "deepseek"),
-                SubscriptionModelInfo(modelID: "deepseek-reasoner", name: "DeepSeek R1 (Reasoner)", provider: .deepseek, badge: "REASONER", description: "Open reasoning model with chain-of-thought", aiProviderID: "deepseek")
-            ]
-        case .copilot:
-            return [
-                SubscriptionModelInfo(modelID: "auto", name: "Copilot Auto", provider: .copilot, badge: "AUTO", description: "GitHub Copilot dynamic model routing", aiProviderID: "copilot"),
-                SubscriptionModelInfo(modelID: "claude-3-7-sonnet", name: "Claude 3.7 Sonnet", provider: .copilot, badge: "HYBRID", description: "Anthropic Claude 3.7 via Copilot", aiProviderID: "copilot"),
-                SubscriptionModelInfo(modelID: "claude-3-5-sonnet", name: "Claude 3.5 Sonnet", provider: .copilot, badge: "FLAGSHIP", description: "Anthropic Claude 3.5 via Copilot", aiProviderID: "copilot"),
-                SubscriptionModelInfo(modelID: "gpt-4o", name: "GPT-4o", provider: .copilot, badge: "FLAGSHIP", description: "OpenAI GPT-4o via Copilot", aiProviderID: "copilot"),
-                SubscriptionModelInfo(modelID: "o3-mini", name: "o3-mini", provider: .copilot, badge: "REASONING", description: "OpenAI o3-mini via Copilot", aiProviderID: "copilot")
-            ]
-        case .glm:
-            return [
-                SubscriptionModelInfo(modelID: "glm-4-plus", name: "GLM-4 Plus", provider: .glm, badge: "MEMBER", description: "Zhipu BigModel flagship membership", aiProviderID: "glm"),
-                SubscriptionModelInfo(modelID: "glm-4-flash", name: "GLM-4 Flash", provider: .glm, badge: "FREE", description: "High-speed zero-latency response", aiProviderID: "glm")
+                SubscriptionModelInfo(modelID: "auto", name: "Copilot Auto", provider: .copilot, badge: "AUTO", description: "GitHub Copilot dynamic model routing", aiProviderID: "copilot")
             ]
         }
+        return []
     }
 
     public var availableModels: [String] {
@@ -342,6 +327,9 @@ public class SubscriptionAuthManager: ObservableObject {
     
     private init() {
         loadSavedAccounts()
+        Task {
+            await self.detectLocalCLISessions()
+        }
     }
     
     public func isConnected(_ provider: SubscriptionProviderType) -> Bool {
@@ -381,6 +369,56 @@ public class SubscriptionAuthManager: ObservableObject {
     
     public func token(for provider: SubscriptionProviderType) -> String? {
         return accounts[provider]?.sessionToken
+    }
+    
+    /// Determines whether a Subscription provider/model should execute via a local CLI OAuth engine
+    /// (`claude_code`, `agy`, `codex`) when no direct pay-as-you-go API key is present.
+    @MainActor
+    public func preferredCLIEngine(for provider: SubscriptionProviderType, model: String) -> String? {
+        let lowerModel = model.lowercased()
+        let acc = accounts[provider]
+        let token = acc?.sessionToken.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        
+        // 1. Models exclusive to Google Antigravity (AGY) CLI
+        if lowerModel.contains("argon") || lowerModel.contains("claude-opus-5-5") || lowerModel.contains("claude-sonnet-5-5") || lowerModel.contains("gemini-3.1-pro") || lowerModel.contains("gemini-3-flash-agent") {
+            if ACPHostService.resolveExecutablePath("agy") != nil {
+                return "agy"
+            }
+        }
+        
+        switch provider {
+        case .claude:
+            // If user has a real sk-ant-api... key (not sk-ant-oat OAuth token), direct API can be used
+            let directKey = AIModelCatalog.resolveKey("anthropic")
+            let hasDirectAPIKey = directKey.hasPrefix("sk-ant-api") || (token.hasPrefix("sk-ant-api"))
+            if !hasDirectAPIKey {
+                if ACPHostService.resolveExecutablePath("claude") != nil {
+                    return "claude_code"
+                }
+                if ACPHostService.resolveExecutablePath("agy") != nil {
+                    return "agy"
+                }
+            }
+        case .gemini:
+            let directKey = AIModelCatalog.resolveKey("gemini")
+            let hasDirectAPIKey = directKey.hasPrefix("AIzaSy") || token.hasPrefix("AIzaSy")
+            if !hasDirectAPIKey {
+                if ACPHostService.resolveExecutablePath("agy") != nil {
+                    return "agy"
+                }
+            }
+        case .chatgpt:
+            let directKey = AIModelCatalog.resolveKey("openai")
+            let hasDirectAPIKey = (directKey.hasPrefix("sk-") && !directKey.hasPrefix("sk-ant-")) || (token.hasPrefix("sk-") && !token.hasPrefix("sk-ant-"))
+            if !hasDirectAPIKey {
+                // If user has ChatGPT OAuth token in ~/.codex/auth.json, AIClient supports Codex ChatGPT Backend API directly,
+                // or falls back to AGY / OpenCode if needed
+                return nil
+            }
+        default:
+            break
+        }
+        return nil
     }
     
     public static func setLiveModels(for provider: SubscriptionProviderType, models: [SubscriptionModelInfo]) {
@@ -427,13 +465,13 @@ public class SubscriptionAuthManager: ObservableObject {
         let trimmedToken = sessionToken.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmedToken.isEmpty else { return }
         
-        // Strict separation: API keys belong to BYOK Direct API, never Web Subscription
-        if trimmedToken.hasPrefix("sk-ant-") {
+        // Also mirror direct API keys to BYOK storage so both modes stay in sync
+        if trimmedToken.hasPrefix("sk-ant-api") {
             UserDefaults.standard.set(trimmedToken, forKey: "anthropic_api_key")
-            return
         } else if trimmedToken.hasPrefix("AIzaSy") {
             UserDefaults.standard.set(trimmedToken, forKey: "gemini_api_key")
-            return
+        } else if trimmedToken.hasPrefix("sk-") && !trimmedToken.hasPrefix("sk-ant-") && provider == .chatgpt {
+            UserDefaults.standard.set(trimmedToken, forKey: "openai_api_key")
         }
         
         let account = SubscriptionAccount(
@@ -483,7 +521,7 @@ public class SubscriptionAuthManager: ObservableObject {
                         token = access
                     }
                 }
-                if token.isEmpty, let directToken = (json["access_token"] ?? json["token"]) as? String {
+                if token.isEmpty, let directToken = (json["access_token"] ?? json["token"] ?? json["OPENAI_API_KEY"]) as? String {
                     token = directToken
                 }
                 
@@ -492,30 +530,31 @@ public class SubscriptionAuthManager: ObservableObject {
                    let idToken = tokens["id_token"] as? String {
                     let parts = idToken.components(separatedBy: ".")
                     if parts.count > 1, let payloadData = Data(base64Encoded: base64Padded(parts[1])),
-                       let payload = try? JSONSerialization.jsonObject(with: payloadData) as? [String: Any],
-                       let mail = payload["email"] as? String {
-                        email = mail
+                       let payload = try? JSONSerialization.jsonObject(with: payloadData) as? [String: Any] {
+                        if let mail = payload["email"] as? String, !mail.isEmpty {
+                            email = mail
+                        }
                     }
                 }
                 
-                // Verify token before saving
                 if !token.isEmpty {
-                    // If it looks like a real API key, verify it
-                    if token.hasPrefix("sk-") {
+                    let finalEmail = email.isEmpty ? "Codex CLI User" : email
+                    let finalToken = token
+                    if finalToken.hasPrefix("sk-") {
                         var req = URLRequest(url: URL(string: "https://api.openai.com/v1/models")!)
-                        req.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
+                        req.setValue("Bearer \(finalToken)", forHTTPHeaderField: "Authorization")
                         req.timeoutInterval = 5
                         if let (_, resp) = try? await URLSession.shared.data(for: req),
                            let http = resp as? HTTPURLResponse, http.statusCode == 200 {
-                            DispatchQueue.main.async {
-                                self.saveAccount(provider: .chatgpt, emailOrUser: email, sessionToken: token, source: "Codex CLI")
+                            await MainActor.run {
+                                self.saveAccount(provider: .chatgpt, emailOrUser: finalEmail, sessionToken: finalToken, source: "Codex CLI")
                             }
                             detected += 1
                         }
                     } else {
-                        // OAuth token from CLI - trust the file existence as proof of auth
-                        DispatchQueue.main.async {
-                            self.saveAccount(provider: .chatgpt, emailOrUser: email.isEmpty ? "Codex CLI User" : email, sessionToken: token, source: "Codex CLI")
+                        // OAuth token from Codex CLI (~/.codex/auth.json)
+                        await MainActor.run {
+                            self.saveAccount(provider: .chatgpt, emailOrUser: finalEmail, sessionToken: finalToken, source: "Codex CLI")
                         }
                         detected += 1
                     }
@@ -527,12 +566,20 @@ public class SubscriptionAuthManager: ObservableObject {
         let claudeHomeJson = home.appendingPathComponent(".claude.json")
         let claudeConfig = home.appendingPathComponent(".claude/config.json")
         var claudeToken: String?
+        var claudeEmail = "Claude CLI User"
         if FileManager.default.fileExists(atPath: claudeHomeJson.path),
            let data = try? Data(contentsOf: claudeHomeJson),
-           let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-           let token = (json["sessionKey"] ?? json["oauthToken"] ?? json["apiKey"]) as? String,
-           !token.isEmpty {
-            claudeToken = token
+           let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] {
+            if let token = (json["sessionKey"] ?? json["oauthToken"] ?? json["apiKey"]) as? String,
+               !token.isEmpty {
+                claudeToken = token
+            } else if let oauthAccount = json["oauthAccount"] as? [String: Any] {
+                let uuid = (oauthAccount["accountUuid"] as? String) ?? "active"
+                if let mail = (oauthAccount["emailAddress"] ?? oauthAccount["displayName"]) as? String, !mail.isEmpty {
+                    claudeEmail = mail
+                }
+                claudeToken = "cli-oauth:claude_code:\(uuid)"
+            }
         }
         if claudeToken == nil, FileManager.default.fileExists(atPath: claudeConfig.path) {
             if let data = try? Data(contentsOf: claudeConfig),
@@ -547,8 +594,8 @@ public class SubscriptionAuthManager: ObservableObject {
         }
         
         if let token = claudeToken, !token.isEmpty {
-            if token.hasPrefix("sk-ant-") {
-                // Real API key - verify and save as direct key
+            let finalClaudeEmail = claudeEmail
+            if token.hasPrefix("sk-ant-api") {
                 var req = URLRequest(url: URL(string: "https://api.anthropic.com/v1/models")!)
                 req.setValue(token, forHTTPHeaderField: "x-api-key")
                 req.setValue("2024-10-22", forHTTPHeaderField: "anthropic-version")
@@ -556,21 +603,35 @@ public class SubscriptionAuthManager: ObservableObject {
                 if let (_, resp) = try? await URLSession.shared.data(for: req),
                    let http = resp as? HTTPURLResponse, http.statusCode == 200 {
                     UserDefaults.standard.set(token, forKey: "anthropic_api_key")
-                    DispatchQueue.main.async {
+                    await MainActor.run {
                         self.saveAccount(provider: .claude, emailOrUser: "Claude API", sessionToken: token, source: "Claude CLI")
                     }
                     detected += 1
                 }
             } else {
-                // Session/OAuth token from Claude CLI - trust file existence
-                DispatchQueue.main.async {
-                    self.saveAccount(provider: .claude, emailOrUser: "Claude CLI User", sessionToken: token, source: "Claude CLI")
+                await MainActor.run {
+                    self.saveAccount(provider: .claude, emailOrUser: finalClaudeEmail, sessionToken: token, source: "Claude CLI")
                 }
                 detected += 1
             }
         }
         
-        // 3. Check for GitHub Copilot CLI session (~/.config/gh/hosts.yml or environment)
+        // 3. Check for Google Antigravity (AGY) CLI session or GEMINI_API_KEY
+        if let geminiKey = ProcessInfo.processInfo.environment["GEMINI_API_KEY"], !geminiKey.isEmpty {
+            await MainActor.run {
+                self.saveAccount(provider: .gemini, emailOrUser: "Gemini API", sessionToken: geminiKey, source: "Environment")
+            }
+            detected += 1
+        } else if ACPHostService.resolveExecutablePath("agy") != nil {
+            await MainActor.run {
+                if !self.isConnected(.gemini) {
+                    self.saveAccount(provider: .gemini, emailOrUser: "Google Antigravity CLI", sessionToken: "cli-oauth:agy:gemini", source: "Antigravity CLI")
+                }
+            }
+            detected += 1
+        }
+        
+        // 4. Check for GitHub Copilot CLI session (~/.config/gh/hosts.yml or environment)
         let ghHosts = home.appendingPathComponent(".config/gh/hosts.yml")
         var ghToken: String?
         if FileManager.default.fileExists(atPath: ghHosts.path),
@@ -594,7 +655,6 @@ public class SubscriptionAuthManager: ObservableObject {
         }
         
         if let token = ghToken, !token.isEmpty {
-            // Verify if account has active Copilot access
             var req = URLRequest(url: URL(string: "https://api.github.com/copilot_internal/v2/token")!)
             req.setValue("token \(token)", forHTTPHeaderField: "Authorization")
             req.setValue("vscode/1.95.0", forHTTPHeaderField: "Editor-Version")
@@ -602,31 +662,42 @@ public class SubscriptionAuthManager: ObservableObject {
             req.timeoutInterval = 5
             if let (_, resp) = try? await URLSession.shared.data(for: req),
                let http = resp as? HTTPURLResponse, http.statusCode == 200 {
-                DispatchQueue.main.async {
-                    self.saveAccount(provider: .copilot, emailOrUser: "GitHub Copilot Active", sessionToken: token, source: "Manual")
+                await MainActor.run {
+                    self.saveAccount(provider: .copilot, emailOrUser: "GitHub Copilot Active", sessionToken: token, source: "GitHub CLI")
                 }
                 detected += 1
             }
         }
         
-        // Also check GEMINI_API_KEY env var
-        if let geminiKey = ProcessInfo.processInfo.environment["GEMINI_API_KEY"], !geminiKey.isEmpty {
-            DispatchQueue.main.async {
-                self.saveAccount(provider: .gemini, emailOrUser: "Gemini API", sessionToken: geminiKey, source: "Environment")
+        // 5. Check for DeepSeek
+        let dsKey: String = await MainActor.run {
+            ProcessInfo.processInfo.environment["DEEPSEEK_API_KEY"] ?? AIModelCatalog.resolveKey("deepseek")
+        }
+        if !dsKey.isEmpty {
+            await MainActor.run {
+                if !self.isConnected(.deepseek) {
+                    self.saveAccount(provider: .deepseek, emailOrUser: "DeepSeek API", sessionToken: dsKey, source: "Direct / Env")
+                }
             }
             detected += 1
         }
         
-        // 5. Check for DeepSeek
-        if let dsKey = ProcessInfo.processInfo.environment["DEEPSEEK_API_KEY"], !dsKey.isEmpty {
-            DispatchQueue.main.async {
-                self.saveAccount(provider: .deepseek, emailOrUser: "DeepSeek API", sessionToken: dsKey, source: "Environment")
+        // 6. Check for GLM / Zhipu
+        let glmKey: String = await MainActor.run {
+            ProcessInfo.processInfo.environment["GLM_API_KEY"] ?? ProcessInfo.processInfo.environment["ZHIPU_API_KEY"] ?? AIModelCatalog.resolveKey("glm")
+        }
+        if !glmKey.isEmpty {
+            await MainActor.run {
+                if !self.isConnected(.glm) {
+                    self.saveAccount(provider: .glm, emailOrUser: "Zhipu GLM", sessionToken: glmKey, source: "Direct / Env")
+                }
             }
             detected += 1
         }
         
         let finalDetected = detected
-        DispatchQueue.main.async {
+        await MainActor.run {
+            AIModelCatalog.shared.syncAllSubscriptionModels()
             self.detectedSessionCount = finalDetected
             if finalDetected > 0 {
                 self.lastDetectionMessage = "Detected \(finalDetected) active subscription session(s)."
@@ -889,16 +960,11 @@ public class SubscriptionAuthManager: ObservableObject {
                     guard saveTokenToKeychain(provider: prov.rawValue, token: loadedToken) else { continue }
                 }
                 let tok = loadedToken.trimmingCharacters(in: .whitespacesAndNewlines)
-                // Redirect raw API keys to BYOK storage (not subscription accounts)
-                if tok.hasPrefix("sk-ant-") {
+                if tok.hasPrefix("sk-ant-api") {
                     UserDefaults.standard.set(tok, forKey: "anthropic_api_key")
-                    continue
                 } else if tok.hasPrefix("AIzaSy") {
                     UserDefaults.standard.set(tok, forKey: "gemini_api_key")
-                    continue
                 }
-                // Accept any valid account regardless of source
-                // (sources: "Manual", "Web Sign-In (1-Click)", "Manual Input")
                 if acc.isValid && !tok.isEmpty {
                     var updatedAcc = acc
                     updatedAcc.sessionToken = tok
@@ -906,7 +972,6 @@ public class SubscriptionAuthManager: ObservableObject {
                 }
             }
             self.accounts = validAccounts
-            // Only persist if we actually redirected API keys (removed entries)
             persistAccounts()
         }
     }

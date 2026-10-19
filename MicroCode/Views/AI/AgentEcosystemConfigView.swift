@@ -1016,25 +1016,27 @@ public struct AgentEcosystemConfigView: View {
                     .font(.system(size: 12, weight: .semibold))
                     .foregroundColor(.primary)
 
-                let specialized = [
-                    ("glm-4-plus", "Zhipu GLM-4 Plus", "Dual-language reasoning and 128k context"),
-                    ("codegeex-4", "CodeGeeX-4", "Multilingual code synthesis & refactoring"),
-                    ("deepseek-chat", "DeepSeek V3", "Direct API high-speed reasoning"),
-                    ("gemini-2.5-pro", "Gemini 2.5 Pro", "Direct Google API multimodal reasoning")
-                ]
-
-                ForEach(specialized, id: \.0) { mid, name, desc in
-                    HStack {
-                        VStack(alignment: .leading, spacing: 1) {
-                            Text(name).font(.system(size: 11, weight: .semibold)).foregroundColor(.primary)
-                            Text(desc).font(.system(size: 10)).foregroundColor(.secondary)
+                let liveProviders = AIModelCatalog.shared.providers.filter { !$0.models.isEmpty }
+                ForEach(liveProviders.prefix(6), id: \.id) { prov in
+                    if let topModel = prov.models.first {
+                        HStack {
+                            VStack(alignment: .leading, spacing: 1) {
+                                Text("\(prov.name) — \(topModel.name)")
+                                    .font(.system(size: 11, weight: .semibold))
+                                    .foregroundColor(.primary)
+                                Text("\(prov.models.count) live models available")
+                                    .font(.system(size: 10))
+                                    .foregroundColor(.secondary)
+                            }
+                            Spacer()
+                            Text(topModel.id)
+                                .font(.system(size: 10, design: .monospaced))
+                                .foregroundColor(.secondary)
                         }
-                        Spacer()
-                        Text(mid).font(.system(size: 10, design: .monospaced)).foregroundColor(.secondary)
+                        .padding(8)
+                        .background(Color.primary.opacity(0.02))
+                        .cornerRadius(6)
                     }
-                    .padding(8)
-                    .background(Color.primary.opacity(0.02))
-                    .cornerRadius(6)
                 }
             }
             .padding(14)

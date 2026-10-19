@@ -400,6 +400,7 @@ async fn main() -> Result<()> {
         )
         // Remote X Support
         .route("/api/remote/connect", post(remote::remote_connect))
+        .route("/api/remote/disconnect", post(remote::remote_disconnect))
         .route("/api/remote/ping", post(remote::remote_ping))
         .route("/api/remote/shell/:id", get(remote::remote_shell_ws))
         .route("/api/remote/exec", post(remote::remote_exec))
@@ -2679,10 +2680,19 @@ mod handlers {
         // 3. Spawn output forwarder
         let (mut sender, mut receiver) = socket.split();
         let mut send_task = tokio::spawn(async move {
-            while let Ok(data) = rx.recv().await {
-                // Send as binary
-                if let Err(_) = sender.send(Message::Binary(data)).await {
-                    break;
+            loop {
+                match rx.recv().await {
+                    Ok(data) => {
+                        if sender.send(Message::Binary(data)).await.is_err() {
+                            break;
+                        }
+                    }
+                    Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {
+                        continue;
+                    }
+                    Err(tokio::sync::broadcast::error::RecvError::Closed) => {
+                        break;
+                    }
                 }
             }
         });
@@ -2696,18 +2706,24 @@ mod handlers {
                 let st = recv_state.read().await;
                 match msg {
                     Message::Text(text) => {
-                        // Protocol: "R:cols,rows" for resize, otherwise input
-                        if text.starts_with("R:") {
+                        // Protocol: "R:cols,rows" for resize (strictly validated), otherwise input
+                        let mut handled_resize = false;
+                        if text.starts_with("R:") && text.len() <= 16 {
                             let parts: Vec<&str> = text[2..].split(',').collect();
                             if parts.len() == 2 {
                                 if let (Ok(cols), Ok(rows)) =
                                     (parts[0].parse::<u16>(), parts[1].parse::<u16>())
                                 {
-                                    let _ =
-                                        st.terminal_manager.resize(&recv_session_id, cols, rows);
+                                    if (1..=1000).contains(&cols) && (1..=1000).contains(&rows) {
+                                        let _ = st
+                                            .terminal_manager
+                                            .resize(&recv_session_id, cols, rows);
+                                        handled_resize = true;
+                                    }
                                 }
                             }
-                        } else {
+                        }
+                        if !handled_resize {
                             let _ = st.terminal_manager.write(&recv_session_id, text.as_bytes());
                         }
                     }
@@ -2724,6 +2740,8 @@ mod handlers {
             _ = (&mut send_task) => recv_task.abort(),
             _ = (&mut recv_task) => send_task.abort(),
         };
+
+        state.read().await.terminal_manager.close_session(&session_id);
     }
 
     // ==========================================

@@ -349,6 +349,33 @@ struct AgenticEditorWorkspace: View {
                 surface = (mode == .aiAgent) ? .agent : .editor
             }
         }
+        .onReceive(NotificationCenter.default.publisher(for: NSNotification.Name("MicroCodeWorkspaceChanged"))) { notif in
+            if let path = notif.object as? String, !path.isEmpty {
+                let normalizedNew = URL(fileURLWithPath: path).standardizedFileURL.path
+                let normalizedCurrent = appState.workspaceFolder?.standardizedFileURL.path
+                if normalizedCurrent != normalizedNew {
+                    Task { @MainActor in
+                        await appState.openWorkspace(url: URL(fileURLWithPath: normalizedNew))
+                    }
+                }
+            }
+        }
+        .onReceive(NotificationCenter.default.publisher(for: NSNotification.Name("MicroCodeOpenFileURL"))) { notif in
+            if let url = notif.object as? URL {
+                Task { @MainActor in
+                    var isDir: ObjCBool = false
+                    if FileManager.default.fileExists(atPath: url.path, isDirectory: &isDir) {
+                        if isDir.boolValue {
+                            await appState.openWorkspace(url: url)
+                            AgentService.shared.setWorkspace(url.path)
+                        } else {
+                            await appState.loadFile(url: url)
+                            surface = .editor
+                        }
+                    }
+                }
+            }
+        }
     }
 
     @ViewBuilder
@@ -503,7 +530,6 @@ struct AgenticEditorWorkspace: View {
                             DeviceRuntimeService.shared.showingEmbeddedAppleDock = true
                             DeviceRuntimeService.shared.showingEmbeddedDeviceDock = true
                             appState.showingPreviewView = true
-                            Task { await DeviceRuntimeService.shared.startPreferredEmbeddedAppleSimulator() }
                         }
                         Button("Android Emulator") {
                             PreviewDockService.shared.selectTab(id: "android")
@@ -511,7 +537,6 @@ struct AgenticEditorWorkspace: View {
                             DeviceRuntimeService.shared.showingEmbeddedAppleDock = false
                             DeviceRuntimeService.shared.showingEmbeddedDeviceDock = true
                             appState.showingPreviewView = true
-                            Task { await DeviceRuntimeService.shared.startPreferredEmbeddedAndroid() }
                         }
                         Button("iPhone USB (Hardware)") {
                             PreviewDockService.shared.selectTab(id: "ios-physical")
@@ -2119,14 +2144,12 @@ struct AgenticContextInspector: View {
                                     deviceRuntime.embeddedDockMode = .ios
                                     deviceRuntime.showingEmbeddedDeviceDock = true
                                     deviceRuntime.showingEmbeddedAppleDock = true
-                                    Task { await deviceRuntime.startEmbeddedAppleSimulator() }
                                 }
                                 Button("Android Emulator") {
                                     PreviewDockService.shared.selectTab(id: "android")
                                     deviceRuntime.embeddedDockMode = .android
                                     deviceRuntime.showingEmbeddedDeviceDock = true
                                     deviceRuntime.showingEmbeddedAppleDock = false
-                                    Task { await deviceRuntime.startPreferredEmbeddedAndroid() }
                                 }
                             }
 
@@ -3580,7 +3603,7 @@ struct EditorArea: View {
                 ExtensionStudioView()
                     .environmentObject(appState)
             case .code:
-                CompatHSplitView {
+                HStack(spacing: 0) {
                     VStack(spacing: 0) {
                         if !appState.openFiles.isEmpty {
                             EditorTabBar()
@@ -3639,6 +3662,7 @@ struct EditorArea: View {
                             DebugArea()
                         }
                     }
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
                     .background(
                         Group {
                             if appState.appTheme.isGlass {
@@ -3979,35 +4003,16 @@ struct RightPreviewPanel: View {
         }
         .frame(width: CGFloat(previewWidth))
         .onAppear {
-            autoSelectPlatform()
             Task {
                 await deviceRuntime.refresh(workspace: appState.workspaceFolder)
             }
         }
-        .onChange(of: appState.currentFile?.path) { _ in
-            autoSelectPlatform()
-        }
     }
 
     private func autoSelectPlatform() {
-        guard let file = appState.currentFile else { return }
-        let ext = (file.name as NSString).pathExtension.lowercased()
-        let path = file.path.lowercased()
-        if ["kt", "kts", "java", "xml"].contains(ext) || path.contains("/android/") || path.contains("/res/") {
-            deviceRuntime.showingEmbeddedAppleDock = false
-            deviceRuntime.showingEmbeddedDeviceDock = true
-            PreviewDockService.shared.selectTab(id: "android")
-            Task { await deviceRuntime.startPreferredEmbeddedAndroid() }
-        } else if ["swift", "storyboard", "xib", "plist"].contains(ext) || path.contains("/ios/") {
-            deviceRuntime.showingEmbeddedAppleDock = true
-            deviceRuntime.showingEmbeddedDeviceDock = true
-            PreviewDockService.shared.selectTab(id: "ios")
-            Task { await deviceRuntime.startPreferredEmbeddedAppleSimulator() }
-        } else if ["html", "htm", "css", "js", "ts", "jsx", "tsx", "vue", "svelte", "astro"].contains(ext) || path.contains("/web/") || path.contains("/public/") {
-            deviceRuntime.showingEmbeddedAppleDock = false
-            deviceRuntime.showingEmbeddedDeviceDock = true
-            PreviewDockService.shared.selectTab(id: "web")
-        }
+        // Intentionally do not auto-boot iOS Simulator or Android Emulator
+        // simply because a .swift or .kt file is open in the editor.
+        // Runtimes should only start when explicitly requested by the user.
     }
 }
 
@@ -4134,8 +4139,13 @@ struct EditorTab: View {
 struct CodeEditor: View {
     let file: CodeFile
     @EnvironmentObject var appState: AppState
-    @State private var text: String = ""
+    @State private var text: String
     @State private var updateTask: Task<Void, Never>? = nil
+
+    init(file: CodeFile) {
+        self.file = file
+        self._text = State(initialValue: file.content)
+    }
     
     var body: some View {
         VStack(spacing: 0) {
@@ -9249,199 +9259,178 @@ struct GlobalKeyboardShortcutsModifier: ViewModifier {
 
     func body(content: Content) -> some View {
         content
+            .background(navigationAndPanelShortcuts)
+            .background(executionAndControlModeShortcuts)
+            .background(optionModeShortcuts)
+    }
+
+    @ViewBuilder
+    private var navigationAndPanelShortcuts: some View {
+        Group {
             // HUD Cheat Sheet (⌘/)
-            .background(
-                Button("") {
-                    appState.showingKeyboardShortcuts.toggle()
-                }
-                .keyboardShortcut("/", modifiers: .command)
-                .hidden()
-            )
+            Button("") {
+                appState.showingKeyboardShortcuts.toggle()
+            }
+            .keyboardShortcut("/", modifiers: .command)
+            .hidden()
+
             // Tabs & Navigation (⌘], ⌘[, ⌘⌥W)
-            .background(
-                Button("") {
-                    appState.selectNextTab()
-                }
-                .keyboardShortcut("]", modifiers: .command)
-                .hidden()
-            )
-            .background(
-                Button("") {
-                    appState.selectPreviousTab()
-                }
-                .keyboardShortcut("[", modifiers: .command)
-                .hidden()
-            )
-            .background(
-                Button("") {
-                    appState.closeOtherTabs()
-                }
-                .keyboardShortcut("w", modifiers: [.command, .option])
-                .hidden()
-            )
+            Button("") {
+                appState.selectNextTab()
+            }
+            .keyboardShortcut("]", modifiers: .command)
+            .hidden()
+
+            Button("") {
+                appState.selectPreviousTab()
+            }
+            .keyboardShortcut("[", modifiers: .command)
+            .hidden()
+
+            Button("") {
+                appState.closeOtherTabs()
+            }
+            .keyboardShortcut("w", modifiers: [.command, .option])
+            .hidden()
+
             // Panels & Layout (⌘J, ⌘I, ⌘⌥G, ⌘⌥P)
-            .background(
-                Button("") {
-                    withAnimation(.easeInOut(duration: 0.2)) {
-                        appState.toggleConsole()
-                    }
+            Button("") {
+                withAnimation(.easeInOut(duration: 0.2)) {
+                    appState.toggleConsole()
                 }
-                .keyboardShortcut("j", modifiers: .command)
-                .hidden()
-            )
-            .background(
-                Button("") {
-                    withAnimation(.easeInOut(duration: 0.2)) {
-                        appState.toggleAgenticContext()
-                    }
+            }
+            .keyboardShortcut("j", modifiers: .command)
+            .hidden()
+
+            Button("") {
+                withAnimation(.easeInOut(duration: 0.2)) {
+                    appState.toggleAgenticContext()
                 }
-                .keyboardShortcut("i", modifiers: .command)
-                .hidden()
-            )
-            .background(
-                Button("") {
-                    withAnimation(.easeInOut(duration: 0.2)) {
-                        appState.toggleGitPanel()
-                    }
+            }
+            .keyboardShortcut("i", modifiers: .command)
+            .hidden()
+
+            Button("") {
+                withAnimation(.easeInOut(duration: 0.2)) {
+                    appState.toggleGitPanel()
                 }
-                .keyboardShortcut("g", modifiers: [.command, .option])
-                .hidden()
-            )
-            .background(
-                Button("") {
-                    withAnimation(.easeInOut(duration: 0.2)) {
-                        appState.showingPreviewView.toggle()
-                    }
+            }
+            .keyboardShortcut("g", modifiers: [.command, .option])
+            .hidden()
+
+            Button("") {
+                withAnimation(.easeInOut(duration: 0.2)) {
+                    appState.showingPreviewView.toggle()
                 }
-                .keyboardShortcut("p", modifiers: [.command, .option])
-                .hidden()
-            )
+            }
+            .keyboardShortcut("p", modifiers: [.command, .option])
+            .hidden()
+        }
+    }
+
+    @ViewBuilder
+    private var executionAndControlModeShortcuts: some View {
+        Group {
             // Code Execution & Build (⌘R, ⌘⇧B, ⌘., ⌘⌥F)
-            .background(
-                Button("") {
-                    appState.runCode()
-                }
-                .keyboardShortcut("r", modifiers: .command)
+            Button("") {
+                appState.runCode()
+            }
+            .keyboardShortcut("r", modifiers: .command)
+            .hidden()
+
+            Button("") {
+                appState.buildProject()
+            }
+            .keyboardShortcut("b", modifiers: [.command, .shift])
+            .hidden()
+
+            Button("") {
+                appState.stopExecution()
+            }
+            .keyboardShortcut(".", modifiers: .command)
+            .hidden()
+
+            Button("") {
+                appState.formatCode()
+            }
+            .keyboardShortcut("f", modifiers: [.command, .option])
+            .hidden()
+
+            // Editor Modes (Control + 1..5)
+            Button("") { appState.switchToMode(.code) }
+                .keyboardShortcut("1", modifiers: .control)
                 .hidden()
-            )
-            .background(
-                Button("") {
-                    appState.buildProject()
-                }
-                .keyboardShortcut("b", modifiers: [.command, .shift])
+            Button("") { appState.switchToMode(.aiAgent) }
+                .keyboardShortcut("2", modifiers: .control)
                 .hidden()
-            )
-            .background(
-                Button("") {
-                    appState.stopExecution()
-                }
-                .keyboardShortcut(".", modifiers: .command)
+            Button("") { appState.switchToMode(.notebook) }
+                .keyboardShortcut("3", modifiers: .control)
                 .hidden()
-            )
-            .background(
-                Button("") {
-                    appState.formatCode()
-                }
-                .keyboardShortcut("f", modifiers: [.command, .option])
+            Button("") { appState.switchToMode(.playground) }
+                .keyboardShortcut("4", modifiers: .control)
                 .hidden()
-            )
-            // Editor Modes (Control + 1..9, 0)
-            .background(
-                Button("") { appState.switchToMode(.code) }
-                    .keyboardShortcut("1", modifiers: .control)
-                    .hidden()
-            )
-            .background(
-                Button("") { appState.switchToMode(.aiAgent) }
-                    .keyboardShortcut("2", modifiers: .control)
-                    .hidden()
-            )
-            .background(
-                Button("") { appState.switchToMode(.notebook) }
-                    .keyboardShortcut("3", modifiers: .control)
-                    .hidden()
-            )
-            .background(
-                Button("") { appState.switchToMode(.playground) }
-                    .keyboardShortcut("4", modifiers: .control)
-                    .hidden()
-            )
-            .background(
-                Button("") { appState.switchToMode(.science) }
-                    .keyboardShortcut("5", modifiers: .control)
-                    .hidden()
-            )
-            .background(
-                Button("") { appState.switchToMode(.browser) }
-                    .keyboardShortcut("6", modifiers: .control)
-                    .hidden()
-            )
-            .background(
-                Button("") { appState.switchToMode(.remoteX) }
-                    .keyboardShortcut("7", modifiers: .control)
-                    .hidden()
-            )
-            .background(
-                Button("") { appState.switchToMode(.embedded) }
-                    .keyboardShortcut("8", modifiers: .control)
-                    .hidden()
-            )
-            .background(
-                Button("") { appState.openAPIStudio() }
-                    .keyboardShortcut("9", modifiers: .control)
-                    .hidden()
-            )
-            .background(
-                Button("") { appState.showingWelcomeHome = true }
-                    .keyboardShortcut("0", modifiers: .control)
-                    .hidden()
-            )
+            Button("") { appState.switchToMode(.science) }
+                .keyboardShortcut("5", modifiers: .control)
+                .hidden()
+        }
+    }
+
+    @ViewBuilder
+    private var optionModeShortcuts: some View {
+        Group {
+            // Editor Modes (Control + 6..9, 0)
+            Button("") { appState.switchToMode(.browser) }
+                .keyboardShortcut("6", modifiers: .control)
+                .hidden()
+            Button("") { appState.switchToMode(.remoteX) }
+                .keyboardShortcut("7", modifiers: .control)
+                .hidden()
+            Button("") { appState.switchToMode(.embedded) }
+                .keyboardShortcut("8", modifiers: .control)
+                .hidden()
+            Button("") { appState.openAPIStudio() }
+                .keyboardShortcut("9", modifiers: .control)
+                .hidden()
+            Button("") { appState.showingWelcomeHome = true }
+                .keyboardShortcut("0", modifiers: .control)
+                .hidden()
+
             // Option alternatives for Mode Switching (⌘⌥1..9)
-            .background(
-                Button("") { appState.switchToMode(.code) }
-                    .keyboardShortcut("1", modifiers: [.command, .option])
-                    .hidden()
-            )
-            .background(
-                Button("") { appState.switchToMode(.aiAgent) }
-                    .keyboardShortcut("2", modifiers: [.command, .option])
-                    .hidden()
-            )
-            .background(
-                Button("") { appState.switchToMode(.notebook) }
-                    .keyboardShortcut("3", modifiers: [.command, .option])
-                    .hidden()
-            )
-            .background(
-                Button("") { appState.switchToMode(.playground) }
-                    .keyboardShortcut("4", modifiers: [.command, .option])
-                    .hidden()
-            )
-            .background(
-                Button("") { appState.switchToMode(.science) }
-                    .keyboardShortcut("5", modifiers: [.command, .option])
-                    .hidden()
-            )
-            .background(
-                Button("") { appState.switchToMode(.browser) }
-                    .keyboardShortcut("6", modifiers: [.command, .option])
-                    .hidden()
-            )
-            .background(
-                Button("") { appState.switchToMode(.remoteX) }
-                    .keyboardShortcut("7", modifiers: [.command, .option])
-                    .hidden()
-            )
-            .background(
-                Button("") { appState.switchToMode(.embedded) }
-                    .keyboardShortcut("8", modifiers: [.command, .option])
-                    .hidden()
-            )
-            .background(
-                Button("") { appState.openAPIStudio() }
-                    .keyboardShortcut("9", modifiers: [.command, .option])
-                    .hidden()
-            )
+            Button("") { appState.switchToMode(.code) }
+                .keyboardShortcut("1", modifiers: [.command, .option])
+                .hidden()
+            Button("") { appState.switchToMode(.aiAgent) }
+                .keyboardShortcut("2", modifiers: [.command, .option])
+                .hidden()
+            Button("") { appState.switchToMode(.notebook) }
+                .keyboardShortcut("3", modifiers: [.command, .option])
+                .hidden()
+            Button("") { appState.switchToMode(.playground) }
+                .keyboardShortcut("4", modifiers: [.command, .option])
+                .hidden()
+            Button("") { appState.switchToMode(.science) }
+                .keyboardShortcut("5", modifiers: [.command, .option])
+                .hidden()
+        }
+        .background(optionModeHighShortcuts)
+    }
+
+    @ViewBuilder
+    private var optionModeHighShortcuts: some View {
+        Group {
+            Button("") { appState.switchToMode(.browser) }
+                .keyboardShortcut("6", modifiers: [.command, .option])
+                .hidden()
+            Button("") { appState.switchToMode(.remoteX) }
+                .keyboardShortcut("7", modifiers: [.command, .option])
+                .hidden()
+            Button("") { appState.switchToMode(.embedded) }
+                .keyboardShortcut("8", modifiers: [.command, .option])
+                .hidden()
+            Button("") { appState.openAPIStudio() }
+                .keyboardShortcut("9", modifiers: [.command, .option])
+                .hidden()
+        }
     }
 }
 

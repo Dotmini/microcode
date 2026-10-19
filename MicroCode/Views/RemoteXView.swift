@@ -139,29 +139,85 @@ struct RemoteConnectionConfig: Identifiable, Hashable, Codable {
     }
     
     var provider: CloudProvider = .none
+    var proxyJump: String = ""
+    var forwardAgent: Bool = false
     
     enum CodingKeys: String, CodingKey {
-        case id, name, host, port, username, authType, password, keyPath, otp, connectionType, lastConnected, provider
+        case id, name, host, port, username, authType, password, keyPath, otp, connectionType, lastConnected, provider, proxyJump, forwardAgent
     }
     
     init(from decoder: Decoder) throws {
         let container = try decoder.container(keyedBy: CodingKeys.self)
-        id = try container.decodeIfPresent(UUID.self, forKey: .id) ?? UUID()
+        let decodedId = try container.decodeIfPresent(UUID.self, forKey: .id) ?? UUID()
+        id = decodedId
         name = try container.decode(String.self, forKey: .name)
         host = try container.decode(String.self, forKey: .host)
         port = try container.decodeIfPresent(UInt16.self, forKey: .port) ?? 22
         username = try container.decode(String.self, forKey: .username)
         authType = try container.decodeIfPresent(AuthType.self, forKey: .authType) ?? .password
-        password = try container.decodeIfPresent(String.self, forKey: .password) ?? ""
         keyPath = try container.decodeIfPresent(String.self, forKey: .keyPath) ?? ""
-        otp = try container.decodeIfPresent(String.self, forKey: .otp) ?? ""
         connectionType = try container.decodeIfPresent(ConnectionType.self, forKey: .connectionType) ?? .ssh
         lastConnected = try container.decodeIfPresent(Date.self, forKey: .lastConnected)
         provider = try container.decodeIfPresent(CloudProvider.self, forKey: .provider) ?? .none
+        proxyJump = try container.decodeIfPresent(String.self, forKey: .proxyJump) ?? ""
+        forwardAgent = try container.decodeIfPresent(Bool.self, forKey: .forwardAgent) ?? false
+        
+        let legacyPwd = try container.decodeIfPresent(String.self, forKey: .password) ?? ""
+        let legacyOtp = try container.decodeIfPresent(String.self, forKey: .otp) ?? ""
+        
+        if !legacyPwd.isEmpty {
+            Task { @MainActor in
+                KeychainManager.shared.saveIntegrationSecret(legacyPwd, account: "ssh_pwd_\(decodedId.uuidString)")
+            }
+            password = legacyPwd
+        } else {
+            password = MainActor.assumeIsolated {
+                KeychainManager.shared.readIntegrationSecret(account: "ssh_pwd_\(decodedId.uuidString)") ?? ""
+            }
+        }
+        
+        if !legacyOtp.isEmpty {
+            Task { @MainActor in
+                KeychainManager.shared.saveIntegrationSecret(legacyOtp, account: "ssh_otp_\(decodedId.uuidString)")
+            }
+            otp = legacyOtp
+        } else {
+            otp = MainActor.assumeIsolated {
+                KeychainManager.shared.readIntegrationSecret(account: "ssh_otp_\(decodedId.uuidString)") ?? ""
+            }
+        }
+    }
+    
+    func encode(to encoder: Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encode(id, forKey: .id)
+        try container.encode(name, forKey: .name)
+        try container.encode(host, forKey: .host)
+        try container.encode(port, forKey: .port)
+        try container.encode(username, forKey: .username)
+        try container.encode(authType, forKey: .authType)
+        // Never write plaintext password or OTP into UserDefaults plist; persist in KeychainManager
+        let serverId = id.uuidString
+        let currentPwd = password
+        let currentOtp = otp
+        Task { @MainActor in
+            if !currentPwd.isEmpty {
+                KeychainManager.shared.saveIntegrationSecret(currentPwd, account: "ssh_pwd_\(serverId)")
+            }
+            if !currentOtp.isEmpty {
+                KeychainManager.shared.saveIntegrationSecret(currentOtp, account: "ssh_otp_\(serverId)")
+            }
+        }
+        try container.encode(keyPath, forKey: .keyPath)
+        try container.encode(connectionType, forKey: .connectionType)
+        try container.encodeIfPresent(lastConnected, forKey: .lastConnected)
+        try container.encode(provider, forKey: .provider)
+        try container.encode(proxyJump, forKey: .proxyJump)
+        try container.encode(forwardAgent, forKey: .forwardAgent)
     }
     
     // Memberwise init
-    init(id: UUID = UUID(), name: String, host: String, port: UInt16 = 22, username: String, authType: AuthType = .password, password: String = "", keyPath: String = "", otp: String = "", connectionType: ConnectionType = .ssh, provider: CloudProvider = .none) {
+    init(id: UUID = UUID(), name: String, host: String, port: UInt16 = 22, username: String, authType: AuthType = .password, password: String = "", keyPath: String = "", otp: String = "", connectionType: ConnectionType = .ssh, provider: CloudProvider = .none, proxyJump: String = "", forwardAgent: Bool = false) {
         self.id = id
         self.name = name
         self.host = host
@@ -173,6 +229,8 @@ struct RemoteConnectionConfig: Identifiable, Hashable, Codable {
         self.otp = otp
         self.connectionType = connectionType
         self.provider = provider
+        self.proxyJump = proxyJump
+        self.forwardAgent = forwardAgent
     }
 }
 
@@ -278,7 +336,6 @@ class RemoteConnectionManager: ObservableObject {
         let entries = SSHConfigParser.shared.parseDefaultConfig()
         var count = 0
         for entry in entries {
-             // Check duplicate
              if !servers.contains(where: { $0.host == entry.hostName || $0.name == entry.host }) {
                  let config = RemoteConnectionConfig(
                     name: entry.host,
@@ -289,13 +346,14 @@ class RemoteConnectionManager: ObservableObject {
                     password: "",
                     keyPath: entry.identityFile ?? "",
                     connectionType: .ssh,
-                    provider: .none
+                    provider: .none,
+                    proxyJump: entry.proxyJump ?? "",
+                    forwardAgent: entry.forwardAgent
                  )
                  addServer(config)
                  count += 1
              }
         }
-        // Could notify user "Imported \(count) servers"
     }
     
     func loadServers() {
@@ -324,6 +382,13 @@ class RemoteConnectionManager: ObservableObject {
     }
     
     func deleteServer(_ server: RemoteConnectionConfig) {
+        let serverId = server.id.uuidString
+        let serverHost = server.host
+        Task { @MainActor in
+            KeychainManager.shared.deleteIntegrationSecret(account: "ssh_pwd_\(serverId)")
+            KeychainManager.shared.deleteIntegrationSecret(account: "ssh_otp_\(serverId)")
+            KeychainManager.shared.deleteIntegrationSecret(account: "ssh_host_pwd_\(serverHost)")
+        }
         servers.removeAll { $0.id == server.id }
         saveServers()
     }
@@ -428,9 +493,6 @@ class RemoteConnectionManager: ObservableObject {
         }
     }
     
-    
-    // Add error callback or published property for UI alerts
-    // Add error callback or published property for UI alerts
     @Published var lastError: String?
     @Published var showError: Bool = false
     @Published var isLoadingFiles: Bool = false
@@ -441,6 +503,10 @@ class RemoteConnectionManager: ObservableObject {
         
         if let server = currentConnection {
             terminateTerminalSession(for: server.id)
+            let serverId = server.id.uuidString
+            Task {
+                try? await BackendService.shared.disconnectRemote(id: serverId)
+            }
         }
         
         isConnected = false
@@ -1794,8 +1860,13 @@ struct ServerConfigSheet: View {
                 provider = server.provider
                 authType = server.authType
                 if password.isEmpty {
-                    if let saved = (UserDefaults.standard.dictionary(forKey: "ssh_saved_passwords") as? [String: String])?[host] {
+                    if let kcSaved = KeychainManager.shared.readIntegrationSecret(account: "ssh_host_pwd_\(host)"), !kcSaved.isEmpty {
+                        password = kcSaved
+                    } else if let legacyDict = UserDefaults.standard.dictionary(forKey: "ssh_saved_passwords") as? [String: String],
+                              let saved = legacyDict[host] {
                         password = saved
+                        KeychainManager.shared.saveIntegrationSecret(saved, account: "ssh_host_pwd_\(host)")
+                        UserDefaults.standard.removeObject(forKey: "ssh_saved_passwords")
                     }
                 }
                 debouncePing()
@@ -1820,11 +1891,6 @@ struct ServerConfigSheet: View {
     private func parseMagicSSH(_ input: String) {
         let trimmed = input.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { return }
-        
-        // Simple regex-based parsing
-        // Target formats:
-        // 1. ssh -i path user@host -p port
-        // 2. user@host
         
         var parsedUser = ""
         var parsedHost = ""
@@ -1860,7 +1926,6 @@ struct ServerConfigSheet: View {
             parsedHost = subParts[1]
         }
         
-        // Apply if found
         if !parsedUser.isEmpty { username = parsedUser }
         if !parsedHost.isEmpty { host = parsedHost }
         if !parsedPort.isEmpty { port = parsedPort }
@@ -1876,7 +1941,6 @@ struct ServerConfigSheet: View {
     
     private func debouncePing() {
         reachabilityStatus = .checking
-        // Simple manual debounce for MVP
         Task {
             try? await Task.sleep(nanoseconds: 800_000_000) // 0.8s
             await checkReachability()
@@ -1907,7 +1971,7 @@ struct ServerConfigSheet: View {
         testResult = nil
         
         let config = RemoteConnectionConfig(
-            id: UUID(), // temp id
+            id: UUID(),
             name: name,
             host: host,
             port: UInt16(port) ?? 22,
@@ -1953,9 +2017,12 @@ struct ServerConfigSheet: View {
         server.username = username
         server.password = password
         if !password.isEmpty {
-            var saved = UserDefaults.standard.dictionary(forKey: "ssh_saved_passwords") as? [String: String] ?? [:]
-            saved[host] = password
-            UserDefaults.standard.set(saved, forKey: "ssh_saved_passwords")
+            KeychainManager.shared.saveIntegrationSecret(password, account: "ssh_pwd_\(server.id.uuidString)")
+            KeychainManager.shared.saveIntegrationSecret(password, account: "ssh_host_pwd_\(host)")
+            UserDefaults.standard.removeObject(forKey: "ssh_saved_passwords")
+        }
+        if !otp.isEmpty {
+            KeychainManager.shared.saveIntegrationSecret(otp, account: "ssh_otp_\(server.id.uuidString)")
         }
         server.keyPath = keyPath
         server.otp = otp
@@ -2029,16 +2096,25 @@ struct RemoteTerminalTab: View {
             "-o", "PreferredAuthentications=publickey,keyboard-interactive,password",
             "-o", "KbdInteractiveAuthentication=yes",
             "-o", "PubkeyAuthentication=yes",
+            "-o", "ControlMaster=auto",
+            "-o", "ControlPath=/tmp/mc-ssh-%r@%h:%p",
+            "-o", "ControlPersist=10m",
             "-t",
             "-p", "\(server.port)"
         ]
+        if server.forwardAgent {
+            args.append("-A")
+        }
+        if !server.proxyJump.isEmpty {
+            args.append(contentsOf: ["-J", server.proxyJump])
+        }
         if !server.keyPath.isEmpty {
             let expanded = (server.keyPath as NSString).expandingTildeInPath
             if FileManager.default.fileExists(atPath: expanded) {
                 args.append(contentsOf: ["-i", expanded, "-o", "IdentitiesOnly=yes"])
             }
         }
-        args.append("\(server.username)@\(server.host)")
+        args.append(contentsOf: ["--", "\(server.username)@\(server.host)"])
         return args
     }
 

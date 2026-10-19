@@ -24,22 +24,32 @@ while [[ $# -gt 0 ]]; do
     esac
 done
 
-# 1. Build Swift (assuming Rust is built or handled separately/before)
+# 1. Build Swift (using External SSD when available)
 echo "🏗️ Building Swift frontend..."
-if [ -d "/Volumes/XcodeWork" ]; then
-    export TMPDIR="/Volumes/XcodeWork/MicroCodeBuild/tmp"
-elif [ -d "/Volumes/MAC" ]; then
-    export TMPDIR="/Volumes/MAC/CodeTunerBuild/tmp"
+if [ -n "${CODETUNER_BUILD_ROOT:-}" ]; then
+    BUILD_ROOT="$CODETUNER_BUILD_ROOT"
 elif [ -d "/Volumes/MicroCodeBuild" ]; then
-    export TMPDIR="/Volumes/MicroCodeBuild/tmp"
+    BUILD_ROOT="/Volumes/MicroCodeBuild"
+elif [ -d "/Volumes/XcodeWork" ]; then
+    BUILD_ROOT="/Volumes/XcodeWork/MicroCodeBuild"
+elif [ -d "/Volumes/MAC" ]; then
+    BUILD_ROOT="/Volumes/MAC/CodeTunerBuild"
 else
-    export TMPDIR="${TMPDIR:-/tmp}"
+    BUILD_ROOT="$(pwd)/.build"
 fi
-mkdir -p "$TMPDIR"
+
+echo "ℹ Build Root: $BUILD_ROOT"
+mkdir -p "$BUILD_ROOT/cargo-home" "$BUILD_ROOT/cargo-target" "$BUILD_ROOT/swiftpm" "$BUILD_ROOT/tmp" "$BUILD_ROOT/apps"
+export TMPDIR="$BUILD_ROOT/tmp"
+export CARGO_HOME="$BUILD_ROOT/cargo-home"
+export CARGO_TARGET_DIR="$BUILD_ROOT/cargo-target"
+SWIFT_SCRATCH_PATH="$BUILD_ROOT/swiftpm/$(basename "$PWD")"
 
 # Collect potential Rust library directories
 RUST_LINK_FLAGS=()
 for libdir in \
+    "$BUILD_ROOT/cargo-target/debug" \
+    "$BUILD_ROOT/cargo-target/release" \
     "/Volumes/MAC/CodeTunerBuild/cargo-target/debug" \
     "/Volumes/MAC/CodeTunerBuild/cargo-target/release" \
     "/Volumes/MicroCodeBuild/cargo-target/release" \
@@ -62,7 +72,7 @@ do
     fi
 done
 
-swift build -c debug \
+swift build -c debug --scratch-path "$SWIFT_SCRATCH_PATH" \
     "${RUST_LINK_FLAGS[@]}" \
     -Xlinker -lmicrocode_embedded \
     -Xlinker -lmicrocode_core \
@@ -76,8 +86,8 @@ swift build -c debug \
     -Xlinker -framework -Xlinker CoreFoundation \
     -Xlinker -headerpad_max_install_names
 
-# 2. Create Bundle
-DEFAULT_APP_DIR="$HOME/Applications"
+# 2. Create Bundle on External SSD (or fallback build root)
+DEFAULT_APP_DIR="$BUILD_ROOT/apps"
 mkdir -p "$DEFAULT_APP_DIR"
 BUNDLE_NAME="${CODETUNER_APP_DEST:-$DEFAULT_APP_DIR/MicroCode.app}"
 rm -rf "$BUNDLE_NAME"
@@ -86,24 +96,16 @@ mkdir -p "$BUNDLE_NAME/Contents/MacOS"
 mkdir -p "$BUNDLE_NAME/Contents/Resources"
 
 # 3. Copy Binary
-BINARY_PATH="$(swift build --show-bin-path)/MicroCode"
+BINARY_PATH="$SWIFT_SCRATCH_PATH/out/Products/Debug/MicroCode"
 if [ ! -f "$BINARY_PATH" ]; then
-    BINARY_PATH=".build/out/Products/Debug/MicroCode"
+    BINARY_PATH="$(swift build -c debug --scratch-path "$SWIFT_SCRATCH_PATH" --show-bin-path)/MicroCode"
 fi
 if [ ! -f "$BINARY_PATH" ]; then
-    BINARY_PATH=".build/arm64-apple-macosx/debug/MicroCode"
+    BINARY_PATH=$(find "$SWIFT_SCRATCH_PATH" -name "MicroCode" -type f ! -path "*.dSYM*" 2>/dev/null | head -n 1)
 fi
 if [ ! -f "$BINARY_PATH" ]; then
-    echo "Error: Binary not found at $BINARY_PATH"
-    # Try finding it
-    BINARY_PATH=$(find .build -name MicroCode -type f | grep -i Products | head -n 1)
-    if [ -z "$BINARY_PATH" ]; then
-        BINARY_PATH=$(find .build -name MicroCode -type f | head -n 1)
-    fi
-    if [ -z "$BINARY_PATH" ]; then
-        echo "Critical Error: Could not locate compiled binary."
-        exit 1
-    fi
+    echo "Critical Error: Could not locate compiled binary in $SWIFT_SCRATCH_PATH."
+    exit 1
 fi
 echo "Using binary at: $BINARY_PATH"
 
@@ -205,7 +207,8 @@ fi
 
 # 7. Code Sign Bundle
 echo "🔐 Signing Bundle..."
-xattr -cr "$BUNDLE_NAME"
+dot_clean -m "$BUNDLE_NAME" 2>/dev/null || true
+xattr -cr "$BUNDLE_NAME" 2>/dev/null || true
 if security find-identity -v -p codesigning | grep -q "Apple Development: business@dotmini.net (A58QB9B355)"; then
     codesign --force --deep --sign "Apple Development: business@dotmini.net (A58QB9B355)" "$BUNDLE_NAME"
 else

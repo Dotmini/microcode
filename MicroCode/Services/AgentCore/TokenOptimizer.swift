@@ -69,17 +69,10 @@ class TokenOptimizer: ObservableObject {
     @Published var stats = TokenUsageStats()
     @Published var isOptimizing = false
     
-    // Stop words for pruning (extended set)
+    // Stop words for light prose pruning (NEVER include negations, modals, or directional prepositions)
     private let stopWords: Set<String> = [
-        "the", "a", "an", "is", "are", "was", "were", "be", "been", "being",
-        "have", "has", "had", "do", "does", "did", "will", "would", "shall",
-        "should", "may", "might", "must", "can", "could", "to", "of", "in",
-        "for", "on", "with", "at", "by", "from", "as", "into", "through",
-        "during", "before", "after", "above", "below", "between", "same",
-        "but", "or", "nor", "not", "so", "very", "just", "about", "up",
-        "out", "if", "then", "than", "too", "also", "that", "this", "these",
-        "those", "it", "its", "they", "them", "their", "we", "our", "he",
-        "she", "him", "her", "his", "my", "your", "i", "me", "you"
+        "the", "a", "an", "been", "being",
+        "very", "just", "too", "also", "that", "this", "these", "those"
     ]
     
     // Code-related keywords that should never be pruned
@@ -95,7 +88,8 @@ class TokenOptimizer: ObservableObject {
         "interface", "abstract", "final", "sealed", "open", "package",
         "create", "read", "write", "delete", "update", "list", "search",
         "build", "run", "test", "deploy", "install", "remove", "add",
-        "fix", "bug", "feature", "refactor", "optimize", "debug"
+        "fix", "bug", "feature", "refactor", "optimize", "debug",
+        "not", "no", "never", "always", "must", "should", "only"
     ]
 
     private let statsKey = "microcode.agentUsage.v2"
@@ -110,7 +104,7 @@ class TokenOptimizer: ObservableObject {
     // MARK: - Estimate Token Count (fast approximation)
     
     nonisolated func estimateTokens(_ text: String) -> Int {
-        // GPT-style tokenization: ~4 chars per token for English, ~2 for code
+        // GPT-style tokenization: ~4 chars per token for English, ~3 for code
         let hasCode = text.contains("{") || text.contains("func ") || text.contains("def ")
         let ratio: Double = hasCode ? 3.0 : 4.0
         return max(1, Int(ceil(Double(text.count) / ratio)))
@@ -118,23 +112,21 @@ class TokenOptimizer: ObservableObject {
     
     // MARK: - Compress System Prompt
     
-    /// Compress system prompt by removing redundant instructions and formatting
+    /// Compress system prompt by removing redundant formatting while strictly preserving negative constraints
     func compressSystemPrompt(_ prompt: String, budget: Int) -> String {
         let tokens = estimateTokens(prompt)
         if tokens <= budget { return prompt }
         
-        // Strategy 1: Remove markdown formatting overhead
+        // Strategy 1: Remove markdown formatting overhead without stripping semantic modals (NEVER/ALWAYS/MUST)
         var compressed = prompt
-            .replacingOccurrences(of: "## ", with: "# ")
             .replacingOccurrences(of: "### ", with: "# ")
-            .replacingOccurrences(of: "**", with: "")
+            .replacingOccurrences(of: "## ", with: "# ")
             .replacingOccurrences(of: "---\n", with: "\n")
         
-        // Strategy 2: Remove verbose instruction phrases
+        // Strategy 2: Remove only filler politeness phrases that never alter constraints
         let verbosePatterns = [
-            "You MUST ", "ALWAYS ", "NEVER ", "CRITICAL RULES\n",
-            "Make sure to ", "Please ensure ", "It is important that ",
-            "Note that ", "Remember to ", "Keep in mind that "
+            "Please ensure that ", "It is important to note that ",
+            "Keep in mind that "
         ]
         for pattern in verbosePatterns {
             compressed = compressed.replacingOccurrences(of: pattern, with: "")
@@ -148,7 +140,7 @@ class TokenOptimizer: ObservableObject {
             compressed = String(compressed.prefix(targetChars))
         }
         
-        stats.savedTokens += tokens - estimateTokens(compressed)
+        stats.savedTokens += max(0, tokens - estimateTokens(compressed))
         return compressed
     }
     
@@ -158,35 +150,36 @@ class TokenOptimizer: ObservableObject {
     func compressHistory(_ messages: [(role: String, content: String)], budget: Int) -> [(role: String, content: String)] {
         guard !messages.isEmpty else { return [] }
         
-        // Strategy 0: Compact any historical tool results to prevent TPM explosion on provider API
+        // Strategy 0: Compact only very old, massive tool dumps (> 40,000 chars) outside the recent window
         var sanitizedMessages: [(role: String, content: String)] = []
+        let recentProtectedCount = 6
         for (idx, msg) in messages.enumerated() {
-            // Keep the very last message verbatim, but compact older tool dumps
-            if idx < messages.count - 1 && msg.content.contains("Tool execution results:") && msg.content.count > 10_000 {
-                let lines = msg.content.components(separatedBy: "\n")
-                let compactLines = lines.filter { line in
-                    let trimmed = line.trimmingCharacters(in: .whitespaces)
-                    return trimmed.hasPrefix("✅") || trimmed.hasPrefix("❌") || trimmed.hasPrefix("⚠️") ||
-                           trimmed.contains("Modified:") || trimmed.contains("Created:")
+            if idx < messages.count - recentProtectedCount && msg.content.count > 40_000 {
+                if msg.content.contains(AIStructuredTurnCodec.markerKey) {
+                    let compacted = AIStructuredTurnCodec.compactToolOutputsIfNeeded(msg.content, maxCharsPerOutput: 6_000)
+                    sanitizedMessages.append((role: msg.role, content: compacted))
+                } else if msg.content.contains("Tool execution results:") {
+                    let head = String(msg.content.prefix(4_000))
+                    let tail = String(msg.content.suffix(2_000))
+                    let summary = head + "\n\n... [Older bulky tool output compacted] ...\n\n" + tail
+                    sanitizedMessages.append((role: msg.role, content: summary))
+                } else {
+                    sanitizedMessages.append(msg)
                 }
-                let summary = compactLines.isEmpty
-                    ? "[Prior tool results completed]"
-                    : "Prior tool summary:\n" + compactLines.prefix(15).joined(separator: "\n") + "\n[Older file content pruned to protect TPM limit]"
-                sanitizedMessages.append((role: msg.role, content: summary))
             } else {
                 sanitizedMessages.append(msg)
             }
         }
         
         let totalTokens = sanitizedMessages.reduce(0) { $0 + estimateTokens($1.content) }
-        let effectiveBudget = min(budget, 80_000)
+        let effectiveBudget = max(40_000, min(budget, 160_000))
         if totalTokens <= effectiveBudget { return sanitizedMessages }
         
         var result: [(role: String, content: String)] = []
         let originalTokens = totalTokens
         
         // Strategy 1: Keep recent messages intact, summarize older ones
-        let keepCount = min(6, sanitizedMessages.count) // Keep last 6 messages verbatim
+        let keepCount = min(8, sanitizedMessages.count) // Keep last 8 messages verbatim
         let toSummarize = Array(sanitizedMessages.dropLast(keepCount))
         let recentMessages = Array(sanitizedMessages.suffix(keepCount))
         
@@ -198,15 +191,20 @@ class TokenOptimizer: ObservableObject {
             }
         }
         
-        // Add recent messages with per-message compression
-        let remainingBudget = budget - result.reduce(0) { $0 + estimateTokens($1.content) }
-        let perMessageBudget = max(200, remainingBudget / max(1, recentMessages.count))
+        // Add recent messages with per-message compression only if over budget
+        let remainingBudget = effectiveBudget - result.reduce(0) { $0 + estimateTokens($1.content) }
+        let perMessageBudget = max(2_000, remainingBudget / max(1, recentMessages.count))
         
         for msg in recentMessages {
             let msgTokens = estimateTokens(msg.content)
             if msgTokens > perMessageBudget {
-                let compressed = compressText(msg.content, targetTokens: perMessageBudget)
-                result.append((role: msg.role, content: compressed))
+                if msg.content.contains(AIStructuredTurnCodec.markerKey) {
+                    let compacted = AIStructuredTurnCodec.compactToolOutputsIfNeeded(msg.content, maxCharsPerOutput: perMessageBudget * 4)
+                    result.append((role: msg.role, content: compacted))
+                } else {
+                    let compressed = compressText(msg.content, targetTokens: perMessageBudget)
+                    result.append((role: msg.role, content: compressed))
+                }
             } else {
                 result.append(msg)
             }
@@ -327,59 +325,92 @@ class TokenOptimizer: ObservableObject {
     
     // MARK: - Compress Tool Output
     
-    /// Compress tool execution output (grep results, directory listings, etc.)
-    func compressToolOutput(_ output: String, toolName: String, budget: Int = 100_000) -> String {
+    /// Compress tool execution output while preserving compiler errors, stack traces, and code context
+    func compressToolOutput(_ output: String, toolName: String, budget: Int = 24_000) -> String {
         let tokens = estimateTokens(output)
         if tokens <= budget { return output }
         
         switch toolName {
         case "grep_search":
-            // Keep unique file matches, limit lines per file
+            // Keep unique file matches, up to 15 matches per file
             let lines = output.components(separatedBy: "\n")
             var fileGroups: [String: [String]] = [:]
+            var fileOrder: [String] = []
             for line in lines {
                 if let colonIdx = line.firstIndex(of: ":") {
                     let file = String(line[..<colonIdx])
-                    if fileGroups[file] == nil { fileGroups[file] = [] }
-                    if (fileGroups[file]?.count ?? 0) < 3 {  // Max 3 matches per file
+                    if fileGroups[file] == nil {
+                        fileGroups[file] = []
+                        fileOrder.append(file)
+                    }
+                    if (fileGroups[file]?.count ?? 0) < 15 {
                         fileGroups[file]?.append(line)
                     }
                 }
             }
-            let compressed = fileGroups.flatMap { $0.value }.joined(separator: "\n")
-            stats.savedTokens += tokens - estimateTokens(compressed)
+            let compressed = fileOrder.flatMap { fileGroups[$0] ?? [] }.joined(separator: "\n")
+            stats.savedTokens += max(0, tokens - estimateTokens(compressed))
             return compressed + "\n(results compressed: \(lines.count) → \(fileGroups.values.reduce(0) { $0 + $1.count }) lines)"
             
         case "list_directory_tree":
-            // Limit depth and file count
+            // Allow up to 250 lines so full module trees remain visible
             let lines = output.components(separatedBy: "\n")
-            let limited = Array(lines.prefix(50))
-            let result = limited.joined(separator: "\n") + (lines.count > 50 ? "\n... (\(lines.count - 50) more entries)" : "")
-            stats.savedTokens += tokens - estimateTokens(result)
+            let limit = 250
+            let limited = Array(lines.prefix(limit))
+            let result = limited.joined(separator: "\n") + (lines.count > limit ? "\n... (\(lines.count - limit) more entries)" : "")
+            stats.savedTokens += max(0, tokens - estimateTokens(result))
             return result
             
         case "shell":
-            // Keep first and last sections of command output
+            // Preserve head, tail, AND any middle compiler/test error & warning lines with surrounding context
             let lines = output.components(separatedBy: "\n")
-            if lines.count > 40 {
-                let head = Array(lines.prefix(15)).joined(separator: "\n")
-                let tail = Array(lines.suffix(15)).joined(separator: "\n")
-                let result = head + "\n\n... (\(lines.count - 30) lines omitted) ...\n\n" + tail
-                stats.savedTokens += tokens - estimateTokens(result)
+            if lines.count > 220 {
+                let headCount = 50
+                let tailCount = 90
+                let head = Array(lines.prefix(headCount)).joined(separator: "\n")
+                let tail = Array(lines.suffix(tailCount)).joined(separator: "\n")
+                
+                let middleStart = headCount
+                let middleEnd = max(middleStart, lines.count - tailCount)
+                var diagnosticIndices = Set<Int>()
+                let errorPatterns = ["error:", "error[", "warning:", "failed", "fatal", "panic", "exception", "traceback", "undefined", "cannot find", "❌"]
+                if middleStart < middleEnd {
+                    for idx in middleStart..<middleEnd {
+                        let lower = lines[idx].lowercased()
+                        if errorPatterns.contains(where: { lower.contains($0) }) {
+                            for ctx in max(middleStart, idx - 2)...min(middleEnd - 1, idx + 3) {
+                                diagnosticIndices.insert(ctx)
+                            }
+                        }
+                    }
+                }
+                
+                var middleDiagnostics = ""
+                if !diagnosticIndices.isEmpty {
+                    let sortedIndices = diagnosticIndices.sorted().prefix(120)
+                    let extracted = sortedIndices.map { "L\($0 + 1): \(lines[$0])" }.joined(separator: "\n")
+                    middleDiagnostics = "\n\n--- [Extracted Diagnostics from lines \(middleStart + 1)-\(middleEnd)] ---\n\(extracted)\n"
+                }
+                
+                let omittedCount = max(0, (middleEnd - middleStart) - diagnosticIndices.count)
+                let result = head + middleDiagnostics + "\n\n... (\(omittedCount) non-diagnostic lines omitted) ...\n\n" + tail
+                stats.savedTokens += max(0, tokens - estimateTokens(result))
                 return result
             }
-            return String(output.prefix(budget * 4)) // Rough char budget
+            let maxChars = max(16_000, budget * 4)
+            return output.count > maxChars ? String(output.prefix(maxChars)) : output
             
         default:
-            // Generic truncation with head + tail strategy
-            if output.count > budget * 4 {
-                let headChars = budget * 2
-                let tailChars = budget
-                let result = String(output.prefix(headChars)) + "\n\n... (truncated) ...\n\n" + String(output.suffix(tailChars))
-                stats.savedTokens += tokens - estimateTokens(result)
+            // Generic truncation with generous head + tail strategy
+            let maxChars = max(16_000, budget * 4)
+            if output.count > maxChars {
+                let headChars = (maxChars * 2) / 3
+                let tailChars = maxChars / 3
+                let result = String(output.prefix(headChars)) + "\n\n... (truncated \(output.count - maxChars) chars) ...\n\n" + String(output.suffix(tailChars))
+                stats.savedTokens += max(0, tokens - estimateTokens(result))
                 return result
             }
-            return String(output.prefix(budget * 4))
+            return output
         }
     }
     
@@ -455,38 +486,15 @@ class TokenOptimizer: ObservableObject {
         let currentTokens = estimateTokens(text)
         if currentTokens <= targetTokens { return text }
         
-        // Strategy: Remove stop words from non-code sections
-        let lines = text.components(separatedBy: "\n")
-        var compressed: [String] = []
-        var inCodeBlock = false
-        
-        for line in lines {
-            if line.contains("```") { inCodeBlock.toggle() }
-            
-            if inCodeBlock {
-                compressed.append(line)  // Keep code blocks intact
-            } else {
-                // Prune stop words from prose
-                let words = line.components(separatedBy: " ")
-                let pruned = words.filter { word in
-                    let lower = word.lowercased().trimmingCharacters(in: .punctuationCharacters)
-                    return !stopWords.contains(lower) || codeKeywords.contains(lower) || word.count <= 1
-                }
-                compressed.append(pruned.joined(separator: " "))
-            }
+        // Preserve head and tail cleanly without mangling grammar via aggressive word deletion
+        let ratio = Double(targetTokens) / Double(max(1, currentTokens))
+        let targetChars = max(500, Int(Double(text.count) * ratio))
+        if text.count > targetChars {
+            let headChars = (targetChars * 2) / 3
+            let tailChars = targetChars / 3
+            return String(text.prefix(headChars)) + "\n... (compressed) ...\n" + String(text.suffix(tailChars))
         }
-        
-        var result = compressed.joined(separator: "\n")
-        let resultTokens = estimateTokens(result)
-        
-        // If still over budget, hard truncate
-        if resultTokens > targetTokens {
-            let ratio = Double(targetTokens) / Double(resultTokens)
-            let targetChars = Int(Double(result.count) * ratio)
-            result = String(result.prefix(targetChars)) + "\n... (compressed)"
-        }
-        
-        return result
+        return text
     }
     
     nonisolated private func isStructuralLine(_ line: String) -> Bool {
@@ -541,18 +549,17 @@ class TokenOptimizer: ObservableObject {
     // MARK: - Smart Iterative Context Window for Agent Loops
     
     /// Compresses tool history dynamically during long-running multi-turn loops.
-    /// Preserves the original goal and the latest 2-3 turns in full fidelity,
-    /// while summarizing older tool outputs to avoid context blowup and AI slop.
+    /// Preserves the original goal and the latest 6 messages (3 full turns) in full fidelity,
+    /// while retaining actionable code/error excerpts in older turns.
     func compressIterativeToolHistory(
         _ history: [(role: String, content: String)],
-        budget: Int = 80_000
+        budget: Int = 120_000
     ) -> [(role: String, content: String)] {
-        guard history.count > 4 else { return history }
+        guard history.count > 8 else { return history }
         
+        let effectiveBudget = max(60_000, min(budget, 180_000))
         let totalTokens = history.reduce(0) { $0 + estimateTokens($1.content) }
-        // Trigger compression if over sensible budget OR if any message contains bulky raw output
-        let hasBulkyTurn = history.contains { $0.content.count > 10_000 }
-        if totalTokens <= budget && !hasBulkyTurn { return history }
+        if totalTokens <= effectiveBudget { return history }
         
         var optimized: [(role: String, content: String)] = []
         
@@ -561,39 +568,39 @@ class TokenOptimizer: ObservableObject {
             optimized.append(first)
         }
         
-        // 2. Determine slice of older turns vs recent turns (preserve latest 3 turns in full fidelity)
-        let recentCount = min(3, history.count - 1)
+        // 2. Preserve the latest 6 messages (3 full turns) in 100% fidelity
+        let recentCount = min(6, history.count - 1)
         let middleTurns = history.dropFirst().dropLast(recentCount)
         let recentTurns = history.suffix(recentCount)
         
-        // 3. Summarize middle tool turns to stop context runaway
+        // 3. Compact older middle turns while keeping file headers, errors, and code excerpts
         for item in middleTurns {
-            if item.role == "user" && item.content.contains("Tool execution results:") {
-                // Compress old tool result
-                let lines = item.content.components(separatedBy: "\n")
-                var compactLines: [String] = []
-                for line in lines {
-                    let trimmed = line.trimmingCharacters(in: .whitespaces)
-                    if trimmed.hasPrefix("✅") || trimmed.hasPrefix("❌") || trimmed.hasPrefix("⚠️") ||
-                       trimmed.contains("Modified:") || trimmed.contains("Created:") ||
-                       trimmed.contains("Kernel directive:") || trimmed.contains("Instruction:") {
-                        compactLines.append(trimmed)
-                    } else if trimmed.hasPrefix("Tool [") || trimmed.contains("output (") {
-                        compactLines.append(trimmed)
-                    }
-                }
-                let summaryContent: String
-                if !compactLines.isEmpty {
-                    summaryContent = "Tool execution results (historical checkpoint):\n" + compactLines.joined(separator: "\n") + "\n[Detailed raw content summarized to prevent context inflation]"
+            if item.content.contains(AIStructuredTurnCodec.markerKey) {
+                if item.role == "user" {
+                    let compacted = AIStructuredTurnCodec.compactToolOutputsIfNeeded(item.content, maxCharsPerOutput: 3_500)
+                    optimized.append((role: "user", content: compacted))
+                } else if item.role == "assistant",
+                          case .assistantToolCalls(let text, let toolCalls) = AIStructuredTurnCodec.decode(item.content),
+                          text.count > 1_500 {
+                    let trimmedText = String(text.prefix(1_500)) + "... [earlier response compacted]"
+                    let reencoded = AIStructuredTurnCodec.encodeAssistantTurn(text: trimmedText, toolCalls: toolCalls)
+                    optimized.append((role: "assistant", content: reencoded))
                 } else {
-                    summaryContent = "[Prior tools completed: \(lines.prefix(3).joined(separator: " "))]"
+                    optimized.append(item)
                 }
-                optimized.append((role: "user", content: summaryContent))
+            } else if item.role == "user" && item.content.contains("Tool execution results:") {
+                if item.content.count > 4_000 {
+                    let head = String(item.content.prefix(2_500))
+                    let tail = String(item.content.suffix(1_000))
+                    let summaryContent = head + "\n... [Earlier tool output compacted] ...\n" + tail
+                    optimized.append((role: "user", content: summaryContent))
+                } else {
+                    optimized.append(item)
+                }
             } else if item.role == "assistant" {
-                // Compact old thoughts
-                if item.content.count > 350 {
-                    let trimmed = item.content.prefix(350)
-                    optimized.append((role: "assistant", content: String(trimmed) + "... [historical thought summarized]"))
+                if item.content.count > 1_500 {
+                    let trimmed = item.content.prefix(1_500)
+                    optimized.append((role: "assistant", content: String(trimmed) + "... [earlier response compacted]"))
                 } else {
                     optimized.append(item)
                 }

@@ -60,20 +60,29 @@ final class TeamTaskService: ObservableObject {
     @Published private(set) var workspacePath: String?
     @Published private(set) var lastError: String?
 
+    private var fileMonitorSource: DispatchSourceFileSystemObject?
+    private var fileMonitorFD: Int32 = -1
+    private var isPersistingLocally = false
+
     var selectedTask: TeamTask? {
         selectedTaskID.flatMap { selectedID in tasks.first(where: { $0.id == selectedID }) }
     }
 
     func load(workspacePath: String?) {
         guard let workspacePath, !workspacePath.isEmpty else {
+            stopWatchingFile()
             self.workspacePath = nil
             tasks = []
             selectedTaskID = nil
             return
         }
+        let workspaceChanged = (self.workspacePath != workspacePath)
         self.workspacePath = workspacePath
         lastError = nil
         let url = documentURL(for: workspacePath)
+        if workspaceChanged || fileMonitorSource == nil {
+            startWatchingFile(at: url)
+        }
         guard FileManager.default.fileExists(atPath: url.path) else {
             tasks = []
             selectedTaskID = nil
@@ -93,6 +102,40 @@ final class TeamTaskService: ObservableObject {
     }
 
     func reload() { load(workspacePath: workspacePath) }
+
+    private func stopWatchingFile() {
+        fileMonitorSource?.cancel()
+        fileMonitorSource = nil
+        if fileMonitorFD >= 0 {
+            close(fileMonitorFD)
+            fileMonitorFD = -1
+        }
+    }
+
+    private func startWatchingFile(at fileURL: URL) {
+        stopWatchingFile()
+        let dirURL = fileURL.deletingLastPathComponent()
+        try? FileManager.default.createDirectory(at: dirURL, withIntermediateDirectories: true)
+        let fd = open(dirURL.path, O_EVTONLY)
+        guard fd >= 0 else { return }
+        fileMonitorFD = fd
+        let source = DispatchSource.makeFileSystemObjectSource(
+            fileDescriptor: fd,
+            eventMask: [.write, .rename, .extend],
+            queue: DispatchQueue.main
+        )
+        source.setEventHandler { [weak self] in
+            Task { @MainActor in
+                guard let self, !self.isPersistingLocally else { return }
+                self.load(workspacePath: self.workspacePath)
+            }
+        }
+        source.setCancelHandler {
+            close(fd)
+        }
+        source.resume()
+        fileMonitorSource = source
+    }
 
     @discardableResult
     func createTask(title: String, objective: String, scope: String, sourceChatID: String? = nil) -> TeamTask? {
@@ -221,6 +264,12 @@ final class TeamTaskService: ObservableObject {
     private func persist() {
         guard let workspacePath else { return }
         let url = documentURL(for: workspacePath)
+        isPersistingLocally = true
+        defer {
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.15) { [weak self] in
+                self?.isPersistingLocally = false
+            }
+        }
         do {
             try FileManager.default.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
             let encoder = JSONEncoder()

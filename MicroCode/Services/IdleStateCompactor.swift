@@ -29,9 +29,9 @@ public final class IdleStateCompactor: ObservableObject {
     @Published public private(set) var isCompacting: Bool = false
     
     private var idleTimer: Timer?
-    private var lastUserActivity: Date = Date()
+    private var lastUserActivity: Date = .distantPast
     private var eventMonitor: Any?
-    private let defaultIdleThreshold: TimeInterval = 3.5 // Inactivity threshold
+    private let defaultIdleThreshold: TimeInterval = 45.0 // Inactivity threshold (avoid compacting during brief reading pauses)
     private var isMonitoringStarted: Bool = false
     
     private init() {}
@@ -41,17 +41,24 @@ public final class IdleStateCompactor: ObservableObject {
         guard !isMonitoringStarted else { return }
         isMonitoringStarted = true
         setupEventMonitors()
-        resetIdleTimer(delay: 2.5) // Initial startup settling delay
+        resetIdleTimer(delay: defaultIdleThreshold)
     }
     
     /// Record active user interaction (keystroke, click, scroll).
+    /// Throttled to avoid 120Hz Timer allocation and @Published mutations during trackpad scrolling.
     public func recordActivity() {
-        lastUserActivity = Date()
+        let now = Date()
         if currentState != .active {
             currentState = .active
-            // Immediate wakeup: decompress only the currently selected file tab in O(1)
+            // Immediate wakeup: decompress only the currently selected file tab if needed
             AppState.shared?.decompressActiveFile()
+            lastUserActivity = now
+            resetIdleTimer(delay: defaultIdleThreshold)
+            return
         }
+        // Throttle timer resets to at most once every 2.0 seconds during continuous scrolling/typing
+        guard now.timeIntervalSince(lastUserActivity) >= 2.0 else { return }
+        lastUserActivity = now
         resetIdleTimer(delay: defaultIdleThreshold)
     }
     
@@ -106,10 +113,6 @@ public final class IdleStateCompactor: ObservableObject {
             // 2. Purge cached NSScrollViews and NSTextViews for closed or hidden tabs
             await MainActor.run {
                 SyntaxHighlightedCodeView.purgeNonVisibleViewCache()
-                CATransaction.begin()
-                CATransaction.flush()
-                CATransaction.commit()
-                NSGraphicsContext.current?.flushGraphics()
             }
             
             // 3. Clear syntax highlight line caches

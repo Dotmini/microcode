@@ -34,7 +34,7 @@ final class DotminiPlatformKeyService: ObservableObject {
     func save(_ rawValue: String) -> Bool {
         let value = rawValue.trimmingCharacters(in: .whitespacesAndNewlines)
         guard value.hasPrefix("sk-dotmini-") || value.hasPrefix("mci-live-") else {
-            validationMessage = "Use a Dotmini Platform key (sk-dotmini-… or mci-live-…)."
+            validationMessage = "Use a Dotmini Platform or Enterprise key (sk-dotmini-… / sk-dotmini-ent-… / mci-live-…)."
             return false
         }
         guard KeychainManager.shared.saveIntegrationSecret(value, account: Self.keychainAccount) else {
@@ -42,7 +42,13 @@ final class DotminiPlatformKeyService: ObservableObject {
             return false
         }
         apiKey = value
-        validationMessage = "Platform key saved securely on this Mac."
+        if value.hasPrefix("sk-dotmini-ent-") {
+            EnterpriseAIAuthService.shared.dotminiEnterpriseKey = value
+            EnterpriseAIAuthService.shared.mode = .dotminiEnterprise
+            validationMessage = "Dotmini Enterprise key saved securely (ZDR & Enterprise Governance active)."
+        } else {
+            validationMessage = "Platform key saved securely on this Mac."
+        }
         return true
     }
 

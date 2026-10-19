@@ -10,6 +10,8 @@
 
 import Foundation
 import Security
+import CryptoKit
+import IOKit
 
 // MARK: - Keychain Manager
 
@@ -19,6 +21,46 @@ class KeychainManager: ObservableObject {
     
     private let service = "com.dotmini.microcode.api-keys"
     private let integrationService = "com.dotmini.microcode.integrations"
+    private var memoryCache: [String: String] = [:]
+    
+    /// Hardware-bound AES-256-GCM key used to seal cached secrets on disk so plaintext is NEVER written to UserDefaults
+    private lazy var sealKey: SymmetricKey = {
+        let machineID = Self.hardwareUUID() ?? "com.dotmini.microcode.sovereign.vault"
+        let material = "microcode.vault.v2.\(machineID)"
+        let digest = SHA256.hash(data: Data(material.utf8))
+        return SymmetricKey(data: digest)
+    }()
+    
+    private static func hardwareUUID() -> String? {
+        let platformExpert = IOServiceGetMatchingService(
+            kIOMainPortDefault,
+            IOServiceMatching("IOPlatformExpertDevice")
+        )
+        guard platformExpert != 0 else { return nil }
+        defer { IOObjectRelease(platformExpert) }
+        if let uuid = IORegistryEntryCreateCFProperty(
+            platformExpert,
+            kIOPlatformUUIDKey as CFString,
+            kCFAllocatorDefault,
+            0
+        )?.takeRetainedValue() as? String {
+            return uuid
+        }
+        return nil
+    }
+    
+    private func encryptSecret(_ plaintext: String) -> Data? {
+        guard let data = plaintext.data(using: .utf8) else { return nil }
+        return try? AES.GCM.seal(data, using: sealKey).combined
+    }
+    
+    private func decryptSecret(_ combined: Data) -> String? {
+        guard let box = try? AES.GCM.SealedBox(combined: combined),
+              let opened = try? AES.GCM.open(box, using: sealKey) else {
+            return nil
+        }
+        return String(data: opened, encoding: .utf8)
+    }
     
     /// Known provider key identifiers
     enum ProviderKey: String, CaseIterable {
@@ -57,17 +99,24 @@ class KeychainManager: ObservableObject {
     
     // MARK: - CRUD Operations
     
-    /// Store an API key in Keychain
+    /// Store an API key in Keychain (and encrypted seal cache, never plaintext UserDefaults)
     func save(key: String, for provider: ProviderKey) -> Bool {
         guard !key.isEmpty else { return false }
         
-        // Fast cache so recompiled binaries never trigger OS password prompt
-        UserDefaults.standard.set(key, forKey: "km_cached_\(provider.rawValue)")
+        memoryCache["api:\(provider.rawValue)"] = key
+        UserDefaults.standard.removeObject(forKey: "km_cached_\(provider.rawValue)")
+        if let sealed = encryptSecret(key) {
+            UserDefaults.standard.set(sealed, forKey: "km_sealed_\(provider.rawValue)")
+        }
         
         let data = Data(key.utf8)
         
-        // Delete existing first
-        delete(for: provider)
+        let deleteQuery: [String: Any] = [
+            kSecClass as String: kSecClassGenericPassword,
+            kSecAttrService as String: service,
+            kSecAttrAccount as String: provider.rawValue
+        ]
+        SecItemDelete(deleteQuery as CFDictionary)
         
         var query: [String: Any] = [
             kSecClass as String: kSecClassGenericPassword,
@@ -84,22 +133,33 @@ class KeychainManager: ObservableObject {
         }
         
         let status = SecItemAdd(query as CFDictionary, nil)
-        
-        if status == errSecSuccess {
-            // Bridge to Rust FFI
-            initializeRustProvider(provider, key: key)
-            return true
+        initializeRustProvider(provider, key: key)
+        if status != errSecSuccess {
+            print("⚠️ Keychain save status for \(provider.rawValue): \(status) (sealed backup active)")
         }
-        
-        print("⚠️ Keychain save failed for \(provider.rawValue): \(status)")
-        return false
+        return true
     }
     
-    /// Read an API key from Keychain
+    /// Read an API key from Keychain / Sealed Store
     func read(for provider: ProviderKey) -> String? {
-        // Fast path: avoid Keychain ACL password prompt on ad-hoc recompiled binaries
-        if let cached = UserDefaults.standard.string(forKey: "km_cached_\(provider.rawValue)"), !cached.isEmpty {
-            return cached
+        if let mem = memoryCache["api:\(provider.rawValue)"], !mem.isEmpty {
+            return mem
+        }
+        
+        // Migrate legacy plaintext cache if present
+        if let legacy = UserDefaults.standard.string(forKey: "km_cached_\(provider.rawValue)"), !legacy.isEmpty {
+            UserDefaults.standard.removeObject(forKey: "km_cached_\(provider.rawValue)")
+            if let sealed = encryptSecret(legacy) {
+                UserDefaults.standard.set(sealed, forKey: "km_sealed_\(provider.rawValue)")
+            }
+            memoryCache["api:\(provider.rawValue)"] = legacy
+            return legacy
+        }
+        
+        if let sealed = UserDefaults.standard.data(forKey: "km_sealed_\(provider.rawValue)"),
+           let str = decryptSecret(sealed), !str.isEmpty {
+            memoryCache["api:\(provider.rawValue)"] = str
+            return str
         }
         
         let query: [String: Any] = [
@@ -114,7 +174,10 @@ class KeychainManager: ObservableObject {
         let status = SecItemCopyMatching(query as CFDictionary, &result)
         
         if status == errSecSuccess, let data = result as? Data, let str = String(data: data, encoding: .utf8) {
-            UserDefaults.standard.set(str, forKey: "km_cached_\(provider.rawValue)")
+            memoryCache["api:\(provider.rawValue)"] = str
+            if let sealed = encryptSecret(str) {
+                UserDefaults.standard.set(sealed, forKey: "km_sealed_\(provider.rawValue)")
+            }
             return str
         }
         
@@ -123,35 +186,15 @@ class KeychainManager: ObservableObject {
     
     /// Update an existing API key
     func update(key: String, for provider: ProviderKey) -> Bool {
-        let query: [String: Any] = [
-            kSecClass as String: kSecClassGenericPassword,
-            kSecAttrService as String: service,
-            kSecAttrAccount as String: provider.rawValue
-        ]
-        
-        let update: [String: Any] = [
-            kSecValueData as String: Data(key.utf8)
-        ]
-        
-        let status = SecItemUpdate(query as CFDictionary, update as CFDictionary)
-        
-        if status == errSecSuccess {
-            initializeRustProvider(provider, key: key)
-            return true
-        }
-        
-        // If not found, create instead
-        if status == errSecItemNotFound {
-            return save(key: key, for: provider)
-        }
-        
-        return false
+        return save(key: key, for: provider)
     }
     
     /// Delete an API key from Keychain
     @discardableResult
     func delete(for provider: ProviderKey) -> Bool {
+        memoryCache.removeValue(forKey: "api:\(provider.rawValue)")
         UserDefaults.standard.removeObject(forKey: "km_cached_\(provider.rawValue)")
+        UserDefaults.standard.removeObject(forKey: "km_sealed_\(provider.rawValue)")
         let query: [String: Any] = [
             kSecClass as String: kSecClassGenericPassword,
             kSecAttrService as String: service,
@@ -172,26 +215,90 @@ class KeychainManager: ObservableObject {
         return ProviderKey.allCases.filter { hasKey(for: $0) }
     }
 
-    // MARK: - Integration Secrets
+    // MARK: - Integration & SSH Secrets (Keychain + AES-GCM Sealed Backup)
 
-    /// Webhook URLs, Supabase session tokens, and compute credentials.
-    /// Kept in local app storage to avoid repeated macOS Keychain dialog prompts.
+    @discardableResult
     func saveIntegrationSecret(_ value: String, account: String) -> Bool {
-        guard !value.isEmpty else { return false }
-        UserDefaults.standard.set(value, forKey: "km_secret_\(account)")
+        guard !value.isEmpty else {
+            return deleteIntegrationSecret(account: account)
+        }
+        memoryCache["sec:\(account)"] = value
+        UserDefaults.standard.removeObject(forKey: "km_secret_\(account)")
+        if let sealed = encryptSecret(value) {
+            UserDefaults.standard.set(sealed, forKey: "km_sealed_sec_\(account)")
+        }
+        
+        let data = Data(value.utf8)
+        let deleteQuery: [String: Any] = [
+            kSecClass as String: kSecClassGenericPassword,
+            kSecAttrService as String: integrationService,
+            kSecAttrAccount as String: account
+        ]
+        SecItemDelete(deleteQuery as CFDictionary)
+        
+        var addQuery: [String: Any] = [
+            kSecClass as String: kSecClassGenericPassword,
+            kSecAttrService as String: integrationService,
+            kSecAttrAccount as String: account,
+            kSecValueData as String: data,
+            kSecAttrAccessible as String: kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly
+        ]
+        var access: SecAccess?
+        SecAccessCreate("MicroCode" as CFString, nil, &access)
+        if let access = access {
+            addQuery[kSecAttrAccess as String] = access
+        }
+        SecItemAdd(addQuery as CFDictionary, nil)
         return true
     }
 
     func readIntegrationSecret(account: String) -> String? {
-        // Pure local storage: NEVER query macOS Keychain on launch
-        // to prevent macOS security dialog ("MicroCode wants to use your confidential information...")
-        return UserDefaults.standard.string(forKey: "km_secret_\(account)")
+        if let mem = memoryCache["sec:\(account)"], !mem.isEmpty {
+            return mem
+        }
+        // Automatically migrate legacy plaintext UserDefaults secret if found
+        if let legacy = UserDefaults.standard.string(forKey: "km_secret_\(account)"), !legacy.isEmpty {
+            UserDefaults.standard.removeObject(forKey: "km_secret_\(account)")
+            _ = saveIntegrationSecret(legacy, account: account)
+            return legacy
+        }
+        if let sealed = UserDefaults.standard.data(forKey: "km_sealed_sec_\(account)"),
+           let decrypted = decryptSecret(sealed), !decrypted.isEmpty {
+            memoryCache["sec:\(account)"] = decrypted
+            return decrypted
+        }
+        let query: [String: Any] = [
+            kSecClass as String: kSecClassGenericPassword,
+            kSecAttrService as String: integrationService,
+            kSecAttrAccount as String: account,
+            kSecReturnData as String: true,
+            kSecMatchLimit as String: kSecMatchLimitOne
+        ]
+        var result: AnyObject?
+        if SecItemCopyMatching(query as CFDictionary, &result) == errSecSuccess,
+           let data = result as? Data,
+           let str = String(data: data, encoding: .utf8), !str.isEmpty {
+            memoryCache["sec:\(account)"] = str
+            if let sealed = encryptSecret(str) {
+                UserDefaults.standard.set(sealed, forKey: "km_sealed_sec_\(account)")
+            }
+            return str
+        }
+        return nil
     }
 
     @discardableResult
     func deleteIntegrationSecret(account: String) -> Bool {
+        memoryCache.removeValue(forKey: "sec:\(account)")
         UserDefaults.standard.removeObject(forKey: "km_secret_\(account)")
-        return true
+        UserDefaults.standard.removeObject(forKey: "km_sealed_sec_\(account)")
+        let query: [String: Any] = [
+            kSecClass as String: kSecClassGenericPassword,
+            kSecAttrService as String: integrationService,
+            kSecAttrAccount as String: account
+        ]
+        let status = SecItemDelete(query as CFDictionary)
+        return status == errSecSuccess || status == errSecItemNotFound
     }
     
     // MARK: - Rust FFI Bridge

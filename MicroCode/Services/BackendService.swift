@@ -563,6 +563,12 @@ class BackendService {
         return try await post(url: url, body: request)
     }
     
+    func disconnectRemote(id: String) async throws {
+        let url = URL(string: "\(baseURL)/api/remote/disconnect")!
+        let payload = ["id": id]
+        let _: StatusResponse = try await post(url: url, body: payload)
+    }
+    
     func pingRemote(host: String, port: UInt16) async throws -> Bool {
         let url = URL(string: "\(baseURL)/api/remote/ping")!
         let request = PingRequest(host: host, port: port)

@@ -8,7 +8,9 @@ use uuid::Uuid;
 pub struct TerminalSession {
     pub id: String,
     pub pty_master: Box<dyn portable_pty::MasterPty + Send>,
+    pub writer: Box<dyn Write + Send>,
     pub tx: broadcast::Sender<Vec<u8>>,
+    pub child: Arc<Mutex<Box<dyn portable_pty::Child + Send + Sync>>>,
 }
 
 impl std::fmt::Debug for TerminalSession {
@@ -41,32 +43,40 @@ impl TerminalManager {
             pixel_height: 0,
         };
 
-        let cmd = CommandBuilder::new(std::env::var("SHELL").unwrap_or("bash".to_string()));
+        let mut cmd = CommandBuilder::new(std::env::var("SHELL").unwrap_or("bash".to_string()));
+        cmd.env_remove("MICROCODE_LOCAL_API_TOKEN");
         let pair = pty_system.openpty(size)?;
 
-        let mut child = pair.slave.spawn_command(cmd)?;
+        let child = pair.slave.spawn_command(cmd)?;
+        let shared_child = Arc::new(Mutex::new(child));
+        let thread_child = shared_child.clone();
 
-        // Clone for background thread
+        // Clone reader and take writer from master PTY
         let mut reader = pair.master.try_clone_reader()?;
-        let (tx, _) = broadcast::channel(100);
+        let writer = pair.master.take_writer()?;
+        let (tx, _) = broadcast::channel(2048);
         let tx_clone = tx.clone();
 
         std::thread::spawn(move || {
-            let mut buf = [0u8; 1024];
+            let mut buf = [0u8; 16384];
             while let Ok(n) = reader.read(&mut buf) {
                 if n == 0 {
                     break;
                 }
                 let _ = tx_clone.send(buf[..n].to_vec());
             }
-            let _ = child.wait();
+            if let Ok(mut c) = thread_child.lock() {
+                let _ = c.wait();
+            }
         });
 
         let id = Uuid::new_v4().to_string();
         let session = TerminalSession {
             id: id.clone(),
             pty_master: pair.master,
+            writer,
             tx,
+            child: shared_child,
         };
 
         self.sessions.lock().unwrap().insert(id.clone(), session);
@@ -86,19 +96,22 @@ impl TerminalManager {
         Ok(())
     }
 
-    pub fn write(&self, id: &str, _data: &[u8]) -> Result<(), anyhow::Error> {
+    pub fn write(&self, id: &str, data: &[u8]) -> Result<(), anyhow::Error> {
         let mut sessions = self.sessions.lock().unwrap();
-        if let Some(_session) = sessions.get_mut(id) {
-            // FIXME: portable-pty MasterPty trait object issues with writing/FD access.
-            // Stubbing for now to allow build.
-            // We need to find a way to write to session.pty_master.
-            #[cfg(unix)]
-            {
-                // use std::os::unix::io::{RawFd, AsRawFd};
-                // ...
-            }
+        if let Some(session) = sessions.get_mut(id) {
+            session.writer.write_all(data)?;
+            session.writer.flush()?;
         }
         Ok(())
+    }
+
+    pub fn close_session(&self, id: &str) {
+        let mut sessions = self.sessions.lock().unwrap();
+        if let Some(session) = sessions.remove(id) {
+            if let Ok(mut child) = session.child.lock() {
+                let _ = child.kill();
+            }
+        }
     }
 
     pub fn subscribe(&self, id: &str) -> Option<broadcast::Receiver<Vec<u8>>> {

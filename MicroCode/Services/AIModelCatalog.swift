@@ -63,17 +63,19 @@ final class AIModelCatalog: ObservableObject {
     @Published private(set) var isRefreshing = false
     @Published private(set) var source = "Built-in catalog"
 
-    private let cacheKey = "microcode.aiModelCatalog.v7"
-    private let refreshDateKey = "microcode.aiModelCatalogRefreshDate.v7"
-    private let refreshInterval: TimeInterval = 10 * 60 // 10 minutes
+    private let cacheKey = "microcode.aiModelCatalog.v9"
+    private let refreshDateKey = "microcode.aiModelCatalogRefreshDate.v9"
+    private let refreshInterval: TimeInterval = 5 * 60 // 5 minutes
 
     private init() {
         providers = Self.fallbackProviders
         loadCachedCatalog()
-        // Auto-refresh live models from provider APIs and local engines on launch
+        // Auto-integrate local ecosystem models and refresh live models from provider APIs on launch
         Task { @MainActor [weak self] in
-            try? await Task.sleep(nanoseconds: 800_000_000) // delay for keys and credentials to load
-            await self?.refreshIfNeeded(force: true)
+            guard let self else { return }
+            self.integrateEcosystemEngines(LocalEcosystemDiscovery.shared.engines)
+            try? await Task.sleep(nanoseconds: 200_000_000)
+            await self.refreshIfNeeded(force: true)
         }
     }
 
@@ -89,31 +91,60 @@ final class AIModelCatalog: ObservableObject {
         providers.lazy.flatMap(\.models).first { $0.id == id }
     }
 
+    private static let legacyStaleModelIDs: Set<String> = [
+        "gemini-2.5-flash",
+        "gemini-2.5-pro",
+        "gemini-2.0-flash",
+        "gemini-1.5-flash",
+        "gemini-1.5-pro",
+        "claude-3-5-sonnet",
+        "claude-3-7-sonnet",
+        "claude-3-5-sonnet-20241022",
+        "claude-3-7-sonnet-20250219",
+        "gpt-4o",
+        "gpt-4o-mini"
+    ]
+
     func normalizedSelection(provider: String, model: String) -> (provider: String, model: String) {
         let trimmed = model.trimmingCharacters(in: .whitespacesAndNewlines)
         if trimmed.isEmpty {
             let fallbackProvider = self.provider(provider) ?? providers.first!
-            return (fallbackProvider.id, fallbackProvider.models.first?.id ?? "gemini-2.5-flash")
+            return (fallbackProvider.id, fallbackProvider.models.first?.id ?? "")
         }
         
         let lower = trimmed.lowercased()
-        var targetModel = trimmed
-        if lower == "gemini" || lower == "gemini-flash" {
-            targetModel = "gemini-2.5-flash"
-        } else if lower == "gemini-pro" {
-            targetModel = "gemini-2.5-pro"
-        } else if lower == "deepseek" {
-            targetModel = "deepseek-chat"
+        // If a generic provider alias or family prefix (e.g. "gemini-4-argon") is passed and live models exist, pick the matching or top live model
+        if lower == "gemini" || lower == "gemini-flash" || lower == "gemini-pro" || lower == "gemini-4-argon" {
+            let candidateModels = self.provider(provider)?.models ?? self.provider("gemini")?.models ?? []
+            if lower == "gemini-4-argon",
+               let argonMatch = candidateModels.first(where: { $0.id.lowercased() == "gemini-4-argon-medium" })
+                ?? candidateModels.first(where: { $0.id.lowercased().hasPrefix("gemini-4-argon") }) {
+                return (provider, argonMatch.id)
+            }
+            if let firstLive = candidateModels.first?.id {
+                return (provider, firstLive)
+            }
         }
         
-        if self.provider(provider)?.models.contains(where: { $0.id == targetModel }) == true {
-            return (provider, targetModel)
+        if Self.legacyStaleModelIDs.contains(lower),
+           let prov = self.provider(provider),
+           let firstLive = prov.models.first?.id,
+           !Self.legacyStaleModelIDs.contains(firstLive.lowercased()) {
+            return (prov.id, firstLive)
         }
-        if let matchedProvider = providers.first(where: { $0.models.contains(where: { $0.id == targetModel }) }) {
-            return (matchedProvider.id, targetModel)
+        
+        if self.provider(provider)?.models.contains(where: { $0.id == trimmed }) == true {
+            return (provider, trimmed)
+        }
+        // Prefix match within the active provider (e.g. "claude-opus-5-5" -> "claude-opus-5-5-high")
+        if let prefixMatch = self.provider(provider)?.models.first(where: { $0.id.lowercased().hasPrefix(lower + "-") }) {
+            return (provider, prefixMatch.id)
+        }
+        if let matchedProvider = providers.first(where: { $0.models.contains(where: { $0.id == trimmed }) }) {
+            return (matchedProvider.id, trimmed)
         }
         // Direct pass-through of any live model returned by API or ecosystem
-        return (provider, targetModel)
+        return (provider, trimmed)
     }
 
     func refreshIfNeeded(force: Bool = false) async {
@@ -126,21 +157,40 @@ final class AIModelCatalog: ObservableObject {
         await refreshLiveProviderModels()
     }
 
-    /// Dynamically fetches models directly from active provider APIs (OpenAI, Gemini, Anthropic, DeepSeek, Groq, GLM, Qwen, Copilot)
-    /// and local installed engines (Codex, AGY, Claude Code, Zed, Ollama, LM Studio).
+    /// Dynamically fetches models directly from active provider APIs (OpenAI, Gemini, Anthropic, DeepSeek, Groq, Grok, GLM, Qwen, Copilot)
+    /// and local installed engines (Codex, AGY, Claude Code, OpenCode, Zed, Ollama, LM Studio) in parallel.
     public func refreshLiveProviderModels() async {
-        await refreshCloudProxyModels()
-        await fetchLiveOpenAIModels()
-        await fetchLiveGeminiModels()
-        await fetchLiveAnthropicModels()
-        await fetchLiveDeepSeekModels()
-        await fetchLiveGLMModels()
-        await fetchLiveGroqModels()
-        await fetchLiveQwenModels()
-        await fetchLiveCopilotModels()
+        async let cloudTask: Void = refreshCloudProxyModels()
+        async let openAITask: Void = fetchLiveOpenAIModels()
+        async let geminiTask: Void = fetchLiveGeminiModels()
+        async let anthropicTask: Void = fetchLiveAnthropicModels()
+        async let deepSeekTask: Void = fetchLiveDeepSeekModels()
+        async let glmTask: Void = fetchLiveGLMModels()
+        async let groqTask: Void = fetchLiveGroqModels()
+        async let grokTask: Void = fetchLiveGrokModels()
+        async let qwenTask: Void = fetchLiveQwenModels()
+        async let copilotTask: Void = fetchLiveCopilotModels()
+        async let ecosystemTask: Void = LocalEcosystemDiscovery.shared.refresh()
+
+        _ = await (
+            cloudTask,
+            openAITask,
+            geminiTask,
+            anthropicTask,
+            deepSeekTask,
+            glmTask,
+            groqTask,
+            grokTask,
+            qwenTask,
+            copilotTask,
+            ecosystemTask
+        )
         integrateLocalModels()
-        await LocalEcosystemDiscovery.shared.refresh()
+        rebuildOmniCloudCatalog()
+        syncAllSubscriptionModels()
+        syncActiveAppStateSelection()
         lastUpdated = Date()
+        source = "Live API & CLI Discovery (\(providers.flatMap(\.models).count) models)"
         saveCachedCatalog()
     }
 
@@ -157,12 +207,127 @@ final class AIModelCatalog: ObservableObject {
                     endpoint: "local://\(engine.id)",
                     models: engine.models
                 )
-                // Insert right after omni or at the top
                 if providers.count > 1 {
                     providers.insert(newProvider, at: 1)
                 } else {
                     providers.append(newProvider)
                 }
+            }
+        }
+        
+        // Bridge live discovered AGY models (e.g. Gemini 4 Argon, Gemini 3.8 Flash, Claude Opus 5.5, Claude Sonnet 5.5)
+        // into the Gemini and Anthropic catalogs
+        if let agyEngine = engines.first(where: { $0.id == "agy" }), !agyEngine.models.isEmpty {
+            let agyGeminiModels = agyEngine.models
+                .filter { $0.id.lowercased().contains("gemini") || $0.id.lowercased().contains("gemma") }
+                .map { AIModelDefinition(id: $0.id, name: $0.name, provider: "gemini", badge: $0.badge) }
+            if !agyGeminiModels.isEmpty, let gIdx = providers.firstIndex(where: { $0.id == "gemini" }) {
+                var merged = agyGeminiModels
+                for existing in providers[gIdx].models where existing.badge != "DEFAULT" && !merged.contains(where: { $0.id == existing.id }) {
+                    merged.append(existing)
+                }
+                merged.sort { a, b in
+                    let sa = Self.geminiModelSortScore(a.id)
+                    let sb = Self.geminiModelSortScore(b.id)
+                    if sa != sb { return sa > sb }
+                    return a.id.localizedStandardCompare(b.id) == .orderedDescending
+                }
+                providers[gIdx].models = merged
+            }
+            
+            let agyClaudeModels = agyEngine.models
+                .filter { $0.id.lowercased().contains("claude") }
+                .map { AIModelDefinition(id: $0.id, name: $0.name, provider: "anthropic", badge: $0.badge) }
+            if !agyClaudeModels.isEmpty, let aIdx = providers.firstIndex(where: { $0.id == "anthropic" }) {
+                var merged = agyClaudeModels
+                for existing in providers[aIdx].models where existing.badge != "DEFAULT" && !merged.contains(where: { $0.id == existing.id }) {
+                    merged.append(existing)
+                }
+                merged.sort { a, b in
+                    let sa = Self.claudeModelSortScore(a.id)
+                    let sb = Self.claudeModelSortScore(b.id)
+                    if sa != sb { return sa > sb }
+                    return a.id.localizedStandardCompare(b.id) == .orderedDescending
+                }
+                providers[aIdx].models = merged
+            }
+        }
+        
+        // Bridge live discovered Codex models (e.g. GPT-6.1-Sol, GPT-6-Astra, GPT-6-Luna) into OpenAI catalog
+        if let codexEngine = engines.first(where: { $0.id == "codex" }), !codexEngine.models.isEmpty {
+            let codexOpenAIModels = codexEngine.models
+                .map { AIModelDefinition(id: $0.id, name: $0.name, provider: "openai", badge: $0.badge) }
+            if let oIdx = providers.firstIndex(where: { $0.id == "openai" }) {
+                var merged = codexOpenAIModels
+                for existing in providers[oIdx].models where existing.badge != "DEFAULT" && !merged.contains(where: { $0.id == existing.id }) {
+                    merged.append(existing)
+                }
+                providers[oIdx].models = merged
+            }
+        }
+        
+        rebuildOmniCloudCatalog()
+        syncAllSubscriptionModels()
+        syncActiveAppStateSelection()
+        saveCachedCatalog()
+    }
+
+    private func rebuildOmniCloudCatalog() {
+        guard let omniIdx = providers.firstIndex(where: { $0.id == "omni" }) else { return }
+        var combined: [AIModelDefinition] = []
+        var seen = Set<String>()
+        
+        // Preserve native Dotmini Omni models first, then top live models from Gemini, OpenAI, Anthropic, DeepSeek, GLM
+        let priorityProviders = ["gemini", "openai", "anthropic", "deepseek", "glm", "qwen", "grok"]
+        for pid in priorityProviders {
+            guard let prov = self.provider(pid) else { continue }
+            for m in prov.models.prefix(8) where m.badge != "DEFAULT" {
+                guard !seen.contains(m.id) else { continue }
+                seen.insert(m.id)
+                combined.append(AIModelDefinition(id: m.id, name: m.name, provider: "omni", badge: m.badge))
+            }
+        }
+        for existing in providers[omniIdx].models where existing.badge != "DEFAULT" && !seen.contains(existing.id) {
+            seen.insert(existing.id)
+            combined.append(existing)
+        }
+        combined.sort { a, b in
+            let sa = Self.universalModelPriorityScore(a.id)
+            let sb = Self.universalModelPriorityScore(b.id)
+            if sa != sb { return sa > sb }
+            return a.id.localizedStandardCompare(b.id) == .orderedDescending
+        }
+        if !combined.isEmpty {
+            providers[omniIdx].models = combined
+        }
+    }
+
+    private func syncActiveAppStateSelection() {
+        guard let appState = AppState.shared else { return }
+        let currentProv = appState.aiProvider
+        let currentMod = appState.aiModel
+        let normalized = normalizedSelection(provider: currentProv, model: currentMod)
+        if normalized.provider != currentProv || normalized.model != currentMod {
+            appState.aiProvider = normalized.provider
+            appState.aiModel = normalized.model
+            appState.saveSettings()
+        }
+    }
+
+    public func syncAllSubscriptionModels() {
+        for subProv in SubscriptionProviderType.allCases where subProv != .copilot {
+            if let catalogProv = self.provider(subProv.aiProviderID), !catalogProv.models.isEmpty {
+                let subModels = catalogProv.models.map { m in
+                    SubscriptionModelInfo(
+                        modelID: m.id,
+                        name: m.name,
+                        provider: subProv,
+                        badge: m.badge,
+                        description: "\(subProv.displayName) live model: \(m.id)",
+                        aiProviderID: subProv.aiProviderID
+                    )
+                }
+                SubscriptionAuthManager.setLiveModels(for: subProv, models: subModels)
             }
         }
     }
@@ -195,7 +360,7 @@ final class AIModelCatalog: ObservableObject {
     private func fetchLiveOpenAIModels() async {
         let key = resolveKey("openai")
         guard !key.isEmpty, let url = URL(string: "https://api.openai.com/v1/models") else { return }
-        var req = URLRequest(url: url, timeoutInterval: 8)
+        var req = URLRequest(url: url, timeoutInterval: 10)
         req.setValue("Bearer \(key)", forHTTPHeaderField: "Authorization")
         req.setValue("application/json", forHTTPHeaderField: "Accept")
         
@@ -212,7 +377,7 @@ final class AIModelCatalog: ObservableObject {
             if lower.contains("whisper") || lower.contains("tts") || lower.contains("dall-e") ||
                lower.contains("embedding") || lower.contains("moderation") || lower.contains("babbage") ||
                lower.contains("davinci") || lower.hasPrefix("ft:") || lower.contains("transcribe") ||
-               lower.contains("audio") || lower.contains("realtime") {
+               lower.contains("audio") || lower.contains("realtime") || lower.contains("search") {
                 continue
             }
             
@@ -220,7 +385,7 @@ final class AIModelCatalog: ObservableObject {
             let badge: String
             if lower.contains("reason") || lower.range(of: #"^o[0-9]"#, options: .regularExpression) != nil {
                 badge = "REASONING"
-            } else if lower.contains("mini") || lower.contains("flash") || lower.contains("nano") {
+            } else if lower.contains("mini") || lower.contains("flash") || lower.contains("nano") || lower.contains("luna") {
                 badge = "FAST"
             } else if lower.contains("astra") || lower.contains("sol") || lower.contains("pro") || lower.contains("plus") || lower.contains("max") {
                 badge = "FLAGSHIP"
@@ -241,7 +406,16 @@ final class AIModelCatalog: ObservableObject {
             if a.created != b.created { return a.created > b.created }
             return a.model.id.localizedStandardCompare(b.model.id) == .orderedDescending
         }
-        let liveModels = liveModelsWithDate.map(\.model)
+        var liveModels = liveModelsWithDate.map(\.model)
+        
+        // Preserve any Codex models discovered locally at the top
+        if let codexModels = LocalEcosystemDiscovery.shared.engines.first(where: { $0.id == "codex" })?.models {
+            for cm in codexModels.reversed() {
+                if !liveModels.contains(where: { $0.id == cm.id }) {
+                    liveModels.insert(AIModelDefinition(id: cm.id, name: cm.name, provider: "openai", badge: cm.badge), at: 0)
+                }
+            }
+        }
         
         if !liveModels.isEmpty, let idx = providers.firstIndex(where: { $0.id == "openai" }) {
             providers[idx].models = liveModels
@@ -280,6 +454,9 @@ final class AIModelCatalog: ObservableObject {
         if let val = ProcessInfo.processInfo.environment[envKey], !val.isEmpty {
             return val
         }
+        if provider == "gemini", let val = ProcessInfo.processInfo.environment["GOOGLE_API_KEY"], !val.isEmpty {
+            return val
+        }
         if let pk = KeychainManager.ProviderKey(rawValue: "\(provider.uppercased())_API_KEY"),
            let val = KeychainManager.shared.read(for: pk), !val.isEmpty {
             return val
@@ -291,101 +468,216 @@ final class AIModelCatalog: ObservableObject {
         Self.resolveKey(provider)
     }
 
-    /// Fetches the latest live models directly from Google Gemini API using user's active key
+    /// Fetches the latest live models directly from Google Gemini API (both v1beta and v1alpha with pageSize=1000)
     private func fetchLiveGeminiModels() async {
         let key = resolveKey("gemini")
-        guard !key.isEmpty, let url = URL(string: "https://generativelanguage.googleapis.com/v1beta/models?key=\(key)") else { return }
-        var req = URLRequest(url: url, timeoutInterval: 8)
-        req.setValue("application/json", forHTTPHeaderField: "Accept")
-        
-        guard let (data, resp) = try? await URLSession.shared.data(for: req),
-              let http = resp as? HTTPURLResponse, http.statusCode == 200,
-              let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-              let list = json["models"] as? [[String: Any]] else { return }
-        
         var liveModels: [AIModelDefinition] = []
-        for item in list {
-            guard let rawName = item["name"] as? String else { continue }
-            let mid = rawName.replacingOccurrences(of: "models/", with: "")
-            let lower = mid.lowercased()
-            
-            // Only generative chat/content models
-            if let methods = item["supportedGenerationMethods"] as? [String], !methods.contains("generateContent") {
-                continue
+        var seenIds = Set<String>()
+        
+        // First include any Gemini models discovered from installed Antigravity (AGY) CLI (e.g. gemini-4-argon-*, gemini-3.8-flash-*)
+        if let agyModels = LocalEcosystemDiscovery.shared.engines.first(where: { $0.id == "agy" })?.models {
+            for m in agyModels where m.id.lowercased().contains("gemini") || m.id.lowercased().contains("gemma") {
+                if !seenIds.contains(m.id) {
+                    seenIds.insert(m.id)
+                    liveModels.append(AIModelDefinition(id: m.id, name: m.name, provider: "gemini", badge: m.badge))
+                }
             }
-            if lower.contains("tts") || lower.contains("embed") || lower.contains("transcribe") || lower.contains("audio") {
-                continue
-            }
-            
-            // Use API's own displayName if provided by Google, otherwise algorithmic formatter
-            let displayName = (item["displayName"] as? String) ?? Self.formatModelName(mid)
-            let badge: String
-            if lower.contains("thinking") {
-                badge = "THINKING"
-            } else if lower.contains("pro") {
-                badge = "PRO"
-            } else if lower.contains("flash") {
-                badge = "FAST"
-            } else {
-                badge = "GEMINI"
-            }
-            liveModels.append(AIModelDefinition(id: mid, name: displayName, provider: "gemini", badge: badge))
         }
         
-        liveModels.sort { a, b in a.id.localizedStandardCompare(b.id) == .orderedDescending }
+        if !key.isEmpty {
+            let endpoints = [
+                "https://generativelanguage.googleapis.com/v1beta/models?pageSize=1000&key=\(key)",
+                "https://generativelanguage.googleapis.com/v1alpha/models?pageSize=1000&key=\(key)"
+            ]
+            for endpoint in endpoints {
+                guard let url = URL(string: endpoint) else { continue }
+                var req = URLRequest(url: url, timeoutInterval: 10)
+                req.setValue("application/json", forHTTPHeaderField: "Accept")
+                
+                guard let (data, resp) = try? await URLSession.shared.data(for: req),
+                      let http = resp as? HTTPURLResponse, http.statusCode == 200,
+                      let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+                      let list = json["models"] as? [[String: Any]] else { continue }
+                
+                for item in list {
+                    guard let rawName = item["name"] as? String else { continue }
+                    let mid = rawName.replacingOccurrences(of: "models/", with: "")
+                    guard !seenIds.contains(mid) else { continue }
+                    let lower = mid.lowercased()
+                    
+                    // Only generative chat/content models
+                    if let methods = item["supportedGenerationMethods"] as? [String], !methods.contains("generateContent") {
+                        continue
+                    }
+                    if lower.contains("tts") || lower.contains("embed") || lower.contains("transcribe") ||
+                       lower.contains("audio") || lower.contains("aqa") || lower.contains("imagen") ||
+                       lower.contains("veo") || lower.contains("learnlm") {
+                        continue
+                    }
+                    
+                    seenIds.insert(mid)
+                    let displayName = (item["displayName"] as? String) ?? Self.formatModelName(mid)
+                    let badge: String
+                    if lower.contains("argon") {
+                        badge = "FLAGSHIP"
+                    } else if lower.contains("thinking") {
+                        badge = "THINKING"
+                    } else if lower.contains("pro") {
+                        badge = "PRO"
+                    } else if lower.contains("flash") {
+                        badge = "FAST"
+                    } else {
+                        badge = "GEMINI"
+                    }
+                    liveModels.append(AIModelDefinition(id: mid, name: displayName, provider: "gemini", badge: badge))
+                }
+            }
+        }
+        
+        liveModels.sort { a, b in
+            let aScore = Self.geminiModelSortScore(a.id)
+            let bScore = Self.geminiModelSortScore(b.id)
+            if aScore != bScore { return aScore > bScore }
+            return a.id.localizedStandardCompare(b.id) == .orderedDescending
+        }
         
         if !liveModels.isEmpty, let idx = providers.firstIndex(where: { $0.id == "gemini" }) {
             providers[idx].models = liveModels
         }
     }
 
-    /// Fetches live Anthropic Claude models using user's API key
+    nonisolated private static func geminiModelSortScore(_ id: String) -> Int {
+        let lower = id.lowercased()
+        var score = 0
+        if lower.contains("gemini-5") { score += 5000 }
+        else if lower.contains("gemini-4") { score += 4000 }
+        else if lower.contains("gemini-3.8") || lower.contains("gemini-3-8") { score += 3800 }
+        else if lower.contains("gemini-3.5") || lower.contains("gemini-3-5") { score += 3500 }
+        else if lower.contains("gemini-3") { score += 3000 }
+        else if lower.contains("gemini-2.5") || lower.contains("gemini-2-5") { score += 2500 }
+        else if lower.contains("gemini-2.0") || lower.contains("gemini-2-0") { score += 2000 }
+        else if lower.contains("gemini-1.5") { score += 1500 }
+        
+        if lower.contains("argon") { score += 400 }
+        else if lower.contains("ultra") { score += 350 }
+        else if lower.contains("pro") { score += 300 }
+        else if lower.contains("flash") && !lower.contains("lite") { score += 200 }
+        else if lower.contains("lite") { score += 100 }
+        
+        if lower.contains("high") { score += 30 }
+        else if lower.contains("medium") { score += 20 }
+        else if lower.contains("low") { score += 10 }
+        return score
+    }
+
+    nonisolated public static func claudeModelSortScore(_ id: String) -> Int {
+        let lower = id.lowercased()
+        var score = 0
+        if lower.contains("5-5") || lower.contains("5.5") { score += 5500 }
+        else if lower.contains("5-1") || lower.contains("5.1") { score += 5100 }
+        else if lower.contains("5-0") || lower.contains("5.0") || lower.contains("claude-5") { score += 5000 }
+        else if lower.contains("4-7") || lower.contains("4.7") { score += 4700 }
+        else if lower.contains("4-6") || lower.contains("4.6") { score += 4600 }
+        else if lower.contains("4-5") || lower.contains("4.5") { score += 4500 }
+        else if lower.contains("4-1") || lower.contains("4.1") { score += 4100 }
+        else if lower.contains("4-0") || lower.contains("4.0") || lower.contains("claude-4") { score += 4000 }
+        else if lower.contains("3-7") || lower.contains("3.7") { score += 3700 }
+        else if lower.contains("3-5") || lower.contains("3.5") { score += 3500 }
+        else if lower.contains("3-") { score += 3000 }
+
+        if lower.contains("opus") { score += 400 }
+        else if lower.contains("sonnet") { score += 300 }
+        else if lower.contains("fable") { score += 250 }
+        else if lower.contains("haiku") { score += 150 }
+
+        if lower.contains("high") { score += 35 }
+        else if lower.contains("medium") { score += 25 }
+        else if lower.contains("low") { score += 10 }
+        else { score += 30 }
+        return score
+    }
+
+    nonisolated public static func universalModelPriorityScore(_ id: String) -> Int {
+        let lower = id.lowercased()
+        if lower.contains("gemini") || lower.contains("gemma") {
+            return geminiModelSortScore(lower) + 100
+        }
+        if lower.contains("claude") {
+            return claudeModelSortScore(lower)
+        }
+        if lower.contains("gpt-6.1") || lower.contains("gpt-6-1") { return 4450 }
+        if lower.contains("gpt-6") { return 4400 }
+        if lower.contains("gpt-5.6") { return 4200 }
+        if lower.contains("gpt-5.4") { return 4100 }
+        if lower.contains("gpt-5") { return 4000 }
+        if lower.contains("deepseek-v4") { return 4350 }
+        if lower.contains("deepseek-r") || lower.contains("deepseek-reasoner") { return 3900 }
+        if lower.contains("deepseek") { return 3700 }
+        if lower.contains("glm-5.3") { return 4150 }
+        if lower.contains("glm-5") { return 3950 }
+        if lower.contains("omni-o1x") { return 4300 }
+        return 2000
+    }
+
+    /// Fetches live Anthropic Claude models using user's API key (plus any discovered AGY Claude models)
     private func fetchLiveAnthropicModels() async {
         let key = resolveKey("anthropic")
-        guard !key.isEmpty, let url = URL(string: "https://api.anthropic.com/v1/models") else { return }
-        var req = URLRequest(url: url, timeoutInterval: 8)
-        req.setValue(key, forHTTPHeaderField: "x-api-key")
-        req.setValue("2023-06-01", forHTTPHeaderField: "anthropic-version")
-        req.setValue("application/json", forHTTPHeaderField: "Accept")
-        
-        guard let (data, resp) = try? await URLSession.shared.data(for: req),
-              let http = resp as? HTTPURLResponse, http.statusCode == 200,
-              let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-              let list = json["data"] as? [[String: Any]] else { return }
-        
         var liveModelsWithDate: [(model: AIModelDefinition, created: String)] = []
-        for item in list {
-            guard let mid = item["id"] as? String else { continue }
-            let lower = mid.lowercased()
-            // Use API's own display_name directly from Anthropic API
-            let displayName = (item["display_name"] as? String) ?? Self.formatModelName(mid)
-            let createdAt = (item["created_at"] as? String) ?? ""
+        var seenIds = Set<String>()
+        
+        if !key.isEmpty, let url = URL(string: "https://api.anthropic.com/v1/models?limit=100") {
+            var req = URLRequest(url: url, timeoutInterval: 10)
+            req.setValue(key, forHTTPHeaderField: "x-api-key")
+            req.setValue("2023-06-01", forHTTPHeaderField: "anthropic-version")
+            req.setValue("application/json", forHTTPHeaderField: "Accept")
             
-            let badge: String
-            if lower.contains("opus") {
-                badge = "REASONING"
-            } else if lower.contains("sonnet") {
-                badge = "AGENT"
-            } else if lower.contains("haiku") {
-                badge = "FAST"
-            } else {
-                badge = "CLAUDE"
+            if let (data, resp) = try? await URLSession.shared.data(for: req),
+               let http = resp as? HTTPURLResponse, http.statusCode == 200,
+               let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+               let list = json["data"] as? [[String: Any]] {
+                for item in list {
+                    guard let mid = item["id"] as? String, !seenIds.contains(mid) else { continue }
+                    seenIds.insert(mid)
+                    let lower = mid.lowercased()
+                    let displayName = (item["display_name"] as? String) ?? Self.formatModelName(mid)
+                    let createdAt = (item["created_at"] as? String) ?? ""
+                    
+                    let badge: String
+                    if lower.contains("opus") {
+                        badge = "REASONING"
+                    } else if lower.contains("sonnet") {
+                        badge = "AGENT"
+                    } else if lower.contains("haiku") {
+                        badge = "FAST"
+                    } else {
+                        badge = "CLAUDE"
+                    }
+                    
+                    liveModelsWithDate.append((
+                        AIModelDefinition(id: mid, name: displayName, provider: "anthropic", badge: badge),
+                        createdAt
+                    ))
+                }
             }
-            
-            liveModelsWithDate.append((
-                AIModelDefinition(id: mid, name: displayName, provider: "anthropic", badge: badge),
-                createdAt
-            ))
         }
         
-        // Sort newest models first using Anthropic's official `created_at` timestamp!
-        liveModelsWithDate.sort { a, b in
-            if !a.created.isEmpty && !b.created.isEmpty {
-                return a.created > b.created
+        var liveModels = liveModelsWithDate.map(\.model)
+        
+        // Merge any Claude models discovered from Antigravity CLI (e.g. claude-opus-5-5-*, claude-sonnet-5-5-*)
+        if let agyModels = LocalEcosystemDiscovery.shared.engines.first(where: { $0.id == "agy" })?.models {
+            for m in agyModels where m.id.lowercased().contains("claude") {
+                if !liveModels.contains(where: { $0.id == m.id }) {
+                    liveModels.append(AIModelDefinition(id: m.id, name: m.name, provider: "anthropic", badge: m.badge))
+                }
             }
-            return a.model.id.localizedStandardCompare(b.model.id) == .orderedDescending
         }
-        let liveModels = liveModelsWithDate.map(\.model)
+        
+        liveModels.sort { a, b in
+            let sa = Self.claudeModelSortScore(a.id)
+            let sb = Self.claudeModelSortScore(b.id)
+            if sa != sb { return sa > sb }
+            return a.id.localizedStandardCompare(b.id) == .orderedDescending
+        }
         
         if !liveModels.isEmpty, let idx = providers.firstIndex(where: { $0.id == "anthropic" }) {
             providers[idx].models = liveModels
@@ -396,7 +688,7 @@ final class AIModelCatalog: ObservableObject {
     private func fetchLiveDeepSeekModels() async {
         let key = resolveKey("deepseek")
         guard !key.isEmpty, let url = URL(string: "https://api.deepseek.com/models") else { return }
-        var req = URLRequest(url: url, timeoutInterval: 8)
+        var req = URLRequest(url: url, timeoutInterval: 10)
         req.setValue("Bearer \(key)", forHTTPHeaderField: "Authorization")
         req.setValue("application/json", forHTTPHeaderField: "Accept")
         
@@ -431,7 +723,7 @@ final class AIModelCatalog: ObservableObject {
     private func fetchLiveGLMModels() async {
         let key = resolveKey("glm")
         guard !key.isEmpty, let url = URL(string: "https://open.bigmodel.cn/api/paas/v4/models") else { return }
-        var req = URLRequest(url: url, timeoutInterval: 8)
+        var req = URLRequest(url: url, timeoutInterval: 10)
         req.setValue("Bearer \(key)", forHTTPHeaderField: "Authorization")
         req.setValue("application/json", forHTTPHeaderField: "Accept")
         
@@ -455,11 +747,48 @@ final class AIModelCatalog: ObservableObject {
         }
     }
 
+    /// Fetches live xAI Grok models using user's API key
+    private func fetchLiveGrokModels() async {
+        let key = resolveKey("grok")
+        guard !key.isEmpty, let url = URL(string: "https://api.x.ai/v1/models") else { return }
+        var req = URLRequest(url: url, timeoutInterval: 10)
+        req.setValue("Bearer \(key)", forHTTPHeaderField: "Authorization")
+        req.setValue("application/json", forHTTPHeaderField: "Accept")
+        
+        guard let (data, resp) = try? await URLSession.shared.data(for: req),
+              let http = resp as? HTTPURLResponse, http.statusCode == 200,
+              let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let list = json["data"] as? [[String: Any]] else { return }
+        
+        var liveModelsWithDate: [(model: AIModelDefinition, created: Int)] = []
+        for item in list {
+            guard let mid = item["id"] as? String else { continue }
+            let lower = mid.lowercased()
+            if lower.contains("embed") || lower.contains("image") { continue }
+            let created = item["created"] as? Int ?? 0
+            let badge = lower.contains("mini") ? "FAST" : (lower.contains("reason") || lower.contains("think") ? "REASONING" : "GROK")
+            liveModelsWithDate.append((
+                AIModelDefinition(id: mid, name: Self.formatModelName(mid), provider: "grok", badge: badge),
+                created
+            ))
+        }
+        
+        liveModelsWithDate.sort { a, b in
+            if a.created != b.created { return a.created > b.created }
+            return a.model.id.localizedStandardCompare(b.model.id) == .orderedDescending
+        }
+        let liveModels = liveModelsWithDate.map(\.model)
+        
+        if !liveModels.isEmpty, let idx = providers.firstIndex(where: { $0.id == "grok" }) {
+            providers[idx].models = liveModels
+        }
+    }
+
     /// Fetches live Groq models using user's API key
     private func fetchLiveGroqModels() async {
         let key = resolveKey("groq")
         guard !key.isEmpty, let url = URL(string: "https://api.groq.com/openai/v1/models") else { return }
-        var req = URLRequest(url: url, timeoutInterval: 8)
+        var req = URLRequest(url: url, timeoutInterval: 10)
         req.setValue("Bearer \(key)", forHTTPHeaderField: "Authorization")
         req.setValue("application/json", forHTTPHeaderField: "Accept")
         
@@ -498,7 +827,7 @@ final class AIModelCatalog: ObservableObject {
     private func fetchLiveQwenModels() async {
         let key = resolveKey("qwen")
         guard !key.isEmpty, let url = URL(string: "https://dashscope.aliyuncs.com/compatible-mode/v1/models") else { return }
-        var req = URLRequest(url: url, timeoutInterval: 8)
+        var req = URLRequest(url: url, timeoutInterval: 10)
         req.setValue("Bearer \(key)", forHTTPHeaderField: "Authorization")
         req.setValue("application/json", forHTTPHeaderField: "Accept")
         
@@ -533,7 +862,7 @@ final class AIModelCatalog: ObservableObject {
             return
         }
         guard let url = URL(string: "https://api.githubcopilot.com/models") else { return }
-        var req = URLRequest(url: url, timeoutInterval: 8)
+        var req = URLRequest(url: url, timeoutInterval: 10)
         req.setValue("Bearer \(sessionToken)", forHTTPHeaderField: "Authorization")
         req.setValue("vscode/1.96.2", forHTTPHeaderField: "Editor-Version")
         req.setValue("copilot-chat/0.24.0", forHTTPHeaderField: "Editor-Plugin-Version")
@@ -575,15 +904,19 @@ final class AIModelCatalog: ObservableObject {
         case "anthropic": await fetchLiveAnthropicModels()
         case "deepseek": await fetchLiveDeepSeekModels()
         case "glm": await fetchLiveGLMModels()
+        case "grok": await fetchLiveGrokModels()
         case "groq": await fetchLiveGroqModels()
         case "qwen": await fetchLiveQwenModels()
         case "copilot", "github": await fetchLiveCopilotModels()
+        case "agy", "codex", "claude_code", "opencode", "zed":
+            await LocalEcosystemDiscovery.shared.refresh()
         case "local":
             await LocalLLMService.shared.scanForServers()
             integrateLocalModels()
         default:
             await refreshCloudProxyModels()
         }
+        syncAllSubscriptionModels()
         lastUpdated = Date()
         saveCachedCatalog()
     }
@@ -681,6 +1014,7 @@ final class AIModelCatalog: ObservableObject {
                 }
             }
         }
+        var touchedProviders = Set<Int>()
         for item in remoteEntries {
             let rawID = item.id.replacingOccurrences(of: "models/", with: "")
             guard isChatModel(rawID) else { continue }
@@ -692,7 +1026,8 @@ final class AIModelCatalog: ObservableObject {
             // Add to specific provider (e.g. deepseek, gemini)
             if let providerIndex = result.firstIndex(where: { $0.id == providerID }) {
                 if !result[providerIndex].models.contains(where: { $0.id == rawID }) {
-                    result[providerIndex].models.insert(modelDef, at: 0)
+                    result[providerIndex].models.append(modelDef)
+                    touchedProviders.insert(providerIndex)
                 }
             }
             
@@ -701,7 +1036,16 @@ final class AIModelCatalog: ObservableObject {
                 let omniDef = AIModelDefinition(id: rawID, name: formattedName, provider: "omni", badge: item.ownedBy?.uppercased() ?? "DOTMINI")
                 if !result[omniIndex].models.contains(where: { $0.id == rawID }) {
                     result[omniIndex].models.append(omniDef)
+                    touchedProviders.insert(omniIndex)
                 }
+            }
+        }
+        for idx in touchedProviders {
+            result[idx].models.sort { a, b in
+                let sa = universalModelPriorityScore(a.id)
+                let sb = universalModelPriorityScore(b.id)
+                if sa != sb { return sa > sb }
+                return a.id.localizedStandardCompare(b.id) == .orderedDescending
             }
         }
         return result
@@ -863,35 +1207,15 @@ final class AIModelCatalog: ObservableObject {
     }
 
     static let fallbackProviders: [AIProviderDefinition] = [
-        AIProviderDefinition(id: "omni", name: "Dotmini Cloud", icon: "sparkles", endpoint: "api.dotmini.net/v1", models: [
-            AIModelDefinition(id: "gpt-4o", name: "GPT-4o", provider: "omni", badge: "CLOUD")
-        ]),
-        AIProviderDefinition(id: "openai", name: "OpenAI", icon: "brain.head.profile", endpoint: "api.openai.com", models: [
-            AIModelDefinition(id: "gpt-4o", name: "GPT-4o", provider: "openai", badge: "DEFAULT")
-        ]),
-        AIProviderDefinition(id: "anthropic", name: "Anthropic Claude", icon: "bubble.left.and.text.bubble.right", endpoint: "api.anthropic.com", models: [
-            AIModelDefinition(id: "claude-3-5-sonnet", name: "Claude 3.5 Sonnet", provider: "anthropic", badge: "DEFAULT")
-        ]),
-        AIProviderDefinition(id: "gemini", name: "Google Gemini", icon: "sparkles", endpoint: "generativelanguage.googleapis.com", models: [
-            AIModelDefinition(id: "gemini-1.5-flash", name: "Gemini 1.5 Flash", provider: "gemini", badge: "DEFAULT")
-        ]),
-        AIProviderDefinition(id: "deepseek", name: "DeepSeek", icon: "water.waves", endpoint: "api.deepseek.com", models: [
-            AIModelDefinition(id: "deepseek-chat", name: "DeepSeek V3 Chat", provider: "deepseek", badge: "DEFAULT")
-        ]),
-        AIProviderDefinition(id: "copilot", name: "GitHub Copilot", icon: "github", endpoint: "api.githubcopilot.com", models: [
-            AIModelDefinition(id: "auto", name: "Copilot Auto", provider: "copilot", badge: "AUTO")
-        ]),
-        AIProviderDefinition(id: "qwen", name: "Qwen / Alibaba", icon: "cloud.fill", endpoint: "dashscope.aliyuncs.com", models: [
-            AIModelDefinition(id: "qwen-plus", name: "Qwen Plus", provider: "qwen", badge: "DEFAULT")
-        ]),
-        AIProviderDefinition(id: "grok", name: "xAI Grok", icon: "bolt.fill", endpoint: "api.x.ai", models: [
-            AIModelDefinition(id: "grok-2", name: "xAI Grok 2", provider: "grok", badge: "DEFAULT")
-        ]),
-        AIProviderDefinition(id: "glm", name: "Zhipu GLM", icon: "globe.asia.australia", endpoint: "open.bigmodel.cn", models: [
-            AIModelDefinition(id: "glm-4-flash", name: "GLM-4 Flash", provider: "glm", badge: "DEFAULT")
-        ]),
-        AIProviderDefinition(id: "local", name: "Local LLM", icon: "desktopcomputer", endpoint: "http://127.0.0.1:11434/v1", models: [
-            AIModelDefinition(id: "local-model", name: "Default Local Model", provider: "local", badge: "LOCAL")
-        ])
+        AIProviderDefinition(id: "omni", name: "Dotmini Cloud", icon: "sparkles", endpoint: "api.dotmini.net/v1", models: []),
+        AIProviderDefinition(id: "openai", name: "OpenAI", icon: "brain.head.profile", endpoint: "api.openai.com", models: []),
+        AIProviderDefinition(id: "anthropic", name: "Anthropic Claude", icon: "bubble.left.and.text.bubble.right", endpoint: "api.anthropic.com", models: []),
+        AIProviderDefinition(id: "gemini", name: "Google Gemini", icon: "sparkles", endpoint: "generativelanguage.googleapis.com", models: []),
+        AIProviderDefinition(id: "deepseek", name: "DeepSeek", icon: "water.waves", endpoint: "api.deepseek.com", models: []),
+        AIProviderDefinition(id: "copilot", name: "GitHub Copilot", icon: "github", endpoint: "api.githubcopilot.com", models: []),
+        AIProviderDefinition(id: "qwen", name: "Qwen / Alibaba", icon: "cloud.fill", endpoint: "dashscope.aliyuncs.com", models: []),
+        AIProviderDefinition(id: "grok", name: "xAI Grok", icon: "bolt.fill", endpoint: "api.x.ai", models: []),
+        AIProviderDefinition(id: "glm", name: "Zhipu GLM", icon: "globe.asia.australia", endpoint: "open.bigmodel.cn", models: []),
+        AIProviderDefinition(id: "local", name: "Local LLM", icon: "desktopcomputer", endpoint: "http://127.0.0.1:11434/v1", models: [])
     ]
 }

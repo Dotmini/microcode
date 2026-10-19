@@ -21,6 +21,15 @@ struct EmbeddedAppleSimulatorView: View {
 
     private var previewTitle: String { runtime.selectedApplePreviewTitle }
 
+    private func closePreview() {
+        runtime.stopEmbeddedAppleSimulator(shutdownSimulator: true)
+        if let onHide {
+            onHide()
+        } else {
+            PreviewDockService.shared.hideDock()
+        }
+    }
+
     var body: some View {
         VStack(spacing: 0) {
             ZStack {
@@ -44,26 +53,54 @@ struct EmbeddedAppleSimulatorView: View {
                                 .foregroundColor(.secondary)
                             Text("\(previewTitle) Preview")
                                 .font(.system(size: 13, weight: .semibold))
-                            Text("Interactive iOS Simulator preview is currently idle.")
+                            Text(runtime.isWorking
+                                 ? "Booting \(previewTitle)…"
+                                 : "Interactive iOS Simulator preview is currently idle (0% CPU).")
                                 .font(.system(size: 10.5))
                                 .foregroundColor(.secondary)
                                 .multilineTextAlignment(.center)
                                 .frame(maxWidth: 260)
 
-                            HStack(spacing: 8) {
-                                Button("Start Simulator") {
-                                    Task { await runtime.startEmbeddedAppleSimulator() }
-                                }
-                                .buttonStyle(.borderedProminent)
-                                .controlSize(.small)
+                            if runtime.isWorking {
+                                ProgressView()
+                                    .controlSize(.small)
+                                HStack(spacing: 8) {
+                                    Button("Stop & Cancel") {
+                                        runtime.stopEmbeddedAppleSimulator(shutdownSimulator: true)
+                                    }
+                                    .buttonStyle(.borderedProminent)
+                                    .tint(.red)
+                                    .controlSize(.small)
 
-                                Button("Switch to Web Preview") {
-                                    PreviewDockService.shared.selectTab(id: "web")
+                                    Button("Close Preview") {
+                                        closePreview()
+                                    }
+                                    .buttonStyle(.bordered)
+                                    .controlSize(.small)
                                 }
-                                .buttonStyle(.bordered)
-                                .controlSize(.small)
+                                .padding(.top, 4)
+                            } else {
+                                HStack(spacing: 8) {
+                                    Button("Start Simulator") {
+                                        Task { await runtime.startEmbeddedAppleSimulator() }
+                                    }
+                                    .buttonStyle(.borderedProminent)
+                                    .controlSize(.small)
+
+                                    Button("Web Preview") {
+                                        PreviewDockService.shared.selectTab(id: "web")
+                                    }
+                                    .buttonStyle(.bordered)
+                                    .controlSize(.small)
+
+                                    Button("Close") {
+                                        closePreview()
+                                    }
+                                    .buttonStyle(.bordered)
+                                    .controlSize(.small)
+                                }
+                                .padding(.top, 4)
                             }
-                            .padding(.top, 4)
 
                         case .connecting:
                             ProgressView()
@@ -77,15 +114,22 @@ struct EmbeddedAppleSimulatorView: View {
                                 .frame(maxWidth: 260)
 
                             HStack(spacing: 8) {
-                                Button("Cancel") {
-                                    Task { await serveSim.stop() }
+                                Button("Stop & Cancel") {
+                                    runtime.stopEmbeddedAppleSimulator(shutdownSimulator: true)
+                                }
+                                .buttonStyle(.borderedProminent)
+                                .tint(.red)
+                                .controlSize(.small)
+
+                                Button("Web Preview") {
+                                    runtime.stopEmbeddedAppleSimulator(shutdownSimulator: true)
+                                    PreviewDockService.shared.selectTab(id: "web")
                                 }
                                 .buttonStyle(.bordered)
                                 .controlSize(.small)
 
-                                Button("Open WebApp Instead") {
-                                    Task { await serveSim.stop() }
-                                    PreviewDockService.shared.selectTab(id: "web")
+                                Button("Close") {
+                                    closePreview()
                                 }
                                 .buttonStyle(.bordered)
                                 .controlSize(.small)
@@ -111,9 +155,15 @@ struct EmbeddedAppleSimulatorView: View {
                                 .buttonStyle(.borderedProminent)
                                 .controlSize(.small)
 
-                                Button("Switch to Web Preview") {
-                                    Task { await serveSim.stop() }
+                                Button("Web Preview") {
+                                    runtime.stopEmbeddedAppleSimulator(shutdownSimulator: true)
                                     PreviewDockService.shared.selectTab(id: "web")
+                                }
+                                .buttonStyle(.bordered)
+                                .controlSize(.small)
+
+                                Button("Close") {
+                                    closePreview()
                                 }
                                 .buttonStyle(.bordered)
                                 .controlSize(.small)
@@ -127,6 +177,30 @@ struct EmbeddedAppleSimulatorView: View {
                     .padding(20)
                     .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 12))
                     .overlay(RoundedRectangle(cornerRadius: 12).stroke(Color.primary.opacity(0.08), lineWidth: 0.8))
+                } else {
+                    VStack {
+                        HStack {
+                            Spacer()
+                            Button {
+                                runtime.stopEmbeddedAppleSimulator(shutdownSimulator: true)
+                            } label: {
+                                HStack(spacing: 4) {
+                                    Image(systemName: "stop.circle.fill")
+                                        .font(.system(size: 11))
+                                    Text("Stop Sim")
+                                        .font(.system(size: 10, weight: .semibold))
+                                }
+                                .foregroundColor(.white)
+                                .padding(.horizontal, 8)
+                                .padding(.vertical, 4)
+                                .background(Color.red.opacity(0.85), in: Capsule())
+                            }
+                            .buttonStyle(.plain)
+                            .help("Stop iOS Simulator and free CPU")
+                        }
+                        .padding(10)
+                        Spacer()
+                    }
                 }
             }
         }

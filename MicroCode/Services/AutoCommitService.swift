@@ -90,8 +90,16 @@ class AutoCommitService: ObservableObject {
         )
         
         if stashResult.exitCode == 0 && !stashResult.output.contains("No local changes") {
-            // Immediately pop the stash to restore working tree
-            // The stash entry remains in reflog for recovery
+            // Capture the stash commit SHA into a persistent ref BEFORE popping,
+            // because `git stash pop` drops `stash@{0}` from `git stash list`.
+            let stashSha = await runGit(["rev-parse", "stash@{0}"], in: root)
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+            let refName = "refs/microcode-checkpoints/\(checkpointId)"
+            if !stashSha.isEmpty {
+                _ = await runGitExec(["update-ref", refName, stashSha], in: root)
+            }
+
+            // Immediately pop the stash to restore the user's working tree
             let popResult = await runGitExec(["stash", "pop"], in: root)
             
             if popResult.exitCode == 0 {
@@ -101,7 +109,9 @@ class AutoCommitService: ObservableObject {
                     toolName: toolName,
                     targetPath: targetPath,
                     stashMessage: commitMessage,
-                    filesSummary: parseStatusSummary(status)
+                    filesSummary: parseStatusSummary(status),
+                    isTagBased: false,
+                    tagName: stashSha.isEmpty ? nil : refName
                 )
                 
                 checkpoints.append(checkpoint)
@@ -114,6 +124,12 @@ class AutoCommitService: ObservableObject {
                 
                 // Prune old checkpoints
                 if checkpoints.count > maxCheckpoints {
+                    let removed = checkpoints.prefix(checkpoints.count - maxCheckpoints)
+                    for old in removed {
+                        if let oldRef = old.tagName, oldRef.hasPrefix("refs/microcode-checkpoints/") {
+                            _ = await runGitExec(["update-ref", "-d", oldRef], in: root)
+                        }
+                    }
                     checkpoints.removeFirst(checkpoints.count - maxCheckpoints)
                 }
                 
@@ -164,41 +180,47 @@ class AutoCommitService: ObservableObject {
         guard let root = workspaceRoot, !root.isEmpty else { return false }
         
         if checkpoint.isTagBased, let tagName = checkpoint.tagName {
-            // Tag-based: hard reset to the tagged commit
+            // Tag-based: restore tracked files to the tagged commit
             let result = await runGitExec(["checkout", tagName, "--", "."], in: root)
             if result.exitCode == 0 {
-                // Remove checkpoints after this one
                 if let index = checkpoints.firstIndex(where: { $0.id == checkpoint.id }) {
                     checkpoints.removeSubrange((index + 1)...)
                 }
                 return true
             }
         } else {
-            // Find the stash entry by its message
-            let stashList = await runGit(["stash", "list"], in: root)
-            let lines = stashList.components(separatedBy: "\n")
-            for line in lines {
-                if line.contains(checkpoint.stashMessage) {
-                    // Extract stash index (e.g., "stash@{0}")
-                    if let stashRef = line.components(separatedBy: ":").first {
-                        // Apply the stash (restores the state before the checkpoint)
-                        let result = await runGitExec(["stash", "apply", stashRef.trimmingCharacters(in: .whitespaces)], in: root)
-                        if result.exitCode == 0 {
-                            if let index = checkpoints.firstIndex(where: { $0.id == checkpoint.id }) {
-                                checkpoints.removeSubrange((index + 1)...)
-                            }
-                            return true
+            // 1. Prefer the persistent checkpoint ref created before `git stash pop`
+            let refCandidates = [checkpoint.tagName, "refs/microcode-checkpoints/\(checkpoint.id)"].compactMap { $0 }
+            for ref in refCandidates {
+                let verify = await runGitExec(["rev-parse", "--verify", ref], in: root)
+                if verify.exitCode == 0 {
+                    _ = await runGitExec(["checkout", "--", "."], in: root)
+                    let applyResult = await runGitExec(["stash", "apply", "--index", ref], in: root)
+                    let fallbackApply = applyResult.exitCode == 0
+                        ? applyResult
+                        : await runGitExec(["stash", "apply", ref], in: root)
+                    if fallbackApply.exitCode == 0 {
+                        if let index = checkpoints.firstIndex(where: { $0.id == checkpoint.id }) {
+                            checkpoints.removeSubrange((index + 1)...)
                         }
+                        return true
                     }
                 }
             }
-            
-            // Fallback: discard all unstaged changes (dangerous but effective)
-            let discardResult = await runGitExec(["checkout", "--", "."], in: root)
-            if discardResult.exitCode == 0 {
-                // Also clean untracked files that might have been created
-                let _ = await runGitExec(["clean", "-fd"], in: root)
-                return true
+
+            // 2. Fallback: Check `git stash list` by message
+            let stashList = await runGit(["stash", "list"], in: root)
+            let lines = stashList.components(separatedBy: "\n")
+            for line in lines where line.contains(checkpoint.stashMessage) {
+                if let stashRef = line.components(separatedBy: ":").first {
+                    let result = await runGitExec(["stash", "apply", stashRef.trimmingCharacters(in: .whitespaces)], in: root)
+                    if result.exitCode == 0 {
+                        if let index = checkpoints.firstIndex(where: { $0.id == checkpoint.id }) {
+                            checkpoints.removeSubrange((index + 1)...)
+                        }
+                        return true
+                    }
+                }
             }
         }
         
@@ -231,13 +253,17 @@ class AutoCommitService: ObservableObject {
     
     // MARK: - Cleanup
     
-    /// Remove checkpoint tags (call on app quit or session end)
+    /// Remove checkpoint tags and refs (call on app quit or session end)
     func cleanupCheckpointTags() async {
         guard let root = workspaceRoot, !root.isEmpty else { return }
         
-        for checkpoint in checkpoints where checkpoint.isTagBased {
+        for checkpoint in checkpoints {
             if let tagName = checkpoint.tagName {
-                let _ = await runGitExec(["tag", "-d", tagName], in: root)
+                if checkpoint.isTagBased {
+                    let _ = await runGitExec(["tag", "-d", tagName], in: root)
+                } else if tagName.hasPrefix("refs/microcode-checkpoints/") {
+                    let _ = await runGitExec(["update-ref", "-d", tagName], in: root)
+                }
             }
         }
     }
@@ -281,12 +307,15 @@ class AutoCommitService: ObservableObject {
             process.executableURL = URL(fileURLWithPath: "/usr/bin/git")
             process.arguments = args
             process.currentDirectoryURL = URL(fileURLWithPath: directory)
+            process.standardInput = FileHandle.nullDevice
             process.standardOutput = pipe
-            process.standardError = Pipe()
+            process.standardError = FileHandle.nullDevice
             do {
                 try process.run()
-                process.waitUntilExit()
                 let data = pipe.fileHandleForReading.readDataToEndOfFile()
+                while process.isRunning {
+                    try? await Task.sleep(nanoseconds: 5_000_000)
+                }
                 return String(data: data, encoding: .utf8)?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
             } catch {
                 return ""
@@ -302,13 +331,16 @@ class AutoCommitService: ObservableObject {
             process.executableURL = URL(fileURLWithPath: "/usr/bin/git")
             process.arguments = args
             process.currentDirectoryURL = URL(fileURLWithPath: directory)
+            process.standardInput = FileHandle.nullDevice
             process.standardOutput = outPipe
             process.standardError = errPipe
             do {
                 try process.run()
-                process.waitUntilExit()
                 let out = String(data: outPipe.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? ""
                 let err = String(data: errPipe.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? ""
+                while process.isRunning {
+                    try? await Task.sleep(nanoseconds: 5_000_000)
+                }
                 return (out + err, process.terminationStatus)
             } catch {
                 return (error.localizedDescription, -1)

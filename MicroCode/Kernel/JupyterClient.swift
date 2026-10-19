@@ -147,6 +147,13 @@ class JupyterClient {
         self.activeKernelID = nil
         disconnectWebSocket()
     }
+
+    func interruptKernel() async {
+        guard let kernelID = activeKernelID,
+              let request = makeRequest(path: "/api/kernels/\(kernelID)/interrupt", method: "POST") else { return }
+        _ = try? await URLSession.shared.data(for: request)
+        CrashReporter.shared.breadcrumb("Jupyter.interruptKernel id=\(kernelID)")
+    }
     
     // MARK: - WebSocket Protocol
     
@@ -330,9 +337,18 @@ class JupyterClient {
                 if let text = dataContent["text/plain"] as? String {
                     onOutput?(text + "\n")
                 }
-                // Handle image data if present
+                // Handle image data if present: decode to temp PNG so NotebookView renders it inline
                 if let base64Image = dataContent["image/png"] as? String {
-                    onOutput?("[Image Output Received: \(base64Image.count) bytes]\n")
+                    let cleanB64 = base64Image.replacingOccurrences(of: "\n", with: "").replacingOccurrences(of: "\r", with: "")
+                    if let imgData = Data(base64Encoded: cleanB64) {
+                        let tmpURL = URL(fileURLWithPath: NSTemporaryDirectory())
+                            .appendingPathComponent("mc_jupyter_plot_\(UUID().uuidString).png")
+                        if (try? imgData.write(to: tmpURL)) != nil {
+                            onOutput?("[IMAGE:\(tmpURL.path)]\n")
+                        } else {
+                            onOutput?("[Image Output Received: \(imgData.count) bytes]\n")
+                        }
+                    }
                 }
             }
         case "error":

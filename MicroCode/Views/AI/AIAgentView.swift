@@ -54,6 +54,7 @@ struct AIAgentView: View {
     @State private var agentEcosystemTab: EcosystemTab = .agents
     @State private var activeACPAgent: ACPAgentConfig? = nil
     @StateObject private var acpHost = ACPHostService.shared
+    @ObservedObject private var ecosystemDiscovery = LocalEcosystemDiscovery.shared
     @ObservedObject private var teamIntegrations = TeamIntegrationService.shared
     @ObservedObject private var deviceRuntime = DeviceRuntimeService.shared
     @ObservedObject private var previewDock = PreviewDockService.shared
@@ -268,7 +269,10 @@ struct AIAgentView: View {
                 if let modelDef = AIModelCatalog.shared.model(id: appState.aiModel) {
                     return modelDef.name
                 }
-                return appState.aiModel.isEmpty ? "Gemini 2.5 Flash" : AIModelCatalog.formatModelName(appState.aiModel)
+                if appState.aiModel.isEmpty {
+                    return AIModelCatalog.shared.provider(appState.aiProvider)?.models.first?.name ?? "Select Model"
+                }
+                return AIModelCatalog.formatModelName(appState.aiModel)
             }()
             return "\(providerName) : \(modelName)"
         } else {
@@ -376,8 +380,8 @@ struct AIAgentView: View {
                                         contextLimitBanner
                                     }
                                     
-                                    // Live Task Activity Banner (linking directly to Task Logs)
-                                    if agent.isLoading || agent.currentToolExecution != nil {
+                                    // Live Task Activity Banner (shown strictly while agent is actively running)
+                                    if agent.isLoading {
                                         liveTaskActivityBanner
                                     }
                                     
@@ -420,6 +424,13 @@ struct AIAgentView: View {
             if sessionScope == .editor {
                 Task { await deviceRuntime.refresh(workspace: appState.workspaceFolder) }
             }
+        }
+        .onChange(of: appState.workspaceFolder) { newFolder in
+            guard sessionScope == .editor, scopedWorkspacePath == nil, let path = newFolder?.path else { return }
+            if agent.currentWorkspace != path {
+                agent.setWorkspace(path)
+            }
+            Task { await deviceRuntime.refresh(workspace: newFolder) }
         }
         .sheet(isPresented: $showingTeamTasks) {
             TeamTasksView(
@@ -665,10 +676,10 @@ struct AIAgentView: View {
     private var headerBar: some View {
         VStack(spacing: 0) {
             GeometryReader { geo in
-                let isCompact = geo.size.width < 560
-                let isVeryCompact = geo.size.width < 380
+                let isCompact = geo.size.width < 680
+                let isVeryCompact = geo.size.width < 460
                 
-                HStack(spacing: 8) {
+                HStack(spacing: 6) {
                     // Sidebar Toggle
                     if allowsChatSidebar {
                         Button(action: { agent.showChatSidebar.toggle() }) {
@@ -743,18 +754,10 @@ struct AIAgentView: View {
                         .frame(height: 24)
                     }
                     .menuStyle(.borderlessButton)
+                    .fixedSize()
                     .help("Configure Team tasks, Agent context, Slack, and Microsoft Teams") }
 
                     if sessionScope == .editor {
-                        Button { deviceRuntime.showingDeviceRuntimeSheet = true } label: {
-                            Image(systemName: "slider.horizontal.3")
-                                .font(.system(size: 11))
-                                .foregroundColor(.secondary)
-                                .frame(height: 26)
-                        }
-                        .buttonStyle(.plain)
-                        .help("Select a real Simulator / Emulator")
-
                         Menu {
                             Section("Live Multi-Platform Preview") {
                                 Button("WebApp Preview (Localhost)") {
@@ -765,13 +768,11 @@ struct AIAgentView: View {
                                 Button("iOS Simulator Preview") {
                                     withAnimation(.easeInOut(duration: 0.16)) {
                                         appState.showPreviewInspector(tab: "ios")
-                                        Task { await deviceRuntime.startEmbeddedAppleSimulator() }
                                     }
                                 }
                                 Button("Android Emulator Preview") {
                                     withAnimation(.easeInOut(duration: 0.16)) {
                                         appState.showPreviewInspector(tab: "android")
-                                        Task { await deviceRuntime.startPreferredEmbeddedAndroid() }
                                     }
                                 }
                                 Button("iPhone USB (Hardware)") {
@@ -866,6 +867,7 @@ struct AIAgentView: View {
                             .frame(height: 24)
                         }
                         .menuStyle(.borderlessButton)
+                        .fixedSize()
                         .help("Choose an iPhone, iPad, Apple Watch, Apple TV, physical Apple device, or Android Preview")
                     }
                     
@@ -1025,14 +1027,39 @@ struct AIAgentView: View {
                     }
                     .padding(2)
                     
-                    // P5: Compact cost status widget
-                    CostStatusWidget()
+                    // P5: Compact cost status widget (shown when wide enough)
+                    if !isCompact {
+                        CostStatusWidget()
+                    }
                     
                     Spacer(minLength: 4)
                     
                     // Model Selector + Menu
-                    HStack(spacing: 2) {
+                    HStack(spacing: 4) {
                         modelSelector
+
+                        if appState.agentMode {
+                            if let external = activeExternalAgentConfig,
+                               external.type == .codexEngine || external.type == .claudeCode || external.type == .agy {
+                                Menu {
+                                    ForEach(ACPPermissionMode.allCases, id: \.self) { mode in
+                                        Button {
+                                            acpHost.setPermissionMode(mode, for: external.id)
+                                        } label: {
+                                            Text(mode.displayName)
+                                            if external.permissionMode == mode { Image(systemName: "checkmark") }
+                                        }
+                                    }
+                                } label: {
+                                    Text(external.permissionMode == .fullAuto ? "Full Auto" : "Review")
+                                        .font(.system(size: 10, weight: .semibold))
+                                }
+                                .disabled(agent.isLoading)
+                                .help("Autonomy for \(external.name)")
+                            } else if activeExternalAgentConfig == nil {
+                                ToolApprovalModePickerView(manager: toolApprovalManager)
+                            }
+                        }
                         
                         Menu {
                             Button {
@@ -2545,10 +2572,6 @@ struct AIAgentView: View {
             Spacer(minLength: 14)
             
             VStack(spacing: 0) {
-                // One unobtrusive activity line; execution details stay in the
-                // transcript and continue running in the background.
-                activeAgentStatusHUD
-                
                 // Queue Indicator Bar
                 queueIndicatorBar
                 
@@ -2785,36 +2808,23 @@ struct AIAgentView: View {
         Menu {
             modelMenuContent
         } label: {
-            HStack(spacing: 5) {
-                // Mode Badge: [ACP] / [Dotmini Cloud] / [BYOK] / [Subscription]
-                Text(currentExecutionMode.badgeTitle)
-                    .font(.system(size: 8.5, weight: .bold))
-                    .padding(.horizontal, 4.5)
-                    .padding(.vertical, 1.5)
-                    .background(currentExecutionMode.badgeColor.opacity(0.12))
-                    .foregroundColor(currentExecutionMode.badgeColor)
-                    .cornerRadius(3.5)
-                
-                // Just Model Name
-                Text(currentModelDisplayName)
-                    .font(.system(size: 11, weight: .medium))
-                    .foregroundColor(.primary.opacity(0.9))
-                    .lineLimit(1)
-                
-                Image(systemName: "chevron.up.chevron.down")
-                    .font(.system(size: 8, weight: .semibold))
-                    .foregroundColor(.secondary.opacity(0.6))
-            }
-            .padding(.horizontal, 7)
-            .padding(.vertical, 4)
-            .background(Color.primary.opacity(0.05))
-            .cornerRadius(6)
-            .overlay(
-                RoundedRectangle(cornerRadius: 6)
-                    .stroke(Color.white.opacity(0.08), lineWidth: 1)
+            Label(
+                "\(currentExecutionMode.badgeTitle) · \(currentModelDisplayName)",
+                systemImage: currentExecutionMode.icon
             )
+            .font(.system(size: 11, weight: .medium))
+            .lineLimit(1)
         }
         .menuStyle(.borderlessButton)
+        .fixedSize()
+        .padding(.horizontal, 7)
+        .padding(.vertical, 3)
+        .background(Color.primary.opacity(0.06))
+        .cornerRadius(6)
+        .overlay(
+            RoundedRectangle(cornerRadius: 6)
+                .stroke(Color.white.opacity(0.1), lineWidth: 1)
+        )
     }
     
     private var sendOrStopButton: some View {
@@ -2920,89 +2930,121 @@ struct AIAgentView: View {
     // MARK: - Live Task Activity Banner
     
     private var liveTaskActivityBanner: some View {
-        HStack(spacing: 8) {
-            Button(action: {
-                withAnimation(.easeInOut(duration: 0.2)) {
-                    if planManager.currentPlan != nil || planManager.isPlanVisible {
-                        isPlanMode = true
-                        planManager.isPlanVisible = true
-                        isTaskMode = false
-                    } else {
-                        isTaskMode = true
-                        activeTaskTab = 0
-                        isPlanMode = false
-                        planManager.isPlanVisible = false
-                    }
-                    isPaperMode = false
-                    isCellMode = false
-                    isWalkthroughMode = false
-                    isPlanFullscreen = false
+        let latestToolCount = agent.messages.last?.toolResults.count ?? 0
+        return HStack(spacing: 0) {
+            Spacer(minLength: 14)
+            
+            HStack(spacing: 8) {
+                ProgressView()
+                    .controlSize(.mini)
+                
+                Text(agent.currentToolExecution ?? agent.agentPhase.displayText)
+                    .font(.system(size: 11, weight: .medium, design: .monospaced))
+                    .foregroundColor(.primary.opacity(0.9))
+                    .lineLimit(1)
+                    .truncationMode(.tail)
+                
+                if latestToolCount > 0 {
+                    Text("\(latestToolCount) step\(latestToolCount == 1 ? "" : "s")")
+                        .font(.system(size: 9.5, weight: .semibold, design: .monospaced))
+                        .foregroundColor(.accentColor)
+                        .padding(.horizontal, 6)
+                        .padding(.vertical, 2)
+                        .background(Color.accentColor.opacity(0.12))
+                        .clipShape(Capsule())
                 }
-            }) {
-                HStack(spacing: 8) {
-                    ProgressView()
-                        .controlSize(.mini)
-                    
-                    if let tool = agent.currentToolExecution {
-                        Text(tool)
-                            .font(.system(size: 10.5, weight: .medium, design: .monospaced))
-                            .foregroundColor(.primary)
-                            .lineLimit(1)
-                    } else {
-                        Text("Agent working on task…")
-                            .font(.system(size: 10.5, weight: .medium))
-                            .foregroundColor(.primary)
-                            .lineLimit(1)
+                
+                Spacer(minLength: 6)
+                
+                Button(action: {
+                    withAnimation(.easeInOut(duration: 0.2)) {
+                        if planManager.currentPlan != nil || planManager.isPlanVisible {
+                            isPlanMode = true
+                            planManager.isPlanVisible = true
+                            isTaskMode = false
+                        } else {
+                            isTaskMode = true
+                            activeTaskTab = 0
+                            isPlanMode = false
+                            planManager.isPlanVisible = false
+                        }
+                        isPaperMode = false
+                        isCellMode = false
+                        isWalkthroughMode = false
+                        isPlanFullscreen = false
                     }
-                    
-                    Spacer()
-                    
+                }) {
                     HStack(spacing: 4) {
                         Image(systemName: "list.bullet.clipboard")
                             .font(.system(size: 9.5))
-                        Text(planManager.currentPlan != nil ? "View Plan ➔" : "View Tasks ➔")
+                        Text(planManager.currentPlan != nil ? "Plan" : "Tasks")
                             .font(.system(size: 10, weight: .semibold))
                     }
-                    .foregroundColor(.primary.opacity(0.85))
+                    .foregroundColor(.secondary)
+                    .padding(.horizontal, 6)
+                    .padding(.vertical, 3)
+                    .background(Color.primary.opacity(0.05))
+                    .cornerRadius(4)
                 }
-                .contentShape(Rectangle())
+                .buttonStyle(.plain)
+                
+                Button(action: {
+                    withAnimation(.easeInOut(duration: 0.2)) {
+                        isTaskMode = true
+                        activeTaskTab = 3
+                        isPlanMode = false
+                        planManager.isPlanVisible = false
+                        isPaperMode = false
+                        isCellMode = false
+                        isWalkthroughMode = false
+                        isPlanFullscreen = false
+                    }
+                }) {
+                    HStack(spacing: 3) {
+                        Image(systemName: "terminal")
+                            .font(.system(size: 9))
+                        Text("\(agent.activityLog.count)")
+                            .font(.system(size: 9, weight: .bold, design: .monospaced))
+                    }
+                    .foregroundColor(.secondary)
+                    .padding(.horizontal, 6)
+                    .padding(.vertical, 3)
+                    .background(Color.primary.opacity(0.05))
+                    .cornerRadius(4)
+                }
+                .buttonStyle(.plain)
+                .help("Inspect low-level diagnostic logs & tool executions")
+                
+                Button(action: {
+                    agent.stopGeneration()
+                    acpHost.stopActiveAgent()
+                }) {
+                    HStack(spacing: 3) {
+                        Image(systemName: "stop.fill")
+                            .font(.system(size: 8, weight: .bold))
+                        Text("Stop")
+                            .font(.system(size: 9.5, weight: .semibold))
+                    }
+                    .foregroundColor(.red.opacity(0.9))
+                    .padding(.horizontal, 7)
+                    .padding(.vertical, 3)
+                    .background(Color.red.opacity(0.12))
+                    .cornerRadius(4)
+                }
+                .buttonStyle(.plain)
+                .help("Stop current agent run")
             }
-            .buttonStyle(.plain)
+            .padding(.horizontal, 10)
+            .padding(.vertical, 6)
+            .background(Color(nsColor: .controlBackgroundColor).opacity(0.75))
+            .cornerRadius(8)
+            .overlay(RoundedRectangle(cornerRadius: 8).stroke(Color.primary.opacity(0.1), lineWidth: 0.5))
+            .frame(maxWidth: 880)
             
-            Button(action: {
-                withAnimation(.easeInOut(duration: 0.2)) {
-                    isTaskMode = true
-                    activeTaskTab = 3
-                    isPlanMode = false
-                    planManager.isPlanVisible = false
-                    isPaperMode = false
-                    isCellMode = false
-                    isWalkthroughMode = false
-                    isPlanFullscreen = false
-                }
-            }) {
-                HStack(spacing: 3) {
-                    Image(systemName: "terminal")
-                        .font(.system(size: 9))
-                    Text("\(agent.activityLog.count)")
-                        .font(.system(size: 9, weight: .bold, design: .monospaced))
-                }
-                .foregroundColor(.secondary)
-                .padding(.horizontal, 6)
-                .padding(.vertical, 3)
-                .background(Color.primary.opacity(0.06))
-                .cornerRadius(4)
-            }
-            .buttonStyle(.plain)
-            .help("Inspect low-level diagnostic logs & tool executions")
+            Spacer(minLength: 14)
         }
-        .padding(.horizontal, 12)
-        .padding(.vertical, 6)
-        .background(Color.primary.opacity(0.04))
-        .cornerRadius(6)
-        .overlay(RoundedRectangle(cornerRadius: 6).stroke(Color.primary.opacity(0.08), lineWidth: 0.5))
-        .padding(.horizontal, 14)
         .padding(.bottom, 4)
+        .transition(.move(edge: .bottom).combined(with: .opacity))
     }
     
     // MARK: - Context Limit Banner
@@ -3282,6 +3324,54 @@ struct AIAgentView: View {
                 acpHost.registerAgent(cfg)
                 return cfg
             }()
+        } else if currentKeyMode == "subscription" {
+            // In Subscription mode, if the selected provider/model is backed by an authenticated local CLI session
+            // (e.g. Claude Code OAuth in ~/.claude.json or Google Antigravity CLI) rather than a raw pay-as-you-go API key,
+            // transparently execute through that CLI engine while keeping the UI in Subscription mode.
+            let activeSubRaw = UserDefaults.standard.string(forKey: "subscriptionActiveProvider")
+            let subProvider: SubscriptionProviderType = {
+                if let raw = activeSubRaw, let explicit = SubscriptionProviderType(rawValue: raw) {
+                    return explicit
+                }
+                if let matched = SubscriptionAuthManager.shared.findModel(id: appState.aiModel)?.provider {
+                    return matched
+                }
+                switch appState.aiProvider {
+                case "anthropic": return .claude
+                case "gemini": return .gemini
+                case "deepseek": return .deepseek
+                case "glm": return .glm
+                case "copilot": return .copilot
+                default: return .chatgpt
+                }
+            }()
+            if let cliEngine = SubscriptionAuthManager.shared.preferredCLIEngine(for: subProvider, model: appState.aiModel) {
+                if cliEngine == "claude_code" {
+                    targetConfig = acpHost.registeredConfigs.first(where: { $0.type == .claudeCode }) ?? {
+                        let bin = LocalEcosystemDiscovery.shared.engines.first(where: { $0.id == "claude_code" })?.binaryPath ?? ACPAgentType.claudeCode.defaultCommand
+                        let cfg = ACPAgentConfig.defaultConfig(for: .claudeCode, command: bin)
+                        acpHost.registerAgent(cfg)
+                        return cfg
+                    }()
+                } else if cliEngine == "agy" {
+                    targetConfig = acpHost.registeredConfigs.first(where: { $0.type == .agy }) ?? {
+                        let bin = LocalEcosystemDiscovery.shared.engines.first(where: { $0.id == "agy" })?.binaryPath ?? ACPAgentType.agy.defaultCommand
+                        let cfg = ACPAgentConfig.defaultConfig(for: .agy, command: bin)
+                        acpHost.registerAgent(cfg)
+                        return cfg
+                    }()
+                }
+            }
+        }
+        
+        // Fast-path for Codex: if Codex OAuth credentials (~/.codex/auth.json) are available,
+        // route directly via AIClient's native Codex Responses SSE stream + AgentToolBox
+        // to avoid spawning the local codex subprocess when its external MCP servers time out.
+        var useDirectCodexOAuth = false
+        if (targetConfig?.type == .codexEngine || appState.aiProvider == "codex"),
+           AIClient.loadCodexOAuthCredentials(fallbackToken: "") != nil {
+            targetConfig = nil
+            useDirectCodexOAuth = true
         }
         
         if let activeConfig = targetConfig {
@@ -3301,28 +3391,32 @@ struct AIAgentView: View {
             
             let workspace = appState.workspaceFolder?.path ?? FileManager.default.currentDirectoryPath
             let session = acpHost.getOrCreateSession(for: activeConfig)
+            let isBridgedSubscription = (currentKeyMode == "subscription" && acpHost.activeAgentId == nil && !["agy", "claude_code", "opencode", "codex", "zed"].contains(appState.aiProvider))
             let chosenModel: String? = {
+                if isBridgedSubscription && !appState.aiModel.isEmpty {
+                    return appState.aiModel
+                }
                 switch activeConfig.type {
                 case .agy:
                     let agyModels = LocalEcosystemDiscovery.shared.models(for: "agy").map(\.id)
-                    return agyModels.contains(appState.aiModel) ? appState.aiModel : (agyModels.first ?? "gemini-2.0-flash")
+                    return agyModels.contains(appState.aiModel) ? appState.aiModel : (agyModels.first ?? "gemini-3-flash-agent")
                 case .openCode:
                     let isAuthed = LocalEcosystemDiscovery.shared.engines.first(where: { $0.id == "opencode" })?.isAuthenticated ?? false
                     let openCodeModels = LocalEcosystemDiscovery.shared.models(for: "opencode").map(\.id)
                     let current = appState.aiModel
-                    if openCodeModels.contains(current) {
+                    if openCodeModels.contains(current) && !current.contains("nemotron-3.5-lightning-free") {
                         if !isAuthed && !current.contains("free") {
-                            return openCodeModels.first(where: { $0.contains("free") }) ?? "opencode/nemotron-3.5-lightning-free"
+                            return openCodeModels.first(where: { $0.contains("free") && !$0.contains("nemotron-3.5-lightning-free") }) ?? "opencode/glm-5.3-flash-free"
                         }
                         return current
                     }
-                    return openCodeModels.first(where: { $0.contains("free") }) ?? "opencode/nemotron-3.5-lightning-free"
+                    return openCodeModels.first(where: { $0.contains("free") && !$0.contains("nemotron-3.5-lightning-free") }) ?? "opencode/glm-5.3-flash-free"
                 case .codexEngine:
                     let codexModels = LocalEcosystemDiscovery.shared.models(for: "codex").map(\.id)
-                    return codexModels.contains(appState.aiModel) ? appState.aiModel : (codexModels.first ?? "gpt-4o")
+                    return codexModels.contains(appState.aiModel) ? appState.aiModel : codexModels.first
                 case .claudeCode:
                     let claudeModels = LocalEcosystemDiscovery.shared.models(for: "claude_code").map(\.id)
-                    return claudeModels.contains(appState.aiModel) ? appState.aiModel : (claudeModels.first ?? "haiku")
+                    return claudeModels.contains(appState.aiModel) ? appState.aiModel : (claudeModels.first ?? "sonnet")
                 case .zedEngine:
                     let zedModels = LocalEcosystemDiscovery.shared.models(for: "zed").map(\.id)
                     return zedModels.contains(appState.aiModel) ? appState.aiModel : (zedModels.first ?? "deepseek-chat")
@@ -3330,7 +3424,7 @@ struct AIAgentView: View {
                     return appState.aiModel.isEmpty ? nil : appState.aiModel
                 }
             }()
-            if let model = chosenModel, appState.aiModel != model {
+            if !isBridgedSubscription, let model = chosenModel, appState.aiModel != model {
                 appState.aiModel = model
             }
             
@@ -3420,6 +3514,12 @@ struct AIAgentView: View {
                                 output: res.content,
                                 error: res.isError ? res.content : nil
                             )
+                        } else {
+                            tools.append(ToolResultModel(
+                                toolCallId: res.toolCallId, toolName: res.toolName ?? "Tool",
+                                success: !res.isError, output: res.content,
+                                error: res.isError ? res.content : nil
+                            ))
                         }
                         agent.messages[idx] = AgentMessageModel(
                             id: responseId, role: .assistant,
@@ -3434,7 +3534,10 @@ struct AIAgentView: View {
                     case .sessionInit:
                         agent.agentPhase = .thinking
                         agent.currentToolExecution = "Connecting to \(activeConfig.name)..."
-                    case .complete:
+                    case .complete(let res):
+                        if accumulatedText.isEmpty && !res.result.isEmpty {
+                            accumulatedText = res.result
+                        }
                         if !accumulatedThinking.isEmpty && accumulatedText.isEmpty {
                             agent.messages[idx] = AgentMessageModel(
                                 id: responseId, role: .assistant,
@@ -3451,10 +3554,20 @@ struct AIAgentView: View {
                                 pendingChanges: agent.messages[idx].pendingChanges,
                                 timestamp: Date()
                             )
+                        } else if !accumulatedText.isEmpty {
+                            agent.messages[idx] = AgentMessageModel(
+                                id: responseId, role: .assistant,
+                                content: accumulatedText,
+                                toolResults: agent.messages[idx].toolResults,
+                                pendingChanges: agent.messages[idx].pendingChanges,
+                                timestamp: Date()
+                            )
                         }
                         agent.isLoading = false
                         agent.agentPhase = .idle
                         agent.currentToolExecution = nil
+                        agent.saveChats()
+                        agent.saveArx()
                     case .error(let err):
                         let curr = agent.messages[idx].content
                         agent.messages[idx] = AgentMessageModel(
@@ -3467,6 +3580,8 @@ struct AIAgentView: View {
                         agent.isLoading = false
                         agent.agentPhase = .idle
                         agent.currentToolExecution = nil
+                        agent.saveChats()
+                        agent.saveArx()
                     default:
                         break
                     }
@@ -3475,9 +3590,18 @@ struct AIAgentView: View {
             return
         }
         
-        let providerString = appState.aiProvider
-        let model = appState.aiModel.isEmpty ? "gemini-2.5-flash" : appState.aiModel
-        let apiKey = appState.resolveApiKey(for: providerString)
+        let providerString = useDirectCodexOAuth ? "openai" : appState.aiProvider
+        let model: String = {
+            if useDirectCodexOAuth {
+                let codexModels = LocalEcosystemDiscovery.shared.models(for: "codex").map(\.id)
+                if codexModels.contains(appState.aiModel) {
+                    return appState.aiModel
+                }
+                return AIClient.loadCodexOAuthCredentials(fallbackToken: "")?.defaultModel ?? "gpt-6-luna"
+            }
+            return appState.aiModel.isEmpty ? (AIModelCatalog.shared.provider(providerString)?.models.first?.id ?? "") : appState.aiModel
+        }()
+        let apiKey = useDirectCodexOAuth ? "codex_oauth" : appState.resolveApiKey(for: providerString)
         
         if appState.agentMode {
             // Agent Mode: Use AgentService pipeline (tool execution + agentic loop)
@@ -3666,12 +3790,18 @@ struct AIAgentView: View {
         default: type = .agy
         }
         
+        let discoveredBinary = LocalEcosystemDiscovery.shared.engines.first(where: { $0.id == engineId })?.binaryPath
+            ?? ACPHostService.resolveExecutablePath(type.defaultCommand)
+            ?? type.defaultCommand
         let config: ACPAgentConfig
-        if let existing = acpHost.registeredConfigs.first(where: { $0.type == type }) {
+        if var existing = acpHost.registeredConfigs.first(where: { $0.type == type }) {
+            if !FileManager.default.isExecutableFile(atPath: existing.command) {
+                existing.command = discoveredBinary
+                acpHost.registerAgent(existing)
+            }
             config = existing
         } else {
-            let binaryPath = LocalEcosystemDiscovery.shared.engines.first(where: { $0.id == engineId })?.binaryPath ?? type.defaultCommand
-            config = ACPAgentConfig.defaultConfig(for: type, command: binaryPath)
+            config = ACPAgentConfig.defaultConfig(for: type, command: discoveredBinary)
             acpHost.registerAgent(config)
         }
         
@@ -3735,38 +3865,24 @@ struct AIAgentView: View {
         Menu {
             modelMenuContent
         } label: {
-            HStack(spacing: 4) {
-                // Mode badge: [ACP] / [Dotmini Cloud] / [BYOK] / [Subscription]
-                Text(currentExecutionMode.badgeTitle)
-                    .font(.system(size: 8, weight: .bold))
-                    .padding(.horizontal, 4)
-                    .padding(.vertical, 1)
-                    .background(currentExecutionMode.badgeColor.opacity(0.12))
-                    .foregroundColor(currentExecutionMode.badgeColor)
-                    .cornerRadius(3)
-                
-                // Model name only
-                Text(headerModelDisplayName)
-                    .font(.system(size: 9.5, weight: .medium))
-                    .lineLimit(1)
-                    .truncationMode(.tail)
-                    .foregroundColor(.primary.opacity(0.9))
-                
-                Image(systemName: "chevron.down")
-                    .font(.system(size: 7, weight: .semibold))
-                    .foregroundColor(.secondary.opacity(0.7))
-            }
-            .padding(.horizontal, 6)
-            .padding(.vertical, 4)
-            .background(Color.primary.opacity(0.05))
-            .cornerRadius(4)
-            .overlay(
-                RoundedRectangle(cornerRadius: 4)
-                    .stroke(Color.white.opacity(0.08), lineWidth: 0.5)
+            Label(
+                "\(currentExecutionMode.badgeTitle) · \(headerModelDisplayName)",
+                systemImage: currentExecutionMode.icon
             )
+            .font(.system(size: 10, weight: .medium))
+            .lineLimit(1)
+            .truncationMode(.tail)
         }
         .menuStyle(.borderlessButton)
-        .frame(maxWidth: 320)
+        .fixedSize()
+        .padding(.horizontal, 6)
+        .padding(.vertical, 3)
+        .background(Color.primary.opacity(0.06))
+        .cornerRadius(4)
+        .overlay(
+            RoundedRectangle(cornerRadius: 4)
+                .stroke(Color.white.opacity(0.1), lineWidth: 0.5)
+        )
         .help("Select Mode & AI Model (ACP, Dotmini Cloud, BYOK, Subscription)")
     }
     
@@ -3956,7 +4072,7 @@ struct AIAgentView: View {
                 // Group 1: 🌟 Flagship & Deep Reasoning
                 let reasoningModels = omni.models.filter {
                     let id = $0.id.lowercased()
-                    return id.contains("astra") || id.contains("sonnet-4-6") || id.contains("3.8-flash") || id.contains("reasoner") || id.contains("o3") || id.contains("o1") || id.contains("5.6-sol")
+                    return id.contains("argon") || id.contains("astra") || id.contains("opus") || id.contains("sonnet") || id.contains("3.8-flash") || id.contains("reasoner") || id.contains("o3") || id.contains("o1") || id.contains("sol")
                 }
                 if !reasoningModels.isEmpty {
                     Menu("🌟 Flagship & Deep Reasoning") {
@@ -4145,7 +4261,7 @@ struct AIAgentView: View {
     private func promptCustomModel(provider: String, isSubscription: Bool) {
         let alert = NSAlert()
         alert.messageText = "Enter Custom Model ID"
-        alert.informativeText = "Type the exact model identifier from \(provider) (e.g. gpt-4.5-preview, claude-3-7-sonnet-20250219, gemini-2.5-pro, deepseek-chat):"
+        alert.informativeText = "Type the exact model identifier from \(provider) (e.g. gemini-4-argon-medium, claude-opus-5-5-high, gpt-6.1-sol, deepseek-v4-pro):"
         alert.addButton(withTitle: "Use Model")
         alert.addButton(withTitle: "Cancel")
         
@@ -4973,11 +5089,55 @@ struct MessageContentParser {
         return nil
     }
     
+    private static var thoughtStartTimes: [String: Date] = [:]
+    private static var completedThoughtDurations: [Int: Int] = [:]
+    private static var activeUnclosedStartTime: Date?
+    private static let durationLock = NSLock()
+
+    private static func recordStreamingThought(_ rawThought: String) {
+        durationLock.lock()
+        defer { durationLock.unlock() }
+        let now = Date()
+        if activeUnclosedStartTime == nil {
+            activeUnclosedStartTime = now
+        }
+        let clean = rawThought.trimmingCharacters(in: .whitespacesAndNewlines)
+        if clean.count >= 40 {
+            let key = String(clean.prefix(40))
+            if thoughtStartTimes[key] == nil {
+                thoughtStartTimes[key] = activeUnclosedStartTime ?? now
+            }
+        }
+    }
+
+    private static func resolveThoughtDuration(for clean: String) -> Int {
+        durationLock.lock()
+        defer { durationLock.unlock() }
+        let hash = clean.hashValue
+        if let cached = completedThoughtDurations[hash] {
+            return cached
+        }
+        let key = String(clean.prefix(40))
+        if let start = thoughtStartTimes[key] ?? activeUnclosedStartTime {
+            let elapsed = max(1, Int(Date().timeIntervalSince(start).rounded()))
+            completedThoughtDurations[hash] = elapsed
+            activeUnclosedStartTime = nil
+            return elapsed
+        }
+        // Fallback for historical persisted messages loaded from disk (~850 chars/sec for modern reasoning models)
+        let fallback = max(1, min(120, clean.count / 850))
+        completedThoughtDurations[hash] = fallback
+        return fallback
+    }
+
     private static func doParse(_ content: String) -> [MessageBlock] {
         let remaining = content
+        let hasClosingThoughtTag =
+            remaining.range(of: "</think", options: .caseInsensitive) != nil ||
+            remaining.range(of: "</thought", options: .caseInsensitive) != nil
         
         // 0. Extract <thought>...</thought>, <thinking>...</thinking>, or <think>...</think>
-        if let thoughtRegex = thoughtRegex {
+        if hasClosingThoughtTag, let thoughtRegex = thoughtRegex {
             let nsContent = remaining as NSString
             let thoughtMatches = thoughtRegex.matches(in: remaining, options: [], range: NSRange(location: 0, length: nsContent.length))
             
@@ -5005,8 +5165,8 @@ struct MessageContentParser {
                     
                     let clean = thoughtBody.trimmingCharacters(in: .whitespacesAndNewlines)
                     if !clean.isEmpty {
-                        let estimatedSec = max(1, clean.count / 120)
-                        parsedList.append(.thought(clean, estimatedSec))
+                        let durationSec = resolveThoughtDuration(for: clean)
+                        parsedList.append(.thought(clean, durationSec))
                     }
                     
                     lastEnd = match.range.location + match.range.length
@@ -5018,10 +5178,11 @@ struct MessageContentParser {
                         if !unclosed.before.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
                             parsedList.append(contentsOf: parseLatexAndCode(unclosed.before))
                         }
+                        recordStreamingThought(unclosed.thought)
                         parsedList.append(.thought(unclosed.thought, nil))
                     } else if let orphan = findOrphanClosingThought(in: afterText) {
                         if !orphan.thought.isEmpty {
-                            parsedList.append(.thought(orphan.thought, max(1, orphan.thought.count / 120)))
+                            parsedList.append(.thought(orphan.thought, resolveThoughtDuration(for: orphan.thought)))
                         }
                         if !orphan.after.isEmpty {
                             parsedList.append(contentsOf: parseLatexAndCode(orphan.after))
@@ -5036,10 +5197,10 @@ struct MessageContentParser {
         }
         
         // Check for orphan closing tag without opening tag (e.g. "Let me start.</thought>")
-        if let orphan = findOrphanClosingThought(in: remaining) {
+        if hasClosingThoughtTag, let orphan = findOrphanClosingThought(in: remaining) {
             var parsedList: [MessageBlock] = []
             if !orphan.thought.isEmpty {
-                parsedList.append(.thought(orphan.thought, max(1, orphan.thought.count / 120)))
+                parsedList.append(.thought(orphan.thought, resolveThoughtDuration(for: orphan.thought)))
             }
             if !orphan.after.isEmpty {
                 parsedList.append(contentsOf: parseLatexAndCode(orphan.after))
@@ -5053,6 +5214,7 @@ struct MessageContentParser {
             if !unclosed.before.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
                 parsedList.append(contentsOf: parseLatexAndCode(unclosed.before))
             }
+            recordStreamingThought(unclosed.thought)
             parsedList.append(.thought(unclosed.thought, nil))
             return parsedList
         }
@@ -5335,8 +5497,8 @@ struct MessageContentParser {
 // MARK: - Chat Stage
 
 private struct ChatScrollBottomVisibleKey: PreferenceKey {
-    static var defaultValue: CGFloat = 0
-    static func reduce(value: inout CGFloat, nextValue: () -> CGFloat) {
+    static var defaultValue: Int = 0
+    static func reduce(value: inout Int, nextValue: () -> Int) {
         value = nextValue()
     }
 }
@@ -5346,6 +5508,14 @@ private struct ChatScrollViewHeightKey: PreferenceKey {
     static func reduce(value: inout CGFloat, nextValue: () -> CGFloat) {
         value = nextValue()
     }
+}
+
+/// Non-reactive reference box so high-frequency 120Hz NSEvent.scrollWheel ticks
+/// never trigger SwiftUI @State body re-evaluations on AgentChatStage.
+private final class ChatScrollInteractionTracker {
+    var lastUserScrollUpTime: Date = .distantPast
+    var viewportHeight: CGFloat = 0
+    var monitor: Any? = nil
 }
 
 struct AgentChatStage: View {
@@ -5361,13 +5531,13 @@ struct AgentChatStage: View {
     
     @ObservedObject private var planManager = ImplementationPlanManager.shared
     @State private var userScrolledUp: Bool = false
-    @State private var scrollViewportHeight: CGFloat = 0
+    @State private var scrollTracker = ChatScrollInteractionTracker()
     
     var body: some View {
         ScrollViewReader { proxy in
             ZStack(alignment: .bottom) {
                 ScrollView {
-                    VStack(spacing: 0) {
+                    LazyVStack(spacing: 0) {
                         if messages.isEmpty && !isLoading {
                             VStack(spacing: 20) {
                                 Spacer().frame(height: 40)
@@ -5454,10 +5624,13 @@ struct AgentChatStage: View {
                                 .padding(.vertical, 8)
                             }
                             
-                            // Reliable Bottom Anchor
+                            // Reliable Bottom Anchor (quantized to 24pt buckets to prevent 120Hz preference churn)
                             GeometryReader { geo in
                                 Color.clear
-                                    .preference(key: ChatScrollBottomVisibleKey.self, value: geo.frame(in: .named("ChatScrollSpace")).maxY)
+                                    .preference(
+                                        key: ChatScrollBottomVisibleKey.self,
+                                        value: Int((geo.frame(in: .named("ChatScrollSpace")).maxY / 24.0).rounded())
+                                    )
                             }
                             .frame(height: 1)
                             .id("BOTTOM_CHAT_ANCHOR")
@@ -5473,20 +5646,19 @@ struct AgentChatStage: View {
                     }
                 )
                 .onPreferenceChange(ChatScrollViewHeightKey.self) { h in
-                    scrollViewportHeight = h
+                    scrollTracker.viewportHeight = h
                 }
-                .onPreferenceChange(ChatScrollBottomVisibleKey.self) { bottomY in
-                    guard scrollViewportHeight > 0 else { return }
-                    // bottomY is the bottom coordinate relative to viewport top
-                    let distanceBelow = bottomY - scrollViewportHeight
-                    if distanceBelow > 100 {
-                        // User scrolled up away from bottom
+                .onPreferenceChange(ChatScrollBottomVisibleKey.self) { bottomBucket in
+                    let viewportH = scrollTracker.viewportHeight
+                    guard viewportH > 0 else { return }
+                    let bottomY = CGFloat(bottomBucket) * 24.0
+                    let distanceBelow = bottomY - viewportH
+                    if distanceBelow > 48 {
                         if !userScrolledUp {
                             userScrolledUp = true
                         }
-                    } else if distanceBelow <= 35 {
-                        // User is near bottom
-                        if userScrolledUp {
+                    } else if distanceBelow <= 24 {
+                        if userScrolledUp && Date().timeIntervalSince(scrollTracker.lastUserScrollUpTime) > 0.75 {
                             userScrolledUp = false
                         }
                     }
@@ -5496,6 +5668,7 @@ struct AgentChatStage: View {
                 if userScrolledUp && !messages.isEmpty {
                     Button(action: {
                         userScrolledUp = false
+                        scrollTracker.lastUserScrollUpTime = .distantPast
                         withAnimation(.easeOut(duration: 0.15)) {
                             proxy.scrollTo("BOTTOM_CHAT_ANCHOR", anchor: .bottom)
                         }
@@ -5523,12 +5696,16 @@ struct AgentChatStage: View {
                 }
             }
             .onChange(of: messages.count) { _ in
-                userScrolledUp = false
-                proxy.scrollTo("BOTTOM_CHAT_ANCHOR", anchor: .bottom)
+                if messages.last?.role == .user {
+                    userScrolledUp = false
+                    scrollTracker.lastUserScrollUpTime = .distantPast
+                    proxy.scrollTo("BOTTOM_CHAT_ANCHOR", anchor: .bottom)
+                } else if !userScrolledUp {
+                    proxy.scrollTo("BOTTOM_CHAT_ANCHOR", anchor: .bottom)
+                }
             }
             .onChange(of: isLoading) { loading in
-                if loading {
-                    userScrolledUp = false
+                if loading && !userScrolledUp {
                     proxy.scrollTo("BOTTOM_CHAT_ANCHOR", anchor: .bottom)
                 }
             }
@@ -5540,6 +5717,25 @@ struct AgentChatStage: View {
             .onAppear {
                 if !messages.isEmpty {
                     proxy.scrollTo("BOTTOM_CHAT_ANCHOR", anchor: .bottom)
+                }
+                if scrollTracker.monitor == nil {
+                    let tracker = scrollTracker
+                    scrollTracker.monitor = NSEvent.addLocalMonitorForEvents(matching: [.scrollWheel]) { event in
+                        // Positive scrollingDeltaY means scrolling upward toward earlier messages
+                        if event.scrollingDeltaY > 0.5 {
+                            tracker.lastUserScrollUpTime = Date()
+                            if !userScrolledUp {
+                                userScrolledUp = true
+                            }
+                        }
+                        return event
+                    }
+                }
+            }
+            .onDisappear {
+                if let monitor = scrollTracker.monitor {
+                    NSEvent.removeMonitor(monitor)
+                    scrollTracker.monitor = nil
                 }
             }
         }
@@ -6013,15 +6209,38 @@ struct RichMessageRow: View, Equatable {
     
     private var aiCellContent: some View {
         let blocks = MessageContentParser.parse(message.content)
+        let lastThoughtIdx = blocks.lastIndex(where: {
+            if case .thought = $0 { return true }
+            return false
+        })
+        let preToolBlocks: [MessageBlock] = {
+            guard !message.toolResults.isEmpty else { return blocks }
+            guard let idx = lastThoughtIdx else { return [] }
+            return Array(blocks[0...idx])
+        }()
+        let postToolBlocks: [MessageBlock] = {
+            guard !message.toolResults.isEmpty else { return [] }
+            guard let idx = lastThoughtIdx else { return blocks }
+            guard idx + 1 < blocks.count else { return [] }
+            return Array(blocks[(idx + 1)...])
+        }()
         let harness = SubAgentHarness.shared
-        let planMgr = ImplementationPlanManager.shared
-        return VStack(alignment: .leading, spacing: 14) {
-            ForEach(blocks) { block in
+        let isLatestStreaming = AgentService.shared.isLoading && AgentService.shared.messages.last?.id == message.id
+        return VStack(alignment: .leading, spacing: 12) {
+            ForEach(preToolBlocks) { block in
+                aiBlockView(block)
+            }
+            
+            if !message.toolResults.isEmpty {
+                ToolExecutionStepsView(results: message.toolResults, isStreaming: isLatestStreaming)
+            }
+            
+            ForEach(postToolBlocks) { block in
                 aiBlockView(block)
             }
             
             // Immediate active progress indicator while agent is connecting/thinking and no content yet
-            if blocks.isEmpty && message.toolResults.isEmpty && AgentService.shared.isLoading && AgentService.shared.messages.last?.id == message.id {
+            if blocks.isEmpty && message.toolResults.isEmpty && isLatestStreaming {
                 HStack(spacing: 8) {
                     ProgressView()
                         .controlSize(.small)
@@ -6032,12 +6251,8 @@ struct RichMessageRow: View, Equatable {
                 .padding(.vertical, 6)
             }
             
-            if !message.toolResults.isEmpty {
-                ToolExecutionStepsView(results: message.toolResults)
-            }
-            
             // SubAgent activity cluster (shown on the latest assistant message only)
-            if !harness.activeSubagents.isEmpty {
+            if !harness.activeSubagents.isEmpty && AgentService.shared.messages.last?.id == message.id {
                 SubAgentClusterView(subagents: harness.activeSubagents)
             }
             
@@ -6152,23 +6367,17 @@ struct RichMessageRow: View, Equatable {
 
 // MARK: - Pending Change Card (Modern Antigravity / Cursor Diff View)
 
-private struct DiffCardWidthKey: PreferenceKey {
-    static var defaultValue: CGFloat = 0
-    static func reduce(value: inout CGFloat, nextValue: () -> CGFloat) {
-        let next = nextValue()
-        if next > 0 { value = next }
-    }
-}
-
 private struct PendingChangeCard: View, Equatable {
     let change: PendingChangeModel
     var onApply: ((PendingChangeModel) -> Void)?
     var onReject: ((PendingChangeModel) -> Void)?
     var onPartialApply: ((PendingChangeModel, String) -> Void)?  // P4: partial hunk apply
     @State private var showDiff = true  // Auto-expand diff
+    @State private var showAllDiffLines = false
     @State private var showHunkReview = false  // P4: hunk-level review mode
     @State private var hunkDiffResult = DiffResult(oldContent: "", newContent: "", hunks: [], additions: 0, deletions: 0)
-    @State private var cardWidth: CGFloat = 0
+    
+    private let initialVisibleLineLimit = 64
     
     static func == (lhs: PendingChangeCard, rhs: PendingChangeCard) -> Bool {
         return lhs.change == rhs.change
@@ -6205,17 +6414,6 @@ private struct PendingChangeCard: View, Equatable {
                     lineWidth: 1
                 )
         )
-        .background(
-            GeometryReader { geo in
-                Color.clear
-                    .preference(key: DiffCardWidthKey.self, value: geo.size.width)
-            }
-        )
-        .onPreferenceChange(DiffCardWidthKey.self) { w in
-            if w > 0 && abs(cardWidth - w) > 0.5 {
-                cardWidth = w
-            }
-        }
     }
     
     private var changeCardHeader: some View {
@@ -6318,49 +6516,38 @@ private struct PendingChangeCard: View, Equatable {
         .padding(8)
     }
     
-    // MARK: - Code Diff (Modern High-Contrast Unified Code Diff with Memoization)
+    // MARK: - Code Diff (Modern High-Contrast Unified Code Diff with Memoization & Metal Rasterization)
     
     private var codeDiffSection: some View {
-        let lines: [UnifiedDiffLine] = DiffCacheManager.getOrComputeDiff(
+        let cached = DiffCacheManager.getOrComputeDiffEntry(
             id: change.id,
             old: change.oldContent,
             new: change.newContent
         )
-        
-        let maxTextWidth = lines.reduce(CGFloat(0)) { currentMax, line in
-            let textWidth = (line.text as NSString).size(
-                withAttributes: [.font: NSFont.monospacedSystemFont(ofSize: 11, weight: .regular)]
-            ).width
-            return max(currentMax, textWidth)
-        }
-        let gutterWidth: CGFloat = 95.5 // 2.5 accent + 36 oldNum + 38 newNum + 1 sep + 18 prefix
-        let minContentWidth = gutterWidth + maxTextWidth + 32
-        let effectiveWidth = max(cardWidth, minContentWidth)
+        let allLines = cached.lines
+        let isTruncated = !showAllDiffLines && allLines.count > initialVisibleLineLimit
+        let visibleLines: ArraySlice<UnifiedDiffLine> = isTruncated
+            ? allLines.prefix(initialVisibleLineLimit)
+            : allLines[...]
+        let rowMinWidth = max(640, cached.minContentWidth)
         
         return VStack(spacing: 0) {
             Divider().opacity(0.4)
             
             ScrollView(.horizontal, showsIndicators: false) {
                 VStack(alignment: .leading, spacing: 0) {
-                    ForEach(lines) { (diffLine: UnifiedDiffLine) in
+                    ForEach(visibleLines) { (diffLine: UnifiedDiffLine) in
                         HStack(spacing: 0) {
                             // Status accent strip (2.5pt)
                             Rectangle()
                                 .fill(diffLine.accentColor)
                                 .frame(width: 2.5)
                             
-                            // Gutter: Old line number
-                            Text(diffLine.oldNum)
+                            // Pre-formatted monospaced gutter (oldNum + newNum)
+                            Text(diffLine.gutterNumbers)
                                 .font(.system(size: 10, design: .monospaced))
-                                .foregroundColor(.secondary.opacity(0.4))
-                                .frame(width: 32, alignment: .trailing)
-                                .padding(.trailing, 4)
-                            
-                            // Gutter: New line number
-                            Text(diffLine.newNum)
-                                .font(.system(size: 10, design: .monospaced))
-                                .foregroundColor(.secondary.opacity(0.4))
-                                .frame(width: 32, alignment: .trailing)
+                                .foregroundColor(diffLine.type == .hunkHeader ? .cyan.opacity(0.7) : .secondary.opacity(0.4))
+                                .frame(width: 72, alignment: .trailing)
                                 .padding(.trailing, 6)
                             
                             // Gutter divider line
@@ -6368,13 +6555,12 @@ private struct PendingChangeCard: View, Equatable {
                                 .fill(Color.primary.opacity(0.08))
                                 .frame(width: 1)
                             
-                            // Prefix (+/-)
+                            // Prefix (+/-) and code text
                             Text(diffLine.prefix)
                                 .font(.system(size: 11, weight: .bold, design: .monospaced))
                                 .foregroundColor(diffLine.prefixColor)
-                                .frame(width: 18, alignment: .center)
+                                .frame(width: 20, alignment: .center)
                             
-                            // Code text
                             Text(diffLine.text)
                                 .font(.system(size: 11, design: .monospaced))
                                 .foregroundColor(diffLine.textColor)
@@ -6383,15 +6569,39 @@ private struct PendingChangeCard: View, Equatable {
                             Spacer(minLength: 0)
                         }
                         .frame(height: 18)
-                        .frame(width: effectiveWidth > 0 ? effectiveWidth : nil, alignment: .leading)
+                        .frame(minWidth: rowMinWidth, alignment: .leading)
                         .background(diffLine.bgColor)
                     }
                 }
-                .frame(width: effectiveWidth > 0 ? effectiveWidth : nil, alignment: .leading)
                 .padding(.vertical, 2)
+                // Flatten static diff rows into a single Metal texture so scrolling past
+                // Code Diff cards in AgentChatStage runs at 120fps with zero per-line redraw.
+                .drawingGroup()
             }
             .frame(maxWidth: .infinity, alignment: .leading)
             .background(Color(nsColor: .textBackgroundColor).opacity(0.6))
+            
+            if allLines.count > initialVisibleLineLimit {
+                Divider().opacity(0.3)
+                Button(action: {
+                    showAllDiffLines.toggle()
+                }) {
+                    HStack(spacing: 5) {
+                        Image(systemName: showAllDiffLines ? "chevron.up" : "chevron.down")
+                            .font(.system(size: 9, weight: .semibold))
+                        Text(showAllDiffLines
+                             ? "Collapse diff (\(initialVisibleLineLimit) of \(allLines.count) lines)"
+                             : "Show all \(allLines.count) diff lines (+\(allLines.count - initialVisibleLineLimit) more)")
+                            .font(.system(size: 10, weight: .medium, design: .monospaced))
+                    }
+                    .foregroundColor(.accentColor)
+                    .frame(maxWidth: .infinity)
+                    .padding(.vertical, 5)
+                    .background(Color.primary.opacity(0.03))
+                    .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+            }
         }
     }
     
@@ -6577,12 +6787,25 @@ public struct UnifiedDiffLine: Identifiable, Equatable {
     public let id: String
     public let oldNum: String
     public let newNum: String
+    public let gutterNumbers: String
     public let prefix: String
     public let text: String
     public let type: DiffLineType
     
     public enum DiffLineType {
         case context, addition, deletion, hunkHeader
+    }
+    
+    public init(id: String, oldNum: String, newNum: String, prefix: String, text: String, type: DiffLineType) {
+        self.id = id
+        self.oldNum = oldNum
+        self.newNum = newNum
+        let paddedOld = oldNum.count < 4 ? String(repeating: " ", count: 4 - oldNum.count) + oldNum : oldNum
+        let paddedNew = newNum.count < 4 ? String(repeating: " ", count: 4 - newNum.count) + newNum : newNum
+        self.gutterNumbers = "\(paddedOld) \(paddedNew)"
+        self.prefix = prefix
+        self.text = text
+        self.type = type
     }
     
     var accentColor: Color {
@@ -6607,7 +6830,7 @@ public struct UnifiedDiffLine: Identifiable, Equatable {
         switch type {
         case .addition: return Color.primary
         case .deletion: return Color.primary.opacity(0.7)
-        case .hunkHeader: return Color.cyan
+        case .hunkHeader: return Color.cyan.opacity(0.85)
         case .context: return Color.primary.opacity(0.85)
         }
     }
@@ -6616,17 +6839,26 @@ public struct UnifiedDiffLine: Identifiable, Equatable {
         switch type {
         case .addition: return Color.green.opacity(0.12)
         case .deletion: return Color.red.opacity(0.10)
-        case .hunkHeader: return Color.cyan.opacity(0.06)
+        case .hunkHeader: return Color.cyan.opacity(0.07)
         case .context: return Color.clear
         }
     }
 }
 
+public struct CachedDiffEntry {
+    public let lines: [UnifiedDiffLine]
+    public let minContentWidth: CGFloat
+}
+
 public final class DiffCacheManager {
-    private static var cache: [String: [UnifiedDiffLine]] = [:]
+    private static var cache: [String: CachedDiffEntry] = [:]
     private static let lock = NSLock()
     
     public static func getOrComputeDiff(id: String, old: String, new: String) -> [UnifiedDiffLine] {
+        return getOrComputeDiffEntry(id: id, old: old, new: new).lines
+    }
+    
+    public static func getOrComputeDiffEntry(id: String, old: String, new: String) -> CachedDiffEntry {
         let key = "\(id)-\(old.hashValue)-\(new.hashValue)"
         lock.lock()
         if let found = cache[key] {
@@ -6635,14 +6867,18 @@ public final class DiffCacheManager {
         }
         lock.unlock()
         
-        let computed = computeDiff(old: old, new: new)
+        let lines = computeDiff(old: old, new: new)
+        let maxChars = lines.reduce(0) { max($0, min($1.text.count, 240)) }
+        // Fast O(1) monospaced width calculation (11pt monospaced ≈ 6.65pt/char + 128pt gutter/padding)
+        let minContentWidth = CGFloat(maxChars) * 6.65 + 128.0
+        let entry = CachedDiffEntry(lines: lines, minContentWidth: minContentWidth)
         
         lock.lock()
         if cache.count > 250 { cache.removeAll(keepingCapacity: true) }
-        cache[key] = computed
+        cache[key] = entry
         lock.unlock()
         
-        return computed
+        return entry
     }
     
     private static func computeDiff(old: String, new: String) -> [UnifiedDiffLine] {
@@ -6651,74 +6887,262 @@ public final class DiffCacheManager {
         
         // Fast path for identical content
         if old == new {
-            return oldLines.prefix(100).enumerated().map { idx, line in
+            let previewCount = min(oldLines.count, 12)
+            var lines = oldLines.prefix(previewCount).enumerated().map { idx, line in
                 UnifiedDiffLine(id: "ctx-\(idx)", oldNum: "\(idx + 1)", newNum: "\(idx + 1)", prefix: " ", text: line, type: .context)
             }
+            if oldLines.count > previewCount {
+                lines.append(UnifiedDiffLine(
+                    id: "ctx-more",
+                    oldNum: "⋯",
+                    newNum: "⋯",
+                    prefix: "@@",
+                    text: "\(oldLines.count - previewCount) more unchanged lines",
+                    type: .hunkHeader
+                ))
+            }
+            return lines
         }
         
-        // DP matrix capped for performance (P4: raised from 150→500 for complete diffs)
-        let m = min(oldLines.count, 500)
-        let n = min(newLines.count, 500)
-        var dp = Array(repeating: Array(repeating: 0, count: n + 1), count: m + 1)
+        // 1. Trim common unchanged prefix and suffix in O(N) so edits deep inside large files
+        // are never cut off by DP matrix limits and LCS only runs on the changed middle region.
+        var prefixCount = 0
+        let minTotal = min(oldLines.count, newLines.count)
+        while prefixCount < minTotal && oldLines[prefixCount] == newLines[prefixCount] {
+            prefixCount += 1
+        }
         
-        for i in 1...max(1, m) {
-            for j in 1...max(1, n) {
-                if i <= m && j <= n && oldLines[i-1] == newLines[j-1] {
-                    dp[i][j] = dp[i-1][j-1] + 1
-                } else {
-                    dp[i][j] = max(dp[i-1][j], dp[i][j-1])
+        var suffixCount = 0
+        while suffixCount < (minTotal - prefixCount) &&
+              oldLines[oldLines.count - 1 - suffixCount] == newLines[newLines.count - 1 - suffixCount] {
+            suffixCount += 1
+        }
+        
+        let midOld = Array(oldLines[prefixCount..<(oldLines.count - suffixCount)])
+        let midNew = Array(newLines[prefixCount..<(newLines.count - suffixCount)])
+        
+        enum RawOp {
+            case equal(String, Int, Int)
+            case delete(String, Int)
+            case insert(String, Int)
+            
+            var isChange: Bool {
+                switch self {
+                case .equal: return false
+                case .delete, .insert: return true
                 }
             }
         }
         
-        enum DiffOp { case equal(String), delete(String), insert(String) }
-        var ops: [DiffOp] = []
-        var i = m, j = n
-        while i > 0 || j > 0 {
-            if i > 0 && j > 0 && oldLines[i-1] == newLines[j-1] {
-                ops.append(.equal(oldLines[i-1]))
-                i -= 1; j -= 1
-            } else if j > 0 && (i == 0 || dp[i][j-1] >= dp[i-1][j]) {
-                ops.append(.insert(newLines[j-1]))
-                j -= 1
-            } else if i > 0 {
-                ops.append(.delete(oldLines[i-1]))
-                i -= 1
+        var midOps: [RawOp] = []
+        let dpCap = 350
+        let m = min(midOld.count, dpCap)
+        let n = min(midNew.count, dpCap)
+        
+        if m > 0 && n > 0 {
+            var dp = Array(repeating: Array(repeating: 0, count: n + 1), count: m + 1)
+            for i in 1...m {
+                for j in 1...n {
+                    if midOld[i - 1] == midNew[j - 1] {
+                        dp[i][j] = dp[i - 1][j - 1] + 1
+                    } else {
+                        dp[i][j] = max(dp[i - 1][j], dp[i][j - 1])
+                    }
+                }
+            }
+            
+            enum StepOp { case equal(String), delete(String), insert(String) }
+            var steps: [StepOp] = []
+            var i = m, j = n
+            while i > 0 || j > 0 {
+                if i > 0 && j > 0 && midOld[i - 1] == midNew[j - 1] {
+                    steps.append(.equal(midOld[i - 1]))
+                    i -= 1; j -= 1
+                } else if j > 0 && (i == 0 || dp[i][j - 1] >= dp[i - 1][j]) {
+                    steps.append(.insert(midNew[j - 1]))
+                    j -= 1
+                } else if i > 0 {
+                    steps.append(.delete(midOld[i - 1]))
+                    i -= 1
+                }
+            }
+            steps.reverse()
+            
+            var curOld = prefixCount + 1
+            var curNew = prefixCount + 1
+            for step in steps {
+                switch step {
+                case .equal(let t):
+                    midOps.append(.equal(t, curOld, curNew))
+                    curOld += 1; curNew += 1
+                case .delete(let t):
+                    midOps.append(.delete(t, curOld))
+                    curOld += 1
+                case .insert(let t):
+                    midOps.append(.insert(t, curNew))
+                    curNew += 1
+                }
+            }
+            // Append any overflow beyond dpCap
+            if midOld.count > m {
+                for idx in m..<midOld.count {
+                    midOps.append(.delete(midOld[idx], curOld))
+                    curOld += 1
+                }
+            }
+            if midNew.count > n {
+                for idx in n..<midNew.count {
+                    midOps.append(.insert(midNew[idx], curNew))
+                    curNew += 1
+                }
+            }
+        } else {
+            var curOld = prefixCount + 1
+            for line in midOld {
+                midOps.append(.delete(line, curOld))
+                curOld += 1
+            }
+            var curNew = prefixCount + 1
+            for line in midNew {
+                midOps.append(.insert(line, curNew))
+                curNew += 1
             }
         }
-        ops.reverse()
         
+        // 2. Build UnifiedDiffLines with ±3 context lines around changes and collapsed hunk headers
+        let contextRadius = 3
         var result: [UnifiedDiffLine] = []
-        var oldLineNum = 1
-        var newLineNum = 1
-        var lineIdx = 0
+        var lineCounter = 0
         
-        for op in ops {
-            lineIdx += 1
-            switch op {
-            case .equal(let text):
+        // Leading unchanged prefix: collapse if > contextRadius
+        if prefixCount > 0 {
+            let keepStart = max(0, prefixCount - contextRadius)
+            if keepStart > 0 {
                 result.append(UnifiedDiffLine(
-                    id: "eq-\(lineIdx)",
-                    oldNum: "\(oldLineNum)", newNum: "\(newLineNum)",
-                    prefix: " ", text: text, type: .context
+                    id: "hunk-pre",
+                    oldNum: "⋯",
+                    newNum: "⋯",
+                    prefix: "@@",
+                    text: "@@ -1,\(keepStart) +1,\(keepStart) @@  •  \(keepStart) unchanged lines",
+                    type: .hunkHeader
                 ))
-                oldLineNum += 1; newLineNum += 1
-            case .delete(let text):
-                result.append(UnifiedDiffLine(
-                    id: "del-\(lineIdx)",
-                    oldNum: "\(oldLineNum)", newNum: "",
-                    prefix: "-", text: text, type: .deletion
-                ))
-                oldLineNum += 1
-            case .insert(let text):
-                result.append(UnifiedDiffLine(
-                    id: "ins-\(lineIdx)",
-                    oldNum: "", newNum: "\(newLineNum)",
-                    prefix: "+", text: text, type: .addition
-                ))
-                newLineNum += 1
             }
-            if result.count > 500 { break }
+            for idx in keepStart..<prefixCount {
+                lineCounter += 1
+                result.append(UnifiedDiffLine(
+                    id: "pre-\(lineCounter)",
+                    oldNum: "\(idx + 1)",
+                    newNum: "\(idx + 1)",
+                    prefix: " ",
+                    text: oldLines[idx],
+                    type: .context
+                ))
+            }
+        }
+        
+        // Middle ops: collapse any unchanged run longer than 2 * contextRadius + 1
+        var keepMid = Array(repeating: false, count: midOps.count)
+        for idx in midOps.indices where midOps[idx].isChange {
+            let lo = max(0, idx - contextRadius)
+            let hi = min(midOps.count - 1, idx + contextRadius)
+            for k in lo...hi {
+                keepMid[k] = true
+            }
+        }
+        
+        var idx = 0
+        while idx < midOps.count {
+            if keepMid[idx] {
+                lineCounter += 1
+                switch midOps[idx] {
+                case .equal(let text, let oNum, let nNum):
+                    result.append(UnifiedDiffLine(
+                        id: "eq-\(lineCounter)",
+                        oldNum: "\(oNum)",
+                        newNum: "\(nNum)",
+                        prefix: " ",
+                        text: text,
+                        type: .context
+                    ))
+                case .delete(let text, let oNum):
+                    result.append(UnifiedDiffLine(
+                        id: "del-\(lineCounter)",
+                        oldNum: "\(oNum)",
+                        newNum: "",
+                        prefix: "-",
+                        text: text,
+                        type: .deletion
+                    ))
+                case .insert(let text, let nNum):
+                    result.append(UnifiedDiffLine(
+                        id: "ins-\(lineCounter)",
+                        oldNum: "",
+                        newNum: "\(nNum)",
+                        prefix: "+",
+                        text: text,
+                        type: .addition
+                    ))
+                }
+                idx += 1
+            } else {
+                let runStart = idx
+                while idx < midOps.count && !keepMid[idx] {
+                    idx += 1
+                }
+                let skipped = idx - runStart
+                if skipped == 1, case .equal(let text, let oNum, let nNum) = midOps[runStart] {
+                    lineCounter += 1
+                    result.append(UnifiedDiffLine(
+                        id: "eq-\(lineCounter)",
+                        oldNum: "\(oNum)",
+                        newNum: "\(nNum)",
+                        prefix: " ",
+                        text: text,
+                        type: .context
+                    ))
+                } else if case .equal(_, let firstOld, let firstNew) = midOps[runStart] {
+                    result.append(UnifiedDiffLine(
+                        id: "hunk-\(runStart)",
+                        oldNum: "⋯",
+                        newNum: "⋯",
+                        prefix: "@@",
+                        text: "@@ -\(firstOld),\(skipped) +\(firstNew),\(skipped) @@  •  \(skipped) unchanged lines",
+                        type: .hunkHeader
+                    ))
+                }
+            }
+            if result.count >= 400 { break }
+        }
+        
+        // Trailing unchanged suffix: keep up to contextRadius lines, collapse the rest
+        if suffixCount > 0 && result.count < 400 {
+            let keepCount = min(suffixCount, contextRadius)
+            let oldSuffixStart = oldLines.count - suffixCount
+            let newSuffixStart = newLines.count - suffixCount
+            for k in 0..<keepCount {
+                lineCounter += 1
+                result.append(UnifiedDiffLine(
+                    id: "suf-\(lineCounter)",
+                    oldNum: "\(oldSuffixStart + k + 1)",
+                    newNum: "\(newSuffixStart + k + 1)",
+                    prefix: " ",
+                    text: oldLines[oldSuffixStart + k],
+                    type: .context
+                ))
+            }
+            let remainingSuffix = suffixCount - keepCount
+            if remainingSuffix > 0 {
+                let startOld = oldSuffixStart + keepCount + 1
+                let startNew = newSuffixStart + keepCount + 1
+                result.append(UnifiedDiffLine(
+                    id: "hunk-suf",
+                    oldNum: "⋯",
+                    newNum: "⋯",
+                    prefix: "@@",
+                    text: "@@ -\(startOld),\(remainingSuffix) +\(startNew),\(remainingSuffix) @@  •  \(remainingSuffix) unchanged lines",
+                    type: .hunkHeader
+                ))
+            }
         }
         
         return result
@@ -6786,6 +7210,19 @@ final class MarkdownAttrCache {
     private static var cache: [String: AttributedString] = [:]
     private static let lock = NSLock()
     
+    private static func sanitizeStreamingMarkdown(_ text: String) -> String {
+        var working = text
+        // During streaming, if the text ends with an unclosed markdown link `[label](url_fragment`,
+        // strip the incomplete `(url_fragment` so AttributedString(markdown:) still parses earlier links.
+        if let lastOpenBracket = working.lastIndex(of: "["),
+           let midParen = working[lastOpenBracket...].range(of: "]("),
+           !working[midParen.upperBound...].contains(")") {
+            let label = working[working.index(after: lastOpenBracket)..<midParen.lowerBound]
+            working.replaceSubrange(lastOpenBracket..<working.endIndex, with: "`\(label)`")
+        }
+        return working
+    }
+    
     static func getOrParse(_ text: String) -> AttributedString {
         lock.lock()
         if let found = cache[text] {
@@ -6794,7 +7231,8 @@ final class MarkdownAttrCache {
         }
         lock.unlock()
         
-        let parsed = (try? AttributedString(markdown: text, options: .init(interpretedSyntax: .inlineOnlyPreservingWhitespace))) ?? AttributedString(text)
+        let sanitized = sanitizeStreamingMarkdown(text)
+        let parsed = (try? AttributedString(markdown: sanitized, options: .init(interpretedSyntax: .inlineOnlyPreservingWhitespace))) ?? AttributedString(sanitized)
         
         lock.lock()
         if cache.count > 500 { cache.removeAll(keepingCapacity: true) }
@@ -6826,6 +7264,21 @@ struct MarkdownTextView: View, Equatable {
             .foregroundColor(.primary)
             .lineSpacing(5)
             .textSelection(.enabled)
+            .environment(\.openURL, OpenURLAction { url in
+                if url.isFileURL || url.scheme == "file" {
+                    let cleanPath = url.path.isEmpty
+                        ? url.absoluteString.replacingOccurrences(of: "file://", with: "").removingPercentEncoding ?? ""
+                        : url.path
+                    if !cleanPath.isEmpty {
+                        NotificationCenter.default.post(
+                            name: NSNotification.Name("MicroCodeOpenFileURL"),
+                            object: URL(fileURLWithPath: cleanPath)
+                        )
+                        return .handled
+                    }
+                }
+                return .systemAction
+            })
     }
 }
 
@@ -6836,9 +7289,24 @@ struct HeadingView: View {
     @EnvironmentObject var appState: AppState
     
     var body: some View {
-        Text(content)
+        Text(MarkdownAttrCache.getOrParse(content))
             .font(.system(size: fontSize, weight: .bold))
             .foregroundColor(.primary)
+            .tint(.accentColor)
+            .textSelection(.enabled)
+            .environment(\.openURL, OpenURLAction { url in
+                if url.scheme == "file" {
+                    let path = url.path
+                    if !path.isEmpty {
+                        NotificationCenter.default.post(
+                            name: Notification.Name("MicroCodeOpenFileURL"),
+                            object: URL(fileURLWithPath: path)
+                        )
+                        return .handled
+                    }
+                }
+                return .systemAction
+            })
             .frame(maxWidth: .infinity, alignment: .leading)
             .padding(.top, topPadding)
             .padding(.bottom, 4)
@@ -6895,10 +7363,25 @@ struct BlockquoteView: View {
                 .fill(Color.accentColor.opacity(0.6))
                 .frame(width: 3)
             
-            Text(content)
+            Text(MarkdownAttrCache.getOrParse(content))
                 .font(.system(size: appState.agentFontSize))
                 .foregroundColor(.secondary)
+                .tint(.accentColor)
                 .italic()
+                .textSelection(.enabled)
+                .environment(\.openURL, OpenURLAction { url in
+                    if url.scheme == "file" {
+                        let path = url.path
+                        if !path.isEmpty {
+                            NotificationCenter.default.post(
+                                name: Notification.Name("MicroCodeOpenFileURL"),
+                                object: URL(fileURLWithPath: path)
+                            )
+                            return .handled
+                        }
+                    }
+                    return .systemAction
+                })
                 .padding(.leading, 12)
                 .padding(.vertical, 4)
         }
@@ -6951,7 +7434,7 @@ struct TableBlockView: View {
                 HStack(spacing: 0) {
                     ForEach(headers.indices, id: \.self) { idx in
                         HStack {
-                            Text(headers[idx])
+                            Text(MarkdownAttrCache.getOrParse(headers[idx]))
                                 .font(.system(size: 12, weight: .bold))
                                 .foregroundColor(.primary)
                             Spacer(minLength: 0)
@@ -7124,28 +7607,63 @@ struct HTMLWebView: NSViewRepresentable {
 
 /// Generates meaningful tags from code content in real-time
 struct CodeTagGenerator {
+    private static let cacheLock = NSLock()
+    private static var tagCache: [Int: String] = [:]
+    private static var compiledRegexCache: [String: NSRegularExpression] = [:]
     
-    /// Generate a smart tag from code analysis
+    static func cachedRegex(_ pattern: String) -> NSRegularExpression? {
+        cacheLock.lock()
+        defer { cacheLock.unlock() }
+        if let existing = compiledRegexCache[pattern] {
+            return existing
+        }
+        guard let regex = try? NSRegularExpression(pattern: pattern, options: []) else {
+            return nil
+        }
+        compiledRegexCache[pattern] = regex
+        return regex
+    }
+    
+    /// Generate a smart tag from code analysis (memoized)
     static func generateTag(from code: String, language: String) -> String {
+        var hasher = Hasher()
+        hasher.combine(code.count)
+        hasher.combine(code.prefix(512))
+        hasher.combine(language.lowercased())
+        let key = hasher.finalize()
+        
+        cacheLock.lock()
+        if let cached = tagCache[key] {
+            cacheLock.unlock()
+            return cached
+        }
+        cacheLock.unlock()
+        
+        let sample = code.count > 2_000 ? String(code.prefix(2_000)) : code
+        let result: String
         // 1. Try to extract function/method name
-        if let funcName = extractFunctionName(from: code, language: language) {
-            return "#\(funcName)"
+        if let funcName = extractFunctionName(from: sample, language: language) {
+            result = "#\(funcName)"
+        } else if let className = extractClassName(from: sample, language: language) {
+            // 2. Try to extract class/struct name
+            result = "#\(className)"
+        } else if let purpose = detectPurpose(from: sample) {
+            // 3. Try to detect purpose from comments
+            result = "#\(purpose)"
+        } else {
+            // 4. Fallback to language + line count
+            let lineCount = code.reduce(into: 1) { if $1 == "\n" { $0 += 1 } }
+            let lang = language.isEmpty ? "Code" : language.capitalized
+            result = "#\(lang)\(lineCount)L"
         }
         
-        // 2. Try to extract class/struct name
-        if let className = extractClassName(from: code, language: language) {
-            return "#\(className)"
+        cacheLock.lock()
+        if tagCache.count > 512 {
+            tagCache.removeAll(keepingCapacity: true)
         }
-        
-        // 3. Try to detect purpose from comments
-        if let purpose = detectPurpose(from: code) {
-            return "#\(purpose)"
-        }
-        
-        // 4. Fallback to language + line count
-        let lineCount = code.components(separatedBy: "\n").count
-        let lang = language.isEmpty ? "Code" : language.capitalized
-        return "#\(lang)\(lineCount)L"
+        tagCache[key] = result
+        cacheLock.unlock()
+        return result
     }
     
     /// Extract function/method name
@@ -7273,7 +7791,7 @@ struct CodeTagGenerator {
 // String extension for regex matching
 extension String {
     func firstMatch(pattern: String) -> String? {
-        guard let regex = try? NSRegularExpression(pattern: pattern, options: []) else {
+        guard let regex = CodeTagGenerator.cachedRegex(pattern) else {
             return nil
         }
         let range = NSRange(self.startIndex..., in: self)
@@ -7592,9 +8110,18 @@ struct NativeCodeBlockView: View, Equatable {
             displayCode = code.components(separatedBy: "\n").prefix(15).joined(separator: "\n")
         }
         
+        let highlightedCode: AttributedString = displayCode.count <= 8_000
+            ? SyntaxHighlightingEngine.cachedSwiftUIAttributedString(
+                displayCode,
+                language: language.isEmpty ? "swift" : language,
+                fontSize: 12,
+                isDark: true
+            )
+            : AttributedString(displayCode)
+        
         return VStack(alignment: .leading, spacing: 0) {
             ScrollView(.horizontal, showsIndicators: false) {
-                Text(displayCode)
+                Text(highlightedCode)
                     .font(.custom("Menlo", size: 12))
                     .lineSpacing(4)
                     .foregroundColor(Color(nsColor: .textColor))
@@ -7802,7 +8329,15 @@ struct AntigravityThoughtBlockView: View {
                         }
                         .padding(.vertical, 4)
                     } else {
-                        let sections = parseThoughtSections(cleanContent)
+                        let visibleContent: String = {
+                            guard isStreaming, cleanContent.count > 2200 else { return cleanContent }
+                            let tail = String(cleanContent.suffix(2200))
+                            if let nl = tail.firstIndex(of: "\n") {
+                                return "…\n" + String(tail[tail.index(after: nl)...])
+                            }
+                            return "…" + tail
+                        }()
+                        let sections = parseThoughtSections(visibleContent)
                         ForEach(sections) { sec in
                             VStack(alignment: .leading, spacing: 4) {
                                 if let title = sec.title, !title.isEmpty {
@@ -8023,55 +8558,139 @@ struct AgentThinkingView: View {
     }
 }
 
-// MARK: - Antigravity-Style Activity Summary & Tool Tree
+// MARK: - Antigravity / Codex-Style Agent Action Timeline Card
 
 struct ToolExecutionStepsView: View {
     let results: [ToolResultModel]
-    // Keep historical tool output cheap while scrolling. Users can still expand
-    // a completed step on demand.
+    var isStreaming: Bool = false
     @State private var isExpanded: Bool = false
+    @State private var userToggled: Bool = false
+    
+    private var readCount: Int {
+        results.filter {
+            ["file_read", "read_file", "view_file", "multi_file_read", "list_directory_tree", "list_dir", "grep_search", "file_search", "find_symbol"].contains($0.toolName)
+        }.count
+    }
+    
+    private var editCount: Int {
+        results.filter {
+            ["file_write", "replace_in_file", "multi_replace_in_file", "write_to_file", "patch_file", "apply_patch", "create_directory", "rename_file"].contains($0.toolName)
+        }.count
+    }
+    
+    private var runCount: Int {
+        results.filter {
+            ["shell", "run_command", "preview_control", "device_runtime", "playground_run", "cell_run", "ardium_run", "ardium_compile", "ardium_test"].contains($0.toolName)
+        }.count
+    }
+    
+    private var failureCount: Int {
+        results.filter { !$0.success }.count
+    }
     
     private var headerTitle: String {
-        let fileCount = results.filter { $0.toolName.contains("file") || $0.toolName.contains("read") || $0.toolName.contains("write") }.count
-        if fileCount > 0 {
-            return "Exploring \(fileCount) file\(fileCount > 1 ? "s" : "")"
+        if isStreaming {
+            return "Running \(results.count) action\(results.count == 1 ? "" : "s")…"
         }
-        return "Executed \(results.count) step\(results.count > 1 ? "s" : "")"
+        return "Completed \(results.count) action\(results.count == 1 ? "" : "s")"
     }
     
     var body: some View {
-        VStack(alignment: .leading, spacing: 4) {
+        VStack(alignment: .leading, spacing: 0) {
             Button(action: {
                 withAnimation(.easeInOut(duration: 0.18)) {
+                    userToggled = true
                     isExpanded.toggle()
                 }
             }) {
-                HStack(spacing: 6) {
-                    Text(headerTitle)
-                        .font(.system(size: 11.5, weight: .regular))
-                        .foregroundColor(.secondary)
+                HStack(spacing: 8) {
+                    if isStreaming {
+                        ProgressView()
+                            .controlSize(.mini)
+                    } else if failureCount == 0 {
+                        Image(systemName: "checkmark.circle.fill")
+                            .font(.system(size: 11.5, weight: .semibold))
+                            .foregroundColor(.green)
+                    } else {
+                        Image(systemName: "exclamationmark.circle.fill")
+                            .font(.system(size: 11.5, weight: .semibold))
+                            .foregroundColor(.orange)
+                    }
                     
-                    Image(systemName: isExpanded ? "chevron.down" : "chevron.right")
-                        .font(.system(size: 8.5, weight: .semibold))
-                        .foregroundColor(.secondary.opacity(0.7))
+                    Text(headerTitle)
+                        .font(.system(size: 11.5, weight: .semibold))
+                        .foregroundColor(.primary.opacity(0.9))
+                    
+                    HStack(spacing: 4) {
+                        if readCount > 0 {
+                            summaryPill(icon: "doc.text", text: "\(readCount) read", color: .blue)
+                        }
+                        if editCount > 0 {
+                            summaryPill(icon: "pencil", text: "\(editCount) edited", color: .orange)
+                        }
+                        if runCount > 0 {
+                            summaryPill(icon: "terminal", text: "\(runCount) ran", color: .purple)
+                        }
+                    }
                     
                     Spacer()
+                    
+                    Image(systemName: isExpanded ? "chevron.down" : "chevron.right")
+                        .font(.system(size: 9, weight: .semibold))
+                        .foregroundColor(.secondary.opacity(0.8))
                 }
+                .padding(.horizontal, 10)
+                .padding(.vertical, 7)
                 .contentShape(Rectangle())
             }
             .buttonStyle(.plain)
             
             if isExpanded {
+                Divider()
+                    .opacity(0.4)
+                
                 VStack(alignment: .leading, spacing: 6) {
-                    ForEach(Array(results.enumerated()), id: \.element.toolCallId) { index, result in
+                    ForEach(Array(results.enumerated()), id: \.element.toolCallId) { _, result in
                         ToolActivityItemRow(result: result)
                     }
                 }
-                .padding(.leading, 8)
-                .padding(.top, 3)
+                .padding(.horizontal, 10)
+                .padding(.vertical, 8)
             }
         }
-        .padding(.vertical, 4)
+        .background(Color(nsColor: .controlBackgroundColor).opacity(0.45))
+        .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
+        .overlay(
+            RoundedRectangle(cornerRadius: 8, style: .continuous)
+                .stroke(Color.primary.opacity(0.09), lineWidth: 0.5)
+        )
+        .onAppear {
+            if isStreaming && !userToggled {
+                isExpanded = true
+            }
+        }
+        .onChange(of: isStreaming) { streaming in
+            if !userToggled {
+                withAnimation(.easeInOut(duration: 0.18)) {
+                    isExpanded = streaming
+                }
+            }
+        }
+    }
+    
+    @ViewBuilder
+    private func summaryPill(icon: String, text: String, color: Color) -> some View {
+        HStack(spacing: 3) {
+            Image(systemName: icon)
+                .font(.system(size: 8.5, weight: .semibold))
+            Text(text)
+                .font(.system(size: 9.5, weight: .medium))
+        }
+        .foregroundColor(color.opacity(0.9))
+        .padding(.horizontal, 6)
+        .padding(.vertical, 2)
+        .background(color.opacity(0.1))
+        .clipShape(Capsule())
     }
 }
 
@@ -8079,7 +8698,7 @@ struct ToolActivityItemRow: View {
     let result: ToolResultModel
     @State private var showDetails: Bool = false
     
-    private var displayItem: (verb: String, detail: String, lineInfo: String?) {
+    private var displayItem: (icon: String, verb: String, detail: String, lineInfo: String?) {
         let output = result.output
         let params = result.toolParams ?? [:]
         var lineInfo: String? = nil
@@ -8097,43 +8716,67 @@ struct ToolActivityItemRow: View {
         case "file_read", "read_file", "view_file":
             let name = resolvedFileName ?? "source file"
             let lines = lineInfo ?? (output.contains("\n") ? "#L1-\(min(350, output.components(separatedBy: .newlines).count))" : nil)
-            return ("Analyzed", name, lines)
+            return ("doc.text", "Read", name, lines)
             
         case "multi_file_read":
             if let paths = params["paths"] as? [String], let first = paths.first {
                 let name = URL(fileURLWithPath: first).lastPathComponent
                 let countStr = paths.count > 1 ? " (+\(paths.count - 1) more)" : ""
-                return ("Analyzed", "\(name)\(countStr)", nil)
+                return ("doc.on.doc", "Read", "\(name)\(countStr)", nil)
             }
-            return ("Analyzed", "project files", nil)
+            return ("doc.on.doc", "Read", "project files", nil)
             
-        case "file_write", "replace_in_file", "write_to_file", "patch_file":
+        case "file_write", "replace_in_file", "multi_replace_in_file", "write_to_file", "patch_file", "apply_patch":
             let name = resolvedFileName ?? "file"
-            return ("Edited", name, nil)
+            return ("pencil.line", "Edited", name, nil)
             
         case "shell", "run_command":
             if let cmd = params["command"] as? String ?? params["CommandLine"] as? String {
                 let cleanCmd = cmd.trimmingCharacters(in: .whitespacesAndNewlines).components(separatedBy: .newlines).first ?? cmd
-                return ("Executed", String(cleanCmd.prefix(40)), nil)
+                return ("terminal", "Ran", String(cleanCmd.prefix(56)), nil)
             }
-            return ("Executed", "terminal task", nil)
+            return ("terminal", "Ran", "terminal command", nil)
+            
+        case "preview_control":
+            let action = (params["action"] as? String) ?? "open"
+            let target = (params["url"] as? String) ?? (params["path"] as? String) ?? "Live Preview"
+            return ("globe", "Preview (\(action))", target, nil)
+            
+        case "device_runtime":
+            let action = (params["action"] as? String) ?? "run"
+            return ("iphone", "Device", action, nil)
             
         case "grep_search", "file_search", "find_symbol":
-            let query = (params["query"] as? String) ?? (params["symbol"] as? String) ?? extractQuery(output)
-            return ("Searched", "\"\(query.prefix(30))\"", nil)
+            let query = (params["query"] as? String) ?? (params["pattern"] as? String) ?? (params["symbol"] as? String) ?? extractQuery(output)
+            return ("magnifyingglass", "Searched", "\"\(query.prefix(36))\"", nil)
             
         case "list_directory_tree", "list_dir":
-            return ("Scanned directory", "project structure", nil)
+            let dirName = resolvedFileName ?? "workspace"
+            return ("folder", "Listed", dirName, nil)
+            
+        case "create_directory":
+            let dirName = resolvedFileName ?? "directory"
+            return ("folder.badge.plus", "Created", dirName, nil)
+            
+        case "rename_file":
+            let oldName = (params["old_path"] as? String).map { URL(fileURLWithPath: $0).lastPathComponent } ?? resolvedFileName ?? "file"
+            let newName = (params["new_path"] as? String).map { URL(fileURLWithPath: $0).lastPathComponent }
+            let detail = newName != nil ? "\(oldName) → \(newName!)" : oldName
+            return ("arrow.right.doc.on.clipboard", "Renamed", detail, nil)
+            
+        case "delete_file":
+            let name = resolvedFileName ?? "file"
+            return ("trash", "Deleted", name, nil)
             
         case "git_status":
-            return ("Inspected", "Git repository state", nil)
+            return ("arrow.triangle.branch", "Inspected", "git status", nil)
             
         case "git_diff":
-            return ("Inspected", "Git diff changes", nil)
+            return ("arrow.triangle.branch", "Inspected", "git diff", nil)
             
         default:
             let cleanName = result.toolName.replacingOccurrences(of: "_", with: " ")
-            return ("Applied", cleanName, nil)
+            return ("wrench.and.screwdriver", "Executed", cleanName, nil)
         }
     }
     
@@ -8141,6 +8784,13 @@ struct ToolActivityItemRow: View {
         if let range = text.range(of: #"/[^\s\n:]+\.[a-zA-Z0-9]+"#, options: .regularExpression) {
             let path = String(text[range])
             return URL(fileURLWithPath: path).lastPathComponent
+        }
+        if let range = text.range(of: #"/[^\s\n:]+"#, options: .regularExpression) {
+            let path = String(text[range]).trimmingCharacters(in: CharacterSet(charactersIn: ".,;)'\""))
+            let last = URL(fileURLWithPath: path).lastPathComponent
+            if !last.isEmpty && last != "/" {
+                return last
+            }
         }
         return nil
     }
@@ -8152,50 +8802,66 @@ struct ToolActivityItemRow: View {
         return "codebase"
     }
     
-    private func extractCommand(_ id: String, output: String) -> String {
-        if let firstLine = output.components(separatedBy: .newlines).first(where: { !$0.trimmingCharacters(in: .whitespaces).isEmpty }) {
-            return String(firstLine.prefix(45))
-        }
-        return "command"
-    }
-    
     var body: some View {
-        VStack(alignment: .leading, spacing: 3) {
+        VStack(alignment: .leading, spacing: 4) {
             Button(action: {
                 withAnimation(.easeInOut(duration: 0.15)) {
                     showDetails.toggle()
                 }
             }) {
                 HStack(spacing: 6) {
+                    Image(systemName: result.success ? "checkmark.circle.fill" : "xmark.circle.fill")
+                        .font(.system(size: 10))
+                        .foregroundColor(result.success ? .green.opacity(0.85) : .red.opacity(0.85))
+                    
+                    Image(systemName: displayItem.icon)
+                        .font(.system(size: 10.5))
+                        .foregroundColor(.secondary)
+                        .frame(width: 14)
+                    
                     Text(displayItem.verb)
-                        .font(.system(size: 13, weight: .regular))
+                        .font(.system(size: 11.5, weight: .medium))
                         .foregroundColor(.secondary)
                     
                     Text(displayItem.detail)
-                        .font(.system(size: 13, weight: .medium, design: .monospaced))
-                        .foregroundColor(Color(nsColor: .labelColor).opacity(0.9))
+                        .font(.system(size: 11.5, weight: .medium, design: .monospaced))
+                        .foregroundColor(.primary.opacity(0.9))
+                        .lineLimit(1)
+                        .truncationMode(.middle)
+                        .padding(.horizontal, 5)
+                        .padding(.vertical, 1.5)
+                        .background(Color.primary.opacity(0.05))
+                        .cornerRadius(4)
                     
                     if let lines = displayItem.lineInfo {
                         Text(lines)
-                            .font(.system(size: 11.5, design: .monospaced))
-                            .foregroundColor(.secondary.opacity(0.7))
+                            .font(.system(size: 10.5, design: .monospaced))
+                            .foregroundColor(.secondary.opacity(0.75))
                     }
                     
                     Spacer()
+                    
+                    Image(systemName: showDetails ? "chevron.down" : "chevron.right")
+                        .font(.system(size: 8, weight: .semibold))
+                        .foregroundColor(.secondary.opacity(0.5))
                 }
                 .contentShape(Rectangle())
             }
             .buttonStyle(.plain)
             
             if showDetails {
-                Text(result.success ? result.output : (result.error ?? "Failed"))
-                    .font(.system(size: 11.5, design: .monospaced))
-                    .foregroundColor(result.success ? .secondary : .red.opacity(0.8))
-                    .lineLimit(15)
+                let rawOutput = result.success ? result.output : (result.error ?? result.output)
+                let trimmedOutput = rawOutput.trimmingCharacters(in: .whitespacesAndNewlines)
+                Text(trimmedOutput.isEmpty ? "(No output)" : String(trimmedOutput.prefix(1500)))
+                    .font(.system(size: 11, design: .monospaced))
+                    .foregroundColor(result.success ? .secondary : .red.opacity(0.85))
+                    .lineLimit(16)
+                    .textSelection(.enabled)
+                    .frame(maxWidth: .infinity, alignment: .leading)
                     .padding(8)
-                    .background(Color.primary.opacity(0.04))
+                    .background(Color.black.opacity(0.2))
                     .cornerRadius(6)
-                    .padding(.leading, 12)
+                    .padding(.leading, 20)
             }
         }
     }
@@ -8348,7 +9014,6 @@ struct ProjectWorkspaceSelectorMenu: View {
         Task { @MainActor in
             await appState.openWorkspace(url: url)
             agent.setWorkspace(path)
-            _ = agent.createNewChat(projectPath: path)
         }
         isPresented = false
     }
