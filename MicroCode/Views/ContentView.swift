@@ -23,6 +23,7 @@ struct ContentView: View {
     var body: some View {
         AgenticEditorWorkspace()
             .environmentObject(appState)
+            .ignoresSafeArea(.all, edges: .top)
             .overlay(autoHealerOverlay)
             .overlay(welcomeOverlay)
             .modifier(PrimarySheetsModifier(appState: appState))
@@ -85,8 +86,10 @@ struct ContentView: View {
                         .allowsHitTesting(false)
                 }
                 
-                FestiveOverlayView()
-                    .allowsHitTesting(false)
+                if (appState.appTheme == .christmas || appState.appTheme == .christmasLight || appState.appTheme == .happyNewYear2026 || appState.appTheme == .happyNewYear2026Light) {
+                    FestiveOverlayView()
+                        .allowsHitTesting(false)
+                }
             }
         )
     }
@@ -314,6 +317,7 @@ struct AgenticEditorWorkspace: View {
                         }
                     }
                     .frame(minWidth: 320, maxWidth: .infinity, maxHeight: .infinity)
+                    .clipped()
                     .layoutPriority(0)
 
                     if appState.agenticContextVisible {
@@ -732,9 +736,9 @@ struct AgenticEditorWorkspace: View {
             .fixedSize()
             .help("Settings (⌘,)")
         }
-        .padding(.leading, (modeHasOwnSidebar || !appState.sidebarVisible) ? 80 : 10)
+        .padding(.leading, (modeHasOwnSidebar || !appState.sidebarVisible) ? 78 : 10)
         .padding(.trailing, 10)
-        .frame(height: 30)
+        .frame(height: 36)
         .background(appState.appTheme.isGlass ? Color.clear : Color(nsColor: appState.appTheme.panelBackground))
     }
 }
@@ -903,9 +907,8 @@ struct AgenticWorkspaceSidebar: View {
             .help("New Conversation (⌘N)")
         }
         .padding(.leading, 78)
-        .padding(.trailing, 12)
-        .padding(.top, 12)
-        .padding(.bottom, 8)
+        .padding(.trailing, 10)
+        .frame(height: 36)
     }
 
     @ViewBuilder
@@ -1280,6 +1283,15 @@ enum XcodeNavigatorTab: Int, CaseIterable {
     }
 }
 
+struct WorkspaceSearchMatch: Identifiable, Hashable {
+    let id: String
+    let filePath: String
+    let relativePath: String
+    let lineNumber: Int
+    let columnNumber: Int
+    let linePreview: String
+}
+
 struct XcodeEditorSidebar: View {
     @EnvironmentObject var appState: AppState
     @Binding var surface: AgenticWorkspaceSurface
@@ -1288,6 +1300,17 @@ struct XcodeEditorSidebar: View {
     @State private var showRecentOnly: Bool = false
     @State private var recentProjects: [URL] = []
     @State private var recentFiles: [URL] = []
+
+    // Workspace Ripgrep Search & Replace State
+    @State private var workspaceSearchQuery: String = ""
+    @State private var workspaceReplaceQuery: String = ""
+    @State private var showWorkspaceReplace: Bool = false
+    @State private var searchCaseSensitive: Bool = false
+    @State private var searchUseRegex: Bool = false
+    @State private var isSearchingWorkspace: Bool = false
+    @State private var workspaceSearchMatches: [WorkspaceSearchMatch] = []
+    @State private var workspaceSearchTask: Task<Void, Never>?
+    @State private var workspaceReplaceMessage: String?
 
     private var displayedFileTree: Binding<[FileNode]> {
         if filterText.isEmpty && !showRecentOnly {
@@ -1340,6 +1363,15 @@ struct XcodeEditorSidebar: View {
         }
         .onChange(of: appState.workspaceFolder) { _ in
             refreshRecents()
+            workspaceSearchMatches = []
+        }
+        .onReceive(NotificationCenter.default.publisher(for: Notification.Name("MicroCodeOpenWorkspaceSearch"))) { notif in
+            withAnimation(.easeInOut(duration: 0.12)) {
+                selectedTab = .search
+                if let showReplace = notif.userInfo?["replace"] as? Bool {
+                    showWorkspaceReplace = showReplace
+                }
+            }
         }
     }
 
@@ -1366,10 +1398,9 @@ struct XcodeEditorSidebar: View {
             }
             Spacer()
         }
-        .padding(.leading, 0)
+        .padding(.leading, 6)
         .padding(.trailing, 4)
-        .padding(.top, 4)
-        .padding(.bottom, 4)
+        .frame(height: 36)
     }
 
     // MARK: - Project Header Bar
@@ -1639,32 +1670,136 @@ struct XcodeEditorSidebar: View {
         }
     }
 
-    // MARK: - Search Navigator Content
+    // MARK: - Search Navigator Content (Ripgrep + Multi-File Replace)
 
     private var searchNavigatorContent: some View {
-        VStack(spacing: 8) {
-            HStack(spacing: 6) {
-                Image(systemName: "magnifyingglass")
-                    .foregroundColor(.secondary)
-                    .font(.system(size: 11))
-                TextField("Search in Workspace…", text: $filterText)
-                    .textFieldStyle(.plain)
-                    .font(.system(size: 11.5))
-                if !filterText.isEmpty {
-                    Button(action: { filterText = "" }) {
-                        Image(systemName: "xmark.circle.fill")
+        VStack(spacing: 6) {
+            VStack(spacing: 5) {
+                HStack(spacing: 4) {
+                    Button {
+                        withAnimation(.easeInOut(duration: 0.12)) {
+                            showWorkspaceReplace.toggle()
+                        }
+                    } label: {
+                        Image(systemName: showWorkspaceReplace ? "chevron.down" : "chevron.right")
+                            .font(.system(size: 9, weight: .bold))
                             .foregroundColor(.secondary)
-                            .font(.system(size: 10))
+                            .frame(width: 14, height: 18)
                     }
                     .buttonStyle(.plain)
+                    .help("Toggle Replace in Workspace (⇧⌘H)")
+
+                    HStack(spacing: 5) {
+                        Image(systemName: "magnifyingglass")
+                            .foregroundColor(.secondary)
+                            .font(.system(size: 10.5))
+                        TextField("Find in Workspace (⇧⌘F)…", text: $workspaceSearchQuery)
+                            .textFieldStyle(.plain)
+                            .font(.system(size: 11.5))
+                            .onSubmit {
+                                triggerWorkspaceRipgrepSearch()
+                            }
+                            .onChange(of: workspaceSearchQuery) { _ in
+                                scheduleWorkspaceRipgrepSearch()
+                            }
+
+                        if !workspaceSearchQuery.isEmpty {
+                            Button(action: {
+                                workspaceSearchQuery = ""
+                                workspaceSearchMatches = []
+                                workspaceReplaceMessage = nil
+                            }) {
+                                Image(systemName: "xmark.circle.fill")
+                                    .foregroundColor(.secondary)
+                                    .font(.system(size: 10))
+                            }
+                            .buttonStyle(.plain)
+                        }
+
+                        Button {
+                            searchCaseSensitive.toggle()
+                            triggerWorkspaceRipgrepSearch()
+                        } label: {
+                            Text("Aa")
+                                .font(.system(size: 9.5, weight: .bold, design: .monospaced))
+                                .padding(.horizontal, 4)
+                                .padding(.vertical, 2)
+                                .background(searchCaseSensitive ? Color.accentColor.opacity(0.22) : Color.clear)
+                                .foregroundColor(searchCaseSensitive ? .accentColor : .secondary)
+                                .cornerRadius(3)
+                        }
+                        .buttonStyle(.plain)
+                        .help("Match Case")
+
+                        Button {
+                            searchUseRegex.toggle()
+                            triggerWorkspaceRipgrepSearch()
+                        } label: {
+                            Text(".*")
+                                .font(.system(size: 9.5, weight: .bold, design: .monospaced))
+                                .padding(.horizontal, 4)
+                                .padding(.vertical, 2)
+                                .background(searchUseRegex ? Color.accentColor.opacity(0.22) : Color.clear)
+                                .foregroundColor(searchUseRegex ? .accentColor : .secondary)
+                                .cornerRadius(3)
+                        }
+                        .buttonStyle(.plain)
+                        .help("Use Regular Expression")
+                    }
+                    .padding(.horizontal, 6)
+                    .padding(.vertical, 5)
+                    .background(Color.primary.opacity(0.05))
+                    .cornerRadius(6)
+                }
+
+                if showWorkspaceReplace {
+                    HStack(spacing: 4) {
+                        Spacer().frame(width: 14)
+                        HStack(spacing: 5) {
+                            Image(systemName: "arrow.left.arrow.right")
+                                .foregroundColor(.secondary)
+                                .font(.system(size: 10))
+                            TextField("Replace with…", text: $workspaceReplaceQuery)
+                                .textFieldStyle(.plain)
+                                .font(.system(size: 11.5))
+                        }
+                        .padding(.horizontal, 6)
+                        .padding(.vertical, 5)
+                        .background(Color.primary.opacity(0.05))
+                        .cornerRadius(6)
+
+                        Button {
+                            performWorkspaceReplaceAll()
+                        } label: {
+                            Text("All")
+                                .font(.system(size: 10, weight: .semibold))
+                                .padding(.horizontal, 7)
+                                .padding(.vertical, 5)
+                                .background(workspaceSearchMatches.isEmpty ? Color.secondary.opacity(0.1) : Color.accentColor.opacity(0.18))
+                                .foregroundColor(workspaceSearchMatches.isEmpty ? .secondary : .accentColor)
+                                .cornerRadius(5)
+                        }
+                        .buttonStyle(.plain)
+                        .disabled(workspaceSearchMatches.isEmpty || workspaceSearchQuery.isEmpty)
+                        .help("Replace All Across Workspace")
+                    }
                 }
             }
             .padding(.horizontal, 8)
-            .padding(.vertical, 6)
-            .background(Color.primary.opacity(0.05))
-            .cornerRadius(6)
-            .padding(.horizontal, 8)
             .padding(.top, 8)
+
+            if let msg = workspaceReplaceMessage {
+                HStack(spacing: 4) {
+                    Image(systemName: "checkmark.circle.fill")
+                        .foregroundColor(.green)
+                        .font(.system(size: 10))
+                    Text(msg)
+                        .font(.system(size: 10))
+                        .foregroundColor(.secondary)
+                    Spacer()
+                }
+                .padding(.horizontal, 12)
+            }
 
             if appState.workspaceFolder == nil {
                 VStack(spacing: 6) {
@@ -1674,36 +1809,275 @@ struct XcodeEditorSidebar: View {
                 }
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
             } else {
+                HStack {
+                    if isSearchingWorkspace {
+                        ProgressView().scaleEffect(0.5)
+                        Text("Searching workspace…")
+                            .font(.system(size: 10))
+                            .foregroundColor(.secondary)
+                    } else if !workspaceSearchQuery.isEmpty {
+                        let fileCount = Set(workspaceSearchMatches.map(\.filePath)).count
+                        Text("\(workspaceSearchMatches.count) results in \(fileCount) files")
+                            .font(.system(size: 10, weight: .medium))
+                            .foregroundColor(.secondary)
+                    }
+                    Spacer()
+                }
+                .padding(.horizontal, 12)
+
                 ScrollView {
                     LazyVStack(alignment: .leading, spacing: 2) {
-                        ForEach(matchingFileNodes(in: appState.fileTree, query: filterText), id: \.id) { node in
-                            Button {
-                                Task { @MainActor in
-                                    await appState.loadFile(url: URL(fileURLWithPath: node.path))
+                        // File name matches
+                        if !workspaceSearchQuery.isEmpty {
+                            let fileMatches = matchingFileNodes(in: appState.fileTree, query: workspaceSearchQuery).prefix(12)
+                            if !fileMatches.isEmpty {
+                                Text("FILES")
+                                    .font(.system(size: 9, weight: .bold))
+                                    .foregroundColor(.secondary)
+                                    .padding(.horizontal, 6)
+                                    .padding(.top, 2)
+                                ForEach(Array(fileMatches), id: \.id) { node in
+                                    Button {
+                                        Task { @MainActor in
+                                            await appState.loadFile(url: URL(fileURLWithPath: node.path))
+                                        }
+                                    } label: {
+                                        HStack(spacing: 6) {
+                                            Image(systemName: node.isDirectory ? "folder.fill" : "doc.text.fill")
+                                                .foregroundColor(node.isDirectory ? .accentColor : .secondary)
+                                                .font(.system(size: 10.5))
+                                            Text(node.name)
+                                                .font(.system(size: 11, weight: .medium))
+                                                .foregroundColor(.primary)
+                                                .lineLimit(1)
+                                            Spacer()
+                                        }
+                                        .padding(.horizontal, 8)
+                                        .padding(.vertical, 3)
+                                        .background(Color.primary.opacity(0.03))
+                                        .cornerRadius(4)
+                                    }
+                                    .buttonStyle(.plain)
                                 }
-                            } label: {
-                                HStack(spacing: 6) {
-                                    Image(systemName: node.isDirectory ? "folder.fill" : "doc.text.fill")
-                                        .foregroundColor(node.isDirectory ? .accentColor : .secondary)
-                                        .font(.system(size: 11))
-                                    Text(node.name)
-                                        .font(.system(size: 11))
-                                        .foregroundColor(.primary)
-                                        .lineLimit(1)
-                                    Spacer()
-                                }
-                                .padding(.horizontal, 8)
-                                .padding(.vertical, 4)
-                                .background(Color.primary.opacity(0.03))
-                                .cornerRadius(4)
                             }
-                            .buttonStyle(.plain)
+                        }
+
+                        // Ripgrep Content Matches
+                        if !workspaceSearchMatches.isEmpty {
+                            Text("TEXT MATCHES")
+                                .font(.system(size: 9, weight: .bold))
+                                .foregroundColor(.secondary)
+                                .padding(.horizontal, 6)
+                                .padding(.top, 6)
+
+                            ForEach(workspaceSearchMatches) { match in
+                                Button {
+                                    let url = URL(fileURLWithPath: match.filePath)
+                                    Task { @MainActor in
+                                        await appState.loadFile(url: url)
+                                        try? await Task.sleep(nanoseconds: 40_000_000)
+                                        NotificationCenter.default.post(
+                                            name: Notification.Name("JumpToLineNotification"),
+                                            object: nil,
+                                            userInfo: ["line": match.lineNumber]
+                                        )
+                                    }
+                                } label: {
+                                    VStack(alignment: .leading, spacing: 2) {
+                                        HStack(spacing: 4) {
+                                            Image(systemName: "doc.text")
+                                                .font(.system(size: 9.5))
+                                                .foregroundColor(.accentColor)
+                                            Text(match.relativePath)
+                                                .font(.system(size: 10.5, weight: .semibold))
+                                                .foregroundColor(.primary)
+                                                .lineLimit(1)
+                                                .truncationMode(.middle)
+                                            Spacer()
+                                            Text(":\(match.lineNumber)")
+                                                .font(.system(size: 9.5, design: .monospaced))
+                                                .foregroundColor(.secondary)
+                                        }
+                                        Text(match.linePreview)
+                                            .font(.system(size: 10.5, design: .monospaced))
+                                            .foregroundColor(.secondary)
+                                            .lineLimit(1)
+                                    }
+                                    .padding(.horizontal, 8)
+                                    .padding(.vertical, 4)
+                                    .background(Color.primary.opacity(0.035))
+                                    .cornerRadius(4)
+                                }
+                                .buttonStyle(.plain)
+                            }
                         }
                     }
                     .padding(.horizontal, 8)
                 }
             }
         }
+    }
+
+    private func scheduleWorkspaceRipgrepSearch() {
+        workspaceSearchTask?.cancel()
+        workspaceReplaceMessage = nil
+        let query = workspaceSearchQuery.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !query.isEmpty else {
+            workspaceSearchMatches = []
+            isSearchingWorkspace = false
+            return
+        }
+        workspaceSearchTask = Task {
+            try? await Task.sleep(nanoseconds: 160_000_000)
+            guard !Task.isCancelled else { return }
+            await MainActor.run { triggerWorkspaceRipgrepSearch() }
+        }
+    }
+
+    private func triggerWorkspaceRipgrepSearch() {
+        guard let rootURL = appState.workspaceFolder else { return }
+        let query = workspaceSearchQuery
+        guard !query.isEmpty else {
+            workspaceSearchMatches = []
+            isSearchingWorkspace = false
+            return
+        }
+        let caseSensitive = searchCaseSensitive
+        let useRegex = searchUseRegex
+        let rootPath = rootURL.path
+        isSearchingWorkspace = true
+
+        Task.detached(priority: .userInitiated) {
+            let rgCandidates = [
+                "/opt/homebrew/bin/rg",
+                "/usr/local/bin/rg",
+                "/usr/bin/rg"
+            ]
+            let rgBin = rgCandidates.first(where: { FileManager.default.isExecutableFile(atPath: $0) })
+
+            let proc = Process()
+            let pipe = Pipe()
+            proc.currentDirectoryURL = rootURL
+            proc.standardOutput = pipe
+            proc.standardError = FileHandle.nullDevice
+
+            if let rg = rgBin {
+                proc.executableURL = URL(fileURLWithPath: rg)
+                var args = [
+                    "--vimgrep",
+                    "--max-count", "40",
+                    "--max-filesize", "2M",
+                    "--glob", "!.git",
+                    "--glob", "!node_modules",
+                    "--glob", "!target",
+                    "--glob", "!.build",
+                    "--glob", "!DerivedData"
+                ]
+                if !caseSensitive { args.append("-i") }
+                if !useRegex { args.append("-F") }
+                args.append("--")
+                args.append(query)
+                args.append(".")
+                proc.arguments = args
+            } else {
+                proc.executableURL = URL(fileURLWithPath: "/usr/bin/grep")
+                var args = [
+                    "-rnI",
+                    "--exclude-dir=.git",
+                    "--exclude-dir=node_modules",
+                    "--exclude-dir=target",
+                    "--exclude-dir=.build",
+                    "--exclude-dir=DerivedData"
+                ]
+                if !caseSensitive { args.append("-i") }
+                if !useRegex { args.append("-F") } else { args.append("-E") }
+                args.append("--")
+                args.append(query)
+                args.append(".")
+                proc.arguments = args
+            }
+
+            var matches: [WorkspaceSearchMatch] = []
+            do {
+                try proc.run()
+                let data = pipe.fileHandleForReading.readDataToEndOfFile()
+                proc.waitUntilExit()
+                if let output = String(data: data, encoding: .utf8) {
+                    var count = 0
+                    output.enumerateLines { line, stop in
+                        guard count < 400 else { stop = true; return }
+                        // Format: ./path/to/file:line:col:preview or ./path/to/file:line:preview
+                        let parts = line.split(separator: ":", maxSplits: 3, omittingEmptySubsequences: false)
+                        guard parts.count >= 3,
+                              let lineNum = Int(parts[1]) else { return }
+                        var rawRel = String(parts[0])
+                        if rawRel.hasPrefix("./") {
+                            rawRel.removeFirst(2)
+                        }
+                        let colNum: Int
+                        let preview: String
+                        if parts.count == 4, let c = Int(parts[2]) {
+                            colNum = c
+                            preview = String(parts[3]).trimmingCharacters(in: .whitespaces)
+                        } else {
+                            colNum = 1
+                            preview = parts.dropFirst(2).joined(separator: ":").trimmingCharacters(in: .whitespaces)
+                        }
+                        let fullPath = (rootPath as NSString).appendingPathComponent(rawRel)
+                        matches.append(
+                            WorkspaceSearchMatch(
+                                id: "\(fullPath):\(lineNum):\(colNum):\(count)",
+                                filePath: fullPath,
+                                relativePath: rawRel,
+                                lineNumber: lineNum,
+                                columnNumber: colNum,
+                                linePreview: preview
+                            )
+                        )
+                        count += 1
+                    }
+                }
+            } catch {}
+
+            let finalMatches = matches
+            await MainActor.run {
+                self.workspaceSearchMatches = finalMatches
+                self.isSearchingWorkspace = false
+            }
+        }
+    }
+
+    private func performWorkspaceReplaceAll() {
+        let query = workspaceSearchQuery
+        let replacement = workspaceReplaceQuery
+        guard !query.isEmpty, !workspaceSearchMatches.isEmpty else { return }
+
+        let targetFiles = Array(Set(workspaceSearchMatches.map(\.filePath)))
+        let caseSensitive = searchCaseSensitive
+        let useRegex = searchUseRegex
+
+        var modifiedFilesCount = 0
+        for path in targetFiles {
+            let url = URL(fileURLWithPath: path)
+            guard let original = try? String(contentsOf: url, encoding: .utf8) else { continue }
+            var options: String.CompareOptions = []
+            if !caseSensitive { options.insert(.caseInsensitive) }
+            if useRegex { options.insert(.regularExpression) }
+
+            let updated = original.replacingOccurrences(of: query, with: replacement, options: options)
+            if updated != original {
+                do {
+                    try updated.write(to: url, atomically: true, encoding: .utf8)
+                    modifiedFilesCount += 1
+                    if let openFile = appState.openFiles.first(where: { $0.path == path }) {
+                        appState.updateFileContent(updated, for: openFile.id)
+                    }
+                } catch {}
+            }
+        }
+
+        workspaceReplaceMessage = "Replaced in \(modifiedFilesCount) file(s)"
+        triggerWorkspaceRipgrepSearch()
     }
 
     // MARK: - Issues Navigator Content
@@ -2226,7 +2600,7 @@ struct AgenticContextInspector: View {
                     .layoutPriority(10)
                 }
                 .padding(.horizontal, 10)
-                .frame(height: 38)
+                .frame(height: 36)
 
                 Divider()
 
@@ -2690,20 +3064,24 @@ struct AgenticContextInspector: View {
         }
 
         if checklistItems.isEmpty {
-            VStack(spacing: 8) {
-                Image(systemName: "checklist")
-                    .font(.system(size: 24))
-                    .foregroundColor(.secondary.opacity(0.5))
-                Text("No task steps found")
-                    .font(.system(size: 11))
-                    .foregroundColor(.secondary)
-                Text(taskMarkdownContent.isEmpty ? "No .microcode/task.md file" : taskMarkdownContent)
-                    .font(.system(size: 9.5, design: .monospaced))
-                    .foregroundColor(.secondary.opacity(0.7))
-                    .lineLimit(8)
+            if !taskMarkdownContent.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                RenderedMarkdownDocumentView(markdown: taskMarkdownContent)
+                    .padding(.vertical, 4)
+            } else {
+                VStack(spacing: 8) {
+                    Image(systemName: "checklist")
+                        .font(.system(size: 24))
+                        .foregroundColor(.secondary.opacity(0.5))
+                    Text("No task steps found")
+                        .font(.system(size: 11))
+                        .foregroundColor(.secondary)
+                    Text("No .microcode/task.md file")
+                        .font(.system(size: 9.5))
+                        .foregroundColor(.secondary.opacity(0.7))
+                }
+                .frame(maxWidth: .infinity)
+                .padding(.top, 24)
             }
-            .frame(maxWidth: .infinity)
-            .padding(.top, 24)
         } else {
             let completedCount = checklistItems.filter { $0.isCompleted }.count
             let totalCount = checklistItems.count
@@ -2729,14 +3107,15 @@ struct AgenticContextInspector: View {
                         .foregroundColor(item.isCompleted ? .accentColor : .secondary.opacity(0.6))
                         .padding(.top, 1)
 
-                    Text(item.text)
-                        .font(.system(size: 11))
-                        .foregroundColor(item.isCompleted ? .secondary : .primary)
-                        .strikethrough(item.isCompleted, color: .secondary.opacity(0.6))
+                    MarkdownTextView(text: item.text)
+                        .opacity(item.isCompleted ? 0.65 : 1.0)
                         .frame(maxWidth: .infinity, alignment: .leading)
                 }
                 .padding(.vertical, 3)
             }
+            
+            Divider().padding(.vertical, 6)
+            RenderedMarkdownDocumentView(markdown: taskMarkdownContent)
         }
     }
 
@@ -2770,11 +3149,7 @@ struct AgenticContextInspector: View {
 
                 Divider().opacity(0.5)
 
-                Text(walkthroughMarkdownContent)
-                    .font(.system(size: 10.5, design: .monospaced))
-                    .foregroundColor(.primary.opacity(0.9))
-                    .textSelection(.enabled)
-                    .lineSpacing(3)
+                RenderedMarkdownDocumentView(markdown: walkthroughMarkdownContent)
             }
         }
     }
@@ -4141,6 +4516,18 @@ struct CodeEditor: View {
     @EnvironmentObject var appState: AppState
     @State private var text: String
     @State private var updateTask: Task<Void, Never>? = nil
+    @State private var markdownRenderMode: Bool = true
+    @State private var showInlineCmdK: Bool = false
+    @State private var inlineCmdKPrompt: String = ""
+    @State private var isRunningInlineCmdK: Bool = false
+    @State private var inlinePreEditSnapshot: String? = nil
+    @State private var activeLineBlameSummary: String = ""
+
+    private var isMarkdownFile: Bool {
+        let lowerName = file.name.lowercased()
+        let lowerLang = file.language.lowercased()
+        return lowerLang == "markdown" || lowerName.hasSuffix(".md") || lowerName.hasSuffix(".markdown")
+    }
 
     init(file: CodeFile) {
         self.file = file
@@ -4164,6 +4551,81 @@ struct CodeEditor: View {
                     }
                 }
                 Spacer()
+                
+                if !activeLineBlameSummary.isEmpty {
+                    HStack(spacing: 4) {
+                        Image(systemName: "arrow.triangle.branch")
+                            .font(.system(size: 8.5))
+                            .foregroundColor(.secondary.opacity(0.75))
+                        Text(activeLineBlameSummary)
+                            .font(.system(size: 10, design: .monospaced))
+                            .foregroundColor(.secondary.opacity(0.82))
+                            .lineLimit(1)
+                    }
+                    .padding(.horizontal, 7)
+                    .padding(.vertical, 2)
+                    .background(Color.primary.opacity(0.035))
+                    .cornerRadius(4)
+                    .help("Live Git Blame for active cursor line")
+                }
+                
+                // Inline Cmd+K AI Edit button
+                Button(action: {
+                    withAnimation(.easeInOut(duration: 0.15)) {
+                        showInlineCmdK.toggle()
+                    }
+                }) {
+                    HStack(spacing: 4) {
+                        Image(systemName: "wand.and.stars")
+                            .font(.system(size: 9.5, weight: .semibold))
+                        Text("Inline Edit (⌘K)")
+                            .font(.system(size: 10, weight: .medium))
+                    }
+                    .foregroundColor(showInlineCmdK ? .accentColor : .secondary)
+                    .padding(.horizontal, 8)
+                    .padding(.vertical, 3)
+                    .background(showInlineCmdK ? Color.accentColor.opacity(0.14) : Color.primary.opacity(0.05))
+                    .cornerRadius(4)
+                }
+                .buttonStyle(.plain)
+                .keyboardShortcut("k", modifiers: [.command])
+                
+                if isMarkdownFile {
+                    HStack(spacing: 1) {
+                        Button(action: { withAnimation(.easeInOut(duration: 0.15)) { markdownRenderMode = true } }) {
+                            HStack(spacing: 3) {
+                                Image(systemName: "doc.richtext")
+                                    .font(.system(size: 9.5))
+                                Text("Rendered")
+                                    .font(.system(size: 9.5, weight: markdownRenderMode ? .semibold : .regular))
+                            }
+                            .foregroundColor(markdownRenderMode ? .primary : .secondary)
+                            .padding(.horizontal, 7)
+                            .padding(.vertical, 3)
+                            .background(markdownRenderMode ? Color.primary.opacity(0.12) : Color.clear)
+                            .cornerRadius(4)
+                        }
+                        .buttonStyle(.plain)
+                        
+                        Button(action: { withAnimation(.easeInOut(duration: 0.15)) { markdownRenderMode = false } }) {
+                            HStack(spacing: 3) {
+                                Image(systemName: "chevron.left.forwardslash.chevron.right")
+                                    .font(.system(size: 9.5))
+                                Text("Source")
+                                    .font(.system(size: 9.5, weight: !markdownRenderMode ? .semibold : .regular))
+                            }
+                            .foregroundColor(!markdownRenderMode ? .primary : .secondary)
+                            .padding(.horizontal, 7)
+                            .padding(.vertical, 3)
+                            .background(!markdownRenderMode ? Color.primary.opacity(0.12) : Color.clear)
+                            .cornerRadius(4)
+                        }
+                        .buttonStyle(.plain)
+                    }
+                    .padding(2)
+                    .background(Color.primary.opacity(0.04))
+                    .cornerRadius(5)
+                }
                 
                 // Language selection menu
                 Menu {
@@ -4196,6 +4658,92 @@ struct CodeEditor: View {
             .background(Color.compat(nsColor: .windowBackgroundColor).opacity(0.5))
             
             Divider()
+            
+            // Inline Cmd+K Prompt & Review Bar
+            if showInlineCmdK || inlinePreEditSnapshot != nil {
+                HStack(spacing: 8) {
+                    Image(systemName: "wand.and.stars")
+                        .font(.system(size: 11, weight: .semibold))
+                        .foregroundColor(.accentColor)
+                    
+                    TextField("Describe how to edit \(file.name) (e.g., refactor function, add error handling)...", text: $inlineCmdKPrompt)
+                        .textFieldStyle(.plain)
+                        .font(.system(size: 11.5))
+                        .onSubmit {
+                            runInlineCmdKEdit()
+                        }
+                    
+                    if isRunningInlineCmdK {
+                        ProgressView()
+                            .controlSize(.mini)
+                    } else {
+                        Button(action: runInlineCmdKEdit) {
+                            Text("Generate")
+                                .font(.system(size: 10.5, weight: .semibold))
+                                .foregroundColor(.white)
+                                .padding(.horizontal, 10)
+                                .padding(.vertical, 4)
+                                .background(Color.accentColor)
+                                .cornerRadius(4)
+                        }
+                        .buttonStyle(.plain)
+                        .disabled(inlineCmdKPrompt.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                    }
+                    
+                    if let snapshot = inlinePreEditSnapshot {
+                        Button(action: {
+                            inlinePreEditSnapshot = nil
+                            showInlineCmdK = false
+                            try? text.write(toFile: file.path, atomically: true, encoding: .utf8)
+                        }) {
+                            HStack(spacing: 3) {
+                                Image(systemName: "checkmark")
+                                    .font(.system(size: 9, weight: .bold))
+                                Text("Accept (⌘↩)")
+                                    .font(.system(size: 10, weight: .semibold))
+                            }
+                            .foregroundColor(.green)
+                            .padding(.horizontal, 8)
+                            .padding(.vertical, 4)
+                            .background(Color.green.opacity(0.14))
+                            .cornerRadius(4)
+                        }
+                        .buttonStyle(.plain)
+                        .keyboardShortcut(.return, modifiers: [.command])
+                        
+                        Button(action: {
+                            text = snapshot
+                            appState.updateFileContent(snapshot, for: file.id)
+                            inlinePreEditSnapshot = nil
+                        }) {
+                            HStack(spacing: 3) {
+                                Image(systemName: "arrow.uturn.backward")
+                                    .font(.system(size: 9, weight: .bold))
+                                Text("Reject (⎋)")
+                                    .font(.system(size: 10, weight: .semibold))
+                            }
+                            .foregroundColor(.red)
+                            .padding(.horizontal, 8)
+                            .padding(.vertical, 4)
+                            .background(Color.red.opacity(0.14))
+                            .cornerRadius(4)
+                        }
+                        .buttonStyle(.plain)
+                        .keyboardShortcut(.escape, modifiers: [])
+                    }
+                    
+                    Button(action: { showInlineCmdK = false }) {
+                        Image(systemName: "xmark")
+                            .font(.system(size: 9.5, weight: .semibold))
+                            .foregroundColor(.secondary)
+                    }
+                    .buttonStyle(.plain)
+                }
+                .padding(.horizontal, 12)
+                .padding(.vertical, 7)
+                .background(Color.accentColor.opacity(0.06))
+                Divider()
+            }
 
             if file.isReadOnly || file.usesPlainTextMode {
                 HStack(spacing: 8) {
@@ -4215,37 +4763,60 @@ struct CodeEditor: View {
                 Divider()
             }
             
-            // Code Editor with Syntax Highlighting Engine
-            ZStack(alignment: .topLeading) {
-                SyntaxHighlightedCodeView(
-                    text: $text,
-                    language: file.language,
-                    fontSize: appState.fontSize,
-                    isDark: appState.appTheme.isDark,
-                    themeName: appState.appTheme.rawValue,
-                    fileURL: URL(fileURLWithPath: file.path),
-                    isEditable: !file.isReadOnly,
-                    enableHighlighting: !file.usesPlainTextMode,
-                    showLineNumbers: appState.showLineNumbers && !file.usesPlainTextMode,
-                    editorID: "file-\(file.id.uuidString)"
-                )
-                
-                if appState.showingCompletions {
-                    AutocompletePopupView(appState: appState) { item in
-                        NotificationCenter.default.post(
-                            name: Notification.Name("InsertLSPCompletionItem"),
-                            object: nil,
-                            userInfo: ["item": item]
-                        )
+            // Rendered Markdown Document View (Default for .md files like implement.md, task.md, walkthrough.md) vs Code Editor
+            if isMarkdownFile && markdownRenderMode {
+                ScrollView {
+                    VStack(alignment: .leading, spacing: 14) {
+                        RenderedMarkdownDocumentView(markdown: text)
+                            .padding(24)
                     }
-                    .offset(x: appState.autocompleteRect.origin.x, y: appState.autocompleteRect.origin.y + 15) // offset below the cursor line
-                    .zIndex(10)
+                    .frame(maxWidth: .infinity, alignment: .leading)
                 }
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+                .background(Color.compat(nsColor: .textBackgroundColor))
+            } else {
+                ZStack(alignment: .topLeading) {
+                    SyntaxHighlightedCodeView(
+                        text: $text,
+                        language: file.language,
+                        fontSize: appState.fontSize,
+                        isDark: appState.appTheme.isDark,
+                        themeName: appState.appTheme.rawValue,
+                        fileURL: URL(fileURLWithPath: file.path),
+                        isEditable: !file.isReadOnly,
+                        enableHighlighting: !file.usesPlainTextMode,
+                        showLineNumbers: appState.showLineNumbers && !file.usesPlainTextMode,
+                        editorID: "file-\(file.id.uuidString)"
+                    )
+                    
+                    if appState.showingCompletions {
+                        AutocompletePopupView(appState: appState) { item in
+                            NotificationCenter.default.post(
+                                name: Notification.Name("InsertLSPCompletionItem"),
+                                object: nil,
+                                userInfo: ["item": item]
+                            )
+                        }
+                        .offset(x: appState.autocompleteRect.origin.x, y: appState.autocompleteRect.origin.y)
+                        .zIndex(10)
+                    }
+                }
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
             }
-            .frame(maxWidth: .infinity, maxHeight: .infinity)
         }
         .onAppear { text = file.content }
-        .onChange(of: file.id) { _ in text = file.content }
+        .onReceive(NotificationCenter.default.publisher(for: EditorLineNumberGutterView.activeLineGitBlameNotification)) { notif in
+            guard let info = notif.userInfo,
+                  let blamedFile = info["file"] as? String,
+                  URL(fileURLWithPath: file.path).standardizedFileURL.path == blamedFile,
+                  let summary = info["summary"] as? String else { return }
+            activeLineBlameSummary = summary
+        }
+        .onChange(of: file.id) { _ in
+            text = file.content
+            activeLineBlameSummary = ""
+            appState.dismissCompletions()
+        }
         .onChange(of: file.content) { newContent in
             if !file.isUnsaved { text = newContent }
         }
@@ -4266,6 +4837,53 @@ struct CodeEditor: View {
                 }
             }
         }
+    }
+    
+    private func runInlineCmdKEdit() {
+        let instruction = inlineCmdKPrompt.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !instruction.isEmpty, !isRunningInlineCmdK else { return }
+        if inlinePreEditSnapshot == nil {
+            inlinePreEditSnapshot = text
+        }
+        isRunningInlineCmdK = true
+        let currentCode = text
+        let provider = StreamableAIProvider(rawValue: appState.aiProvider) ?? StreamableAIProvider.detect(from: appState.aiModel)
+        let model = appState.aiModel.isEmpty ? "gemini-2.5-flash" : appState.aiModel
+        let apiKey = appState.resolveApiKey(for: appState.aiProvider)
+        
+        let sysPrompt = "You are an inline code transformation engine inside MicroCode IDE. Return ONLY the complete updated file content without surrounding markdown code fences or explanations."
+        let userPrompt = "File: \(file.name)\nInstruction: \(instruction)\n\nCurrent File Content:\n\(currentCode)"
+        
+        AIClient.shared.sendMessage(
+            prompt: userPrompt,
+            systemPrompt: sysPrompt,
+            conversationHistory: [],
+            provider: provider,
+            model: model,
+            apiKey: apiKey,
+            onToken: { _ in },
+            onComplete: { fullResponse in
+                DispatchQueue.main.async {
+                    self.isRunningInlineCmdK = false
+                    var cleaned = fullResponse.trimmingCharacters(in: .whitespacesAndNewlines)
+                    if cleaned.hasPrefix("```") {
+                        let lines = cleaned.components(separatedBy: .newlines)
+                        if lines.count >= 2 {
+                            cleaned = lines.dropFirst().dropLast(lines.last?.trimmingCharacters(in: .whitespaces) == "```" ? 1 : 0).joined(separator: "\n")
+                        }
+                    }
+                    if !cleaned.isEmpty {
+                        self.text = cleaned
+                        self.appState.updateFileContent(cleaned, for: self.file.id)
+                    }
+                }
+            },
+            onError: { _ in
+                DispatchQueue.main.async {
+                    self.isRunningInlineCmdK = false
+                }
+            }
+        )
     }
 
     private func formattedByteCount(_ count: Int) -> String {
@@ -4673,116 +5291,376 @@ struct TextEditorView: NSViewRepresentable {
     }
 }
 
-// MARK: - Debug Area (Interactive Terminal)
+// MARK: - Debug Area (Interactive Terminal & Console Dock)
 
 struct DebugArea: View {
     @EnvironmentObject var appState: AppState
+    @ObservedObject private var terminalManager = TerminalSessionManager.shared
+    @ObservedObject private var lspManager = LSPManager.shared
+    @AppStorage("mc_debug_area_height") private var panelHeight: Double = 240
+    @State private var isMaximized: Bool = false
+    @State private var dragStartHeight: Double? = nil
 
-    
+    private var resolvedWorkingDirectory: String {
+        if let ws = appState.workspaceFolder?.path, !ws.isEmpty {
+            return ws
+        }
+        return appState.activeTerminalDirectory
+    }
+
+    private var allDiagnostics: [(filePath: String, fileName: String, diagnostic: LSPDiagnostic)] {
+        var items: [(String, String, LSPDiagnostic)] = []
+        for (uri, diags) in lspManager.fileDiagnostics {
+            let path = URL(string: uri)?.path ?? uri
+            let name = URL(fileURLWithPath: path).lastPathComponent
+            for d in diags {
+                items.append((path, name, d))
+            }
+        }
+        return items.sorted { lhs, rhs in
+            let lSev = lhs.2.severity ?? 9
+            let rSev = rhs.2.severity ?? 9
+            if lSev != rSev { return lSev < rSev }
+            if lhs.1 != rhs.1 { return lhs.1 < rhs.1 }
+            return lhs.2.range.start.line < rhs.2.range.start.line
+        }
+    }
+
     var body: some View {
+        let effectiveHeight: CGFloat = isMaximized ? 520 : CGFloat(max(130, min(520, panelHeight)))
+
         VStack(spacing: 0) {
-            // Toolbar with tabs
-            HStack(spacing: 0) {
-                // Tabs
-                HStack(spacing: 0) {
-                    ConsoleTabButton(title: "OUTPUT", isSelected: appState.selectedConsoleTab == 0) { appState.selectedConsoleTab = 0 }
-                    ConsoleTabButton(title: "TERMINAL", isSelected: appState.selectedConsoleTab == 1) { appState.selectedConsoleTab = 1 }
-                    ConsoleTabButton(title: "PROBLEMS", isSelected: appState.selectedConsoleTab == 2) { appState.selectedConsoleTab = 2 }
-                    ConsoleTabButton(title: "ANALYSIS", isSelected: appState.selectedConsoleTab == 3) { appState.selectedConsoleTab = 3 }
+            // Drag Resizer Handle
+            Rectangle()
+                .fill(Color.primary.opacity(0.08))
+                .frame(height: 4)
+                .contentShape(Rectangle())
+                .onHover { hovering in
+                    if hovering {
+                        NSCursor.resizeUpDown.push()
+                    } else {
+                        NSCursor.pop()
+                    }
                 }
-                
+                .gesture(
+                    DragGesture(minimumDistance: 1)
+                        .onChanged { value in
+                            if dragStartHeight == nil {
+                                dragStartHeight = isMaximized ? 520 : panelHeight
+                                isMaximized = false
+                            }
+                            if let base = dragStartHeight {
+                                panelHeight = max(130, min(520, base - Double(value.translation.height)))
+                            }
+                        }
+                        .onEnded { _ in
+                            dragStartHeight = nil
+                        }
+                )
+
+            // Toolbar with tabs + context actions
+            HStack(spacing: 6) {
+                HStack(spacing: 0) {
+                    ConsoleTabButton(title: "OUTPUT", isSelected: appState.selectedConsoleTab == 0) {
+                        appState.selectedConsoleTab = 0
+                    }
+                    ConsoleTabButton(title: "TERMINAL", isSelected: appState.selectedConsoleTab == 1) {
+                        appState.selectedConsoleTab = 1
+                    }
+                    ConsoleTabButton(
+                        title: "PROBLEMS",
+                        badgeCount: allDiagnostics.count,
+                        isSelected: appState.selectedConsoleTab == 2
+                    ) {
+                        appState.selectedConsoleTab = 2
+                    }
+                    ConsoleTabButton(title: "ANALYSIS", isSelected: appState.selectedConsoleTab == 3) {
+                        appState.selectedConsoleTab = 3
+                    }
+                }
+
+                // Multi-Tab Terminal Session Selector (when Terminal tab is active)
+                if appState.selectedConsoleTab == 1 {
+                    Divider()
+                        .frame(height: 14)
+                        .padding(.horizontal, 2)
+
+                    ScrollView(.horizontal, showsIndicators: false) {
+                        HStack(spacing: 4) {
+                            ForEach(terminalManager.sessions) { session in
+                                let isActive = terminalManager.activeSession?.id == session.id
+                                let isSplit = terminalManager.splitSession?.id == session.id
+                                HStack(spacing: 5) {
+                                    Circle()
+                                        .fill(session.isRunning ? Color.green : Color.secondary.opacity(0.5))
+                                        .frame(width: 6, height: 6)
+                                    Text(session.title)
+                                        .font(.system(size: 10.5, weight: (isActive || isSplit) ? .semibold : .regular, design: .monospaced))
+                                        .lineLimit(1)
+                                    if terminalManager.sessions.count > 1 {
+                                        Button {
+                                            terminalManager.closeSession(session.id)
+                                        } label: {
+                                            Image(systemName: "xmark")
+                                                .font(.system(size: 8, weight: .bold))
+                                                .foregroundColor(.secondary)
+                                        }
+                                        .buttonStyle(.plain)
+                                    }
+                                }
+                                .padding(.horizontal, 8)
+                                .padding(.vertical, 3)
+                                .background(
+                                    RoundedRectangle(cornerRadius: 5)
+                                        .fill(isActive ? Color.accentColor.opacity(0.18) : (isSplit ? Color.accentColor.opacity(0.09) : Color.primary.opacity(0.05)))
+                                )
+                                .onTapGesture {
+                                    terminalManager.activeSessionID = session.id
+                                }
+                            }
+                        }
+                    }
+
+                    if let cwd = terminalManager.activeSession?.workingDirectory, !cwd.isEmpty {
+                        HStack(spacing: 3) {
+                            Image(systemName: "folder")
+                                .font(.system(size: 9))
+                            Text(URL(fileURLWithPath: cwd).lastPathComponent)
+                                .font(.system(size: 10, design: .monospaced))
+                                .lineLimit(1)
+                        }
+                        .foregroundColor(.secondary)
+                        .padding(.horizontal, 6)
+                        .help(cwd)
+                    }
+                }
+
                 Spacer()
-                
-                HStack(spacing: 4) {
-                    Button(action: { appState.consoleOutput = "" }) {
+
+                HStack(spacing: 6) {
+                    if appState.selectedConsoleTab == 1 {
+                        Button {
+                            if let session = terminalManager.activeSession {
+                                session.dispatchFixWithAIToAgent(fallbackWorkingDir: resolvedWorkingDirectory)
+                            }
+                        } label: {
+                            HStack(spacing: 3) {
+                                Image(systemName: "sparkles")
+                                    .font(.system(size: 9.5))
+                                Text("Fix with AI")
+                                    .font(.system(size: 10, weight: .medium))
+                            }
+                            .padding(.horizontal, 6)
+                            .padding(.vertical, 2)
+                            .background(Color.accentColor.opacity(0.14))
+                            .cornerRadius(4)
+                        }
+                        .buttonStyle(.plain)
+                        .help("Send recent terminal output/error to AI Agent")
+
+                        Button {
+                            terminalManager.createSession(
+                                workingDirectory: resolvedWorkingDirectory,
+                                fontName: appState.playgroundFontName,
+                                fontSize: 13,
+                                textColor: appState.appTheme.editorText,
+                                backgroundColor: appState.appTheme.editorBackground,
+                                isTransparent: appState.appTheme == .extraClear
+                            )
+                        } label: {
+                            Image(systemName: "plus")
+                                .font(.system(size: 11, weight: .medium))
+                        }
+                        .buttonStyle(.borderless)
+                        .help("New Terminal Tab")
+
+                        Button {
+                            terminalManager.toggleSplit(
+                                workingDirectory: resolvedWorkingDirectory,
+                                fontName: appState.playgroundFontName,
+                                fontSize: 13,
+                                textColor: appState.appTheme.editorText,
+                                backgroundColor: appState.appTheme.editorBackground,
+                                isTransparent: appState.appTheme == .extraClear
+                            )
+                        } label: {
+                            Image(systemName: "rectangle.split.2x1")
+                                .font(.system(size: 11))
+                                .foregroundColor(terminalManager.splitSession != nil ? .accentColor : .secondary)
+                        }
+                        .buttonStyle(.borderless)
+                        .help("Split Terminal Pane")
+
+                        Button {
+                            terminalManager.restartActiveSession()
+                        } label: {
+                            Image(systemName: "arrow.clockwise")
+                                .font(.system(size: 10.5))
+                        }
+                        .buttonStyle(.borderless)
+                        .help("Restart Active Shell")
+                    }
+
+                    Button {
+                        if appState.selectedConsoleTab == 1 {
+                            terminalManager.clearActiveSession()
+                        } else if appState.selectedConsoleTab == 2 {
+                            lspManager.fileDiagnostics.removeAll()
+                        } else {
+                            appState.consoleOutput = ""
+                        }
+                    } label: {
                         Image(systemName: "trash")
                             .font(.system(size: 11))
                     }
                     .buttonStyle(.borderless)
-                    .help("Clear")
-                    
+                    .help(appState.selectedConsoleTab == 1 ? "Clear Terminal (⌘K)" : "Clear")
+
+                    Button {
+                        withAnimation(.easeInOut(duration: 0.15)) {
+                            isMaximized.toggle()
+                        }
+                    } label: {
+                        Image(systemName: isMaximized ? "arrow.down.right.and.arrow.up.left" : "arrow.up.left.and.arrow.down.right")
+                            .font(.system(size: 10))
+                    }
+                    .buttonStyle(.borderless)
+                    .help(isMaximized ? "Restore Panel Size" : "Maximize Panel")
+
                     Button(action: { appState.toggleConsole() }) {
                         Image(systemName: "xmark")
                             .font(.system(size: 10))
                     }
                     .buttonStyle(.borderless)
-                    .help("Close")
+                    .help("Close Panel")
                 }
                 .padding(.trailing, 8)
             }
             .frame(height: 28)
             .background(appState.appTheme == .extraClear ? Color.clear : Color(nsColor: .windowBackgroundColor))
-            
+
             Divider()
-            
-            // Content based on tab
-            switch appState.selectedConsoleTab {
-            case 0: // Output
-                ScrollViewReader { proxy in
-                     ScrollView {
-                        Text(appState.consoleOutput.isEmpty ? "No output yet. Run code with ⌘R" : appState.consoleOutput)
-                            .font(.system(size: 12, design: .monospaced))
-                            .foregroundColor(appState.consoleOutput.isEmpty ? Color(nsColor: appState.appTheme.commentColor) : Color(nsColor: appState.appTheme.editorText))
-                            .frame(maxWidth: .infinity, alignment: .leading)
-                            .padding(10)
-                            .id("bottom")
-                            .compatTextSelection()
-                    }
-                    .onChange(of: appState.consoleOutput) { _ in
-                        proxy.scrollTo("bottom", anchor: .bottom)
-                    }
-                }
-                .frame(minHeight: 100, maxHeight: 300)
-                .background(appState.appTheme == .extraClear ? Color.clear : Color(nsColor: appState.appTheme.editorBackground))
-                
-            case 1: // Terminal
+
+            // Unified-Height Content Stage (keeps Terminal mounted so tab switches never reset PTY)
+            ZStack {
+                // Tab 1: Persistent Authentic Terminal
                 AuthenticTerminal(
                     shell: "/bin/zsh",
+                    workingDirectory: resolvedWorkingDirectory,
                     fontName: appState.playgroundFontName,
                     fontSize: 13,
                     textColor: appState.appTheme.editorText,
                     backgroundColor: appState.appTheme.editorBackground,
                     isTransparent: appState.appTheme == .extraClear
                 )
-                .frame(minHeight: 120, maxHeight: 350)
-                .background(appState.appTheme == .extraClear ? Color.clear : Color(nsColor: appState.appTheme.editorBackground))
-                
-            case 2: // Problems
-                VStack {
-                    Text("No problems detected")
-                        .font(.system(size: 12))
-                        .foregroundColor(.secondary)
-                        .frame(maxWidth: .infinity, maxHeight: .infinity)
+                .opacity(appState.selectedConsoleTab == 1 ? 1 : 0)
+                .allowsHitTesting(appState.selectedConsoleTab == 1)
+
+                if appState.selectedConsoleTab == 0 {
+                    // Tab 0: Output
+                    ScrollViewReader { proxy in
+                        ScrollView {
+                            Text(appState.consoleOutput.isEmpty ? "No output yet. Run code with ⌘R" : appState.consoleOutput)
+                                .font(.system(size: 12, design: .monospaced))
+                                .foregroundColor(appState.consoleOutput.isEmpty ? Color(nsColor: appState.appTheme.commentColor) : Color(nsColor: appState.appTheme.editorText))
+                                .frame(maxWidth: .infinity, alignment: .leading)
+                                .padding(10)
+                                .id("bottom")
+                                .compatTextSelection()
+                        }
+                        .onChange(of: appState.consoleOutput) { _ in
+                            proxy.scrollTo("bottom", anchor: .bottom)
+                        }
+                    }
+                    .background(appState.appTheme == .extraClear ? Color.clear : Color(nsColor: appState.appTheme.editorBackground))
+                } else if appState.selectedConsoleTab == 2 {
+                    // Tab 2: Live LSP & Syntax Problems
+                    problemsTabView
+                        .background(appState.appTheme == .extraClear ? Color.clear : Color(nsColor: appState.appTheme.editorBackground))
+                } else if appState.selectedConsoleTab == 3 {
+                    // Tab 3: Static Code Analysis
+                    CodeAnalysisPanel()
+                        .environmentObject(appState)
                 }
-                .frame(minHeight: 100, maxHeight: 300)
-                .background(appState.appTheme == .extraClear ? Color.clear : Color(nsColor: .textBackgroundColor))
-                
-            case 3: // Analysis
-                CodeAnalysisPanel()
-                    .environmentObject(appState)
-                    .frame(minHeight: 200, maxHeight: 400)
-                
-            default:
-                EmptyView()
             }
+            .frame(height: effectiveHeight)
+            .background(appState.appTheme == .extraClear ? Color.clear : Color(nsColor: appState.appTheme.editorBackground))
         }
     }
 
+    @ViewBuilder
+    private var problemsTabView: some View {
+        let items = allDiagnostics
+        if items.isEmpty {
+            VStack(spacing: 8) {
+                Image(systemName: "checkmark.seal.fill")
+                    .font(.system(size: 22))
+                    .foregroundColor(.green.opacity(0.75))
+                Text("No problems detected in workspace")
+                    .font(.system(size: 12, weight: .medium))
+                    .foregroundColor(.secondary)
+            }
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
+        } else {
+            ScrollView {
+                LazyVStack(alignment: .leading, spacing: 0) {
+                    ForEach(Array(items.enumerated()), id: \.offset) { _, entry in
+                        let isError = (entry.diagnostic.severity ?? 1) == 1
+                        let line = entry.diagnostic.range.start.line + 1
+                        let col = entry.diagnostic.range.start.character + 1
+                        HStack(spacing: 8) {
+                            Image(systemName: isError ? "xmark.octagon.fill" : "exclamationmark.triangle.fill")
+                                .foregroundColor(isError ? .red : .orange)
+                                .font(.system(size: 11))
+                            Text(entry.diagnostic.message)
+                                .font(.system(size: 11.5))
+                                .foregroundColor(.primary)
+                                .lineLimit(2)
+                            Spacer()
+                            Text("\(entry.fileName):\(line):\(col)")
+                                .font(.system(size: 10.5, design: .monospaced))
+                                .foregroundColor(.secondary)
+                        }
+                        .padding(.horizontal, 12)
+                        .padding(.vertical, 6)
+                        .contentShape(Rectangle())
+                        .onTapGesture {
+                            Task { @MainActor in
+                                await appState.loadFile(url: URL(fileURLWithPath: entry.filePath))
+                            }
+                        }
+                        Divider().opacity(0.3)
+                    }
+                }
+            }
+        }
+    }
 }
 
 struct ConsoleTabButton: View {
     let title: String
+    var badgeCount: Int = 0
     let isSelected: Bool
     let action: () -> Void
     
     var body: some View {
         Button(action: action) {
-            Text(title)
-                .font(.system(size: 10, weight: .semibold))
-                .foregroundColor(isSelected ? .primary : .secondary)
-                .padding(.horizontal, 12)
-                .padding(.vertical, 6)
-                .background(isSelected ? Color.accentColor.opacity(0.15) : Color.clear)
+            HStack(spacing: 5) {
+                Text(title)
+                    .font(.system(size: 10, weight: .semibold))
+                    .foregroundColor(isSelected ? .primary : .secondary)
+                if badgeCount > 0 {
+                    Text("\(badgeCount)")
+                        .font(.system(size: 9, weight: .bold, design: .monospaced))
+                        .foregroundColor(.white)
+                        .padding(.horizontal, 5)
+                        .padding(.vertical, 1)
+                        .background(Capsule().fill(Color.red.opacity(0.85)))
+                }
+            }
+            .padding(.horizontal, 12)
+            .padding(.vertical, 6)
+            .background(isSelected ? Color.accentColor.opacity(0.15) : Color.clear)
         }
         .buttonStyle(.plain)
     }
@@ -7300,6 +8178,17 @@ struct SettingsView: View {
         case "openai": return .green
         case "anthropic": return .pink
         case "deepseek": return .cyan
+        case "openrouter": return .indigo
+        case "groq": return .orange
+        case "mistral": return .orange
+        case "kimi": return .cyan
+        case "perplexity": return .teal
+        case "typhoon": return .purple
+        case "cerebras": return .pink
+        case "together": return .blue
+        case "fireworks": return .orange
+        case "minimax": return .pink
+        case "nvidia": return .green
         case "grok": return .purple
         case "qwen": return .indigo
         case "glm": return .red
@@ -8398,7 +9287,12 @@ struct SettingsView: View {
         agentMaxIterations = appState.agentMaxIterations
         
         // Load ALL provider keys
-        let providers = ["gemini", "openai", "anthropic", "deepseek", "grok", "qwen", "glm"]
+        let providers = [
+            "gemini", "openai", "anthropic", "deepseek",
+            "openrouter", "groq", "mistral", "kimi", "perplexity", "typhoon",
+            "cerebras", "together", "fireworks", "minimax", "nvidia",
+            "grok", "qwen", "glm"
+        ]
         for p in providers {
             providerKeys[p] = appState.apiKeys[p] ?? UserDefaults.standard.string(forKey: "\(p)_api_key") ?? ""
         }
@@ -8498,9 +9392,20 @@ struct SettingsView: View {
         case "anthropic": return "ANTHROPIC_API_KEY"
         case "glm": return "GLM_API_KEY"
         case "deepseek": return "DEEPSEEK_API_KEY"
+        case "openrouter": return "OPENROUTER_API_KEY"
+        case "groq": return "GROQ_API_KEY"
+        case "mistral": return "MISTRAL_API_KEY"
+        case "kimi": return "KIMI_API_KEY"
+        case "perplexity": return "PERPLEXITY_API_KEY"
+        case "typhoon": return "TYPHOON_API_KEY"
+        case "cerebras": return "CEREBRAS_API_KEY"
+        case "together": return "TOGETHER_API_KEY"
+        case "fireworks": return "FIREWORKS_API_KEY"
+        case "minimax": return "MINIMAX_API_KEY"
+        case "nvidia": return "NVIDIA_API_KEY"
         case "grok": return "GROK_API_KEY"
         case "qwen": return "QWEN_API_KEY"
-        default: return "API_KEY"
+        default: return "\(provider.uppercased())_API_KEY"
         }
     }
 }

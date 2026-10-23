@@ -347,7 +347,11 @@ private struct SubscriptionWKWebViewRepresentable: NSViewRepresentable {
         config.applicationNameForUserAgent = "Version/18.0 Safari/605.1.15 MicroCode/2.0"
         
         let wv = WKWebView(frame: .zero, configuration: config)
-        wv.customUserAgent = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/18.0 Safari/605.1.15"
+        if provider == .aipass {
+            wv.customUserAgent = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"
+        } else {
+            wv.customUserAgent = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/18.0 Safari/605.1.15"
+        }
         wv.navigationDelegate = context.coordinator
         
         // Listen to real-time cookie changes
@@ -426,15 +430,10 @@ private struct SubscriptionWKWebViewRepresentable: NSViewRepresentable {
                 
                 switch self.parent.provider {
                 case .chatgpt:
-                    // 1. NextAuth chunked cookies (__Secure-next-auth.session-token.0, .1, etc.) or plain
-                    let tokenChunks = cookies
-                        .filter { $0.name.hasPrefix("__Secure-next-auth.session-token") || $0.name.hasPrefix("next-auth.session-token") }
-                        .sorted { $0.name < $1.name }
-                    
+                    // Only accept a direct JWT cookie (eyJ...); encrypted NextAuth JWE cookies (__Secure-next-auth.session-token)
+                    // are exchanged via fetch('/api/auth/session') in checkJavaScript for the real accessToken JWT.
                     var sessionToken: String? = nil
-                    if !tokenChunks.isEmpty {
-                        sessionToken = tokenChunks.map(\.value).joined()
-                    } else if let single = cookies.first(where: { $0.name == "oai-client-auth-token" && !$0.value.isEmpty }) {
+                    if let single = cookies.first(where: { $0.name == "oai-client-auth-token" && $0.value.hasPrefix("eyJ") }) {
                         sessionToken = single.value
                     }
                     
@@ -462,6 +461,11 @@ private struct SubscriptionWKWebViewRepresentable: NSViewRepresentable {
                         }
                         return
                     }
+                    if let webView = webView {
+                        DispatchQueue.main.async {
+                            self.checkJavaScript(in: webView)
+                        }
+                    }
                     
                 case .claude:
                     let claudeChunks = cookies
@@ -488,7 +492,7 @@ private struct SubscriptionWKWebViewRepresentable: NSViewRepresentable {
                     }
                     
                 case .deepseek:
-                    if let cookie = cookies.first(where: { ($0.name == "userToken" || $0.name == "auth_token") && !$0.value.isEmpty }) {
+                    if let cookie = cookies.first(where: { ($0.name == "userToken" || $0.name == "auth_token") && !SubscriptionAuthManager.isCorruptedToken($0.value) }) {
                         self.isFound = true
                         DispatchQueue.main.async {
                             self.parent.onTokenDetected(cookie.value, "DeepSeek Web User")
@@ -501,12 +505,32 @@ private struct SubscriptionWKWebViewRepresentable: NSViewRepresentable {
                     break
                     
                 case .glm:
-                    if let cookie = cookies.first(where: { $0.name == "token" && !$0.value.isEmpty }) {
+                    if let cookie = cookies.first(where: { $0.name == "token" && !SubscriptionAuthManager.isCorruptedToken($0.value) }) {
                         self.isFound = true
                         DispatchQueue.main.async {
                             self.parent.onTokenDetected(cookie.value, "GLM BigModel User")
                         }
                         return
+                    }
+                    
+                case .aipass:
+                    let aipassCookies = cookies.filter { $0.domain.contains("aipass.net") }
+                    if let sessionCookie = aipassCookies.first(where: { $0.name == "__Secure-ai_passport_auth.session_token" && !$0.value.isEmpty }) {
+                        self.isFound = true
+                        let cookieHeader = aipassCookies.map { "\($0.name)=\($0.value)" }.joined(separator: "; ")
+                        let finalToken = cookieHeader.isEmpty ? "__Secure-ai_passport_auth.session_token=\(sessionCookie.value)" : cookieHeader
+                        DispatchQueue.main.async {
+                            self.parent.onTokenDetected(finalToken, "TH-AI Passport Member")
+                        }
+                        return
+                    }
+                    
+                case .openrouter, .groq, .mistral, .kimi, .perplexity, .typhoon,
+                     .qwen, .grok, .cerebras, .together, .fireworks, .minimax, .nvidia:
+                    if let webView = webView {
+                        DispatchQueue.main.async {
+                            self.checkJavaScript(in: webView)
+                        }
                     }
                 }
             }
@@ -524,9 +548,9 @@ private struct SubscriptionWKWebViewRepresentable: NSViewRepresentable {
                         const res = await fetch('/api/auth/session');
                         if (res.ok) {
                             const data = await res.json();
-                            if (data && (data.accessToken || data.user)) {
+                            if (data && typeof data.accessToken === 'string' && data.accessToken.length > 20) {
                                 return JSON.stringify({
-                                    token: data.accessToken || '',
+                                    token: data.accessToken,
                                     user: data.user?.email || data.user?.name || 'ChatGPT Plus User'
                                 });
                             }
@@ -534,7 +558,7 @@ private struct SubscriptionWKWebViewRepresentable: NSViewRepresentable {
                     } catch(e) {}
                     try {
                         const at = localStorage.getItem('accessToken');
-                        if (at && at.length > 20) {
+                        if (at && at.length > 20 && !at.startsWith('{')) {
                             return JSON.stringify({ token: at, user: 'ChatGPT User' });
                         }
                     } catch(e) {}
@@ -559,13 +583,20 @@ private struct SubscriptionWKWebViewRepresentable: NSViewRepresentable {
                     try {
                         for (const key of ['userToken', 'user_token', 'auth_token', 'token', 'd_token']) {
                             const raw = localStorage.getItem(key) || sessionStorage.getItem(key);
-                            if (raw) {
-                                try {
-                                    const parsed = JSON.parse(raw);
-                                    if (parsed && parsed.value) return JSON.stringify({ token: parsed.value, user: 'DeepSeek User' });
-                                    if (parsed && parsed.token) return JSON.stringify({ token: parsed.token, user: 'DeepSeek User' });
-                                } catch(e) {}
-                                if (typeof raw === 'string' && raw.length > 10) return JSON.stringify({ token: raw, user: 'DeepSeek User' });
+                            if (!raw || raw === 'null' || raw === 'undefined') continue;
+                            try {
+                                const parsed = JSON.parse(raw);
+                                if (parsed && typeof parsed === 'object') {
+                                    const val = parsed.value || parsed.token || parsed.access_token;
+                                    if (typeof val === 'string' && val.length > 16 && val !== 'null') {
+                                        return JSON.stringify({ token: val, user: 'DeepSeek User' });
+                                    }
+                                    continue;
+                                }
+                            } catch(e) {}
+                            const trimmed = String(raw).trim();
+                            if (!trimmed.startsWith('{') && trimmed.length > 16 && !trimmed.includes('"value":null')) {
+                                return JSON.stringify({ token: trimmed, user: 'DeepSeek User' });
                             }
                         }
                     } catch(e) {}
@@ -593,13 +624,45 @@ private struct SubscriptionWKWebViewRepresentable: NSViewRepresentable {
                 (() => {
                     try {
                         const tok = localStorage.getItem('token');
-                        if (tok) return JSON.stringify({ token: tok, user: 'GLM User' });
+                        if (tok && tok !== 'null' && !tok.startsWith('{')) return JSON.stringify({ token: tok, user: 'GLM User' });
                     } catch(e) {}
                     return null;
                 })()
                 """
                 
-            case .copilot:
+            case .openrouter, .groq, .mistral, .kimi, .perplexity, .typhoon,
+                 .qwen, .grok, .cerebras, .together, .fireworks, .minimax, .nvidia:
+                let userLabel = parent.provider.shortLabel
+                jsScript = """
+                (() => {
+                    try {
+                        const inputs = Array.from(document.querySelectorAll('input, textarea, code, pre, span'));
+                        const patterns = [
+                            /sk-or-v1-[A-Za-z0-9]{32,}/,
+                            /gsk_[A-Za-z0-9]{32,}/,
+                            /pplx-[A-Za-z0-9]{24,}/,
+                            /xai-[A-Za-z0-9]{24,}/,
+                            /csk-[A-Za-z0-9]{24,}/,
+                            /fw_[A-Za-z0-9]{20,}/,
+                            /nvapi-[A-Za-z0-9_-]{24,}/,
+                            /sk-[A-Za-z0-9_-]{28,}/
+                        ];
+                        for (const el of inputs) {
+                            const val = (el.value || el.textContent || '').trim();
+                            if (!val || val.includes('...') || val.includes('•••') || val.includes('***')) continue;
+                            for (const pat of patterns) {
+                                const m = val.match(pat);
+                                if (m && m[0]) {
+                                    return JSON.stringify({ token: m[0], user: '\(userLabel) Member' });
+                                }
+                            }
+                        }
+                    } catch(e) {}
+                    return null;
+                })()
+                """
+                
+            case .copilot, .aipass:
                 jsScript = ""
             }
             
@@ -611,7 +674,8 @@ private struct SubscriptionWKWebViewRepresentable: NSViewRepresentable {
                 
                 if let data = jsonStr.data(using: .utf8),
                    let dict = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-                   let token = dict["token"] as? String, !token.isEmpty {
+                   let token = dict["token"] as? String,
+                   !SubscriptionAuthManager.isCorruptedToken(token) {
                     self.isFound = true
                     let user = dict["user"] as? String
                     DispatchQueue.main.async {

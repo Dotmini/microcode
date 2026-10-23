@@ -211,6 +211,11 @@ public struct DebugPanelView: View {
             
             Divider()
             
+            if debugService.sessionState.isActive || !debugService.breakpoints.isEmpty {
+                interactiveDAPInspectorView
+                Divider()
+            }
+            
             if filteredErrors.isEmpty {
                 emptyStateView
             } else {
@@ -223,6 +228,179 @@ public struct DebugPanelView: View {
                 triggerAutoFixIfNeeded()
             }
         }
+    }
+    
+    // MARK: - Interactive LLDB-DAP Inspector
+    
+    private var interactiveDAPInspectorView: some View {
+        HStack(alignment: .top, spacing: 0) {
+            // Left: Breakpoints & Call Stack
+            VStack(alignment: .leading, spacing: 4) {
+                HStack {
+                    Image(systemName: "circle.inset.filled")
+                        .font(.system(size: 9))
+                        .foregroundColor(.red)
+                    Text("BREAKPOINTS & CALL STACK")
+                        .font(.system(size: 9.5, weight: .bold))
+                        .foregroundColor(.secondary)
+                    Spacer()
+                    if !debugService.breakpoints.isEmpty {
+                        Button("Clear") {
+                            debugService.clearAllBreakpoints()
+                        }
+                        .font(.system(size: 9))
+                        .buttonStyle(.plain)
+                        .foregroundColor(.secondary)
+                    }
+                }
+                .padding(.horizontal, 8)
+                .padding(.top, 6)
+                
+                ScrollView {
+                    VStack(alignment: .leading, spacing: 3) {
+                        if !debugService.callStack.isEmpty {
+                            ForEach(debugService.callStack) { frame in
+                                Button {
+                                    debugService.fetchVariables(forFrameId: frame.id)
+                                    if let path = frame.sourcePath, frame.line > 0 {
+                                        Task { @MainActor in
+                                            await appState.loadFile(url: URL(fileURLWithPath: path))
+                                            NotificationCenter.default.post(
+                                                name: Notification.Name("JumpToLineNotification"),
+                                                object: nil,
+                                                userInfo: ["line": frame.line, "column": max(1, frame.column)]
+                                            )
+                                        }
+                                    }
+                                } label: {
+                                    HStack(spacing: 5) {
+                                        Image(systemName: "stack")
+                                            .font(.system(size: 9))
+                                            .foregroundColor(.yellow)
+                                        Text(frame.name)
+                                            .font(.system(size: 10.5, weight: .medium, design: .monospaced))
+                                            .lineLimit(1)
+                                        Spacer()
+                                        if frame.line > 0 {
+                                            Text("L\(frame.line)")
+                                                .font(.system(size: 9.5, design: .monospaced))
+                                                .foregroundColor(.secondary)
+                                        }
+                                    }
+                                    .padding(.horizontal, 6)
+                                    .padding(.vertical, 3)
+                                    .background(Color.primary.opacity(0.05))
+                                    .cornerRadius(4)
+                                }
+                                .buttonStyle(.plain)
+                            }
+                        }
+                        
+                        ForEach(Array(debugService.breakpoints.keys.sorted()), id: \.self) { filePath in
+                            let lines = Array(debugService.breakpoints[filePath] ?? []).sorted()
+                            let fileName = (filePath as NSString).lastPathComponent
+                            ForEach(lines, id: \.self) { line in
+                                HStack(spacing: 5) {
+                                    Circle()
+                                        .fill(Color.red)
+                                        .frame(width: 7, height: 7)
+                                    Button {
+                                        Task { @MainActor in
+                                            await appState.loadFile(url: URL(fileURLWithPath: filePath))
+                                            NotificationCenter.default.post(
+                                                name: Notification.Name("JumpToLineNotification"),
+                                                object: nil,
+                                                userInfo: ["line": line]
+                                            )
+                                        }
+                                    } label: {
+                                        Text("\(fileName):\(line)")
+                                            .font(.system(size: 10.5, design: .monospaced))
+                                            .foregroundColor(.primary)
+                                            .lineLimit(1)
+                                    }
+                                    .buttonStyle(.plain)
+                                    Spacer()
+                                    Button {
+                                        debugService.toggleBreakpoint(file: filePath, line: line)
+                                    } label: {
+                                        Image(systemName: "xmark")
+                                            .font(.system(size: 8))
+                                            .foregroundColor(.secondary)
+                                    }
+                                    .buttonStyle(.plain)
+                                }
+                                .padding(.horizontal, 6)
+                                .padding(.vertical, 2)
+                            }
+                        }
+                    }
+                    .padding(.horizontal, 6)
+                    .padding(.bottom, 6)
+                }
+            }
+            .frame(maxWidth: .infinity)
+            
+            Divider()
+            
+            // Right: Local Variables & Debug Output
+            VStack(alignment: .leading, spacing: 4) {
+                HStack {
+                    Image(systemName: "cube.transparent")
+                        .font(.system(size: 9))
+                        .foregroundColor(.cyan)
+                    Text("LOCAL VARIABLES & LLDB OUTPUT")
+                        .font(.system(size: 9.5, weight: .bold))
+                        .foregroundColor(.secondary)
+                    Spacer()
+                    Text(debugService.sessionState.statusText)
+                        .font(.system(size: 9.5, weight: .semibold, design: .monospaced))
+                        .foregroundColor(debugService.sessionState.isPaused ? .yellow : .green)
+                }
+                .padding(.horizontal, 8)
+                .padding(.top, 6)
+                
+                ScrollView {
+                    VStack(alignment: .leading, spacing: 3) {
+                        if !debugService.localVariables.isEmpty {
+                            ForEach(debugService.localVariables) { v in
+                                HStack(spacing: 6) {
+                                    Text(v.name)
+                                        .font(.system(size: 10.5, weight: .semibold, design: .monospaced))
+                                        .foregroundColor(.cyan)
+                                    if !v.type.isEmpty {
+                                        Text(": \(v.type)")
+                                            .font(.system(size: 9.5, design: .monospaced))
+                                            .foregroundColor(.secondary)
+                                    }
+                                    Text("= \(v.value)")
+                                        .font(.system(size: 10.5, design: .monospaced))
+                                        .foregroundColor(.primary)
+                                        .lineLimit(1)
+                                    Spacer()
+                                }
+                                .padding(.horizontal, 6)
+                                .padding(.vertical, 2)
+                                .background(Color.primary.opacity(0.04))
+                                .cornerRadius(3)
+                            }
+                        }
+                        if !debugService.debugConsoleOutput.isEmpty {
+                            Text(debugService.debugConsoleOutput)
+                                .font(.system(size: 10, design: .monospaced))
+                                .foregroundColor(.secondary)
+                                .textSelection(.enabled)
+                                .frame(maxWidth: .infinity, alignment: .leading)
+                                .padding(.horizontal, 6)
+                        }
+                    }
+                    .padding(.bottom, 6)
+                }
+            }
+            .frame(maxWidth: .infinity)
+        }
+        .frame(height: 120)
+        .background(Color.primary.opacity(0.03))
     }
     
     // MARK: - Toolbar
@@ -260,6 +438,78 @@ public struct DebugPanelView: View {
                     }
                     .buttonStyle(.plain)
                     .help(debugService.isMonitoring ? "Console output monitoring is active (click to pause)" : "Monitoring paused (click to resume)")
+                    
+                    Divider().frame(height: 14)
+                    
+                    // Native LLDB-DAP Interactive Stepping Controls
+                    HStack(spacing: 4) {
+                        if !debugService.sessionState.isActive {
+                            Button {
+                                if let path = appState.currentFile?.path, !path.isEmpty {
+                                    Task {
+                                        await debugService.startDebugSession(
+                                            filePath: path,
+                                            workspacePath: appState.workspaceFolder?.path
+                                        )
+                                    }
+                                }
+                            } label: {
+                                HStack(spacing: 3) {
+                                    Image(systemName: "play.bug.fill")
+                                        .font(.system(size: 10))
+                                    Text("Debug (LLDB)")
+                                        .font(.system(size: 10, weight: .semibold))
+                                }
+                                .foregroundColor(.green)
+                                .padding(.horizontal, 7)
+                                .padding(.vertical, 3)
+                                .background(Color.green.opacity(0.14))
+                                .cornerRadius(4)
+                            }
+                            .buttonStyle(.plain)
+                            .disabled(appState.currentFile == nil)
+                            .help("Compile with debug symbols (-g) and launch interactive lldb-dap session")
+                        } else {
+                            Button { debugService.continueExecution() } label: {
+                                Image(systemName: "play.fill").font(.system(size: 10)).foregroundColor(.green)
+                                    .frame(width: 22, height: 20).background(Color.primary.opacity(0.07)).cornerRadius(4)
+                            }
+                            .buttonStyle(.plain)
+                            .disabled(!debugService.sessionState.isPaused)
+                            .help("Continue Execution")
+                            
+                            Button { debugService.stepOver() } label: {
+                                Image(systemName: "arrow.uturn.forward").font(.system(size: 10))
+                                    .frame(width: 22, height: 20).background(Color.primary.opacity(0.07)).cornerRadius(4)
+                            }
+                            .buttonStyle(.plain)
+                            .disabled(!debugService.sessionState.isPaused)
+                            .help("Step Over (Next Line)")
+                            
+                            Button { debugService.stepInto() } label: {
+                                Image(systemName: "arrow.down.to.line").font(.system(size: 10))
+                                    .frame(width: 22, height: 20).background(Color.primary.opacity(0.07)).cornerRadius(4)
+                            }
+                            .buttonStyle(.plain)
+                            .disabled(!debugService.sessionState.isPaused)
+                            .help("Step Into Function")
+                            
+                            Button { debugService.stepOut() } label: {
+                                Image(systemName: "arrow.up.to.line").font(.system(size: 10))
+                                    .frame(width: 22, height: 20).background(Color.primary.opacity(0.07)).cornerRadius(4)
+                            }
+                            .buttonStyle(.plain)
+                            .disabled(!debugService.sessionState.isPaused)
+                            .help("Step Out of Function")
+                            
+                            Button { debugService.stopDebugSession() } label: {
+                                Image(systemName: "stop.fill").font(.system(size: 10)).foregroundColor(.red)
+                                    .frame(width: 22, height: 20).background(Color.red.opacity(0.14)).cornerRadius(4)
+                            }
+                            .buttonStyle(.plain)
+                            .help("Stop LLDB Debug Session")
+                        }
+                    }
                 }
                 
                 Spacer()

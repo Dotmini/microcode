@@ -166,6 +166,17 @@ public final class SyntaxCache: @unchecked Sendable {
         _flattenedTokens = nil // Invalidate flattened cache
     }
     
+    /// Store multiple cache entries in a single lock acquisition (eliminates thousands of per-line lock round-trips)
+    public func setEntriesBatch(_ entries: [(line: Int, entry: LineCacheEntry)]) {
+        guard !entries.isEmpty else { return }
+        lock.lock()
+        defer { lock.unlock() }
+        for (line, entry) in entries {
+            cache[line] = entry
+        }
+        _flattenedTokens = nil
+    }
+    
     /// Get all cached tokens (if fully cached)
     public func allSyntaxTokens() -> [SyntaxToken] {
         lock.lock()
@@ -455,15 +466,184 @@ public final class IncrementalLexer: @unchecked Sendable {
         for region in dirtyRegions {
             // ZOMBIE KILLER: Stop processing if cancelled
             if Task.isCancelled { return [] }
-            retokenizeRegion(startLine: region.startLine, endLine: region.endLine, lines: lines)
+            _ = retokenizeRegion(startLine: region.startLine, endLine: region.endLine, lines: lines)
         }
         
         return cache.allSyntaxTokens()
     }
     
-    /// Re-tokenize a specific region
-    private func retokenizeRegion(startLine: Int, endLine: Int, lines: [String]) {
-        guard startLine >= 0 && startLine < lines.count else { return }
+    /// Result of an incremental re-tokenization pass.
+    /// When `isFullDocument` is false, `tokens` and `dirtyCharRange` cover ONLY the lines that actually changed,
+    /// cutting Main-Thread `NSTextStorage` attribute updates from O(entire file) down to O(1 edited line).
+    public struct IncrementalHighlightUpdate: Sendable {
+        public let tokens: [SyntaxToken]
+        public let dirtyCharRange: NSRange?
+        public let isFullDocument: Bool
+    }
+    
+    public func retokenizeDirtyRegionsIncremental(in document: String) -> IncrementalHighlightUpdate {
+        if Task.isCancelled {
+            return IncrementalHighlightUpdate(tokens: [], dirtyCharRange: nil, isFullDocument: false)
+        }
+        
+        let lines = document.components(separatedBy: "\n")
+        let dirtyRegions = cache.popDirtyRegions()
+        
+        guard !dirtyRegions.isEmpty else {
+            return IncrementalHighlightUpdate(tokens: [], dirtyCharRange: NSRange(location: 0, length: 0), isFullDocument: false)
+        }
+        
+        let isInitialFullPass = dirtyRegions.count == 1
+            && dirtyRegions[0].startLine == 0
+            && dirtyRegions[0].endLine >= max(0, lines.count - 1)
+            && lines.count > 8
+        
+        // Fast Multi-Core Parallel Path for Initial Full-Document Tokenization (>= 400 lines)
+        if isInitialFullPass && lines.count >= 400 {
+            retokenizeFullDocumentParallel(lines: lines)
+            return IncrementalHighlightUpdate(
+                tokens: cache.allSyntaxTokens(),
+                dirtyCharRange: nil,
+                isFullDocument: true
+            )
+        }
+        
+        var minLine = Int.max
+        var maxLine = Int.min
+        var minUTF16Offset = Int.max
+        var maxUTF16Offset = Int.min
+        
+        for region in dirtyRegions {
+            if Task.isCancelled {
+                return IncrementalHighlightUpdate(tokens: [], dirtyCharRange: nil, isFullDocument: false)
+            }
+            if let span = retokenizeRegion(startLine: region.startLine, endLine: region.endLine, lines: lines) {
+                minLine = min(minLine, span.startLine)
+                maxLine = max(maxLine, span.endLine)
+                minUTF16Offset = min(minUTF16Offset, span.startOffset)
+                maxUTF16Offset = max(maxUTF16Offset, span.endOffset)
+            }
+        }
+        
+        if isInitialFullPass || minLine > maxLine || (maxLine - minLine) > 80 {
+            return IncrementalHighlightUpdate(
+                tokens: cache.allSyntaxTokens(),
+                dirtyCharRange: nil,
+                isFullDocument: true
+            )
+        }
+        
+        var sliceTokens: [SyntaxToken] = []
+        for line in minLine...maxLine {
+            if let entry = cache.entry(forLine: line) {
+                sliceTokens.append(contentsOf: entry.tokens)
+            }
+        }
+        let length = max(0, maxUTF16Offset - minUTF16Offset)
+        return IncrementalHighlightUpdate(
+            tokens: sliceTokens,
+            dirtyCharRange: NSRange(location: minUTF16Offset, length: length),
+            isFullDocument: false
+        )
+    }
+    
+    /// Multi-Core Parallel Document Lexer:
+    /// Partitions `lines` across all Apple Silicon CPU cores using `DispatchQueue.concurrentPerform`,
+    /// reconciles any cross-chunk multiline comment/string state boundaries, and commits in 1 batch lock.
+    private func retokenizeFullDocumentParallel(lines: [String]) {
+        let totalLines = lines.count
+        guard totalLines > 0 else { return }
+        
+        var lineOffsets = Array<Int>(repeating: 0, count: totalLines)
+        var runningOffset = 0
+        for i in 0..<totalLines {
+            lineOffsets[i] = runningOffset
+            runningOffset += lines[i].utf16.count + 1
+        }
+        
+        let workerCount = min(PerformanceManager.totalCores, max(2, totalLines / 200))
+        let chunkSize = (totalLines + workerCount - 1) / workerCount
+        var chunkEntries = Array<[LineCacheEntry]>(repeating: [], count: workerCount)
+        let lexer = self.baseLexer
+        
+        chunkEntries.withUnsafeMutableBufferPointer { buf in
+            let rawAddr = UInt(bitPattern: UnsafeMutableRawPointer(buf.baseAddress!))
+            DispatchQueue.concurrentPerform(iterations: workerCount) { workerIdx in
+                let start = workerIdx * chunkSize
+                let end = min(totalLines, start + chunkSize)
+                guard start < end else { return }
+                
+                var local: [LineCacheEntry] = []
+                local.reserveCapacity(end - start)
+                var state: SyntaxLexerState = .normal
+                
+                for lineNum in start..<end {
+                    let line = lines[lineNum]
+                    let offset = lineOffsets[lineNum]
+                    let (tokens, nextState) = lexer.tokenizeLine(
+                        line,
+                        lineNumber: lineNum,
+                        startState: state,
+                        startOffset: offset
+                    )
+                    local.append(LineCacheEntry(
+                        lineContent: line,
+                        tokens: tokens,
+                        startState: state,
+                        endState: nextState
+                    ))
+                    state = nextState
+                }
+                
+                let slotPtr = UnsafeMutablePointer<[LineCacheEntry]>(bitPattern: rawAddr)! + workerIdx
+                slotPtr.pointee = local
+            }
+        }
+        
+        // Reconcile chunk boundaries if a multiline comment/string crossed from chunk (w - 1) into chunk w
+        for w in 1..<workerCount {
+            guard !chunkEntries[w - 1].isEmpty, !chunkEntries[w].isEmpty else { continue }
+            var carryState = chunkEntries[w - 1].last!.endState
+            let chunkStartLine = w * chunkSize
+            for idx in 0..<chunkEntries[w].count {
+                let existing = chunkEntries[w][idx]
+                if existing.startState == carryState {
+                    break // State converged!
+                }
+                let lineNum = chunkStartLine + idx
+                let line = lines[lineNum]
+                let offset = lineOffsets[lineNum]
+                let (tokens, nextState) = lexer.tokenizeLine(
+                    line,
+                    lineNumber: lineNum,
+                    startState: carryState,
+                    startOffset: offset
+                )
+                chunkEntries[w][idx] = LineCacheEntry(
+                    lineContent: line,
+                    tokens: tokens,
+                    startState: carryState,
+                    endState: nextState
+                )
+                carryState = nextState
+            }
+        }
+        
+        var batch: [(line: Int, entry: LineCacheEntry)] = []
+        batch.reserveCapacity(totalLines)
+        for w in 0..<workerCount {
+            let chunkStartLine = w * chunkSize
+            for (offsetIdx, entry) in chunkEntries[w].enumerated() {
+                batch.append((chunkStartLine + offsetIdx, entry))
+            }
+        }
+        cache.setEntriesBatch(batch)
+    }
+    
+    /// Re-tokenize a specific region and return the actual line & UTF-16 offset span that was updated
+    @discardableResult
+    private func retokenizeRegion(startLine: Int, endLine: Int, lines: [String]) -> (startLine: Int, endLine: Int, startOffset: Int, endOffset: Int)? {
+        guard startLine >= 0 && startLine < lines.count else { return nil }
         
         // Get the state from the previous line (if exists)
         var currentState: SyntaxLexerState = .normal
@@ -480,13 +660,18 @@ public final class IncrementalLexer: @unchecked Sendable {
                 currentOffset += lines[i].utf16.count + 1
             }
         }
+        let regionStartOffset = currentOffset
         
         // SyntaxTokenize lines until the end state stabilizes
         var lineNumber = startLine
+        var lastProcessedLine = startLine
+        var regionEndOffset = currentOffset
+        var batchEntries: [(line: Int, entry: LineCacheEntry)] = []
+        batchEntries.reserveCapacity(max(1, min(lines.count - startLine, endLine - startLine + 4)))
         
         while lineNumber < lines.count {
             // ZOMBIE KILLER: Stop processing if cancelled
-            if Task.isCancelled { return }
+            if Task.isCancelled { return nil }
             
             // Check if we've passed the dirty region
             if lineNumber > endLine {
@@ -504,20 +689,25 @@ public final class IncrementalLexer: @unchecked Sendable {
             let startState = currentState
             let (tokens, newEndState) = baseLexer.tokenizeLine(line, lineNumber: lineNumber, startState: startState, startOffset: currentOffset)
             
-            // Cache the result
+            // Collect entry for single batch lock commit
             let entry = LineCacheEntry(
                 lineContent: line,
                 tokens: tokens, // Note: tokens already contain absolute offsets based on startOffset
                 startState: startState,
                 endState: newEndState
             )
-            cache.setEntry(entry, forLine: lineNumber)
+            batchEntries.append((lineNumber, entry))
             
             // Prepare for next line
             currentState = newEndState
+            lastProcessedLine = lineNumber
+            regionEndOffset = currentOffset + line.utf16.count
             currentOffset += line.utf16.count + 1
             lineNumber += 1
         }
+        
+        cache.setEntriesBatch(batchEntries)
+        return (startLine, lastProcessedLine, regionStartOffset, regionEndOffset)
     }
     
     /// Handle a text edit

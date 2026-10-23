@@ -12,6 +12,7 @@
 //
 
 import Foundation
+import Accelerate
 
 // MARK: - Memory Entry
 
@@ -237,7 +238,7 @@ class AgentMemoryService: ObservableObject {
         var request = LocalBackendAuth.request(url: url)
         request.httpMethod = "POST"
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
-        request.timeoutInterval = 2.0 // Fast timeout to prevent blocking UI
+        request.timeoutInterval = 0.5 // Fast timeout to prevent blocking UI
         
         struct Req: Codable {
             let text: String
@@ -500,10 +501,11 @@ class AgentMemoryService: ObservableObject {
             }
         }
         
-        // L2 normalize
-        let norm = sqrt(embedding.reduce(0) { $0 + $1 * $1 })
+        // L2 normalize via Apple Silicon Accelerate / AMX SIMD (vDSP)
+        let sumSq = vDSP.sumOfSquares(embedding)
+        let norm = sqrt(sumSq)
         if norm > 0 {
-            embedding = embedding.map { $0 / norm }
+            embedding = vDSP.divide(embedding, norm)
         }
         
         return embedding
@@ -518,21 +520,13 @@ class AgentMemoryService: ObservableObject {
         return hash
     }
     
-    /// Cosine similarity between two vectors
+    /// Hardware-accelerated Cosine similarity between two vectors using Apple Silicon Accelerate (AMX / NEON vDSP)
     nonisolated static func cosineSimilarity(_ a: [Float], _ b: [Float]) -> Float {
-        guard a.count == b.count else { return 0 }
-        
-        var dot: Float = 0
-        var normA: Float = 0
-        var normB: Float = 0
-        
-        for i in 0..<a.count {
-            dot += a[i] * b[i]
-            normA += a[i] * a[i]
-            normB += b[i] * b[i]
-        }
-        
-        let denominator = sqrt(normA) * sqrt(normB)
+        guard a.count == b.count, !a.isEmpty else { return 0 }
+        let dot = vDSP.dot(a, b)
+        let normA = vDSP.sumOfSquares(a)
+        let normB = vDSP.sumOfSquares(b)
+        let denominator = sqrt(normA * normB)
         return denominator > 0 ? dot / denominator : 0
     }
     

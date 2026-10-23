@@ -285,8 +285,11 @@ class MCPServer: ObservableObject {
         connectedClients += 1
         log("Client connected", method: "initialize", status: .info)
         
+        let requestedVersion = request.params?.protocolVersion ?? "2025-06-18"
+        let negotiatedVersion = ["2025-06-18", "2025-03-26", "2024-11-05"].contains(requestedVersion) ? requestedVersion : "2025-06-18"
+        
         let result: [String: Any] = [
-            "protocolVersion": "2024-11-05",
+            "protocolVersion": negotiatedVersion,
             "capabilities": [
                 "tools": ["listChanged": true],
                 "resources": ["subscribe": false, "listChanged": true],
@@ -295,7 +298,7 @@ class MCPServer: ObservableObject {
             ],
             "serverInfo": [
                 "name": "MicroCode MCP",
-                "version": "1.0.0"
+                "version": "3.0.0"
             ]
         ]
         return MCPResponse(id: request.id, result: result)
@@ -514,6 +517,97 @@ class MCPServer: ObservableObject {
                     ],
                     "required": ["action"]
                 ]
+            ],
+            [
+                "name": "ide_browser",
+                "description": "Control and inspect MicroCode's built-in IDE Browser and Live WebApp Preview (WebKit). Supports navigating to URLs, inspecting interactive DOM elements, reading DOM text/HTML, clicking elements, typing into inputs (React/Vue compatible), evaluating JavaScript, reading live console/network logs, taking high-res PNG snapshots, Visual Element Picker (highlight_element / pick_element), and autonomous UI health verification (verify_ui).",
+                "inputSchema": [
+                    "type": "object",
+                    "properties": [
+                        "action": ["type": "string", "description": "Action: 'navigate', 'inspect_elements', 'get_dom', 'click', 'type', 'eval_js', 'console_logs', 'network_logs', 'screenshot', 'highlight_element', 'pick_element', 'verify_ui', or 'status'"],
+                        "target": ["type": "string", "description": "Target WebView: 'auto' (default), 'browser' (IDE Browser), or 'preview' (Live WebApp Preview Dock)"],
+                        "url": ["type": "string", "description": "URL to open (for 'navigate' / 'verify_ui')"],
+                        "selector": ["type": "string", "description": "CSS selector or button text (for 'click', 'type', 'get_dom', 'highlight_element')"],
+                        "text": ["type": "string", "description": "Text to type into input (for 'type')"],
+                        "submit": ["type": "boolean", "description": "Submit form after typing (for 'type')"],
+                        "script": ["type": "string", "description": "JavaScript expression to evaluate in page (for 'eval_js')"],
+                        "format": ["type": "string", "description": "'text' or 'html' (for 'get_dom')"],
+                        "level": ["type": "string", "description": "Console filter: 'error', 'warn', 'info', 'log' (for 'console_logs')"],
+                        "clear": ["type": "boolean", "description": "Clear buffered logs after reading (for 'console_logs' / 'network_logs')"],
+                        "output_path": ["type": "string", "description": "PNG file path (for 'screenshot' / 'verify_ui')"]
+                    ],
+                    "required": ["action"]
+                ]
+            ],
+            [
+                "name": "preview_control",
+                "description": "Inspect and control MicroCode's Live WebApp Preview Dock and Device Preview panel.",
+                "inputSchema": [
+                    "type": "object",
+                    "properties": [
+                        "action": ["type": "string", "description": "Action: 'status', 'open_web', 'refresh', 'toggle_dock', or 'close'"],
+                        "url": ["type": "string", "description": "Web URL to open in preview (e.g. http://localhost:3000)"]
+                    ],
+                    "required": ["action"]
+                ]
+            ],
+            [
+                "name": "editor_control",
+                "description": "Inspect and control the active MicroCode IDE Editor tabs, active file, and IDE mode (Code Editor, Browser, Notebook, Playground, AI Agent, Science, API Studio).",
+                "inputSchema": [
+                    "type": "object",
+                    "properties": [
+                        "action": ["type": "string", "description": "Action: 'status', 'open_file', 'list_tabs', 'switch_mode'"],
+                        "path": ["type": "string", "description": "File path to open in editor (for 'open_file')"],
+                        "mode": ["type": "string", "description": "IDE mode: 'editor', 'browser', 'notebook', 'playground', 'agent', 'science', 'api_studio' (for 'switch_mode')"]
+                    ],
+                    "required": ["action"]
+                ]
+            ],
+            [
+                "name": "lsp_intelligence",
+                "description": "Query live Language Server Protocol (LSP) intelligence in MicroCode (hover type info, go-to-definition, completions, active diagnostics, and active LSP servers).",
+                "inputSchema": [
+                    "type": "object",
+                    "properties": [
+                        "action": ["type": "string", "description": "Action: 'hover', 'definition', 'completions', 'active_diagnostics', or 'status'"],
+                        "path": ["type": "string", "description": "File path to inspect"],
+                        "line": ["type": "integer", "description": "1-based line number (for hover/definition/completions)"],
+                        "column": ["type": "integer", "description": "1-based column number (for hover/definition/completions)"]
+                    ],
+                    "required": ["action"]
+                ]
+            ],
+            [
+                "name": "api_studio",
+                "description": "Control MicroCode's built-in API Studio (Postman-level HTTP Client). Supports executing HTTP requests with AI Test Suite assertions, scanning the workspace for backend API routes (FastAPI, Express, Next.js, Rust Axum, Go), listing collections, importing .env variables, and generating multi-language SDK snippets (cURL, Swift, TypeScript, Python, Rust).",
+                "inputSchema": [
+                    "type": "object",
+                    "properties": [
+                        "action": ["type": "string", "description": "Action: 'execute', 'scan_routes', 'list_collections', 'load_env', or 'generate_snippet'"],
+                        "method": ["type": "string", "description": "HTTP method: GET, POST, PUT, DELETE, PATCH"],
+                        "url": ["type": "string", "description": "Target URL (supports {{base_url}} environment variables)"],
+                        "headers": ["type": "string", "description": "JSON object of HTTP headers"],
+                        "body": ["type": "string", "description": "Request body payload (JSON or text)"],
+                        "language": ["type": "string", "description": "Target SDK language for 'generate_snippet': 'curl', 'swift', 'typescript', 'python', 'rust'"],
+                        "save": ["type": "boolean", "description": "Save request to active API Studio collection"]
+                    ],
+                    "required": ["action"]
+                ]
+            ],
+            [
+                "name": "database_studio",
+                "description": "Inspect and query databases in MicroCode Database Studio. Supports discovering database files (.sqlite, .db, .sqlite3, schema.prisma, migrations) in the workspace, listing tables, inspecting table DDL schemas, and executing SQL queries.",
+                "inputSchema": [
+                    "type": "object",
+                    "properties": [
+                        "action": ["type": "string", "description": "Action: 'discover', 'list_tables', 'schema', or 'query'"],
+                        "path": ["type": "string", "description": "Path to SQLite database file (or ':memory:'). Optional if using active DatabaseStudio connection."],
+                        "query": ["type": "string", "description": "SQL query to execute (for 'query' action)"],
+                        "table": ["type": "string", "description": "Optional table name (for 'schema' action)"]
+                    ],
+                    "required": ["action"]
+                ]
             ]
         ]
         
@@ -545,7 +639,21 @@ class MCPServer: ObservableObject {
             let res = executeSyncAccount(args)
             return MCPResponse(id: request.id, result: ["content": [["type": "text", "text": "\(res)"]]])
         }
+        if ["ide_browser", "preview_control", "editor_control", "lsp_intelligence", "api_studio", "database_studio"].contains(name) {
+            do {
+                let res = try await AgentToolBox.shared.execute(name, params: args)
+                log("Tool: \(name)", method: "tools/call", status: .success)
+                return MCPResponse(id: request.id, result: ["content": [["type": "text", "text": "\(res)"]]])
+            } catch {
+                log("Tool error: \(name) — \(error.localizedDescription)", method: "tools/call", status: .error)
+                return MCPResponse(id: request.id, result: ["content": [["type": "text", "text": "Error: \(error.localizedDescription)"]], "isError": true])
+            }
+        }
         
+        if sandbox == nil {
+            let fallbackWs = AppState.shared?.activeTerminalDirectory ?? FileManager.default.currentDirectoryPath
+            start(workspace: fallbackWs)
+        }
         guard let sandbox = sandbox else {
             return MCPResponse(id: request.id, error: .custom("MCP Server not initialized — no workspace set"))
         }

@@ -987,7 +987,7 @@ class YourCloudKernel: ComputeKernel {
                 try process.run()
                 
                 if let data = scriptFeed.data(using: .utf8) {
-                    stdinPipe.fileHandleForWriting.write(data)
+                    try? stdinPipe.fileHandleForWriting.write(contentsOf: data)
                     try? stdinPipe.fileHandleForWriting.close()
                 }
                 

@@ -90,6 +90,14 @@ swift build -c debug --scratch-path "$SWIFT_SCRATCH_PATH" \
 DEFAULT_APP_DIR="$BUILD_ROOT/apps"
 mkdir -p "$DEFAULT_APP_DIR"
 BUNDLE_NAME="${CODETUNER_APP_DEST:-$DEFAULT_APP_DIR/MicroCode.app}"
+# Gracefully terminate any running instance executing from $BUNDLE_NAME BEFORE unlinking
+# its Mach-O binary on external storage (prevents mmap __TEXT page-fault SIGBUS loops).
+if pgrep -f "$BUNDLE_NAME/Contents/MacOS/MicroCode" >/dev/null 2>&1; then
+    echo "⏹ Stopping running MicroCode instance at $BUNDLE_NAME..."
+    pkill -TERM -f "$BUNDLE_NAME/Contents/MacOS/MicroCode" 2>/dev/null || true
+    sleep 0.5
+    pkill -KILL -f "$BUNDLE_NAME/Contents/MacOS/MicroCode" 2>/dev/null || true
+fi
 rm -rf "$BUNDLE_NAME"
 echo "📦 Creating Bundle: $BUNDLE_NAME"
 mkdir -p "$BUNDLE_NAME/Contents/MacOS"
@@ -126,9 +134,9 @@ cat > "$BUNDLE_NAME/Contents/Info.plist" <<EOF
     <key>CFBundleDisplayName</key>
     <string>MicroCode</string>
     <key>CFBundleShortVersionString</key>
-    <string>2.3.1</string>
+    <string>2.5.28</string>
     <key>CFBundleVersion</key>
-    <string>3</string>
+    <string>28</string>
     <key>CFBundlePackageType</key>
     <string>APPL</string>
     <key>CFBundleIconFile</key>
@@ -204,6 +212,13 @@ if [ -f "MicrocodeCoreSupport/libmicrocode_core.dylib" ]; then
     install_name_tool -change /Users/dotmini/Documents/SX/codetunner-native/microcode_core/target/release/deps/libmicrocode_core.dylib @rpath/libmicrocode_core.dylib "$BUNDLE_NAME/Contents/MacOS/MicroCode" 2>/dev/null || true
     install_name_tool -add_rpath @executable_path/../Frameworks "$BUNDLE_NAME/Contents/MacOS/MicroCode" 2>/dev/null || true
 fi
+if [ -f "$BUILD_ROOT/cargo-target/debug/libmicrocode_embedded.dylib" ]; then
+    echo "   Copying libmicrocode_embedded.dylib into Frameworks..."
+    cp "$BUILD_ROOT/cargo-target/debug/libmicrocode_embedded.dylib" "$BUNDLE_NAME/Contents/Frameworks/"
+    install_name_tool -id @rpath/libmicrocode_embedded.dylib "$BUNDLE_NAME/Contents/Frameworks/libmicrocode_embedded.dylib" 2>/dev/null || true
+    install_name_tool -change /Volumes/MAC/CodeTunerBuild/cargo-target/debug/deps/libmicrocode_embedded.dylib @rpath/libmicrocode_embedded.dylib "$BUNDLE_NAME/Contents/MacOS/MicroCode" 2>/dev/null || true
+    install_name_tool -add_rpath @executable_path/../Frameworks "$BUNDLE_NAME/Contents/MacOS/MicroCode" 2>/dev/null || true
+fi
 
 # 7. Code Sign Bundle
 echo "🔐 Signing Bundle..."
@@ -225,9 +240,16 @@ rm -rf "MicroCode.app"
 ln -sfn "$BUNDLE_NAME" "MicroCode.app"
 echo "🔗 Workspace symlink updated: MicroCode.app -> $BUNDLE_NAME"
 
-# Sync to system /Applications folder
+# Sync to system /Applications folder (symlink when building on External SSD to save 360MB on internal drive)
 if [ -w "/Applications" ]; then
     rm -rf "/Applications/MicroCode.app"
-    cp -R "$BUNDLE_NAME" "/Applications/MicroCode.app"
-    echo "📱 System Applications updated: /Applications/MicroCode.app"
+    ln -sfn "$BUNDLE_NAME" "/Applications/MicroCode.app"
+    echo "📱 System Applications updated: /Applications/MicroCode.app -> $BUNDLE_NAME"
+fi
+
+# Also sync to ~/Applications folder so Dock/Spotlight shortcuts pointing there never run a stale build
+if [ -d "$HOME/Applications" ]; then
+    rm -rf "$HOME/Applications/MicroCode.app"
+    ln -sfn "$BUNDLE_NAME" "$HOME/Applications/MicroCode.app"
+    echo "📱 User Applications updated: $HOME/Applications/MicroCode.app -> $BUNDLE_NAME"
 fi

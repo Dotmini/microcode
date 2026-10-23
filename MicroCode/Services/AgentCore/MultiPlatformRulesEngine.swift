@@ -16,36 +16,87 @@ import Foundation
 import Combine
 
 public enum RulePlatformSource: String, CaseIterable, Codable, Identifiable {
+    case agentsMd = "AGENTS.md (Open Standard)"
+    case claudeMd = "Claude Code (CLAUDE.md)"
     case cursorLegacy = "Cursor (.cursorrules)"
     case cursorMdc = "Cursor Modern (.cursor/rules/*.mdc)"
     case windsurf = "Windsurf (.windsurfrules)"
     case cline = "Cline (.clinerules)"
     case copilot = "Copilot (.copilot-instructions.md)"
     case zed = "Zed (.zed/settings.json)"
+    case txcode = "TX Code (.txcode-rules)"
     case microcode = "MicroCode (.microcode/agent.md)"
 
     public var id: String { rawValue }
 
     public var badge: String {
         switch self {
+        case .agentsMd: return "AGENTS.MD"
+        case .claudeMd: return "CLAUDE"
         case .cursorLegacy, .cursorMdc: return "CURSOR"
         case .windsurf: return "WINDSURF"
         case .cline: return "CLINE"
         case .copilot: return "COPILOT"
         case .zed: return "ZED"
+        case .txcode: return "TXCODE"
         case .microcode: return "MICROCODE"
         }
     }
 
     public var icon: String {
         switch self {
+        case .agentsMd: return "doc.badge.gearshape"
+        case .claudeMd: return "sparkles.rectangle.stack"
         case .cursorLegacy, .cursorMdc: return "cursorarrow.rays"
         case .windsurf: return "wind"
         case .cline: return "terminal"
         case .copilot: return "airplane"
         case .zed: return "bolt.fill"
+        case .txcode: return "checkmark.rectangle"
         case .microcode: return "sparkles"
         }
+    }
+}
+
+public enum AgentHookStage: String, Codable, CaseIterable {
+    case preTool = "pre_tool"
+    case postTool = "post_tool"
+    case preFinish = "pre_finish"
+
+    public var badge: String {
+        switch self {
+        case .preTool: return "PRE_TOOL"
+        case .postTool: return "POST_TOOL"
+        case .preFinish: return "PRE_FINISH"
+        }
+    }
+}
+
+public struct AgentLifecycleHook: Identifiable, Codable, Hashable {
+    public let id: String
+    public let stage: AgentHookStage
+    public let name: String
+    public let matcher: String       // Tool regex/name or file glob (e.g. "file_write|patch_file", "*.ts", "*")
+    public let command: String       // Shell command to run
+    public let blockOnFailure: Bool  // If true, non-zero exit blocks tool or requires agent fix before finishing
+    public let sourceFile: String
+
+    public init(
+        id: String = UUID().uuidString,
+        stage: AgentHookStage,
+        name: String,
+        matcher: String = "*",
+        command: String,
+        blockOnFailure: Bool = true,
+        sourceFile: String
+    ) {
+        self.id = id
+        self.stage = stage
+        self.name = name
+        self.matcher = matcher
+        self.command = command
+        self.blockOnFailure = blockOnFailure
+        self.sourceFile = sourceFile
     }
 }
 
@@ -87,6 +138,7 @@ public struct DiscoveredMCPServer: Identifiable, Codable, Hashable {
     public let command: String
     public let args: [String]
     public let env: [String: String]
+    public let url: String?
 
     public init(
         id: String = UUID().uuidString,
@@ -94,7 +146,8 @@ public struct DiscoveredMCPServer: Identifiable, Codable, Hashable {
         sourcePlatform: String,
         command: String,
         args: [String],
-        env: [String: String] = [:]
+        env: [String: String] = [:],
+        url: String? = nil
     ) {
         self.id = id
         self.name = name
@@ -102,6 +155,7 @@ public struct DiscoveredMCPServer: Identifiable, Codable, Hashable {
         self.command = command
         self.args = args
         self.env = env
+        self.url = url
     }
 }
 
@@ -109,6 +163,7 @@ public final class MultiPlatformRulesEngine: ObservableObject {
     public static let shared = MultiPlatformRulesEngine()
 
     @Published public private(set) var discoveredRules: [PlatformRule] = []
+    @Published public private(set) var discoveredHooks: [AgentLifecycleHook] = []
     @Published public private(set) var discoveredMCPServers: [DiscoveredMCPServer] = []
     @Published public private(set) var ignoredPatterns: [String] = []
     @Published public private(set) var lastScanDate: Date? = nil
@@ -125,6 +180,7 @@ public final class MultiPlatformRulesEngine: ObservableObject {
         guard let root = workspaceRoot, !root.isEmpty else {
             DispatchQueue.main.async {
                 self.discoveredRules = []
+                self.discoveredHooks = []
                 self.discoveredMCPServers = []
                 self.ignoredPatterns = []
                 self.currentWorkspace = nil
@@ -135,9 +191,59 @@ public final class MultiPlatformRulesEngine: ObservableObject {
         scanQueue.async { [weak self] in
             guard let self = self else { return }
             var rules: [PlatformRule] = []
+            var hooks: [AgentLifecycleHook] = []
             var ignores: [String] = []
 
             let rootURL = URL(fileURLWithPath: root)
+
+            // 0A. Scan Open Standard AGENTS.md (root + nested directories up to depth 3)
+            self.scanAgentsMdFiles(rootURL: rootURL, into: &rules)
+
+            // 0B. Scan Claude Code CLAUDE.md and .claude/CLAUDE.md (with @path import expansion)
+            for claudeRel in ["CLAUDE.md", ".claude/CLAUDE.md"] {
+                let claudeURL = rootURL.appendingPathComponent(claudeRel)
+                if let rawContent = try? String(contentsOf: claudeURL, encoding: .utf8),
+                   !rawContent.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                    let expanded = self.expandAtFileImports(in: rawContent, baseURL: claudeURL.deletingLastPathComponent(), rootURL: rootURL)
+                    rules.append(PlatformRule(
+                        source: .claudeMd,
+                        fileName: URL(fileURLWithPath: claudeRel).lastPathComponent,
+                        relativePath: claudeRel,
+                        summaryDescription: "Claude Code Project Memory & Guidelines",
+                        globs: ["*"],
+                        alwaysApply: true,
+                        content: expanded
+                    ))
+                }
+            }
+
+            // 0C. Scan TX Code .txcode-rules and .txcode/rules/*.{md,mdc}
+            for txRel in [".txcode-rules", ".txcoderules"] {
+                let txURL = rootURL.appendingPathComponent(txRel)
+                if let content = try? String(contentsOf: txURL, encoding: .utf8),
+                   !content.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                    rules.append(PlatformRule(
+                        source: .txcode,
+                        fileName: txRel,
+                        relativePath: txRel,
+                        summaryDescription: "TX Code Project Rules",
+                        globs: ["*"],
+                        alwaysApply: true,
+                        content: content
+                    ))
+                }
+            }
+            let txRulesDir = rootURL.appendingPathComponent(".txcode/rules")
+            if let enumerator = self.fileManager.enumerator(at: txRulesDir, includingPropertiesForKeys: [.isRegularFileKey], options: [.skipsHiddenFiles]) {
+                for case let fileURL as URL in enumerator {
+                    let ext = fileURL.pathExtension.lowercased()
+                    if ext == "mdc" || ext == "md" {
+                        if let parsed = self.parseMdcRule(fileURL: fileURL, rootURL: rootURL, sourceOverride: .txcode) {
+                            rules.append(parsed)
+                        }
+                    }
+                }
+            }
 
             // 1. Scan Cursor Legacy .cursorrules
             let cursorRulesURL = rootURL.appendingPathComponent(".cursorrules")
@@ -239,7 +345,7 @@ public final class MultiPlatformRulesEngine: ObservableObject {
                 }
             }
 
-            // 8. Scan MicroCode .microcode/agent.md
+            // 8. Scan MicroCode .microcode/agent.md and .microcode/rules/*.{md,mdc}
             let microcodeURL = rootURL.appendingPathComponent(".microcode/agent.md")
             if let content = try? String(contentsOf: microcodeURL, encoding: .utf8), !content.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
                 rules.append(PlatformRule(
@@ -252,6 +358,20 @@ public final class MultiPlatformRulesEngine: ObservableObject {
                     content: content
                 ))
             }
+            let mcRulesDir = rootURL.appendingPathComponent(".microcode/rules")
+            if let enumerator = self.fileManager.enumerator(at: mcRulesDir, includingPropertiesForKeys: [.isRegularFileKey], options: [.skipsHiddenFiles]) {
+                for case let fileURL as URL in enumerator {
+                    let ext = fileURL.pathExtension.lowercased()
+                    if ext == "mdc" || ext == "md" {
+                        if let parsed = self.parseMdcRule(fileURL: fileURL, rootURL: rootURL, sourceOverride: .microcode) {
+                            rules.append(parsed)
+                        }
+                    }
+                }
+            }
+
+            // 8B. Scan Lifecycle Hooks (pre_tool, post_tool, pre_finish)
+            self.scanLifecycleHooks(rootURL: rootURL, into: &hooks)
 
             // 9. Scan Universal MCP servers across MicroCode, Antigravity, Claude, Cursor, Windsurf, VS Code, and Codex
             var mcpServers: [DiscoveredMCPServer] = []
@@ -265,6 +385,7 @@ public final class MultiPlatformRulesEngine: ObservableObject {
                 (homeURL.appendingPathComponent(".cursor/mcp.json"), "Cursor User (~/.cursor/mcp.json)"),
                 (homeURL.appendingPathComponent(".codeium/windsurf/mcp_config.json"), "Windsurf (~/.codeium/windsurf/mcp_config.json)"),
                 (homeURL.appendingPathComponent(".codex/mcp.json"), "Codex (~/.codex/mcp.json)"),
+                (homeURL.appendingPathComponent(".gemini/antigravity/mcp_config.json"), "Antigravity (~/.gemini/antigravity/mcp_config.json)"),
                 (homeURL.appendingPathComponent(".gemini/settings.json"), "Antigravity (~/.gemini/settings.json)"),
                 (homeURL.appendingPathComponent("Library/Application Support/Claude/claude_desktop_config.json"), "Claude Desktop")
             ]
@@ -274,17 +395,23 @@ public final class MultiPlatformRulesEngine: ObservableObject {
                     let serversDict = (json["mcpServers"] as? [String: [String: Any]]) ?? (json["servers"] as? [String: [String: Any]])
                     if let servers = serversDict {
                         for (serverName, spec) in servers {
+                            if serverName == "microcode" { continue } // Already handled natively by MCPClient.shared (mcp__local__*)
                             if let disabled = spec["disabled"] as? Bool, disabled { continue }
+                            if let enabled = spec["enabled"] as? Bool, !enabled { continue }
                             let cmd = spec["command"] as? String ?? ""
                             let args = spec["args"] as? [String] ?? []
                             let env = spec["env"] as? [String: String] ?? [:]
-                            if !cmd.isEmpty && !mcpServers.contains(where: { $0.name == serverName }) {
+                            let remoteUrl = (spec["url"] as? String) ?? (spec["serverUrl"] as? String)
+                            // Skip servers with unconfigured placeholder credentials (e.g. YOUR_SLACK_BOT_TOKEN)
+                            if env.values.contains(where: { $0.hasPrefix("YOUR_") }) { continue }
+                            if (!cmd.isEmpty || (remoteUrl != nil && !(remoteUrl?.isEmpty ?? true))) && !mcpServers.contains(where: { $0.name == serverName }) {
                                 mcpServers.append(DiscoveredMCPServer(
                                     name: serverName,
                                     sourcePlatform: label,
-                                    command: cmd,
+                                    command: cmd.isEmpty ? (remoteUrl ?? "") : cmd,
                                     args: args,
-                                    env: env
+                                    env: env,
+                                    url: remoteUrl
                                 ))
                             }
                         }
@@ -293,10 +420,12 @@ public final class MultiPlatformRulesEngine: ObservableObject {
             }
 
             let finalRules = rules
+            let finalHooks = hooks
             let finalMCPServers = mcpServers
             let finalIgnores = ignores
             DispatchQueue.main.async {
                 self.discoveredRules = finalRules
+                self.discoveredHooks = finalHooks
                 self.discoveredMCPServers = finalMCPServers
                 self.ignoredPatterns = finalIgnores
                 self.lastScanDate = Date()
@@ -306,9 +435,254 @@ public final class MultiPlatformRulesEngine: ObservableObject {
         }
     }
 
-    // MARK: - MDC Parsing (.cursor/rules/*.mdc)
+    // MARK: - AGENTS.md (Root + Nested Subdirectory Discovery) & CLAUDE.md @import Expansion
 
-    private func parseMdcRule(fileURL: URL, rootURL: URL) -> PlatformRule? {
+    private func scanAgentsMdFiles(rootURL: URL, into rules: inout [PlatformRule]) {
+        // 1. Root AGENTS.md
+        let rootAgentsURL = rootURL.appendingPathComponent("AGENTS.md")
+        if let content = try? String(contentsOf: rootAgentsURL, encoding: .utf8),
+           !content.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            let expanded = expandAtFileImports(in: content, baseURL: rootURL, rootURL: rootURL)
+            rules.append(PlatformRule(
+                source: .agentsMd,
+                fileName: "AGENTS.md",
+                relativePath: "AGENTS.md",
+                summaryDescription: "Workspace Root AGENTS.md Instructions",
+                globs: ["*"],
+                alwaysApply: true,
+                content: expanded
+            ))
+        }
+
+        // 2. Nested AGENTS.md in immediate subdirectories (up to depth 2) with automatic directory glob scoping
+        let skipDirs: Set<String> = [".git", "node_modules", ".build", "target", "dist", "build", ".codetuner-build", "Pods", ".next", "venv", ".venv"]
+        guard let topChildren = try? fileManager.contentsOfDirectory(at: rootURL, includingPropertiesForKeys: [.isDirectoryKey], options: [.skipsHiddenFiles]) else {
+            return
+        }
+        for childURL in topChildren {
+            guard (try? childURL.resourceValues(forKeys: [.isDirectoryKey]).isDirectory) == true else { continue }
+            let dirName = childURL.lastPathComponent
+            if skipDirs.contains(dirName) { continue }
+
+            let nestedAgents = childURL.appendingPathComponent("AGENTS.md")
+            if let content = try? String(contentsOf: nestedAgents, encoding: .utf8),
+               !content.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                let relPath = "\(dirName)/AGENTS.md"
+                rules.append(PlatformRule(
+                    source: .agentsMd,
+                    fileName: relPath,
+                    relativePath: relPath,
+                    summaryDescription: "Scoped AGENTS.md for \(dirName)/",
+                    globs: ["\(dirName)/*", "\(dirName)/**/*"],
+                    alwaysApply: false,
+                    content: content
+                ))
+            }
+        }
+    }
+
+    private func expandAtFileImports(in text: String, baseURL: URL, rootURL: URL) -> String {
+        let lines = text.components(separatedBy: .newlines)
+        var outLines: [String] = []
+        for line in lines {
+            let trimmed = line.trimmingCharacters(in: .whitespaces)
+            // Support `@path/to/file.md` standalone import syntax (used by CLAUDE.md and AGENTS.md)
+            if trimmed.hasPrefix("@"),
+               !trimmed.contains(" "),
+               trimmed.count > 2,
+               (trimmed.hasSuffix(".md") || trimmed.hasSuffix(".mdc") || trimmed.hasSuffix(".txt")) {
+                let importRel = String(trimmed.dropFirst())
+                let candidateURL = importRel.hasPrefix("/")
+                    ? URL(fileURLWithPath: importRel)
+                    : baseURL.appendingPathComponent(importRel).standardizedFileURL
+                if candidateURL.path.hasPrefix(rootURL.path),
+                   let imported = try? String(contentsOf: candidateURL, encoding: .utf8),
+                   !imported.isEmpty {
+                    outLines.append("<!-- Imported from \(importRel) -->")
+                    outLines.append(imported)
+                    continue
+                }
+            }
+            outLines.append(line)
+        }
+        return outLines.joined(separator: "\n")
+    }
+
+    // MARK: - Lifecycle Hooks Discovery & Execution (pre_tool, post_tool, pre_finish)
+
+    private func scanLifecycleHooks(rootURL: URL, into hooks: inout [AgentLifecycleHook]) {
+        let hookCandidates: [(URL, String)] = [
+            (rootURL.appendingPathComponent(".microcode/hooks.json"), ".microcode/hooks.json"),
+            (rootURL.appendingPathComponent(".txcode/hooks.json"), ".txcode/hooks.json"),
+            (rootURL.appendingPathComponent(".cursor/hooks.json"), ".cursor/hooks.json"),
+            (rootURL.appendingPathComponent(".claude/settings.json"), ".claude/settings.json"),
+            (rootURL.appendingPathComponent(".claude/settings.local.json"), ".claude/settings.local.json")
+        ]
+
+        for (fileURL, sourceLabel) in hookCandidates {
+            guard let data = try? Data(contentsOf: fileURL),
+                  let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else { continue }
+
+            let hooksRoot = (json["hooks"] as? [String: Any]) ?? json
+
+            let stageMappings: [(keys: [String], stage: AgentHookStage)] = [
+                (["pre_tool", "preTool", "PreToolUse"], .preTool),
+                (["post_tool", "postTool", "PostToolUse"], .postTool),
+                (["pre_finish", "preFinish", "Stop"], .preFinish)
+            ]
+
+            for mapping in stageMappings {
+                for key in mapping.keys {
+                    if let entries = hooksRoot[key] as? [[String: Any]] {
+                        for entry in entries {
+                            let matcher = (entry["matcher"] as? String) ?? (entry["glob"] as? String) ?? (entry["tool"] as? String) ?? "*"
+                            let blockOnFailure = (entry["blockOnFailure"] as? Bool) ?? (entry["block_on_failure"] as? Bool) ?? true
+                            if let cmd = entry["command"] as? String, !cmd.isEmpty {
+                                let name = (entry["name"] as? String) ?? "\(mapping.stage.rawValue): \(cmd.prefix(36))"
+                                hooks.append(AgentLifecycleHook(
+                                    stage: mapping.stage,
+                                    name: name,
+                                    matcher: matcher,
+                                    command: cmd,
+                                    blockOnFailure: blockOnFailure,
+                                    sourceFile: sourceLabel
+                                ))
+                            } else if let innerHooks = entry["hooks"] as? [[String: Any]] {
+                                // Claude Code nested hooks array format
+                                for inner in innerHooks {
+                                    if let cmd = inner["command"] as? String, !cmd.isEmpty {
+                                        let name = (inner["name"] as? String) ?? "\(mapping.stage.rawValue) (\(matcher))"
+                                        hooks.append(AgentLifecycleHook(
+                                            stage: mapping.stage,
+                                            name: name,
+                                            matcher: matcher,
+                                            command: cmd,
+                                            blockOnFailure: blockOnFailure,
+                                            sourceFile: sourceLabel
+                                        ))
+                                    }
+                                }
+                            }
+                        }
+                    } else if let singleCmd = hooksRoot[key] as? String, !singleCmd.isEmpty {
+                        hooks.append(AgentLifecycleHook(
+                            stage: mapping.stage,
+                            name: "\(mapping.stage.rawValue) hook",
+                            matcher: "*",
+                            command: singleCmd,
+                            blockOnFailure: true,
+                            sourceFile: sourceLabel
+                        ))
+                    }
+                }
+            }
+        }
+    }
+
+    /// Executes matching lifecycle hooks for `pre_tool`, `post_tool`, or `pre_finish`.
+    public func executeHooks(
+        stage: AgentHookStage,
+        toolName: String? = nil,
+        filePath: String? = nil,
+        workspaceRoot: String
+    ) async -> (allowed: Bool, feedback: String) {
+        let stageHooks = discoveredHooks.filter { $0.stage == stage }
+        guard !stageHooks.isEmpty, !workspaceRoot.isEmpty else {
+            return (true, "")
+        }
+
+        let matchingHooks = stageHooks.filter { hook in
+            let m = hook.matcher.trimmingCharacters(in: .whitespacesAndNewlines)
+            if m.isEmpty || m == "*" || m == "**/*" { return true }
+            if let tool = toolName {
+                let parts = m.components(separatedBy: "|").map { $0.trimmingCharacters(in: .whitespaces) }
+                if parts.contains(where: { $0.caseInsensitiveCompare(tool) == .orderedSame }) {
+                    return true
+                }
+            }
+            if let file = filePath {
+                let relFile = file.replacingOccurrences(of: workspaceRoot + "/", with: "")
+                if matchGlob(pattern: m, string: relFile) {
+                    return true
+                }
+            }
+            return false
+        }
+
+        guard !matchingHooks.isEmpty else { return (true, "") }
+
+        var feedbackParts: [String] = []
+        for hook in matchingHooks {
+            let result = await runHookShellCommand(
+                hook.command,
+                stage: stage,
+                toolName: toolName,
+                filePath: filePath,
+                workspaceRoot: workspaceRoot
+            )
+            if result.exitCode != 0 {
+                let snippet = String(result.output.suffix(1200)).trimmingCharacters(in: .whitespacesAndNewlines)
+                let msg = "⚠️ [Hook \(stage.badge) Failed — \(hook.name) (`\(hook.command)` exited with \(result.exitCode))]:\n\(snippet.isEmpty ? "(no output)" : snippet)"
+                feedbackParts.append(msg)
+                if hook.blockOnFailure {
+                    return (false, feedbackParts.joined(separator: "\n\n"))
+                }
+            } else if !result.output.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty && stage != .preTool {
+                let snippet = String(result.output.suffix(600)).trimmingCharacters(in: .whitespacesAndNewlines)
+                feedbackParts.append("ℹ️ [Hook \(stage.badge) — \(hook.name)]: \(snippet)")
+            }
+        }
+
+        return (true, feedbackParts.joined(separator: "\n\n"))
+    }
+
+    private func runHookShellCommand(
+        _ command: String,
+        stage: AgentHookStage,
+        toolName: String?,
+        filePath: String?,
+        workspaceRoot: String
+    ) async -> (exitCode: Int32, output: String) {
+        await Task.detached(priority: .userInitiated) {
+            let proc = Process()
+            proc.executableURL = URL(fileURLWithPath: "/bin/zsh")
+            proc.arguments = ["-c", command]
+            proc.currentDirectoryURL = URL(fileURLWithPath: workspaceRoot)
+            var env = ProcessInfo.processInfo.environment
+            env["MICROCODE_HOOK_STAGE"] = stage.rawValue
+            env["MICROCODE_WORKSPACE"] = workspaceRoot
+            if let toolName { env["MICROCODE_TOOL"] = toolName }
+            if let filePath {
+                env["MICROCODE_FILE"] = filePath
+                env["FILE"] = filePath
+            }
+            proc.environment = env
+
+            let pipe = Pipe()
+            proc.standardOutput = pipe
+            proc.standardError = pipe
+            do {
+                try proc.run()
+                let deadline = Date().addingTimeInterval(15.0)
+                while proc.isRunning && Date() < deadline {
+                    try? await Task.sleep(nanoseconds: 50_000_000)
+                }
+                if proc.isRunning {
+                    proc.terminate()
+                    return (-1, "Hook timed out after 15s")
+                }
+                let data = pipe.fileHandleForReading.readDataToEndOfFile()
+                let output = String(data: data, encoding: .utf8) ?? ""
+                return (proc.terminationStatus, output)
+            } catch {
+                return (-1, error.localizedDescription)
+            }
+        }.value
+    }
+
+    // MARK: - MDC Parsing (.cursor/rules/*.mdc & .txcode/rules/*.md)
+
+    private func parseMdcRule(fileURL: URL, rootURL: URL, sourceOverride: RulePlatformSource? = nil) -> PlatformRule? {
         guard let text = try? String(contentsOf: fileURL, encoding: .utf8), !text.isEmpty else { return nil }
 
         var description = ""
@@ -350,7 +724,7 @@ public final class MultiPlatformRulesEngine: ObservableObject {
             .capitalized
 
         return PlatformRule(
-            source: .cursorMdc,
+            source: sourceOverride ?? .cursorMdc,
             fileName: fileURL.lastPathComponent,
             relativePath: relativePath,
             summaryDescription: description.isEmpty ? fallbackDesc : description,

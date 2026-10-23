@@ -14,26 +14,11 @@ class GridRenderer: NSObject, MetalRenderer {
         if self.pipelineState != nil { return } // Already setup
         
         self.device = device
-        self.commandQueue = device.makeCommandQueue()
+        self.commandQueue = SharedUMAMetalContext.commandQueue ?? device.makeCommandQueue()
         
-        // Robust library loading
-        let library: MTLLibrary?
-        if let defaultLib = device.makeDefaultLibrary() {
-            library = defaultLib
-        } else {
-            // Fallback for cases where default library isn't automatically found (e.g. SPM)
-            let bundle = Bundle(for: Self.self)
-            if let path = bundle.path(forResource: "default", ofType: "metallib") {
-                library = try? device.makeLibrary(filepath: path)
-            } else {
-                library = nil
-            }
-        }
-        
-        guard let lib = library,
+        guard let lib = SharedUMAMetalContext.library ?? device.makeDefaultLibrary(),
               let vertexFunction = lib.makeFunction(name: "vertex_main"),
               let fragmentFunction = lib.makeFunction(name: "grid_fragment") else {
-            print("❌ Metal error: Could not load grid shaders")
             return
         }
         

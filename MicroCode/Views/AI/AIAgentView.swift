@@ -17,6 +17,8 @@ import AppKit
 import WebKit
 import UniformTypeIdentifiers
 import PDFKit
+import AVKit
+import AVFoundation
 
 // MARK: - AI Agent View (Professional)
 
@@ -73,8 +75,27 @@ struct AIAgentView: View {
     @State private var contextSearchPrefix = ""
     @State private var showRawMarkdownPlan = false
     @State private var isPlanFullscreen = false
+    @AppStorage("studioAspectRatio") private var studioAspectRatio: String = "16:9"
+    @AppStorage("studioResolution") private var studioResolution: String = "1080p"
+    @AppStorage("studioDuration") private var studioDuration: String = "5s"
+    @State private var isCompareMode = false
+    @AppStorage("compareSecondaryModel") private var compareSecondaryModel: String = "DeepSeek-V4.1-Flash"
+    @ObservedObject private var scopeGuard = WorkspaceScopeGuard.shared
+    @ObservedObject private var secretShield = SecretShieldMonitor.shared
+    @ObservedObject private var subAgentHarness = SubAgentHarness.shared
+    @State private var showingContextXRayPopover = false
+    @State private var newPinnedConstraintText = ""
+    @State private var lastPrunedTokensCount: Int? = nil
+    @State private var secretActionToast: String? = nil
     
     private var selectedSubAgentDisplayName: String {
+        if selectedSubAgentType.hasPrefix("squad:") {
+            let pid = String(selectedSubAgentType.dropFirst("squad:".count))
+            if let preset = subAgentHarness.squadPresets.first(where: { $0.id == pid }) {
+                return "👑 \(preset.name)"
+            }
+            return "👑 CEO Squad"
+        }
         switch selectedSubAgentType {
         case "main": return "Main Agent"
         case "architect": return "Architect"
@@ -123,6 +144,10 @@ struct AIAgentView: View {
     private var activeExternalAgentConfig: ACPAgentConfig? {
         if let id = acpHost.activeAgentId {
             return acpHost.registeredConfigs.first(where: { $0.id == id })
+        }
+        let rawMode = UserDefaults.standard.string(forKey: "aiKeyMode") ?? ""
+        if rawMode == "subscription" || rawMode == "direct" || rawMode == "cloud" || rawMode == "local" {
+            return nil
         }
         if appState.aiProvider == "agy" {
             return acpHost.registeredConfigs.first(where: { $0.type == .agy })
@@ -303,115 +328,160 @@ struct AIAgentView: View {
     }
     
     var body: some View {
-        HStack(spacing: 0) {
-            // Chat Sidebar (Collapsible)
-            if allowsChatSidebar && agent.showChatSidebar {
-                chatSidebar
-                    .frame(width: 220)
-                Divider()
-            }
+        GeometryReader { rootGeo in
+            let hasEmbeddedDock = sessionScope == .editor && (deviceRuntime.showingEmbeddedDeviceDock || previewDock.isDockVisible) && !appState.agenticContextVisible
+            let hasRightInspector = appState.agenticContextVisible
+            let isPlanActive = isPlanMode || planManager.isPlanVisible
+            let sidebarW: CGFloat = (allowsChatSidebar && agent.showChatSidebar) ? 220 : 0
+            let dockW: CGFloat = hasEmbeddedDock ? 420 : (hasRightInspector ? 320 : 0)
+            let mainColumnAvailWidth = rootGeo.size.width - sidebarW - dockW
+            // Auto-promote Plan to full main column when available width cannot comfortably fit Chat (min 420) + Plan (min 400) side-by-side
+            let shouldShowPlanFullColumn = isPlanActive && (
+                isPlanFullscreen ||
+                mainColumnAvailWidth < 820
+            )
             
-            // Main Content
-            VStack(spacing: 0) {
-                // 1. Toolbar / Header (Solid, Industrial)
-                headerBar
+            HStack(spacing: 0) {
+                // Chat Sidebar (Collapsible)
+                if allowsChatSidebar && agent.showChatSidebar {
+                    chatSidebar
+                        .frame(width: 220)
+                        .clipped()
+                    Divider()
+                }
                 
-                Divider().background(borderColor)
-                
-                // 2. Main Content Area
-                if isTaskMode {
-                    // Task.md / Agent.md Editor
-                    taskEditorView
-                } else if isWalkthroughMode {
-                    // Antigravity-style Interactive Walkthrough
-                    walkthroughView
-                } else if isPaperMode {
-                    // A4 Paper Reading Mode
-                    A4PaperView(
-                        messages: agent.messages,
-                        currentPage: $currentPaperPage
-                    )
-                } else if isCellMode {
-                    // Cell Mode (Notebook-style AI Agent)
-                    AgentCellModeView()
-                        .environmentObject(appState)
-                        .transition(.opacity)
-                } else if isPlanFullscreen && (isPlanMode || planManager.isPlanVisible) {
-                    // Fullscreen Implementation Plan
-                    planView
-                } else {
-                    // Chat & Plan Side-by-Side Split View
-                    HStack(spacing: 0) {
-                        // Left Pane: Chat Workspace (Fluid)
+                // Main Content
+                VStack(spacing: 0) {
+                    // 1. Toolbar / Header (Solid, Industrial)
+                    headerBar
+                        .clipped()
+                    
+                    Divider().background(borderColor)
+                    
+                    // 2. Main Content Area
+                    if isTaskMode {
+                        // Task.md / Agent.md Editor
+                        taskEditorView
+                            .frame(maxWidth: .infinity, maxHeight: .infinity)
+                            .clipped()
+                    } else if isWalkthroughMode {
+                        // Antigravity-style Interactive Walkthrough
+                        walkthroughView
+                            .frame(maxWidth: .infinity, maxHeight: .infinity)
+                            .clipped()
+                    } else if isPaperMode {
+                        // A4 Paper Reading Mode
+                        A4PaperView(
+                            messages: agent.messages,
+                            currentPage: $currentPaperPage
+                        )
+                        .frame(maxWidth: .infinity, maxHeight: .infinity)
+                        .clipped()
+                    } else if isCellMode {
+                        // Cell Mode (Notebook-style AI Agent)
+                        AgentCellModeView()
+                            .environmentObject(appState)
+                            .frame(maxWidth: .infinity, maxHeight: .infinity)
+                            .clipped()
+                            .transition(.opacity)
+                    } else if shouldShowPlanFullColumn {
+                        // Full-Column Implementation Plan (Automatically used when Preview Dock is open in compact window)
                         VStack(spacing: 0) {
-                            if agent.messages.isEmpty && !agent.isLoading && planManager.currentPlan == nil && !isPlanMode && !planManager.isPlanVisible {
-                                // Centered Empty State (Matching media_1787685889495.png)
-                                centeredEmptyStateView
-                            } else {
-                                // Active Chat Mode (Messages on top, Input docked cleanly at bottom)
+                            planView
+                                .frame(maxWidth: .infinity, maxHeight: .infinity)
+                                .clipped()
+
+                            if agent.isLoading {
+                                liveTaskActivityBanner
+                            }
+
+                            inputArea
+                        }
+                        .frame(maxWidth: .infinity, maxHeight: .infinity)
+                        .clipped()
+                    } else {
+                        // Chat & Plan Side-by-Side Split View
+                        HStack(spacing: 0) {
+                            // Left Pane: Chat Workspace (Fluid, strictly bounded to column width via GeometryReader)
+                            GeometryReader { chatColGeo in
                                 VStack(spacing: 0) {
-                                    // Chat Scroll
-                                    AgentChatStage(
-                                        messages: agent.messages,
-                                        isLoading: agent.isLoading,
-                                        domain: agent.domain,
-                                        currentToolExecution: agent.currentToolExecution,
-                                        onApplyChange: { change in applyChange(change) },
-                                        onRejectChange: { change in rejectChange(change) },
-                                        onSuggestionTap: { suggestion in inputText = suggestion; sendMessage() },
-                                        onViewPlan: {
-                                            withAnimation(.easeInOut(duration: 0.2)) {
-                                                planManager.isPlanVisible.toggle()
-                                                if planManager.isPlanVisible && planManager.currentPlan == nil, let ws = appState.workspaceFolder?.path {
-                                                    planManager.loadFromTaskMarkdown(workspacePath: ws)
-                                                }
+                                    if agent.messages.isEmpty && !agent.isLoading && agent.messageQueue.isEmpty && planManager.currentPlan == nil && !isPlanMode && !planManager.isPlanVisible {
+                                        centeredEmptyStateView
+                                    } else {
+                                        VStack(spacing: 0) {
+                                            AgentChatStage(
+                                                messages: agent.messages,
+                                                isLoading: agent.isLoading,
+                                                domain: agent.domain,
+                                                currentToolExecution: agent.currentToolExecution,
+                                                onApplyChange: { change in applyChange(change) },
+                                                onRejectChange: { change in rejectChange(change) },
+                                                onSuggestionTap: { suggestion in inputText = suggestion; sendMessage() },
+                                                onViewPlan: {
+                                                    withAnimation(.easeInOut(duration: 0.2)) {
+                                                        planManager.isPlanVisible.toggle()
+                                                        if planManager.isPlanVisible && planManager.currentPlan == nil, let ws = appState.workspaceFolder?.path {
+                                                            planManager.loadFromTaskMarkdown(workspacePath: ws)
+                                                        }
+                                                    }
+                                                },
+                                                onRevertToMessage: { msgId in handleRevertToMessage(msgId) },
+                                                onEditAndResendMessage: { msgId, newText in handleEditAndResendMessage(id: msgId, newContent: newText) },
+                                                onRetryAssistantMessage: { msgId in handleRetryAssistantMessage(msgId) },
+                                                onDeleteMessage: { msgId, revertFiles in handleDeleteMessage(msgId, revertFiles: revertFiles) }
+                                            )
+                                            .environmentObject(appState)
+                                            
+                                            if let suggestion = agent.suggestedAction {
+                                                suggestedActionBar(suggestion)
                                             }
+                                            
+                                            if agent.contextLimitReached {
+                                                contextLimitBanner
+                                            }
+                                            
+                                            if agent.isLoading {
+                                                liveTaskActivityBanner
+                                            }
+                                            
+                                            inputArea
                                         }
-                                    )
-                                    .environmentObject(appState)
-                                    
-                                    // Suggested Action (after completion)
-                                    if let suggestion = agent.suggestedAction {
-                                        suggestedActionBar(suggestion)
                                     }
-                                    
-                                    // Context Limit Banner (warn user and prompt for new conversation)
-                                    if agent.contextLimitReached {
-                                        contextLimitBanner
-                                    }
-                                    
-                                    // Live Task Activity Banner (shown strictly while agent is actively running)
-                                    if agent.isLoading {
-                                        liveTaskActivityBanner
-                                    }
-                                    
-                                    // Input Container (Docked at bottom)
-                                    inputArea
                                 }
+                                .frame(width: chatColGeo.size.width, height: chatColGeo.size.height)
+                            }
+                            .frame(minWidth: 320, maxWidth: .infinity, maxHeight: .infinity)
+                            .clipped()
+                            
+                            // Right Pane: Implementation Plan Side Panel (Side-by-Side Split View)
+                            if isPlanActive {
+                                Divider().background(borderColor)
+                                planSidePanelView
+                                    .frame(minWidth: 340, idealWidth: 420, maxWidth: 520, maxHeight: .infinity)
+                                    .clipped()
+                                    .transition(.move(edge: .trailing).combined(with: .opacity))
                             }
                         }
-                        .frame(minWidth: 380)
-                        
-                        // Right Pane: Implementation Plan Side Panel (Side-by-Side Split View)
-                        if isPlanMode || planManager.isPlanVisible {
-                            Divider().background(borderColor)
-                            planSidePanelView
-                                .frame(minWidth: 380, idealWidth: 480, maxWidth: 640)
-                                .transition(.move(edge: .trailing).combined(with: .opacity))
-                        }
+                        .frame(maxWidth: .infinity, maxHeight: .infinity)
+                        .clipped()
                     }
                 }
-            }
+                .frame(minWidth: 280, maxWidth: .infinity, maxHeight: .infinity)
+                .clipped()
 
-            // Preview is a workspace surface, not a success toast from the
-            // capture transport.  Keep it visible while an AVD is connecting
-            // (and if a transport needs to retry) so one click always gives
-            // the user immediate feedback beside Chat.
-            if sessionScope == .editor && (deviceRuntime.showingEmbeddedDeviceDock || previewDock.isDockVisible) && !appState.agenticContextVisible {
-                Divider()
-                embeddedDeviceDock
-                    .frame(minWidth: 380, idealWidth: 460, maxWidth: 560)
+                // Preview is a workspace surface, not a success toast from the
+                // capture transport.  Keep it visible while an AVD is connecting
+                // (and if a transport needs to retry) so one click always gives
+                // the user immediate feedback beside Chat.
+                if hasEmbeddedDock {
+                    Divider()
+                    embeddedDeviceDock
+                        .frame(minWidth: 300, idealWidth: 400, maxWidth: 500, maxHeight: .infinity)
+                        .clipped()
+                }
             }
+            .frame(width: rootGeo.size.width, height: rootGeo.size.height)
+            .clipped()
         }
         .background(appState.appTheme.isGlass ? Color.clear : Color(nsColor: appState.appTheme.workspaceBackground))
         .onAppear {
@@ -472,6 +542,9 @@ struct AIAgentView: View {
             AgentEcosystemConfigView(initialTab: agentEcosystemTab)
                 .environmentObject(appState)
         }
+        .sheet(isPresented: $subAgentHarness.showSquadBuilderSheet) {
+            AgentSquadBuilderSheet()
+        }
         .onReceive(NotificationCenter.default.publisher(for: NSNotification.Name("MicroCode.OpenAgentConnections"))) { _ in
             showingAgentConnections = true
         }
@@ -509,6 +582,28 @@ struct AIAgentView: View {
                 isInputFocused = true
             }
         }
+        .onReceive(NotificationCenter.default.publisher(for: NSNotification.Name("MicroCodeInsertAgentPrompt"))) { notification in
+            if let prompt = notification.userInfo?["prompt"] as? String {
+                let autoSend = (notification.userInfo?["autoSend"] as? Bool) ?? false
+                if autoSend {
+                    if agent.isLoading || agent.isProcessingQueue {
+                        agent.enqueueMessage(prompt, attachments: [])
+                    } else {
+                        executeMessage(prompt, attachments: [])
+                    }
+                } else {
+                    inputText = inputText.isEmpty ? prompt : "\(inputText)\n\(prompt)"
+                    isInputFocused = true
+                }
+            }
+        }
+        .onAppear {
+            if sessionScope == .editor {
+                scopeGuard.syncWorkspace(agent.currentWorkspace ?? scopedWorkspacePath)
+                agent.loadPinnedConstraints(for: agent.currentWorkspace ?? scopedWorkspacePath)
+                agent.refreshProjectBriefing()
+            }
+        }
     }
 
     // MARK: - Centered Empty State View
@@ -544,14 +639,21 @@ struct AIAgentView: View {
                         .environmentObject(appState)
                 }
                 .padding(.leading, 2)
+
+                // Feature #8: "Where Was I?" Instant Project Briefing Card
+                if sessionScope == .editor, let briefing = agent.projectBriefing {
+                    projectBriefingCardView(briefing)
+                }
                 
                 activeAgentStatusHUD
+
+                securityAndFailoverAlertsBar
                 
                 // Clean Floating Input Box
                 inputCardView
             }
             .frame(maxWidth: 880)
-            .padding(.horizontal, 20)
+            .padding(.horizontal, 28)
             
             Spacer()
         }
@@ -676,10 +778,10 @@ struct AIAgentView: View {
     private var headerBar: some View {
         VStack(spacing: 0) {
             GeometryReader { geo in
-                let isCompact = geo.size.width < 680
-                let isVeryCompact = geo.size.width < 460
+                let isCompact = geo.size.width < 760
+                let isVeryCompact = geo.size.width < 520
                 
-                HStack(spacing: 6) {
+                HStack(spacing: 5) {
                     // Sidebar Toggle
                     if allowsChatSidebar {
                         Button(action: { agent.showChatSidebar.toggle() }) {
@@ -882,6 +984,8 @@ struct AIAgentView: View {
                                 isTaskMode = false
                                 isWalkthroughMode = false
                                 isPlanFullscreen = false
+                                isPlanMode = false
+                                planManager.isPlanVisible = false
                             }
                         }
                         modePill("Plan", icon: "list.bullet.clipboard", isActive: isPlanMode || planManager.isPlanVisible, compact: isVeryCompact) {
@@ -1031,12 +1135,49 @@ struct AIAgentView: View {
                     if !isCompact {
                         CostStatusWidget()
                     }
+
+                    // Feature #5: Context X-Ray & Token Pruner HUD Button
+                    Button {
+                        showingContextXRayPopover.toggle()
+                    } label: {
+                        HStack(spacing: 3) {
+                            Image(systemName: "chart.pie.fill")
+                                .font(.system(size: 9.5))
+                                .foregroundColor(agent.pinnedConstraints.isEmpty ? .secondary : .accentColor)
+                            if !isVeryCompact {
+                                Text("X-Ray")
+                                    .font(.system(size: 10, weight: .medium))
+                            }
+                            if !agent.pinnedConstraints.isEmpty {
+                                Text("\(agent.pinnedConstraints.count)")
+                                    .font(.system(size: 8.5, weight: .bold, design: .monospaced))
+                                    .padding(.horizontal, 3.5)
+                                    .padding(.vertical, 1)
+                                    .background(Color.accentColor.opacity(0.18))
+                                    .foregroundColor(.accentColor)
+                                    .cornerRadius(3)
+                            }
+                        }
+                        .foregroundColor(.secondary)
+                        .padding(.horizontal, 6)
+                        .frame(height: 24)
+                        .background(showingContextXRayPopover ? Color.primary.opacity(0.09) : Color.clear)
+                        .cornerRadius(5)
+                    }
+                    .buttonStyle(.plain)
+                    .fixedSize()
+                    .help("Context X-Ray, Token Pruner & Pinned Hard Constraints")
+                    .popover(isPresented: $showingContextXRayPopover, arrowEdge: .bottom) {
+                        contextXRayPopoverView
+                    }
                     
                     Spacer(minLength: 4)
                     
-                    // Model Selector + Menu
+                    // Model Selector + Menu (hide duplicate modelSelector on narrow splits since it is in inputBottomToolbar)
                     HStack(spacing: 4) {
-                        modelSelector
+                        if !isVeryCompact {
+                            modelSelector
+                        }
 
                         if appState.agentMode {
                             if let external = activeExternalAgentConfig,
@@ -1118,12 +1259,20 @@ struct AIAgentView: View {
                                 acpHost.resetAllSessions()
                             } label: { Label("Clear Chat", systemImage: "trash") }
                         } label: {
-                            Text("More")
-                                .font(.system(size: 10))
-                                .foregroundColor(.secondary)
-                                .frame(height: 24)
+                            Group {
+                                if isCompact {
+                                    Image(systemName: "ellipsis.circle")
+                                        .font(.system(size: 11))
+                                } else {
+                                    Text("Actions")
+                                        .font(.system(size: 10))
+                                }
+                            }
+                            .foregroundColor(.secondary)
+                            .frame(height: 24)
                         }
                         .menuStyle(.borderlessButton)
+                        .fixedSize()
 
                         Button(action: {
                             agentEcosystemTab = .rules
@@ -1174,10 +1323,10 @@ struct AIAgentView: View {
                     }
                 }
                 .padding(.horizontal, 8)
-                .padding(.vertical, 5)
+                .padding(.vertical, 4)
             }
-            .frame(height: 36)
-            .background(paneColor)
+            .frame(height: 32)
+            .background(Color(nsColor: appState.appTheme.panelBackground))
         }
     }
 
@@ -1274,22 +1423,48 @@ struct AIAgentView: View {
     }
     
     private var planSidePanelHeader: some View {
-        HStack(spacing: 8) {
+        HStack(spacing: 6) {
+            Button(action: {
+                withAnimation(.easeInOut(duration: 0.18)) {
+                    isPlanMode = false
+                    planManager.isPlanVisible = false
+                    isPlanFullscreen = false
+                }
+            }) {
+                HStack(spacing: 3) {
+                    Image(systemName: "chevron.left")
+                        .font(.system(size: 9.5, weight: .bold))
+                    Text("Chat")
+                        .font(.system(size: 10.5, weight: .semibold))
+                        .lineLimit(1)
+                }
+                .foregroundColor(.accentColor)
+                .padding(.horizontal, 7)
+                .padding(.vertical, 3.5)
+                .background(Color.accentColor.opacity(0.12))
+                .cornerRadius(5)
+            }
+            .buttonStyle(.plain)
+            .fixedSize(horizontal: true, vertical: false)
+            .help("Return to AI Chat")
+
             HStack(spacing: 6) {
                 Image(systemName: "list.bullet.clipboard.fill")
-                    .font(.system(size: 13))
+                    .font(.system(size: 12))
                     .foregroundColor(.accentColor)
                 
                 Text("Implementation Plan")
-                    .font(.system(size: 12.5, weight: .bold))
+                    .font(.system(size: 12, weight: .bold))
                     .foregroundColor(.primary)
+                    .lineLimit(1)
+                    .layoutPriority(1)
                 
                 if let plan = planManager.currentPlan {
                     approvalBadge(for: plan.approvalState)
                 }
             }
             
-            Spacer()
+            Spacer(minLength: 4)
             
             if let plan = planManager.currentPlan {
                 Button(action: {
@@ -1302,7 +1477,9 @@ struct AIAgentView: View {
                             .font(.system(size: 9.5))
                         Text(showRawMarkdownPlan ? "Structured" : "Markdown")
                             .font(.system(size: 10, weight: .medium))
+                            .lineLimit(1)
                     }
+                    .fixedSize(horizontal: true, vertical: false)
                     .padding(.horizontal, 6)
                     .padding(.vertical, 3.5)
                     .background(Color.primary.opacity(0.06))
@@ -1380,20 +1557,22 @@ struct AIAgentView: View {
             .buttonStyle(.plain)
             .help("Close Plan Side Panel")
         }
-        .padding(.horizontal, 12)
+        .padding(.horizontal, 10)
         .padding(.vertical, 8)
         .background(panelBg)
     }
     
     private func approvalBadge(for state: PlanApprovalState) -> some View {
-        HStack(spacing: 5) {
+        HStack(spacing: 4) {
             Circle()
                 .fill(state == .approved ? Color.green.opacity(0.85) : (state == .rejected ? Color.red.opacity(0.85) : Color.orange.opacity(0.85)))
                 .frame(width: 5, height: 5)
             Text(state.displayName)
                 .font(.system(size: 9.5, weight: .medium))
                 .foregroundColor(.secondary)
+                .lineLimit(1)
         }
+        .fixedSize(horizontal: true, vertical: false)
         .padding(.horizontal, 6)
         .padding(.vertical, 2.5)
         .background(Color.primary.opacity(0.04))
@@ -1797,10 +1976,7 @@ struct AIAgentView: View {
     private func planRawMarkdownView(plan: ImplementationPlan) -> some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 10) {
-                Text(plan.rawMarkdown.isEmpty ? "# \(plan.title)\n\n\(plan.summary)" : plan.rawMarkdown)
-                    .font(.system(size: 11.5, design: .monospaced))
-                    .foregroundColor(.primary.opacity(0.9))
-                    .textSelection(.enabled)
+                RenderedMarkdownDocumentView(markdown: plan.rawMarkdown.isEmpty ? "# \(plan.title)\n\n\(plan.summary)" : plan.rawMarkdown)
                     .padding(16)
             }
             .frame(maxWidth: .infinity, alignment: .leading)
@@ -1828,54 +2004,71 @@ struct AIAgentView: View {
                     .frame(maxWidth: 420)
             }
             
-            HStack(spacing: 10) {
-                Button(action: {
-                    if let ws = appState.workspaceFolder?.path {
-                        let loaded = planManager.loadFromTaskMarkdown(workspacePath: ws)
-                        if !loaded {
-                            inputText = "/plan "
-                            isPlanMode = false
-                        }
-                    } else {
-                        inputText = "/plan "
-                        isPlanMode = false
-                    }
-                }) {
-                    HStack(spacing: 6) {
-                        Image(systemName: "doc.badge.plus")
-                        Text("Load from .microcode/task.md")
-                    }
-                    .font(.system(size: 11.5, weight: .medium))
-                    .padding(.horizontal, 14)
-                    .padding(.vertical, 7)
-                    .background(Color.primary.opacity(0.06))
-                    .cornerRadius(6)
+            ViewThatFits(in: .horizontal) {
+                HStack(spacing: 10) {
+                    planEmptyLoadButton
+                    planEmptyDraftButton
                 }
-                .buttonStyle(.plain)
-                
-                Button(action: {
-                    inputText = "/plan Create implementation plan for the current task"
-                    isPlanMode = false
-                }) {
-                    HStack(spacing: 6) {
-                        Image(systemName: "sparkles")
-                        Text("Draft Plan with AI (/plan)")
-                    }
-                    .font(.system(size: 11.5, weight: .bold))
-                    .foregroundColor(.white)
-                    .padding(.horizontal, 16)
-                    .padding(.vertical, 7)
-                    .background(Color.accentColor)
-                    .cornerRadius(6)
+                VStack(spacing: 8) {
+                    planEmptyLoadButton
+                    planEmptyDraftButton
                 }
-                .buttonStyle(.plain)
             }
             .padding(.top, 8)
             
             Spacer()
         }
         .frame(maxWidth: .infinity)
-        .padding(.horizontal, 24)
+        .padding(.horizontal, 20)
+    }
+    
+    private var planEmptyLoadButton: some View {
+        Button(action: {
+            if let ws = appState.workspaceFolder?.path {
+                let loaded = planManager.loadFromTaskMarkdown(workspacePath: ws)
+                if !loaded {
+                    inputText = "/plan "
+                    isPlanMode = false
+                }
+            } else {
+                inputText = "/plan "
+                isPlanMode = false
+            }
+        }) {
+            HStack(spacing: 6) {
+                Image(systemName: "doc.badge.plus")
+                Text("Load task.md")
+                    .lineLimit(1)
+            }
+            .font(.system(size: 11.5, weight: .medium))
+            .padding(.horizontal, 12)
+            .padding(.vertical, 7)
+            .background(Color.primary.opacity(0.06))
+            .cornerRadius(6)
+        }
+        .buttonStyle(.plain)
+        .fixedSize(horizontal: true, vertical: false)
+    }
+    
+    private var planEmptyDraftButton: some View {
+        Button(action: {
+            inputText = "/plan Create implementation plan for the current task"
+            isPlanMode = false
+        }) {
+            HStack(spacing: 6) {
+                Image(systemName: "sparkles")
+                Text("Draft Plan (/plan)")
+                    .lineLimit(1)
+            }
+            .font(.system(size: 11.5, weight: .bold))
+            .foregroundColor(.white)
+            .padding(.horizontal, 14)
+            .padding(.vertical, 7)
+            .background(Color.accentColor)
+            .cornerRadius(6)
+        }
+        .buttonStyle(.plain)
+        .fixedSize(horizontal: true, vertical: false)
     }
     
     // MARK: - Task Editor & Autonomous Task Runner
@@ -1955,30 +2148,40 @@ struct AIAgentView: View {
                 
                 // Trailing Action Controls (Fixed Size so they never collapse or distort)
                 HStack(spacing: 6) {
-                    if activeTaskTab == 0 {
-                        // Compact View Mode Switcher (Checklist vs Raw Markdown)
+                    if activeTaskTab < 3 {
+                        // Compact View Mode Switcher (Rendered Document vs Edit Source)
                         HStack(spacing: 1) {
                             Button(action: { withAnimation(.easeInOut(duration: 0.15)) { taskViewMode = 0 } }) {
-                                Image(systemName: "checklist")
-                                    .font(.system(size: 11, weight: taskViewMode == 0 ? .semibold : .regular))
-                                    .foregroundColor(taskViewMode == 0 ? .primary : .secondary)
-                                    .frame(width: 24, height: 22)
-                                    .background(taskViewMode == 0 ? Color.primary.opacity(0.12) : Color.clear)
-                                    .cornerRadius(4)
+                                HStack(spacing: 3) {
+                                    Image(systemName: "doc.richtext")
+                                        .font(.system(size: 10, weight: taskViewMode == 0 ? .semibold : .regular))
+                                    Text("Rendered")
+                                        .font(.system(size: 9.5, weight: taskViewMode == 0 ? .semibold : .regular))
+                                }
+                                .foregroundColor(taskViewMode == 0 ? .primary : .secondary)
+                                .padding(.horizontal, 6)
+                                .frame(height: 22)
+                                .background(taskViewMode == 0 ? Color.primary.opacity(0.12) : Color.clear)
+                                .cornerRadius(4)
                             }
                             .buttonStyle(.plain)
-                            .help("Checklist View")
+                            .help("Rendered Document View")
                             
                             Button(action: { withAnimation(.easeInOut(duration: 0.15)) { taskViewMode = 1 } }) {
-                                Image(systemName: "doc.plaintext")
-                                    .font(.system(size: 11, weight: taskViewMode == 1 ? .semibold : .regular))
-                                    .foregroundColor(taskViewMode == 1 ? .primary : .secondary)
-                                    .frame(width: 24, height: 22)
-                                    .background(taskViewMode == 1 ? Color.primary.opacity(0.12) : Color.clear)
-                                    .cornerRadius(4)
+                                HStack(spacing: 3) {
+                                    Image(systemName: "pencil")
+                                        .font(.system(size: 10, weight: taskViewMode == 1 ? .semibold : .regular))
+                                    Text("Edit")
+                                        .font(.system(size: 9.5, weight: taskViewMode == 1 ? .semibold : .regular))
+                                }
+                                .foregroundColor(taskViewMode == 1 ? .primary : .secondary)
+                                .padding(.horizontal, 6)
+                                .frame(height: 22)
+                                .background(taskViewMode == 1 ? Color.primary.opacity(0.12) : Color.clear)
+                                .cornerRadius(4)
                             }
                             .buttonStyle(.plain)
-                            .help("Raw Markdown View")
+                            .help("Edit Markdown Source")
                         }
                         .padding(2)
                         .background(Color.primary.opacity(0.04))
@@ -2097,19 +2300,24 @@ struct AIAgentView: View {
                         ScrollView {
                             LazyVStack(alignment: .leading, spacing: 6) {
                                 if parsedSteps.isEmpty {
-                                    VStack(spacing: 8) {
-                                        Image(systemName: "list.bullet.rectangle")
-                                            .font(.system(size: 24))
-                                            .foregroundColor(.secondary.opacity(0.5))
-                                        Text("No checklist steps found in task.md")
-                                            .font(.system(size: 11.5))
-                                            .foregroundColor(.secondary)
-                                        Text("Add lines starting with `- [ ] Your step description`")
-                                            .font(.system(size: 10))
-                                            .foregroundColor(.secondary.opacity(0.7))
+                                    if !taskMdText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                                        RenderedMarkdownDocumentView(markdown: taskMdText)
+                                            .padding(6)
+                                    } else {
+                                        VStack(spacing: 8) {
+                                            Image(systemName: "list.bullet.rectangle")
+                                                .font(.system(size: 24))
+                                                .foregroundColor(.secondary.opacity(0.5))
+                                            Text("No checklist steps found in task.md")
+                                                .font(.system(size: 11.5))
+                                                .foregroundColor(.secondary)
+                                            Text("Add lines starting with `- [ ] Your step description`")
+                                                .font(.system(size: 10))
+                                                .foregroundColor(.secondary.opacity(0.7))
+                                        }
+                                        .frame(maxWidth: .infinity)
+                                        .padding(.top, 40)
                                     }
-                                    .frame(maxWidth: .infinity)
-                                    .padding(.top, 40)
                                 } else {
                                     ForEach(parsedSteps) { step in
                                         HStack(alignment: .top, spacing: 10) {
@@ -2121,10 +2329,8 @@ struct AIAgentView: View {
                                             .buttonStyle(.plain)
                                             .padding(.top, 1)
                                             
-                                            Text(step.text)
-                                                .font(.system(size: 12))
-                                                .foregroundColor(step.isCompleted ? .secondary : .primary)
-                                                .strikethrough(step.isCompleted, color: .secondary.opacity(0.6))
+                                            MarkdownTextView(text: step.text)
+                                                .opacity(step.isCompleted ? 0.65 : 1.0)
                                                 .frame(maxWidth: .infinity, alignment: .leading)
                                             
                                             if !step.isCompleted && !agent.isLoading {
@@ -2149,6 +2355,10 @@ struct AIAgentView: View {
                                         .background(step.isCompleted ? Color.primary.opacity(0.015) : Color.primary.opacity(0.035))
                                         .cornerRadius(6)
                                     }
+                                    
+                                    Divider().opacity(0.25).padding(.vertical, 8)
+                                    RenderedMarkdownDocumentView(markdown: taskMdText)
+                                        .padding(.horizontal, 8)
                                 }
                             }
                             .padding(14)
@@ -2162,15 +2372,31 @@ struct AIAgentView: View {
                         .background(workspaceBg)
                 }
             } else if activeTaskTab == 1 {
-                TextEditor(text: $agentMdText)
-                    .font(.system(size: 12, design: .monospaced))
-                    .scrollContentBackground(.hidden)
+                if taskViewMode == 0 {
+                    ScrollView {
+                        RenderedMarkdownDocumentView(markdown: agentMdText)
+                            .padding(18)
+                    }
                     .background(workspaceBg)
+                } else {
+                    TextEditor(text: $agentMdText)
+                        .font(.system(size: 12, design: .monospaced))
+                        .scrollContentBackground(.hidden)
+                        .background(workspaceBg)
+                }
             } else if activeTaskTab == 2 {
-                TextEditor(text: $walkthroughMdText)
-                    .font(.system(size: 12, design: .monospaced))
-                    .scrollContentBackground(.hidden)
+                if taskViewMode == 0 {
+                    ScrollView {
+                        RenderedMarkdownDocumentView(markdown: walkthroughMdText)
+                            .padding(18)
+                    }
                     .background(workspaceBg)
+                } else {
+                    TextEditor(text: $walkthroughMdText)
+                        .font(.system(size: 12, design: .monospaced))
+                        .scrollContentBackground(.hidden)
+                        .background(workspaceBg)
+                }
             } else if activeTaskTab == 3 {
                 TaskLogsView()
                     .environmentObject(appState)
@@ -2243,10 +2469,7 @@ struct AIAgentView: View {
                     .frame(maxWidth: .infinity)
                 } else {
                     VStack(alignment: .leading, spacing: 12) {
-                        Text(walkthroughMdText)
-                            .font(.system(size: 12, design: .monospaced))
-                            .lineSpacing(4)
-                            .textSelection(.enabled)
+                        RenderedMarkdownDocumentView(markdown: walkthroughMdText)
                             .padding(18)
                             .frame(maxWidth: .infinity, alignment: .leading)
                             .background(panelBg)
@@ -2282,10 +2505,6 @@ struct AIAgentView: View {
     
     private func executeSingleStep(_ stepText: String) {
         saveTaskFiles()
-        let providerString = appState.aiProvider
-        let model = appState.aiModel.isEmpty ? "gemini-2.5-flash" : appState.aiModel
-        let apiKey = appState.resolveApiKey(for: providerString)
-        
         let directive = """
         Execute this single task step from .microcode/task.md:
         
@@ -2296,14 +2515,7 @@ struct AIAgentView: View {
         2. Once completed, update .microcode/task.md to check off this step.
         """
         
-        Task {
-            await agent.sendMessage(
-                directive,
-                provider: providerString,
-                model: model,
-                apiKey: apiKey
-            )
-        }
+        executeMessage(directive, attachments: [])
     }
     
     private func taskEditorTab(_ label: String, icon: String? = nil, idx: Int, badge: Int? = nil) -> some View {
@@ -2379,6 +2591,58 @@ struct AIAgentView: View {
     @ViewBuilder
     private var inputCardView: some View {
         VStack(alignment: .leading, spacing: 6) {
+            if isCompareMode {
+                HStack(spacing: 6) {
+                    Image(systemName: "rectangle.split.2x1.fill")
+                        .font(.system(size: 10, weight: .semibold))
+                        .foregroundColor(.accentColor)
+                    Text("Compare Mode:")
+                        .font(.system(size: 10.5, weight: .bold))
+                        .foregroundColor(.accentColor)
+                    Text(currentModelDisplayName)
+                        .font(.system(size: 10, weight: .medium, design: .monospaced))
+                        .foregroundColor(.primary.opacity(0.85))
+                        .lineLimit(1)
+                    Text("vs")
+                        .font(.system(size: 10, weight: .semibold))
+                        .foregroundColor(.secondary)
+                    Menu {
+                        ForEach(["DeepSeek-V4.1-Flash", "claude-sonnet-5-5@default", "gpt-6-luna", "gemini-3.8-flash", "glm-5.1@jts", "kimi-k2.5"], id: \.self) { m in
+                            Button(m) { compareSecondaryModel = m }
+                        }
+                    } label: {
+                        HStack(spacing: 3) {
+                            Text(compareSecondaryModel)
+                                .font(.system(size: 10, weight: .semibold, design: .monospaced))
+                                .lineLimit(1)
+                            Image(systemName: "chevron.down")
+                                .font(.system(size: 7, weight: .bold))
+                        }
+                        .foregroundColor(.accentColor)
+                        .padding(.horizontal, 6)
+                        .padding(.vertical, 2)
+                        .background(Color.accentColor.opacity(0.14))
+                        .cornerRadius(4)
+                    }
+                    .menuStyle(.borderlessButton)
+                    .fixedSize()
+                    Spacer()
+                    Button {
+                        isCompareMode = false
+                    } label: {
+                        Image(systemName: "xmark.circle.fill")
+                            .font(.system(size: 11))
+                            .foregroundColor(.secondary)
+                    }
+                    .buttonStyle(.plain)
+                    .help("Exit Compare Mode")
+                }
+                .padding(.horizontal, 8)
+                .padding(.vertical, 4)
+                .background(Color.accentColor.opacity(0.08))
+                .cornerRadius(6)
+            }
+
             // Multiline text input
             if #available(macOS 13.0, *) {
                 TextField("Ask anything, @ to mention, / for actions", text: $inputText, axis: .vertical)
@@ -2392,9 +2656,19 @@ struct AIAgentView: View {
                         // If slash suggestions are showing and user presses Enter, select the highlighted command
                         if showSlashSuggestions && !slashCommandService.suggestions.isEmpty {
                             let cmd = slashCommandService.suggestions[min(slashSelectedIndex, slashCommandService.suggestions.count - 1)]
-                            inputText = "/\(cmd.rawValue) "
                             showSlashSuggestions = false
                             slashSelectedIndex = 0
+                            if cmd == .compare {
+                                isCompareMode.toggle()
+                                inputText = ""
+                                return
+                            }
+                            let trimmed = inputText.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+                            if trimmed == "/\(cmd.rawValue)" && !cmd.requiresArgument {
+                                sendMessage()
+                                return
+                            }
+                            inputText = "/\(cmd.rawValue) "
                             return
                         }
                         if !NSEvent.modifierFlags.contains(.shift) && !inputText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
@@ -2407,10 +2681,10 @@ struct AIAgentView: View {
                         showSlashSuggestions = slashCommandService.isShowingSuggestions
                         if !showSlashSuggestions { slashSelectedIndex = 0 }
                         
-                        // @ Context Provider: detect @prefix
-                        if let atIdx = newValue.lastIndex(of: "@") {
+                        // @ Context Provider: detect @prefix only when actively typing a short token at the end
+                        if newValue.count <= 2000, let atIdx = newValue.lastIndex(of: "@") {
                             let afterAt = String(newValue[newValue.index(after: atIdx)...])
-                            if !afterAt.contains(" ") && (atIdx == newValue.startIndex || newValue[newValue.index(before: atIdx)] == " ") {
+                            if afterAt.count <= 48 && !afterAt.contains(" ") && !afterAt.contains("\n") && !afterAt.contains("/") && (atIdx == newValue.startIndex || newValue[newValue.index(before: atIdx)] == " " || newValue[newValue.index(before: atIdx)] == "\n") {
                                 showContextSuggestions = true
                                 contextSearchPrefix = afterAt
                             } else {
@@ -2432,48 +2706,11 @@ struct AIAgentView: View {
                     }
             }
             
-            // Bottom Toolbar inside the Input Box
+            // Bottom Toolbar inside the Input Box (Single consolidated row)
             inputBottomToolbar
-            
-            // Sub-bar (Local/Remote SSH on left, Main Agent on right)
-            HStack {
-                AgentTargetEnvironmentMenu(showingAddServer: $showingAddServerSheet)
-                
-                Spacer()
-                
-                // SubAgent Dropdown Pill Button
-                Button(action: { showSubAgentDropdown.toggle() }) {
-                    HStack(spacing: 4) {
-                        let runningCount = SubAgentHarness.shared.activeSubagents.filter { $0.state == .running }.count
-                        if runningCount > 0 {
-                            Circle()
-                                .fill(Color.green)
-                                .frame(width: 6, height: 6)
-                        }
-                        Text(selectedSubAgentDisplayName)
-                            .font(.system(size: 10, weight: selectedSubAgentType == "main" ? .regular : .medium))
-                        Image(systemName: "chevron.down")
-                            .font(.system(size: 7))
-                    }
-                    .foregroundColor(selectedSubAgentType == "main" ? .secondary.opacity(0.85) : .accentColor)
-                    .padding(.horizontal, 6)
-                    .padding(.vertical, 2)
-                    .background(selectedSubAgentType == "main" ? Color.clear : Color.accentColor.opacity(0.1))
-                    .cornerRadius(4)
-                }
-                .buttonStyle(.plain)
-                .popover(isPresented: $showSubAgentDropdown, arrowEdge: .bottom) {
-                    SubAgentSelectorMenu(
-                        selectedType: $selectedSubAgentType,
-                        isPresented: $showSubAgentDropdown
-                    )
-                    .environmentObject(appState)
-                }
-            }
-            .padding(.horizontal, 4)
-            .padding(.top, 2)
         }
-        .padding(10)
+        .padding(.horizontal, 10)
+        .padding(.vertical, 8)
         .background(
             RoundedRectangle(cornerRadius: 12, style: .continuous)
                 .fill(isDropTargeted ? Color.accentColor.opacity(0.12) : Color.white.opacity(0.04))
@@ -2569,7 +2806,7 @@ struct AIAgentView: View {
     
     private var inputArea: some View {
         HStack(spacing: 0) {
-            Spacer(minLength: 14)
+            Spacer(minLength: 0)
             
             VStack(spacing: 0) {
                 // Queue Indicator Bar
@@ -2598,9 +2835,14 @@ struct AIAgentView: View {
                         suggestions: slashCommandService.suggestions,
                         selectedIndex: slashSelectedIndex,
                         onSelect: { command in
-                            inputText = "/\(command.rawValue) "
                             showSlashSuggestions = false
                             slashSelectedIndex = 0
+                            if command == .compare {
+                                isCompareMode.toggle()
+                                inputText = ""
+                            } else {
+                                inputText = "/\(command.rawValue) "
+                            }
                         }
                     )
                     .environmentObject(appState)
@@ -2628,6 +2870,14 @@ struct AIAgentView: View {
                     .padding(.bottom, 4)
                 }
                 
+                // Media Studio Parameter Bar (Image / Video / Music models)
+                if AIClient.isAiPassMediaModel(appState.aiModel) {
+                    mediaStudioParameterBar
+                        .padding(.bottom, 5)
+                }
+
+                securityAndFailoverAlertsBar
+                
                 // Keep the composer visually aligned with the reading column.
                 // The two flexible spacers leave a small gutter on narrow splits,
                 // then centre the card and cap it at a comfortable desktop width.
@@ -2638,8 +2888,9 @@ struct AIAgentView: View {
             }
             .frame(maxWidth: 880)
             
-            Spacer(minLength: 14)
+            Spacer(minLength: 0)
         }
+        .padding(.horizontal, 14)
         .padding(.vertical, 8)
         .background(Color.clear)
     }
@@ -2686,32 +2937,644 @@ struct AIAgentView: View {
         }
     }
     
-    private var inputBottomToolbar: some View {
-        HStack(spacing: 8) {
-            plusActionMenu
-            modelSelectorDropdown
-            
-            if let file = appState.currentFile {
-                HStack(spacing: 3) {
-                    Circle().fill(Color.blue.opacity(0.7)).frame(width: 5, height: 5)
-                    Text(file.name)
-                        .font(.system(size: 10, design: .monospaced))
-                        .foregroundColor(.secondary)
-                        .lineLimit(1)
-                }
-                .padding(.horizontal, 6)
-                .padding(.vertical, 3)
-                .background(Color.primary.opacity(0.03))
-                .cornerRadius(4)
+    private var mediaStudioParameterBar: some View {
+        let isVideo = AIClient.isAiPassVideoModel(appState.aiModel)
+        let isImage = AIClient.isAiPassImageModel(appState.aiModel)
+        let isMusic = AIClient.isAiPassMusicModel(appState.aiModel)
+        let ratios = ["16:9", "9:16", "1:1", "4:3", "21:9"]
+        let resolutions = isVideo ? ["720p", "1080p", "4K"] : ["1K", "2K", "4K"]
+        let durations = isMusic ? ["15s", "30s", "60s"] : ["5s", "8s", "10s"]
+        
+        return HStack(spacing: 8) {
+            HStack(spacing: 4) {
+                Image(systemName: isVideo ? "film" : (isMusic ? "waveform" : "photo"))
+                    .font(.system(size: 10, weight: .semibold))
+                    .foregroundColor(.accentColor)
+                Text(isVideo ? "VIDEO STUDIO" : (isMusic ? "AUDIO STUDIO" : "IMAGE STUDIO"))
+                    .font(.system(size: 9.5, weight: .bold, design: .monospaced))
+                    .foregroundColor(.secondary)
             }
             
-            Spacer()
+            if isImage || isVideo {
+                Divider().frame(height: 12)
+                HStack(spacing: 3) {
+                    Text("Ratio")
+                        .font(.system(size: 9.5, weight: .medium))
+                        .foregroundColor(.secondary)
+                    ForEach(ratios, id: \.self) { r in
+                        Button(action: { studioAspectRatio = r }) {
+                            Text(r)
+                                .font(.system(size: 9.5, weight: studioAspectRatio == r ? .semibold : .regular, design: .monospaced))
+                                .padding(.horizontal, 5)
+                                .padding(.vertical, 2)
+                                .background(studioAspectRatio == r ? Color.accentColor.opacity(0.18) : Color.primary.opacity(0.04))
+                                .foregroundColor(studioAspectRatio == r ? .accentColor : .secondary)
+                                .cornerRadius(4)
+                        }
+                        .buttonStyle(.plain)
+                    }
+                }
+                
+                Divider().frame(height: 12)
+                HStack(spacing: 3) {
+                    Text("Res")
+                        .font(.system(size: 9.5, weight: .medium))
+                        .foregroundColor(.secondary)
+                    ForEach(resolutions, id: \.self) { res in
+                        Button(action: { studioResolution = res }) {
+                            Text(res)
+                                .font(.system(size: 9.5, weight: studioResolution == res ? .semibold : .regular, design: .monospaced))
+                                .padding(.horizontal, 5)
+                                .padding(.vertical, 2)
+                                .background(studioResolution == res ? Color.accentColor.opacity(0.18) : Color.primary.opacity(0.04))
+                                .foregroundColor(studioResolution == res ? .accentColor : .secondary)
+                                .cornerRadius(4)
+                        }
+                        .buttonStyle(.plain)
+                    }
+                }
+            }
+            
+            if isVideo || isMusic {
+                Divider().frame(height: 12)
+                HStack(spacing: 3) {
+                    Text("Length")
+                        .font(.system(size: 9.5, weight: .medium))
+                        .foregroundColor(.secondary)
+                    ForEach(durations, id: \.self) { dur in
+                        Button(action: { studioDuration = dur }) {
+                            Text(dur)
+                                .font(.system(size: 9.5, weight: studioDuration == dur ? .semibold : .regular, design: .monospaced))
+                                .padding(.horizontal, 5)
+                                .padding(.vertical, 2)
+                                .background(studioDuration == dur ? Color.accentColor.opacity(0.18) : Color.primary.opacity(0.04))
+                                .foregroundColor(studioDuration == dur ? .accentColor : .secondary)
+                                .cornerRadius(4)
+                        }
+                        .buttonStyle(.plain)
+                    }
+                }
+            }
+            
+            Spacer(minLength: 4)
+            
+            if isImage || isVideo {
+                Button(action: pickFile) {
+                    HStack(spacing: 4) {
+                        Image(systemName: "photo.badge.plus")
+                            .font(.system(size: 9.5))
+                        Text(isVideo ? "Image-to-Video Ref" : "Image-to-Image Ref")
+                            .font(.system(size: 9.5, weight: .medium))
+                    }
+                    .foregroundColor(.primary.opacity(0.85))
+                    .padding(.horizontal, 7)
+                    .padding(.vertical, 3)
+                    .background(Color.primary.opacity(0.06))
+                    .cornerRadius(4)
+                }
+                .buttonStyle(.plain)
+                .help("Attach a reference image for Image-to-Video or Image-to-Image generation")
+            }
+        }
+        .padding(.horizontal, 10)
+        .padding(.vertical, 5)
+        .background(Color.primary.opacity(0.03))
+        .cornerRadius(7)
+        .overlay(
+            RoundedRectangle(cornerRadius: 7)
+                .stroke(Color.primary.opacity(0.08), lineWidth: 0.5)
+        )
+    }
+
+    private var inputBottomToolbar: some View {
+        HStack(spacing: 6) {
+            plusActionMenu
+            modelSelectorDropdown
+                .layoutPriority(1)
+
+            if sessionScope == .editor {
+                scopeLockMenuPill
+                AgentTargetEnvironmentMenu(showingAddServer: $showingAddServerSheet)
+            }
+            
+            Spacer(minLength: 4)
+            
+            // SubAgent Dropdown Pill Button (Consolidated into main input toolbar)
+            Button(action: { showSubAgentDropdown.toggle() }) {
+                HStack(spacing: 3) {
+                    let runningCount = SubAgentHarness.shared.activeSubagents.filter { $0.state == .running }.count
+                    if runningCount > 0 {
+                        Circle()
+                            .fill(Color.green)
+                            .frame(width: 6, height: 6)
+                    }
+                    Text(selectedSubAgentType == "main" ? "Agent" : selectedSubAgentDisplayName)
+                        .font(.system(size: 10, weight: selectedSubAgentType == "main" ? .regular : .medium))
+                        .lineLimit(1)
+                    Image(systemName: "chevron.down")
+                        .font(.system(size: 7))
+                }
+                .foregroundColor(selectedSubAgentType == "main" ? .secondary.opacity(0.85) : .accentColor)
+                .padding(.horizontal, 6)
+                .padding(.vertical, 3)
+                .background(selectedSubAgentType == "main" ? Color.primary.opacity(0.03) : Color.accentColor.opacity(0.1))
+                .cornerRadius(5)
+            }
+            .buttonStyle(.plain)
+            .fixedSize()
+            .popover(isPresented: $showSubAgentDropdown, arrowEdge: .bottom) {
+                SubAgentSelectorMenu(
+                    selectedType: $selectedSubAgentType,
+                    isPresented: $showSubAgentDropdown
+                )
+                .environmentObject(appState)
+            }
             
             voiceInputButton
+                .fixedSize()
             
             sendOrStopButton
+                .fixedSize()
         }
         .padding(.top, 2)
+    }
+
+    // MARK: - Feature #4: Scope Lock & Protected Files Menu Pill
+
+    private var scopeLockMenuPill: some View {
+        let ws = agent.currentWorkspace ?? scopedWorkspacePath
+        let activeFilePath = appState.currentFile?.path
+        let isActiveLocked = activeFilePath.map { scopeGuard.isLocked($0, workspaceRoot: ws) } ?? false
+        let hasActiveGuard = !scopeGuard.lockedPaths.isEmpty || scopeGuard.strictMentionOnlyScope
+
+        return Menu {
+            if let file = appState.currentFile {
+                Button {
+                    scopeGuard.toggleLock(file.path, workspaceRoot: ws)
+                } label: {
+                    Label(
+                        isActiveLocked ? "Unlock \(file.name)" : "Lock \(file.name) (Protect from AI)",
+                        systemImage: isActiveLocked ? "lock.open" : "lock.fill"
+                    )
+                }
+                Divider()
+            }
+
+            Button {
+                scopeGuard.strictMentionOnlyScope.toggle()
+            } label: {
+                HStack {
+                    Label("Strict Scope (Edit Only @Mentioned Files)", systemImage: "scope")
+                    if scopeGuard.strictMentionOnlyScope {
+                        Image(systemName: "checkmark")
+                    }
+                }
+            }
+
+            if let root = ws, !root.isEmpty {
+                Button {
+                    _ = scopeGuard.lockCoreConfigFiles(in: root)
+                } label: {
+                    Label("Lock Core Configs (.env, package.json, Cargo.toml)", systemImage: "shield.lefthalf.filled")
+                }
+            }
+
+            if !scopeGuard.lockedPaths.isEmpty {
+                Divider()
+                Section("Locked Files (\(scopeGuard.lockedPaths.count))") {
+                    ForEach(Array(scopeGuard.lockedPaths).sorted(), id: \.self) { lockedPath in
+                        let name = URL(fileURLWithPath: lockedPath).lastPathComponent
+                        Button {
+                            scopeGuard.toggleLock(lockedPath, workspaceRoot: ws)
+                        } label: {
+                            Label("Unlock \(name)", systemImage: "lock.fill")
+                        }
+                    }
+                    Button(role: .destructive) {
+                        scopeGuard.unlockAll(workspaceRoot: ws)
+                    } label: {
+                        Label("Unlock All Files", systemImage: "lock.open.fill")
+                    }
+                }
+            }
+        } label: {
+            HStack(spacing: 3) {
+                Image(systemName: isActiveLocked ? "lock.fill" : (scopeGuard.strictMentionOnlyScope ? "scope" : "lock.shield"))
+                    .font(.system(size: 10, weight: .semibold))
+                if isActiveLocked {
+                    Text("Locked")
+                        .font(.system(size: 9.5, weight: .semibold))
+                } else if scopeGuard.strictMentionOnlyScope {
+                    Text("Strict")
+                        .font(.system(size: 9.5, weight: .semibold))
+                } else if !scopeGuard.lockedPaths.isEmpty {
+                    Text("\(scopeGuard.lockedPaths.count)")
+                        .font(.system(size: 9.5, weight: .bold, design: .monospaced))
+                }
+            }
+            .foregroundColor(hasActiveGuard ? .orange : .secondary)
+            .padding(.horizontal, 5)
+            .padding(.vertical, 3)
+            .background(hasActiveGuard ? Color.orange.opacity(0.14) : Color.primary.opacity(0.04))
+            .cornerRadius(5)
+        }
+        .menuStyle(.borderlessButton)
+        .fixedSize()
+        .help("Scope Lock & Protected Files Guard — Lock files from AI edits or enforce Strict @Mention Scope")
+    }
+
+    // MARK: - Feature #3 & #7: Auto-Failover & Secret Leak Shield Alerts Bar
+
+    @ViewBuilder
+    private var securityAndFailoverAlertsBar: some View {
+        VStack(alignment: .leading, spacing: 4) {
+            if let failoverBanner = agent.lastFailoverBanner {
+                HStack(spacing: 6) {
+                    Image(systemName: "bolt.horizontal.circle.fill")
+                        .font(.system(size: 11))
+                        .foregroundColor(.green)
+                    Text(failoverBanner)
+                        .font(.system(size: 10.5, weight: .medium))
+                        .foregroundColor(.primary.opacity(0.9))
+                        .lineLimit(1)
+                    Spacer()
+                    Button {
+                        agent.lastFailoverBanner = nil
+                    } label: {
+                        Image(systemName: "xmark")
+                            .font(.system(size: 8.5))
+                            .foregroundColor(.secondary)
+                    }
+                    .buttonStyle(.plain)
+                }
+                .padding(.horizontal, 10)
+                .padding(.vertical, 5)
+                .background(Color.green.opacity(0.09))
+                .cornerRadius(6)
+                .overlay(
+                    RoundedRectangle(cornerRadius: 6)
+                        .stroke(Color.green.opacity(0.25), lineWidth: 0.8)
+                )
+            }
+
+            if let toast = secretActionToast {
+                HStack(spacing: 6) {
+                    Image(systemName: "checkmark.shield.fill")
+                        .font(.system(size: 11))
+                        .foregroundColor(.green)
+                    Text(toast)
+                        .font(.system(size: 10.5, weight: .medium))
+                        .foregroundColor(.primary)
+                    Spacer()
+                    Button {
+                        secretActionToast = nil
+                    } label: {
+                        Image(systemName: "xmark")
+                            .font(.system(size: 8.5))
+                            .foregroundColor(.secondary)
+                    }
+                    .buttonStyle(.plain)
+                }
+                .padding(.horizontal, 10)
+                .padding(.vertical, 5)
+                .background(Color.green.opacity(0.10))
+                .cornerRadius(6)
+            }
+
+            ForEach(secretShield.activeAlerts.prefix(2)) { alert in
+                HStack(spacing: 8) {
+                    Image(systemName: "key.radiowaves.forward.fill")
+                        .font(.system(size: 11))
+                        .foregroundColor(.orange)
+                    VStack(alignment: .leading, spacing: 1) {
+                        Text("Secret Leak Shield: \(alert.findings.count) credential(s) detected in \(alert.fileName)")
+                            .font(.system(size: 10.5, weight: .semibold))
+                            .foregroundColor(.orange)
+                        Text(alert.findings.map { "\($0.ruleName) (\($0.maskedSnippet))" }.joined(separator: " · "))
+                            .font(.system(size: 9.5, design: .monospaced))
+                            .foregroundColor(.secondary)
+                            .lineLimit(1)
+                    }
+                    Spacer()
+                    Button {
+                        let summary = secretShield.moveSecretsToEnv(
+                            alert: alert,
+                            workspaceRoot: agent.currentWorkspace ?? scopedWorkspacePath
+                        )
+                        secretActionToast = summary
+                    } label: {
+                        HStack(spacing: 3) {
+                            Image(systemName: "lock.doc.fill")
+                                .font(.system(size: 9))
+                            Text("Move to .env")
+                                .font(.system(size: 9.5, weight: .semibold))
+                        }
+                        .padding(.horizontal, 8)
+                        .padding(.vertical, 3)
+                        .background(Color.orange.opacity(0.20))
+                        .foregroundColor(.orange)
+                        .cornerRadius(4)
+                    }
+                    .buttonStyle(.plain)
+                    .help("Extract hardcoded secrets to .env, add .env to .gitignore, and replace with env variable lookup")
+
+                    Button {
+                        secretShield.dismissAlert(alert)
+                    } label: {
+                        Image(systemName: "xmark")
+                            .font(.system(size: 9))
+                            .foregroundColor(.secondary)
+                    }
+                    .buttonStyle(.plain)
+                }
+                .padding(.horizontal, 10)
+                .padding(.vertical, 6)
+                .background(Color.orange.opacity(0.08))
+                .cornerRadius(6)
+                .overlay(
+                    RoundedRectangle(cornerRadius: 6)
+                        .stroke(Color.orange.opacity(0.25), lineWidth: 0.8)
+                )
+            }
+        }
+    }
+
+    // MARK: - Feature #8: "Where Was I?" Instant Project Briefing Card
+
+    private func projectBriefingCardView(_ briefing: ProjectBriefingSnapshot) -> some View {
+        VStack(alignment: .leading, spacing: 6) {
+            HStack(spacing: 8) {
+                HStack(spacing: 4) {
+                    Image(systemName: "sparkles.rectangle.stack")
+                        .font(.system(size: 10, weight: .semibold))
+                        .foregroundColor(.accentColor)
+                    Text("Project Briefing")
+                        .font(.system(size: 10.5, weight: .bold))
+                        .foregroundColor(.primary.opacity(0.9))
+                }
+
+                HStack(spacing: 3) {
+                    Image(systemName: "arrow.triangle.branch")
+                        .font(.system(size: 8.5))
+                    Text(briefing.gitBranch)
+                        .font(.system(size: 9.5, weight: .semibold, design: .monospaced))
+                }
+                .foregroundColor(.secondary)
+                .padding(.horizontal, 5)
+                .padding(.vertical, 1.5)
+                .background(Color.primary.opacity(0.05))
+                .cornerRadius(4)
+
+                if !briefing.modifiedFiles.isEmpty {
+                    Text("\(briefing.modifiedFiles.count) uncommitted")
+                        .font(.system(size: 9.5, weight: .medium))
+                        .foregroundColor(.orange)
+                        .padding(.horizontal, 5)
+                        .padding(.vertical, 1.5)
+                        .background(Color.orange.opacity(0.12))
+                        .cornerRadius(4)
+                }
+
+                if briefing.completedTasksCount > 0 || !briefing.pendingTasks.isEmpty {
+                    Text("\(briefing.completedTasksCount) done · \(briefing.pendingTasks.count) pending")
+                        .font(.system(size: 9.5, weight: .medium))
+                        .foregroundColor(.secondary)
+                }
+
+                Spacer()
+
+                Button {
+                    agent.refreshProjectBriefing()
+                } label: {
+                    Image(systemName: "arrow.clockwise")
+                        .font(.system(size: 9.5))
+                        .foregroundColor(.secondary)
+                }
+                .buttonStyle(.plain)
+                .help("Refresh Git & Task Briefing")
+
+                Button {
+                    executeMessage(briefing.suggestedNextPrompt)
+                } label: {
+                    HStack(spacing: 3) {
+                        Image(systemName: "play.fill")
+                            .font(.system(size: 8))
+                        Text("Resume Next Step")
+                            .font(.system(size: 9.5, weight: .semibold))
+                    }
+                    .padding(.horizontal, 8)
+                    .padding(.vertical, 3)
+                    .background(Color.accentColor.opacity(0.16))
+                    .foregroundColor(.accentColor)
+                    .cornerRadius(5)
+                }
+                .buttonStyle(.plain)
+                .help(briefing.suggestedNextPrompt)
+            }
+
+            if !briefing.lastConversationSummary.isEmpty {
+                Text(briefing.lastConversationSummary)
+                    .font(.system(size: 10.5))
+                    .foregroundColor(.secondary)
+                    .lineLimit(1)
+                    .truncationMode(.tail)
+            }
+
+            if !briefing.modifiedFiles.isEmpty {
+                ScrollView(.horizontal, showsIndicators: false) {
+                    HStack(spacing: 4) {
+                        ForEach(briefing.modifiedFiles.prefix(6), id: \.self) { file in
+                            Button {
+                                inputText = "@\(file) " + inputText
+                                isInputFocused = true
+                            } label: {
+                                HStack(spacing: 3) {
+                                    Image(systemName: "doc.badge.gearshape")
+                                        .font(.system(size: 8))
+                                    Text(URL(fileURLWithPath: file).lastPathComponent)
+                                        .font(.system(size: 9.5, design: .monospaced))
+                                }
+                                .padding(.horizontal, 6)
+                                .padding(.vertical, 2)
+                                .background(Color.primary.opacity(0.05))
+                                .foregroundColor(.primary.opacity(0.8))
+                                .cornerRadius(4)
+                            }
+                            .buttonStyle(.plain)
+                            .help("Click to @mention \(file)")
+                        }
+                    }
+                }
+            }
+        }
+        .padding(.horizontal, 12)
+        .padding(.vertical, 8)
+        .background(Color.primary.opacity(0.03))
+        .cornerRadius(8)
+        .overlay(
+            RoundedRectangle(cornerRadius: 8)
+                .stroke(Color.primary.opacity(0.08), lineWidth: 0.8)
+        )
+    }
+
+    // MARK: - Feature #5: Context X-Ray & Token Pruner Popover
+
+    private var contextXRayPopoverView: some View {
+        let xray = agent.computeContextXRay()
+        return VStack(alignment: .leading, spacing: 10) {
+            HStack {
+                Image(systemName: "chart.pie.fill")
+                    .font(.system(size: 11, weight: .semibold))
+                    .foregroundColor(.accentColor)
+                Text("Context X-Ray & Token Pruner")
+                    .font(.system(size: 11.5, weight: .bold))
+                Spacer()
+                Text("~\(xray.totalTokens.formatted()) / \(xray.budgetCeiling.formatted()) tok")
+                    .font(.system(size: 10, weight: .semibold, design: .monospaced))
+                    .foregroundColor(.secondary)
+            }
+
+            // Token distribution rows
+            VStack(alignment: .leading, spacing: 5) {
+                contextXRayRow(label: "System & Workspace Rules", tokens: xray.systemAndRulesTokens, total: xray.totalTokens, color: .blue)
+                contextXRayRow(label: "Pinned Hard Constraints", tokens: xray.pinnedConstraintsTokens, total: xray.totalTokens, color: .purple)
+                contextXRayRow(label: "Conversation Messages", tokens: xray.conversationProseTokens, total: xray.totalTokens, color: .green)
+                contextXRayRow(label: "Tool Outputs (Prunable)", tokens: xray.toolOutputsTokens, total: xray.totalTokens, color: .orange)
+            }
+            .padding(8)
+            .background(Color.primary.opacity(0.04))
+            .cornerRadius(6)
+
+            // 1-Click Prune Tool Outputs + Auto-Failover Toggle
+            HStack(spacing: 8) {
+                Button {
+                    let freed = agent.pruneBulkyToolOutputs()
+                    lastPrunedTokensCount = freed
+                } label: {
+                    HStack(spacing: 4) {
+                        Image(systemName: "scissors")
+                            .font(.system(size: 9.5, weight: .semibold))
+                        Text("Prune Bulky Tool Outputs")
+                            .font(.system(size: 10, weight: .semibold))
+                    }
+                    .padding(.horizontal, 8)
+                    .padding(.vertical, 4)
+                    .background(Color.orange.opacity(0.16))
+                    .foregroundColor(.orange)
+                    .cornerRadius(5)
+                }
+                .buttonStyle(.plain)
+
+                if let freed = lastPrunedTokensCount {
+                    Text(freed > 0 ? "Freed ~\(freed) tok" : "Already compact")
+                        .font(.system(size: 9.5, design: .monospaced))
+                        .foregroundColor(.green)
+                }
+
+                Spacer()
+
+                Toggle(isOn: $agent.autoFailoverEnabled) {
+                    Text("Auto-Failover")
+                        .font(.system(size: 10, weight: .medium))
+                }
+                .toggleStyle(.switch)
+                .controlSize(.mini)
+                .help("Zero-Drop Auto-Failover: automatically switch to healthy backup provider/model on 429/503 errors")
+            }
+
+            Divider()
+
+            // Pinned Hard Constraints Section
+            VStack(alignment: .leading, spacing: 6) {
+                HStack {
+                    Image(systemName: "pin.fill")
+                        .font(.system(size: 9.5))
+                        .foregroundColor(.purple)
+                    Text("Pinned Hard Constraints (Never Pruned)")
+                        .font(.system(size: 10.5, weight: .bold))
+                    Spacer()
+                }
+
+                HStack(spacing: 6) {
+                    TextField("Add constraint (e.g. Use Swift 6, Do not touch auth)...", text: $newPinnedConstraintText)
+                        .textFieldStyle(.plain)
+                        .font(.system(size: 10.5))
+                        .padding(.horizontal, 6)
+                        .padding(.vertical, 4)
+                        .background(Color.primary.opacity(0.06))
+                        .cornerRadius(4)
+                        .onSubmit {
+                            agent.addPinnedConstraint(newPinnedConstraintText)
+                            newPinnedConstraintText = ""
+                        }
+                    Button("Pin") {
+                        agent.addPinnedConstraint(newPinnedConstraintText)
+                        newPinnedConstraintText = ""
+                    }
+                    .font(.system(size: 10, weight: .semibold))
+                    .padding(.horizontal, 8)
+                    .padding(.vertical, 4)
+                    .background(Color.purple.opacity(0.16))
+                    .foregroundColor(.purple)
+                    .cornerRadius(4)
+                    .buttonStyle(.plain)
+                    .disabled(newPinnedConstraintText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                }
+
+                if agent.pinnedConstraints.isEmpty {
+                    Text("No pinned constraints yet. Pinned rules stay at the top of system context across every turn.")
+                        .font(.system(size: 9.5))
+                        .foregroundColor(.secondary)
+                } else {
+                    ScrollView {
+                        VStack(alignment: .leading, spacing: 4) {
+                            ForEach(Array(agent.pinnedConstraints.enumerated()), id: \.offset) { idx, item in
+                                HStack(spacing: 6) {
+                                    Image(systemName: "pin.circle.fill")
+                                        .font(.system(size: 10))
+                                        .foregroundColor(.purple)
+                                    Text(item)
+                                        .font(.system(size: 10))
+                                        .lineLimit(2)
+                                    Spacer()
+                                    Button {
+                                        agent.removePinnedConstraint(at: idx)
+                                    } label: {
+                                        Image(systemName: "xmark.circle.fill")
+                                            .font(.system(size: 10))
+                                            .foregroundColor(.secondary)
+                                    }
+                                    .buttonStyle(.plain)
+                                }
+                                .padding(.horizontal, 6)
+                                .padding(.vertical, 3)
+                                .background(Color.primary.opacity(0.04))
+                                .cornerRadius(4)
+                            }
+                        }
+                    }
+                    .frame(maxHeight: 110)
+                }
+            }
+        }
+        .padding(12)
+        .frame(width: 350)
+    }
+
+    private func contextXRayRow(label: String, tokens: Int, total: Int, color: Color) -> some View {
+        let pct = Int(round((Double(tokens) / Double(max(1, total))) * 100))
+        return HStack(spacing: 6) {
+            Circle()
+                .fill(color)
+                .frame(width: 6, height: 6)
+            Text(label)
+                .font(.system(size: 10))
+                .foregroundColor(.primary.opacity(0.85))
+            Spacer()
+            Text("\(tokens.formatted()) tok (\(pct)%)")
+                .font(.system(size: 9.5, design: .monospaced))
+                .foregroundColor(.secondary)
+        }
     }
     
     private var voiceInputButton: some View {
@@ -2762,6 +3625,11 @@ struct AIAgentView: View {
                 inputText = "/review " + inputText
             }) {
                 Label("Code Review (/review)", systemImage: "checkmark.shield")
+            }
+            Button(action: {
+                isCompareMode.toggle()
+            }) {
+                Label(isCompareMode ? "Disable Compare Mode (/compare)" : "Compare 2 Models (/compare)", systemImage: "rectangle.split.2x1")
             }
         } label: {
             Image(systemName: "plus")
@@ -2814,9 +3682,10 @@ struct AIAgentView: View {
             )
             .font(.system(size: 11, weight: .medium))
             .lineLimit(1)
+            .truncationMode(.tail)
         }
         .menuStyle(.borderlessButton)
-        .fixedSize()
+        .frame(maxWidth: 235)
         .padding(.horizontal, 7)
         .padding(.vertical, 3)
         .background(Color.primary.opacity(0.06))
@@ -2832,22 +3701,38 @@ struct AIAgentView: View {
             let hasInput = !inputText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || !attachments.isEmpty
             
             if agent.isLoading {
-                if hasInput {
-                    // Queue Button (Adds prompt to queue without stopping current task)
-                    Button(action: sendMessage) {
-                        ZStack {
-                            Circle()
-                                .fill(Color.orange)
-                                .frame(width: 26, height: 26)
-                            Image(systemName: "plus")
-                                .font(.system(size: 12, weight: .bold))
-                                .foregroundColor(.white)
+                HStack(spacing: 5) {
+                    if hasInput {
+                        // Queue Button (Adds prompt to queue without stopping current task)
+                        Button(action: enqueueCurrentInput) {
+                            ZStack {
+                                Circle()
+                                    .fill(Color.orange.opacity(0.88))
+                                    .frame(width: 24, height: 24)
+                                Image(systemName: "plus")
+                                    .font(.system(size: 11, weight: .bold))
+                                    .foregroundColor(.white)
+                            }
                         }
+                        .buttonStyle(.plain)
+                        .help("Add to Queue (Runs after active task finishes)")
+
+                        // Send Now Button (Stops current loop & sends new message immediately)
+                        Button(action: sendMessage) {
+                            ZStack {
+                                Circle()
+                                    .fill(Color.accentColor)
+                                    .frame(width: 26, height: 26)
+                                Image(systemName: "arrow.up")
+                                    .font(.system(size: 11, weight: .bold))
+                                    .foregroundColor(.white)
+                            }
+                        }
+                        .buttonStyle(.plain)
+                        .help("Send Immediately (Interrupts active loop and starts new message)")
                     }
-                    .buttonStyle(.plain)
-                    .help("Add to Queue (Runs automatically after active task finishes)")
-                } else {
-                    // Stop Button (Only when input is empty)
+
+                    // Stop Button
                     Button(action: {
                         agent.stopGeneration()
                         acpHost.stopActiveAgent()
@@ -2886,44 +3771,54 @@ struct AIAgentView: View {
     // MARK: - Suggested Action Bar
     
     private func suggestedActionBar(_ suggestion: SuggestedAction) -> some View {
-        HStack(spacing: 8) {
-            VStack(alignment: .leading, spacing: 1) {
-                Text(suggestion.title)
-                    .font(.system(size: 11, weight: .bold))
-                    .foregroundColor(.primary)
-                Text(suggestion.description)
-                    .font(.system(size: 9))
-                    .foregroundColor(.secondary)
-            }
+        HStack(spacing: 0) {
+            Spacer(minLength: 0)
             
-            Spacer()
-            
-            Button(action: {
-                // TODO: Run project command
-                inputText = "Run the project and show me the output"
-                sendMessage()
-                agent.suggestedAction = nil
-            }) {
-                Text("Run")
-                    .font(.system(size: 10, weight: .bold))
-                    .foregroundColor(.primary)
-                    .padding(.horizontal, 12)
-                    .padding(.vertical, 4)
-                    .background(Color.primary.opacity(0.09))
-                    .cornerRadius(4)
+            HStack(spacing: 8) {
+                VStack(alignment: .leading, spacing: 1) {
+                    Text(suggestion.title)
+                        .font(.system(size: 11, weight: .bold))
+                        .foregroundColor(.primary)
+                    Text(suggestion.description)
+                        .font(.system(size: 9))
+                        .foregroundColor(.secondary)
+                }
+                
+                Spacer()
+                
+                Button(action: {
+                    inputText = "Run the project and show me the output"
+                    sendMessage()
+                    agent.suggestedAction = nil
+                }) {
+                    Text("Run")
+                        .font(.system(size: 10, weight: .bold))
+                        .foregroundColor(.primary)
+                        .padding(.horizontal, 12)
+                        .padding(.vertical, 4)
+                        .background(Color.primary.opacity(0.09))
+                        .cornerRadius(4)
+                }
+                .buttonStyle(.plain)
+                
+                Button(action: { agent.suggestedAction = nil }) {
+                    Text("Dismiss")
+                        .font(.system(size: 9))
+                        .foregroundColor(.secondary)
+                }
+                .buttonStyle(.plain)
             }
-            .buttonStyle(.plain)
+            .padding(.horizontal, 12)
+            .padding(.vertical, 6)
+            .background(Color.primary.opacity(0.035))
+            .cornerRadius(8)
+            .overlay(RoundedRectangle(cornerRadius: 8).stroke(Color.primary.opacity(0.08), lineWidth: 0.5))
+            .frame(maxWidth: 880)
             
-            Button(action: { agent.suggestedAction = nil }) {
-                Text("Dismiss")
-                    .font(.system(size: 9))
-                    .foregroundColor(.secondary)
-            }
-            .buttonStyle(.plain)
+            Spacer(minLength: 0)
         }
-        .padding(.horizontal, 12)
-        .padding(.vertical, 6)
-        .background(Color.primary.opacity(0.035))
+        .padding(.horizontal, 14)
+        .padding(.bottom, 4)
         .transition(.move(edge: .bottom).combined(with: .opacity))
     }
     
@@ -2932,7 +3827,7 @@ struct AIAgentView: View {
     private var liveTaskActivityBanner: some View {
         let latestToolCount = agent.messages.last?.toolResults.count ?? 0
         return HStack(spacing: 0) {
-            Spacer(minLength: 14)
+            Spacer(minLength: 0)
             
             HStack(spacing: 8) {
                 ProgressView()
@@ -2948,13 +3843,15 @@ struct AIAgentView: View {
                     Text("\(latestToolCount) step\(latestToolCount == 1 ? "" : "s")")
                         .font(.system(size: 9.5, weight: .semibold, design: .monospaced))
                         .foregroundColor(.accentColor)
+                        .lineLimit(1)
+                        .fixedSize(horizontal: true, vertical: false)
                         .padding(.horizontal, 6)
                         .padding(.vertical, 2)
                         .background(Color.accentColor.opacity(0.12))
                         .clipShape(Capsule())
                 }
                 
-                Spacer(minLength: 6)
+                Spacer(minLength: 4)
                 
                 Button(action: {
                     withAnimation(.easeInOut(duration: 0.2)) {
@@ -2979,7 +3876,9 @@ struct AIAgentView: View {
                             .font(.system(size: 9.5))
                         Text(planManager.currentPlan != nil ? "Plan" : "Tasks")
                             .font(.system(size: 10, weight: .semibold))
+                            .lineLimit(1)
                     }
+                    .fixedSize(horizontal: true, vertical: false)
                     .foregroundColor(.secondary)
                     .padding(.horizontal, 6)
                     .padding(.vertical, 3)
@@ -3005,7 +3904,9 @@ struct AIAgentView: View {
                             .font(.system(size: 9))
                         Text("\(agent.activityLog.count)")
                             .font(.system(size: 9, weight: .bold, design: .monospaced))
+                            .lineLimit(1)
                     }
+                    .fixedSize(horizontal: true, vertical: false)
                     .foregroundColor(.secondary)
                     .padding(.horizontal, 6)
                     .padding(.vertical, 3)
@@ -3024,7 +3925,9 @@ struct AIAgentView: View {
                             .font(.system(size: 8, weight: .bold))
                         Text("Stop")
                             .font(.system(size: 9.5, weight: .semibold))
+                            .lineLimit(1)
                     }
+                    .fixedSize(horizontal: true, vertical: false)
                     .foregroundColor(.red.opacity(0.9))
                     .padding(.horizontal, 7)
                     .padding(.vertical, 3)
@@ -3041,8 +3944,9 @@ struct AIAgentView: View {
             .overlay(RoundedRectangle(cornerRadius: 8).stroke(Color.primary.opacity(0.1), lineWidth: 0.5))
             .frame(maxWidth: 880)
             
-            Spacer(minLength: 14)
+            Spacer(minLength: 0)
         }
+        .padding(.horizontal, 14)
         .padding(.bottom, 4)
         .transition(.move(edge: .bottom).combined(with: .opacity))
     }
@@ -3050,47 +3954,55 @@ struct AIAgentView: View {
     // MARK: - Context Limit Banner
     
     private var contextLimitBanner: some View {
-        HStack(spacing: 10) {
-            Image(systemName: "exclamationmark.triangle.fill")
-                .foregroundColor(.orange)
-                .font(.system(size: 13))
+        HStack(spacing: 0) {
+            Spacer(minLength: 0)
             
-            VStack(alignment: .leading, spacing: 2) {
-                Text("Conversation Context Limit Reached")
-                    .font(.system(size: 11, weight: .semibold))
-                    .foregroundColor(.primary)
-                Text("The current thread has utilized its full token window. Start a new conversation for optimal reasoning and speed.")
-                    .font(.system(size: 10))
-                    .foregroundColor(.secondary)
-            }
-            
-            Spacer()
-            
-            Button(action: {
-                _ = agent.createNewChat(projectPath: agent.currentWorkspace ?? scopedWorkspacePath)
-            }) {
-                HStack(spacing: 4) {
-                    Image(systemName: "plus.bubble.fill")
-                    Text("New Conversation")
+            HStack(spacing: 10) {
+                Image(systemName: "exclamationmark.triangle.fill")
+                    .foregroundColor(.orange)
+                    .font(.system(size: 13))
+                
+                VStack(alignment: .leading, spacing: 2) {
+                    Text("Conversation Context Limit Reached")
+                        .font(.system(size: 11, weight: .semibold))
+                        .foregroundColor(.primary)
+                    Text("The current thread has utilized its full token window. Start a new conversation for optimal reasoning and speed.")
+                        .font(.system(size: 10))
+                        .foregroundColor(.secondary)
                 }
-                .font(.system(size: 10, weight: .semibold))
-                .padding(.horizontal, 10)
-                .padding(.vertical, 5)
-                .background(Color.accentColor)
-                .foregroundColor(.white)
-                .cornerRadius(5)
+                
+                Spacer()
+                
+                Button(action: {
+                    _ = agent.createNewChat(projectPath: agent.currentWorkspace ?? scopedWorkspacePath)
+                }) {
+                    HStack(spacing: 4) {
+                        Image(systemName: "plus.bubble.fill")
+                        Text("New Conversation")
+                    }
+                    .font(.system(size: 10, weight: .semibold))
+                    .padding(.horizontal, 10)
+                    .padding(.vertical, 5)
+                    .background(Color.accentColor)
+                    .foregroundColor(.white)
+                    .cornerRadius(5)
+                }
+                .buttonStyle(.plain)
             }
-            .buttonStyle(.plain)
+            .padding(.horizontal, 12)
+            .padding(.vertical, 8)
+            .background(Color.orange.opacity(0.1))
+            .cornerRadius(8)
+            .overlay(
+                RoundedRectangle(cornerRadius: 8)
+                    .stroke(Color.orange.opacity(0.25), lineWidth: 0.5)
+            )
+            .frame(maxWidth: 880)
+            
+            Spacer(minLength: 0)
         }
-        .padding(.horizontal, 12)
-        .padding(.vertical, 8)
-        .background(Color.orange.opacity(0.1))
-        .overlay(
-            Rectangle()
-                .frame(height: 1)
-                .foregroundColor(Color.orange.opacity(0.25)),
-            alignment: .top
-        )
+        .padding(.horizontal, 14)
+        .padding(.bottom, 4)
         .transition(.move(edge: .bottom).combined(with: .opacity))
     }
     
@@ -3192,9 +4104,15 @@ struct AIAgentView: View {
         var userText = inputText
         let currentAttachments = attachments
         
-        // Dismiss any open suggestions
+        // Dismiss any open suggestions and ensure Chat stage is visible (not hidden behind full-column Plan/Task views)
         showSlashSuggestions = false
         showContextSuggestions = false
+        isTaskMode = false
+        isWalkthroughMode = false
+        isPaperMode = false
+        isPlanFullscreen = false
+        isPlanMode = false
+        planManager.isPlanVisible = false
         
         inputText = ""
         attachments = []
@@ -3233,10 +4151,51 @@ struct AIAgentView: View {
                     // Model switching placeholder — show current info
                     let modelMsg = AgentMessageModel(
                         id: UUID().uuidString, role: .assistant,
-                        content: "🤖 Model selection is available in the settings panel. Use the model picker above the chat input.",
+                        content: "Model selection is available in the settings panel. Use the model picker above the chat input.",
                         toolResults: [], pendingChanges: [], timestamp: Date()
                     )
                     agent.messages.append(modelMsg)
+                    return
+                case .learn:
+                    let ruleText = parsed.argument.trimmingCharacters(in: .whitespacesAndNewlines)
+                    let ws = agent.currentWorkspace ?? appState.workspaceFolder?.path ?? FileManager.default.currentDirectoryPath
+                    if !ruleText.isEmpty {
+                        ProjectMemoryService.shared.appendLearnedRule(ruleText, workspace: ws)
+                        let savedMsg = AgentMessageModel(
+                            id: UUID().uuidString, role: .assistant,
+                            content: "**Saved Project Rule** to `.microcode/rules.md`:\n\n- \(ruleText)",
+                            toolResults: [], pendingChanges: [], timestamp: Date()
+                        )
+                        agent.messages.append(savedMsg)
+                    } else {
+                        let usageMsg = AgentMessageModel(
+                            id: UUID().uuidString, role: .assistant,
+                            content: "Usage: `/learn <rule>` — appends a persistent rule to `.microcode/rules.md` and injects it automatically into all future Agent turns.",
+                            toolResults: [], pendingChanges: [], timestamp: Date()
+                        )
+                        agent.messages.append(usageMsg)
+                    }
+                    return
+                case .compare:
+                    isCompareMode = true
+                    let arg = parsed.argument.trimmingCharacters(in: .whitespacesAndNewlines)
+                    if arg.isEmpty {
+                        let cmpMsg = AgentMessageModel(
+                            id: UUID().uuidString, role: .assistant,
+                            content: "**Compare Mode Enabled** (`\(appState.aiModel)` vs `\(compareSecondaryModel)`). Send your next prompt to compare both models side-by-side.",
+                            toolResults: [], pendingChanges: [], timestamp: Date()
+                        )
+                        agent.messages.append(cmpMsg)
+                        return
+                    }
+                    userText = arg
+                case .squad:
+                    let arg = parsed.argument.trimmingCharacters(in: .whitespacesAndNewlines)
+                    if arg.isEmpty {
+                        subAgentHarness.showSquadBuilderSheet = true
+                        return
+                    }
+                    runCEOSquadMessage(arg, attachments: currentAttachments)
                     return
                 default:
                     // Transform slash command into a prompt
@@ -3254,13 +4213,196 @@ struct AIAgentView: View {
             contextProviderService.clearAll()
         }
         
-        // If AI is busy, queue the message
-        if agent.isLoading || agent.isProcessingQueue {
-            agent.enqueueMessage(userText, attachments: currentAttachments)
+        // If Compare Mode (2 Models Arena) is active, run both models in parallel
+        if isCompareMode {
+            runCompareArenaMessage(userText, attachments: currentAttachments)
             return
         }
         
+        // If AI is busy when the user hits Enter / Send, interrupt the current turn cleanly
+        // (preserving its partial output as a permanent message) and start the new request immediately.
+        if agent.isLoading {
+            agent.stopGeneration(autoProcessQueue: false)
+            acpHost.stopActiveAgent()
+        }
+        
         executeMessage(userText, attachments: currentAttachments)
+    }
+
+    private func enqueueCurrentInput() {
+        let trimmedText = inputText.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmedText.isEmpty || !attachments.isEmpty else { return }
+        var userText = trimmedText
+        let currentAttachments = attachments
+        inputText = ""
+        attachments = []
+        let contextPrompt = contextProviderService.buildContextPrompt()
+        if !contextPrompt.isEmpty {
+            userText = userText + "\n\n" + contextPrompt
+            contextProviderService.clearAll()
+        }
+        agent.enqueueMessage(userText, attachments: currentAttachments)
+    }
+    
+    private func runCompareArenaMessage(_ userText: String, attachments currentAttachments: [AIAttachment] = []) {
+        let fullUserContent = userText + (currentAttachments.isEmpty ? "" : "\n[Attached: \(currentAttachments.map(\.name).joined(separator: ", "))]")
+        _ = agent.prepareUserTurn(fullUserContent, createStreamingPlaceholder: false)
+        
+        let responseId = UUID().uuidString
+        let primaryModel = appState.aiModel.isEmpty ? "gemini-3.8-flash" : appState.aiModel
+        let secondaryModel = (compareSecondaryModel == primaryModel) ? "claude-sonnet-5-5@default" : compareSecondaryModel
+        let providerString = appState.aiProvider
+        let primaryProvider = StreamableAIProvider(rawValue: providerString) ?? .gemini
+        let secondaryProvider = StreamableAIProvider.detect(from: secondaryModel)
+        let primaryKey = appState.resolveApiKey(for: providerString)
+        let secondaryKey = appState.resolveApiKey(for: secondaryProvider.rawValue)
+        
+        agent.messages.append(AgentMessageModel(
+            id: responseId, role: .assistant,
+            content: "### Compare Arena: `\(primaryModel)` vs `\(secondaryModel)`\n\nGenerating parallel responses...",
+            toolResults: [], pendingChanges: [], timestamp: Date()
+        ))
+        agent.isLoading = true
+        agent.saveChats()
+        
+        Task { @MainActor in
+            let sysPrompt = "You are MicroCode AI — a senior software engineering assistant. Respond clearly and concisely in the user's language."
+            let msgs: [[(String, Any)]] = [[("_role", "user"), ("text", userText)]]
+            
+            async let primaryTask: String = {
+                do {
+                    let res = try await AIClient.shared.sendSync(
+                        messages: msgs,
+                        systemPrompt: sysPrompt,
+                        provider: primaryProvider,
+                        model: primaryModel,
+                        apiKey: primaryKey,
+                        tools: nil
+                    )
+                    return res.text
+                } catch {
+                    return "Error: \(error.localizedDescription)"
+                }
+            }()
+            
+            async let secondaryTask: String = {
+                do {
+                    let res = try await AIClient.shared.sendSync(
+                        messages: msgs,
+                        systemPrompt: sysPrompt,
+                        provider: secondaryProvider,
+                        model: secondaryModel,
+                        apiKey: secondaryKey,
+                        tools: nil
+                    )
+                    return res.text
+                } catch {
+                    return "Error: \(error.localizedDescription)"
+                }
+            }()
+            
+            let (outA, outB) = await (primaryTask, secondaryTask)
+            let combined = """
+            ### Model A: `\(primaryModel)`
+            
+            \(outA.isEmpty ? "_(No output)_" : outA)
+            
+            ---
+            
+            ### Model B: `\(secondaryModel)`
+            
+            \(outB.isEmpty ? "_(No output)_" : outB)
+            """
+            
+            if let idx = self.agent.messages.firstIndex(where: { $0.id == responseId }) {
+                self.agent.messages[idx] = AgentMessageModel(
+                    id: responseId, role: .assistant, content: combined,
+                    toolResults: [], pendingChanges: [], timestamp: Date()
+                )
+            }
+            self.agent.isLoading = false
+            self.agent.saveChats()
+        }
+    }
+    
+    private func runCEOSquadMessage(_ userText: String, attachments currentAttachments: [AIAttachment] = []) {
+        let fullUserContent = userText + (currentAttachments.isEmpty ? "" : "\n[Attached: \(currentAttachments.map(\.name).joined(separator: ", "))]")
+        _ = agent.prepareUserTurn(fullUserContent, createStreamingPlaceholder: false)
+        
+        let responseId = UUID().uuidString
+        let preset = subAgentHarness.activeSquadPreset ?? AgentSquadPreset.builtInPresets[0]
+        agent.messages.append(AgentMessageModel(
+            id: responseId, role: .assistant,
+            content: "👔 **CEO & Specialist Squad (`\(preset.name)`)** กำลังเริ่มต้นประชุมแบ่งงานและล็อกขอบเขตไฟล์...",
+            toolResults: [], pendingChanges: [], timestamp: Date()
+        ))
+        agent.isLoading = true
+        agent.saveChats()
+        let ws = agent.currentWorkspace ?? appState.workspaceFolder?.path
+        
+        Task { @MainActor in
+            let finalReport = await SubAgentHarness.shared.runCEOSquadSession(
+                objective: userText,
+                workspacePath: ws,
+                presetOverride: preset,
+                onProgress: { statusText in
+                    if let idx = self.agent.messages.firstIndex(where: { $0.id == responseId }) {
+                        self.agent.messages[idx] = AgentMessageModel(
+                            id: responseId, role: .assistant,
+                            content: statusText,
+                            toolResults: [], pendingChanges: [], timestamp: Date()
+                        )
+                    }
+                }
+            )
+            if let idx = self.agent.messages.firstIndex(where: { $0.id == responseId }) {
+                self.agent.messages[idx] = AgentMessageModel(
+                    id: responseId, role: .assistant,
+                    content: finalReport,
+                    toolResults: [], pendingChanges: [], timestamp: Date()
+                )
+            }
+            self.agent.isLoading = false
+            self.agent.saveChats()
+        }
+    }
+    
+    private func runDirectSubAgentMessage(typeName: String, userText: String, attachments currentAttachments: [AIAttachment] = []) {
+        let fullUserContent = userText + (currentAttachments.isEmpty ? "" : "\n[Attached: \(currentAttachments.map(\.name).joined(separator: ", "))]")
+        _ = agent.prepareUserTurn(fullUserContent, createStreamingPlaceholder: false)
+        
+        let responseId = UUID().uuidString
+        let roleName = SubAgentHarness.shared.registeredDefinitions[typeName]?.role ?? typeName.capitalized
+        let ws = agent.currentWorkspace ?? appState.workspaceFolder?.path
+        let instance = SubAgentHarness.shared.invokeSubagent(
+            typeName: typeName,
+            role: roleName,
+            prompt: userText,
+            workspacePath: ws
+        )
+        agent.messages.append(AgentMessageModel(
+            id: responseId, role: .assistant,
+            content: "⚡ **[\(roleName)] (`\(instance.endpointBadge ?? "Active Model")`)** กำลังดำเนินการ...",
+            toolResults: [], pendingChanges: [], timestamp: Date()
+        ))
+        agent.isLoading = true
+        agent.saveChats()
+        
+        Task { @MainActor in
+            let outcome = try? await SubAgentHarness.shared.waitForSubagent(id: instance.id)
+            let report = outcome?.instance.finalReport ?? outcome?.instance.stateDetail ?? "SubAgent finished."
+            let badge = outcome?.instance.endpointBadge ?? roleName
+            let formatted = "### ⚡ \(roleName) (`\(badge)`)\n\n\(report)"
+            if let idx = self.agent.messages.firstIndex(where: { $0.id == responseId }) {
+                self.agent.messages[idx] = AgentMessageModel(
+                    id: responseId, role: .assistant,
+                    content: formatted,
+                    toolResults: [], pendingChanges: [], timestamp: Date()
+                )
+            }
+            self.agent.isLoading = false
+            self.agent.saveChats()
+        }
     }
     
     private func executeMessage(_ userText: String, attachments currentAttachments: [AIAttachment] = []) {
@@ -3281,106 +4423,87 @@ struct AIAgentView: View {
         // Never overwrite the independent Science workspace with the Editor's
         // project when a message is sent.
         if sessionScope == .editor, let workspace = appState.workspaceFolder {
-            agent.setWorkspace(workspace.path)
-        }
-        
-        // Route to External ACP Agent (Claude Code, Antigravity, OpenCode, Aider, Codex Engine, Zed) if active or if engine selected
-        var targetConfig: ACPAgentConfig? = nil
-        if let activeAgentId = acpHost.activeAgentId,
-           let cfg = acpHost.registeredConfigs.first(where: { $0.id == activeAgentId }) {
-            targetConfig = cfg
-        } else if appState.aiProvider == "agy" {
-            targetConfig = acpHost.registeredConfigs.first(where: { $0.type == .agy }) ?? {
-                let bin = LocalEcosystemDiscovery.shared.engines.first(where: { $0.id == "agy" })?.binaryPath ?? ACPAgentType.agy.defaultCommand
-                let cfg = ACPAgentConfig.defaultConfig(for: .agy, command: bin)
-                acpHost.registerAgent(cfg)
-                return cfg
-            }()
-        } else if appState.aiProvider == "claude_code" {
-            targetConfig = acpHost.registeredConfigs.first(where: { $0.type == .claudeCode }) ?? {
-                let bin = LocalEcosystemDiscovery.shared.engines.first(where: { $0.id == "claude_code" })?.binaryPath ?? ACPAgentType.claudeCode.defaultCommand
-                let cfg = ACPAgentConfig.defaultConfig(for: .claudeCode, command: bin)
-                acpHost.registerAgent(cfg)
-                return cfg
-            }()
-        } else if appState.aiProvider == "opencode" {
-            targetConfig = acpHost.registeredConfigs.first(where: { $0.type == .openCode }) ?? {
-                let bin = LocalEcosystemDiscovery.shared.engines.first(where: { $0.id == "opencode" })?.binaryPath ?? ACPAgentType.openCode.defaultCommand
-                let cfg = ACPAgentConfig.defaultConfig(for: .openCode, command: bin)
-                acpHost.registerAgent(cfg)
-                return cfg
-            }()
-        } else if appState.aiProvider == "codex" {
-            targetConfig = acpHost.registeredConfigs.first(where: { $0.type == .codexEngine }) ?? {
-                let bin = LocalEcosystemDiscovery.shared.engines.first(where: { $0.id == "codex" })?.binaryPath ?? ACPAgentType.codexEngine.defaultCommand
-                let cfg = ACPAgentConfig.defaultConfig(for: .codexEngine, command: bin)
-                acpHost.registerAgent(cfg)
-                return cfg
-            }()
-        } else if appState.aiProvider == "zed" {
-            targetConfig = acpHost.registeredConfigs.first(where: { $0.type == .zedEngine }) ?? {
-                let bin = LocalEcosystemDiscovery.shared.engines.first(where: { $0.id == "zed" })?.binaryPath ?? ACPAgentType.zedEngine.defaultCommand
-                let cfg = ACPAgentConfig.defaultConfig(for: .zedEngine, command: bin)
-                acpHost.registerAgent(cfg)
-                return cfg
-            }()
-        } else if currentKeyMode == "subscription" {
-            // In Subscription mode, if the selected provider/model is backed by an authenticated local CLI session
-            // (e.g. Claude Code OAuth in ~/.claude.json or Google Antigravity CLI) rather than a raw pay-as-you-go API key,
-            // transparently execute through that CLI engine while keeping the UI in Subscription mode.
-            let activeSubRaw = UserDefaults.standard.string(forKey: "subscriptionActiveProvider")
-            let subProvider: SubscriptionProviderType = {
-                if let raw = activeSubRaw, let explicit = SubscriptionProviderType(rawValue: raw) {
-                    return explicit
-                }
-                if let matched = SubscriptionAuthManager.shared.findModel(id: appState.aiModel)?.provider {
-                    return matched
-                }
-                switch appState.aiProvider {
-                case "anthropic": return .claude
-                case "gemini": return .gemini
-                case "deepseek": return .deepseek
-                case "glm": return .glm
-                case "copilot": return .copilot
-                default: return .chatgpt
-                }
-            }()
-            if let cliEngine = SubscriptionAuthManager.shared.preferredCLIEngine(for: subProvider, model: appState.aiModel) {
-                if cliEngine == "claude_code" {
-                    targetConfig = acpHost.registeredConfigs.first(where: { $0.type == .claudeCode }) ?? {
-                        let bin = LocalEcosystemDiscovery.shared.engines.first(where: { $0.id == "claude_code" })?.binaryPath ?? ACPAgentType.claudeCode.defaultCommand
-                        let cfg = ACPAgentConfig.defaultConfig(for: .claudeCode, command: bin)
-                        acpHost.registerAgent(cfg)
-                        return cfg
-                    }()
-                } else if cliEngine == "agy" {
-                    targetConfig = acpHost.registeredConfigs.first(where: { $0.type == .agy }) ?? {
-                        let bin = LocalEcosystemDiscovery.shared.engines.first(where: { $0.id == "agy" })?.binaryPath ?? ACPAgentType.agy.defaultCommand
-                        let cfg = ACPAgentConfig.defaultConfig(for: .agy, command: bin)
-                        acpHost.registerAgent(cfg)
-                        return cfg
-                    }()
-                }
+            if agent.currentWorkspace != workspace.path {
+                agent.setWorkspace(workspace.path)
             }
         }
         
-        // Fast-path for Codex: if Codex OAuth credentials (~/.codex/auth.json) are available,
-        // route directly via AIClient's native Codex Responses SSE stream + AgentToolBox
-        // to avoid spawning the local codex subprocess when its external MCP servers time out.
+        // Route to CEO & Specialist Squad Mode when a Squad Preset is selected in SubAgentSelectorMenu
+        if selectedSubAgentType.hasPrefix("squad:") {
+            let presetId = String(selectedSubAgentType.dropFirst("squad:".count))
+            subAgentHarness.activeSquadPresetId = presetId
+            runCEOSquadMessage(userText, attachments: currentAttachments)
+            return
+        }
+        
+        // Route to a specific Specialized SubAgent when selected in SubAgentSelectorMenu
+        if selectedSubAgentType != "main" {
+            runDirectSubAgentMessage(typeName: selectedSubAgentType, userText: userText, attachments: currentAttachments)
+            return
+        }
+        
+        // Route to External ACP Agent (Claude Code, Antigravity, OpenCode, Aider, Codex Engine, Zed) ONLY when explicitly in ACP mode
+        var targetConfig: ACPAgentConfig? = nil
+        let isExplicitACPMode = (UserDefaults.standard.string(forKey: "aiKeyMode") == "acp") || (acpHost.activeAgentId != nil)
+        if let activeAgentId = acpHost.activeAgentId,
+           let cfg = acpHost.registeredConfigs.first(where: { $0.id == activeAgentId }) {
+            targetConfig = cfg
+        } else if isExplicitACPMode {
+            if appState.aiProvider == "agy" {
+                targetConfig = acpHost.registeredConfigs.first(where: { $0.type == .agy }) ?? {
+                    let bin = LocalEcosystemDiscovery.shared.engines.first(where: { $0.id == "agy" })?.binaryPath ?? ACPAgentType.agy.defaultCommand
+                    let cfg = ACPAgentConfig.defaultConfig(for: .agy, command: bin)
+                    acpHost.registerAgent(cfg)
+                    return cfg
+                }()
+            } else if appState.aiProvider == "claude_code" {
+                targetConfig = acpHost.registeredConfigs.first(where: { $0.type == .claudeCode }) ?? {
+                    let bin = LocalEcosystemDiscovery.shared.engines.first(where: { $0.id == "claude_code" })?.binaryPath ?? ACPAgentType.claudeCode.defaultCommand
+                    let cfg = ACPAgentConfig.defaultConfig(for: .claudeCode, command: bin)
+                    acpHost.registerAgent(cfg)
+                    return cfg
+                }()
+            } else if appState.aiProvider == "opencode" {
+                targetConfig = acpHost.registeredConfigs.first(where: { $0.type == .openCode }) ?? {
+                    let bin = LocalEcosystemDiscovery.shared.engines.first(where: { $0.id == "opencode" })?.binaryPath ?? ACPAgentType.openCode.defaultCommand
+                    let cfg = ACPAgentConfig.defaultConfig(for: .openCode, command: bin)
+                    acpHost.registerAgent(cfg)
+                    return cfg
+                }()
+            } else if appState.aiProvider == "codex" {
+                targetConfig = acpHost.registeredConfigs.first(where: { $0.type == .codexEngine }) ?? {
+                    let bin = LocalEcosystemDiscovery.shared.engines.first(where: { $0.id == "codex" })?.binaryPath ?? ACPAgentType.codexEngine.defaultCommand
+                    let cfg = ACPAgentConfig.defaultConfig(for: .codexEngine, command: bin)
+                    acpHost.registerAgent(cfg)
+                    return cfg
+                }()
+            } else if appState.aiProvider == "zed" {
+                targetConfig = acpHost.registeredConfigs.first(where: { $0.type == .zedEngine }) ?? {
+                    let bin = LocalEcosystemDiscovery.shared.engines.first(where: { $0.id == "zed" })?.binaryPath ?? ACPAgentType.zedEngine.defaultCommand
+                    let cfg = ACPAgentConfig.defaultConfig(for: .zedEngine, command: bin)
+                    acpHost.registerAgent(cfg)
+                    return cfg
+                }()
+            }
+        }
+        
+        // Native ChatGPT Plus / Pro OAuth stream (~/.codex/auth.json -> chatgpt.com/backend-api/codex/responses)
         var useDirectCodexOAuth = false
-        if (targetConfig?.type == .codexEngine || appState.aiProvider == "codex"),
-           AIClient.loadCodexOAuthCredentials(fallbackToken: "") != nil {
+        let chatgptSubToken = SubscriptionAuthManager.shared.getAccount(.chatgpt)?.sessionToken ?? ""
+        let isSubscriptionChatGPT = (currentKeyMode == "subscription" && appState.aiProvider == "openai" && !chatgptSubToken.hasPrefix("sk-"))
+        if isSubscriptionChatGPT, AIClient.loadCodexOAuthCredentials(fallbackToken: chatgptSubToken) != nil {
+            useDirectCodexOAuth = true
+        } else if targetConfig?.type == .codexEngine,
+                  let cmd = targetConfig?.command,
+                  !FileManager.default.isExecutableFile(atPath: cmd),
+                  AIClient.loadCodexOAuthCredentials(fallbackToken: chatgptSubToken) != nil {
             targetConfig = nil
             useDirectCodexOAuth = true
         }
         
         if let activeConfig = targetConfig {
-            let userMessage = AgentMessageModel(
-                id: UUID().uuidString, role: .user,
-                content: userText + (currentAttachments.isEmpty ? "" : "\n[Attached: \(currentAttachments.map(\.name).joined(separator: ", "))]"),
-                toolResults: [], pendingChanges: [], timestamp: Date()
-            )
-            agent.messages.append(userMessage)
+            let fullUserContent = userText + (currentAttachments.isEmpty ? "" : "\n[Attached: \(currentAttachments.map(\.name).joined(separator: ", "))]")
+            _ = agent.prepareUserTurn(fullUserContent, createStreamingPlaceholder: false)
             
             let responseId = UUID().uuidString
             agent.messages.append(AgentMessageModel(
@@ -3388,6 +4511,7 @@ struct AIAgentView: View {
                 toolResults: [], pendingChanges: [], timestamp: Date()
             ))
             agent.isLoading = true
+            agent.saveChats()
             
             let workspace = appState.workspaceFolder?.path ?? FileManager.default.currentDirectoryPath
             let session = acpHost.getOrCreateSession(for: activeConfig)
@@ -3399,7 +4523,7 @@ struct AIAgentView: View {
                 switch activeConfig.type {
                 case .agy:
                     let agyModels = LocalEcosystemDiscovery.shared.models(for: "agy").map(\.id)
-                    return agyModels.contains(appState.aiModel) ? appState.aiModel : (agyModels.first ?? "gemini-3-flash-agent")
+                    return agyModels.contains(appState.aiModel) ? appState.aiModel : (agyModels.first ?? "gemini-3.8-flash-low")
                 case .openCode:
                     let isAuthed = LocalEcosystemDiscovery.shared.engines.first(where: { $0.id == "opencode" })?.isAuthenticated ?? false
                     let openCodeModels = LocalEcosystemDiscovery.shared.models(for: "opencode").map(\.id)
@@ -3586,6 +4710,14 @@ struct AIAgentView: View {
                         break
                     }
                 }
+                if agent.isLoading {
+                    agent.isLoading = false
+                    agent.agentPhase = .idle
+                    agent.currentToolExecution = nil
+                    agent.saveChats()
+                    agent.saveArx()
+                }
+                agent.processQueue()
             }
             return
         }
@@ -3593,8 +4725,8 @@ struct AIAgentView: View {
         let providerString = useDirectCodexOAuth ? "openai" : appState.aiProvider
         let model: String = {
             if useDirectCodexOAuth {
-                let codexModels = LocalEcosystemDiscovery.shared.models(for: "codex").map(\.id)
-                if codexModels.contains(appState.aiModel) {
+                let lower = appState.aiModel.lowercased()
+                if !lower.isEmpty && (lower.hasPrefix("gpt") || lower.contains("codex")) {
                     return appState.aiModel
                 }
                 return AIClient.loadCodexOAuthCredentials(fallbackToken: "")?.defaultModel ?? "gpt-6-luna"
@@ -3604,24 +4736,19 @@ struct AIAgentView: View {
         let apiKey = useDirectCodexOAuth ? "codex_oauth" : appState.resolveApiKey(for: providerString)
         
         if appState.agentMode {
-            // Agent Mode: Use AgentService pipeline (tool execution + agentic loop)
-            Task {
-                await agent.sendMessage(
-                    userText,
-                    provider: providerString,
-                    model: model,
-                    apiKey: apiKey,
-                    attachments: currentAttachments
-                )
-            }
+            // Agent Mode: Synchronously append the user message & set isLoading = true on @MainActor
+            // before spawning the async tool loop so the UI updates in the exact same frame.
+            agent.startOrEnqueueMessage(
+                userText,
+                provider: providerString,
+                model: model,
+                apiKey: apiKey,
+                attachments: currentAttachments
+            )
         } else {
             // Simple Chat Mode: Direct AIClient streaming
-            let userMessage = AgentMessageModel(
-                id: UUID().uuidString, role: .user,
-                content: userText + (currentAttachments.isEmpty ? "" : "\n[Attached: \(currentAttachments.map(\.name).joined(separator: ", "))]"),
-                toolResults: [], pendingChanges: [], timestamp: Date()
-            )
-            agent.messages.append(userMessage)
+            let fullUserContent = userText + (currentAttachments.isEmpty ? "" : "\n[Attached: \(currentAttachments.map(\.name).joined(separator: ", "))]")
+            _ = agent.prepareUserTurn(fullUserContent, createStreamingPlaceholder: false)
             
             let responseId = UUID().uuidString
             agent.messages.append(AgentMessageModel(
@@ -3629,6 +4756,7 @@ struct AIAgentView: View {
                 toolResults: [], pendingChanges: [], timestamp: Date()
             ))
             agent.isLoading = true
+            agent.saveChats()
             
             let provider: StreamableAIProvider = StreamableAIProvider(rawValue: providerString) ?? .gemini
             let history: [(role: String, content: String)] = agent.messages.dropLast(2)
@@ -3643,11 +4771,12 @@ struct AIAgentView: View {
                 simpleChatPrompt = "You are MicroCode AI — a professional software engineering assistant integrated into the MicroCode IDE. Maintain a professional, clear, and authoritative tone. Provide well-structured, accurate responses with precise technical terminology. When the user asks about code, act as a senior software engineer providing production-quality solutions with clear code blocks. When the user writes in Thai, respond in Thai. When in English, respond in English. Be thorough but concise."
             }
             
+            let isDirectMediaModel = AIClient.isAiPassMediaModel(model)
             AIClient.shared.sendMessage(
                 prompt: userText,
                 attachments: currentAttachments,
-                systemPrompt: simpleChatPrompt,
-                conversationHistory: history,
+                systemPrompt: isDirectMediaModel ? nil : simpleChatPrompt,
+                conversationHistory: isDirectMediaModel ? [] : history,
                 provider: provider,
                 model: model,
                 apiKey: apiKey,
@@ -3663,6 +4792,7 @@ struct AIAgentView: View {
                 onComplete: { _ in
                     self.agent.isLoading = false
                     self.agent.saveChats()
+                    self.agent.processQueue()
                 },
                 onError: { error in
                     if let idx = self.agent.messages.firstIndex(where: { $0.id == responseId }) {
@@ -3673,6 +4803,7 @@ struct AIAgentView: View {
                     }
                     self.agent.isLoading = false
                     self.agent.saveChats()
+                    self.agent.processQueue()
                 }
             )
         }
@@ -3754,9 +4885,45 @@ struct AIAgentView: View {
         }
     }
     
+    // MARK: - Per-Message Actions (Revert, Edit & Resend, Retry, Delete)
+    
+    private func handleRevertToMessage(_ messageId: String) {
+        acpHost.stopActiveAgent()
+        if let restoredText = agent.revertToMessage(id: messageId, restoreFiles: true) {
+            inputText = restoredText
+            isInputFocused = true
+        }
+    }
+    
+    private func handleEditAndResendMessage(id messageId: String, newContent: String) {
+        let trimmed = newContent.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return }
+        acpHost.stopActiveAgent()
+        _ = agent.revertToMessage(id: messageId, restoreFiles: true)
+        inputText = trimmed
+        sendMessage()
+    }
+    
+    private func handleRetryAssistantMessage(_ assistantMessageId: String) {
+        acpHost.stopActiveAgent()
+        if let (userMsgId, promptText) = agent.precedingUserPrompt(forAssistantMessageId: assistantMessageId) {
+            _ = agent.revertToMessage(id: userMsgId, restoreFiles: true)
+            inputText = promptText
+            sendMessage()
+        } else {
+            // Fallback if no preceding user message found: just remove this assistant message
+            agent.deleteMessage(id: assistantMessageId, revertFiles: true)
+        }
+    }
+    
+    private func handleDeleteMessage(_ messageId: String, revertFiles: Bool = false) {
+        agent.deleteMessage(id: messageId, revertFiles: revertFiles)
+    }
+    
     // MARK: - Engine & Agent Switching Helpers
     
     private func switchToConfig(_ config: ACPAgentConfig) {
+        UserDefaults.standard.set("acp", forKey: "aiKeyMode")
         activeACPAgent = config
         acpHost.activeAgentId = config.id
         let engineId: String
@@ -3780,6 +4947,7 @@ struct AIAgentView: View {
     }
     
     private func switchToEngine(_ engineId: String, modelId: String) {
+        UserDefaults.standard.set("acp", forKey: "aiKeyMode")
         let type: ACPAgentType
         switch engineId {
         case "agy": type = .agy
@@ -3874,7 +5042,7 @@ struct AIAgentView: View {
             .truncationMode(.tail)
         }
         .menuStyle(.borderlessButton)
-        .fixedSize()
+        .frame(maxWidth: 195)
         .padding(.horizontal, 6)
         .padding(.vertical, 3)
         .background(Color.primary.opacity(0.06))
@@ -4297,23 +5465,37 @@ struct AIAgentView: View {
     private func subscriptionProviderSubmenu(prov: SubscriptionProviderType) -> some View {
         let isConnected = SubscriptionAuthManager.shared.isConnected(prov)
         Menu("\(prov.displayName)\(isConnected ? " (Active)" : "")") {
-            ForEach(prov.modelInfos) { subModel in
-                Button(action: {
-                    switchToNativeMode(mode: "subscription")
-                    appState.aiProvider = subModel.aiProviderID
-                    appState.aiModel = subModel.modelID
-                    SubscriptionAuthManager.shared.activeProvider = subModel.provider
-                    UserDefaults.standard.set(subModel.provider.rawValue, forKey: "subscriptionActiveProvider")
-                    UserDefaults.standard.set("subscription", forKey: "aiKeyMode")
-                    appState.saveSettings()
-                }) {
-                    HStack {
-                        Text(subModel.name)
-                        if currentExecutionMode == .subscription && appState.aiModel == subModel.modelID {
-                            Image(systemName: "checkmark")
-                        }
+            if prov == .aipass {
+                let allModels = prov.modelInfos
+                let imageModels = allModels.filter { $0.badge == "IMAGE" || AIClient.isAiPassImageModel($0.modelID) }
+                let videoModels = allModels.filter { $0.badge == "VIDEO" || AIClient.isAiPassVideoModel($0.modelID) }
+                let musicModels = allModels.filter { $0.badge == "MUSIC" || AIClient.isAiPassMusicModel($0.modelID) }
+                let chatModels = allModels.filter { !AIClient.isAiPassMediaModel($0.modelID) && $0.badge != "IMAGE" && $0.badge != "VIDEO" && $0.badge != "MUSIC" }
+                
+                Menu("Chat, Coding & Reasoning (\(chatModels.count))") {
+                    ForEach(chatModels) { subModel in
+                        subscriptionModelButton(subModel)
                     }
                 }
+                Menu("Image Generation (\(imageModels.count))") {
+                    ForEach(imageModels) { subModel in
+                        subscriptionModelButton(subModel)
+                    }
+                }
+                Menu("Video Generation (\(videoModels.count))") {
+                    ForEach(videoModels) { subModel in
+                        subscriptionModelButton(subModel)
+                    }
+                }
+                Menu("Audio & Music Generation (\(musicModels.count))") {
+                    ForEach(musicModels) { subModel in
+                        subscriptionModelButton(subModel)
+                    }
+                }
+                Divider()
+            }
+            ForEach(prov.modelInfos) { subModel in
+                subscriptionModelButton(subModel)
             }
             Divider()
             Button("Enter Custom Model ID...") {
@@ -4330,6 +5512,26 @@ struct AIAgentView: View {
                 Divider()
                 Button("Connect \(prov.displayName) in Settings...") {
                     appState.showingSettingsDialog = true
+                }
+            }
+        }
+    }
+    
+    @ViewBuilder
+    private func subscriptionModelButton(_ subModel: SubscriptionModelInfo) -> some View {
+        Button(action: {
+            switchToNativeMode(mode: "subscription")
+            appState.aiProvider = subModel.aiProviderID
+            appState.aiModel = subModel.modelID
+            SubscriptionAuthManager.shared.activeProvider = subModel.provider
+            UserDefaults.standard.set(subModel.provider.rawValue, forKey: "subscriptionActiveProvider")
+            UserDefaults.standard.set("subscription", forKey: "aiKeyMode")
+            appState.saveSettings()
+        }) {
+            HStack {
+                Text(subModel.badge.isEmpty ? subModel.name : "\(subModel.name) [\(subModel.badge)]")
+                if currentExecutionMode == .subscription && appState.aiModel == subModel.modelID {
+                    Image(systemName: "checkmark")
                 }
             }
         }
@@ -4967,6 +6169,12 @@ struct HeaderIconButton: View {
 
 // MARK: - Rich Message Renderer
 
+enum GeneratedMediaKind: String, Equatable {
+    case image
+    case video
+    case audio
+}
+
 enum MessageBlock: Identifiable {
     case thought(String, Int?) // Content, duration in seconds
     case text(String)
@@ -4977,6 +6185,7 @@ enum MessageBlock: Identifiable {
     case blockquote(String)
     case latex(String, Bool) // Expression, isBlock ($$...$$ vs $...$)
     case html(String)
+    case media(GeneratedMediaKind, String, String) // Kind, Title/Alt, URL or Path
     
     var id: String {
         switch self {
@@ -4991,6 +6200,7 @@ enum MessageBlock: Identifiable {
         case .blockquote(let c): return "quote-\(c.hashValue)"
         case .latex(let e, _): return "latex-\(e.hashValue)"
         case .html(let c): return "html-\(c.hashValue)"
+        case .media(let k, let t, let u): return "media-\(k.rawValue)-\(t.hashValue)-\(u.hashValue)"
         }
     }
 }
@@ -5309,8 +6519,11 @@ struct MessageContentParser {
                 let trimmedCode = code.trimmingCharacters(in: .whitespacesAndNewlines)
                 
                 // Check if this is a LaTeX/math code block - render as LaTeX
-                if lang.lowercased() == "latex" || lang.lowercased() == "math" || lang.lowercased() == "tex" {
+                let lowerLang = lang.lowercased().trimmingCharacters(in: .whitespacesAndNewlines)
+                if lowerLang == "latex" || lowerLang == "math" || lowerLang == "tex" {
                     blocks.append(.latex(trimmedCode, true))
+                } else if lowerLang == "markdown" || lowerLang == "md" || lowerLang.hasSuffix(".md") {
+                    blocks.append(contentsOf: parseTextContent(trimmedCode))
                 } else {
                     blocks.append(.code(lang, trimmedCode))
                 }
@@ -5474,6 +6687,29 @@ struct MessageContentParser {
                 listItems = []
             }
             
+            // Skip legacy emoji wrapper lines around media cards
+            if trimmed.hasPrefix("🖼️ **Generated") ||
+               trimmed.hasPrefix("🎬 **Generated") ||
+               trimmed.hasPrefix("🎵 **Generated") ||
+               trimmed.hasPrefix("📁 Saved to:") {
+                lineIndex += 1
+                continue
+            }
+            
+            // Check for Markdown Media ![alt](url_or_path)
+            if let mediaMatch = extractMarkdownMedia(from: trimmed) {
+                if !currentText.isEmpty {
+                    let joined = currentText.joined(separator: "\n")
+                    if !joined.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                        blocks.append(.text(joined))
+                    }
+                    currentText = []
+                }
+                blocks.append(.media(mediaMatch.kind, mediaMatch.alt, mediaMatch.target))
+                lineIndex += 1
+                continue
+            }
+            
             // Regular text
             currentText.append(line)
             lineIndex += 1
@@ -5491,6 +6727,29 @@ struct MessageContentParser {
         }
         
         return blocks
+    }
+    
+    private static func extractMarkdownMedia(from line: String) -> (kind: GeneratedMediaKind, alt: String, target: String)? {
+        guard let bangIdx = line.range(of: "![") else { return nil }
+        let afterBang = line[bangIdx.upperBound...]
+        guard let closeBracket = afterBang.range(of: "](") else { return nil }
+        let alt = String(afterBang[..<closeBracket.lowerBound]).trimmingCharacters(in: .whitespacesAndNewlines)
+        let afterParen = afterBang[closeBracket.upperBound...]
+        guard let closeParen = afterParen.lastIndex(of: ")") else { return nil }
+        let rawTarget = String(afterParen[..<closeParen]).trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !rawTarget.isEmpty else { return nil }
+        
+        let lowerTarget = rawTarget.lowercased()
+        let lowerAlt = alt.lowercased()
+        let kind: GeneratedMediaKind
+        if lowerTarget.hasSuffix(".mp4") || lowerTarget.hasSuffix(".mov") || lowerTarget.hasSuffix(".webm") || lowerTarget.hasSuffix(".m4v") || lowerTarget.contains("video/") || lowerAlt.contains("video") {
+            kind = .video
+        } else if lowerTarget.hasSuffix(".mp3") || lowerTarget.hasSuffix(".wav") || lowerTarget.hasSuffix(".m4a") || lowerTarget.hasSuffix(".ogg") || lowerTarget.hasSuffix(".aac") || lowerTarget.hasSuffix(".flac") || lowerTarget.contains("audio/") || lowerAlt.contains("music") || lowerAlt.contains("audio") {
+            kind = .audio
+        } else {
+            kind = .image
+        }
+        return (kind, alt.isEmpty ? "Generated Media" : alt, rawTarget)
     }
 }
 
@@ -5528,8 +6787,13 @@ struct AgentChatStage: View {
     var onRejectChange: ((PendingChangeModel) -> Void)? = nil
     var onSuggestionTap: ((String) -> Void)? = nil
     var onViewPlan: (() -> Void)? = nil
+    var onRevertToMessage: ((String) -> Void)? = nil
+    var onEditAndResendMessage: ((String, String) -> Void)? = nil
+    var onRetryAssistantMessage: ((String) -> Void)? = nil
+    var onDeleteMessage: ((String, Bool) -> Void)? = nil
     
     @ObservedObject private var planManager = ImplementationPlanManager.shared
+    @ObservedObject private var agentService = AgentService.shared
     @State private var userScrolledUp: Bool = false
     @State private var scrollTracker = ChatScrollInteractionTracker()
     
@@ -5537,8 +6801,8 @@ struct AgentChatStage: View {
         ScrollViewReader { proxy in
             ZStack(alignment: .bottom) {
                 ScrollView {
-                    LazyVStack(spacing: 0) {
-                        if messages.isEmpty && !isLoading {
+                    VStack(spacing: 0) {
+                        if messages.isEmpty && !isLoading && agentService.messageQueue.isEmpty {
                             VStack(spacing: 20) {
                                 Spacer().frame(height: 40)
                                 
@@ -5607,20 +6871,117 @@ struct AgentChatStage: View {
                                 .foregroundColor(.secondary)
                                 .padding(.vertical, 12)
                             }
+                            let lastMessageId = messages.last?.id
                             ForEach(messages) { message in
-                                RichMessageRow(message: message, onApplyChange: onApplyChange, onRejectChange: onRejectChange)
-                                    .equatable()
-                                    .id(message.id)
+                                RichMessageRow(
+                                    message: message,
+                                    isStreaming: isLoading && message.id == lastMessageId,
+                                    onApplyChange: onApplyChange,
+                                    onRejectChange: onRejectChange,
+                                    onRevert: { onRevertToMessage?(message.id) },
+                                    onEditAndResend: { editedText in onEditAndResendMessage?(message.id, editedText) },
+                                    onRetry: { onRetryAssistantMessage?(message.id) },
+                                    onDelete: { revertFiles in onDeleteMessage?(message.id, revertFiles) }
+                                )
+                                .equatable()
+                                .id(message.id)
+                            }
+                            
+                            if messages.isEmpty && isLoading {
+                                HStack(spacing: 0) {
+                                    Spacer(minLength: 0)
+                                    HStack(spacing: 10) {
+                                        ProgressView()
+                                            .controlSize(.small)
+                                        Text(currentToolExecution ?? agentService.currentToolExecution ?? "Agent is executing task...")
+                                            .font(.system(size: 12, weight: .medium, design: .monospaced))
+                                            .foregroundColor(.secondary)
+                                        Spacer()
+                                    }
+                                    .padding(14)
+                                    .background(Color.primary.opacity(0.04))
+                                    .cornerRadius(8)
+                                    .frame(maxWidth: 880)
+                                    Spacer(minLength: 0)
+                                }
+                                .padding(.horizontal, 12)
+                                .padding(.vertical, 12)
+                            }
+                            
+                            // Render any queued user messages directly in the chat stream so they never appear to vanish
+                            ForEach(agentService.messageQueue) { queued in
+                                HStack(spacing: 0) {
+                                    Spacer(minLength: 0)
+                                    VStack(alignment: .trailing, spacing: 4) {
+                                        HStack(spacing: 0) {
+                                            Spacer(minLength: 48)
+                                            Text(queued.text.count > 500 ? String(queued.text.prefix(500)) + "…" : queued.text)
+                                                .font(Font.custom(appState.agentFontName, size: appState.agentFontSize))
+                                                .foregroundColor(.primary.opacity(0.9))
+                                                .multilineTextAlignment(.leading)
+                                                .lineLimit(6)
+                                                .padding(12)
+                                                .background(Color.orange.opacity(0.14))
+                                                .overlay(
+                                                    RoundedRectangle(cornerRadius: 8)
+                                                        .stroke(Color.orange.opacity(0.35), lineWidth: 1)
+                                                )
+                                                .cornerRadius(8)
+                                                .frame(maxWidth: 600, alignment: .trailing)
+                                        }
+                                        HStack(spacing: 8) {
+                                            HStack(spacing: 4) {
+                                                Image(systemName: "clock.fill")
+                                                    .font(.system(size: 9))
+                                                Text("อยู่ในคิว (จะส่งต่ออัตโนมัติ)")
+                                                    .font(.system(size: 10, weight: .medium))
+                                            }
+                                            .foregroundColor(.orange)
+                                            
+                                            Button(action: {
+                                                agentService.stopGeneration(autoProcessQueue: true)
+                                            }) {
+                                                Text("ส่งทันที (Send Now)")
+                                                    .font(.system(size: 10, weight: .semibold))
+                                                    .foregroundColor(.accentColor)
+                                                    .padding(.horizontal, 6)
+                                                    .padding(.vertical, 2)
+                                                    .background(Color.accentColor.opacity(0.12))
+                                                    .cornerRadius(4)
+                                            }
+                                            .buttonStyle(.plain)
+                                            
+                                            Button(action: {
+                                                agentService.cancelQueuedMessage(id: queued.id)
+                                            }) {
+                                                Text("ยกเลิก")
+                                                    .font(.system(size: 10))
+                                                    .foregroundColor(.secondary)
+                                            }
+                                            .buttonStyle(.plain)
+                                        }
+                                    }
+                                    .frame(maxWidth: 880, alignment: .trailing)
+                                    Spacer(minLength: 0)
+                                }
+                                .padding(.horizontal, 12)
+                                .padding(.vertical, 6)
+                                .id("queued_\(queued.id.uuidString)")
                             }
                             
                             // Inline plan approval card (Persists throughout plan lifecycle)
                             if let _ = planManager.currentPlan, !messages.isEmpty {
-                                PlanApprovalInlineCard(
-                                    planManager: planManager,
-                                    onViewPlan: onViewPlan
-                                )
-                                .environmentObject(appState)
-                                .padding(.horizontal, 16)
+                                HStack(spacing: 0) {
+                                    Spacer(minLength: 0)
+                                    PlanApprovalInlineCard(
+                                        planManager: planManager,
+                                        onViewPlan: onViewPlan
+                                    )
+                                    .environmentObject(appState)
+                                    .frame(maxWidth: 880)
+                                    Spacer(minLength: 0)
+                                }
+                                .padding(.horizontal, 28)
                                 .padding(.vertical, 8)
                             }
                             
@@ -5653,12 +7014,13 @@ struct AgentChatStage: View {
                     guard viewportH > 0 else { return }
                     let bottomY = CGFloat(bottomBucket) * 24.0
                     let distanceBelow = bottomY - viewportH
-                    if distanceBelow > 48 {
+                    let recentlyScrolledManually = Date().timeIntervalSince(scrollTracker.lastUserScrollUpTime) < 1.5
+                    if distanceBelow > 72 && recentlyScrolledManually {
                         if !userScrolledUp {
                             userScrolledUp = true
                         }
-                    } else if distanceBelow <= 24 {
-                        if userScrolledUp && Date().timeIntervalSince(scrollTracker.lastUserScrollUpTime) > 0.75 {
+                    } else if distanceBelow <= 36 {
+                        if userScrolledUp && Date().timeIntervalSince(scrollTracker.lastUserScrollUpTime) > 0.6 {
                             userScrolledUp = false
                         }
                     }
@@ -5695,12 +7057,46 @@ struct AgentChatStage: View {
                     .transition(.opacity.combined(with: .scale(scale: 0.9)))
                 }
             }
+            .onChange(of: AgentService.shared.activeChatId) { _ in
+                userScrolledUp = false
+                scrollTracker.lastUserScrollUpTime = .distantPast
+                DispatchQueue.main.async {
+                    proxy.scrollTo("BOTTOM_CHAT_ANCHOR", anchor: .bottom)
+                }
+            }
             .onChange(of: messages.count) { _ in
-                if messages.last?.role == .user {
+                let isNewUserTurn = messages.last?.role == .user
+                    || (messages.count >= 2 && messages[messages.count - 2].role == .user && messages.last?.id == "streaming" && (messages.last?.content.isEmpty ?? true))
+                if isNewUserTurn || !userScrolledUp {
                     userScrolledUp = false
                     scrollTracker.lastUserScrollUpTime = .distantPast
-                    proxy.scrollTo("BOTTOM_CHAT_ANCHOR", anchor: .bottom)
-                } else if !userScrolledUp {
+                    DispatchQueue.main.async {
+                        proxy.scrollTo("BOTTOM_CHAT_ANCHOR", anchor: .bottom)
+                    }
+                }
+            }
+            .onChange(of: messages.last?.id) { _ in
+                let isNewUserTurn = messages.last?.role == .user
+                    || (messages.count >= 2 && messages[messages.count - 2].role == .user && messages.last?.id == "streaming" && (messages.last?.content.isEmpty ?? true))
+                if isNewUserTurn || !userScrolledUp {
+                    userScrolledUp = false
+                    scrollTracker.lastUserScrollUpTime = .distantPast
+                    DispatchQueue.main.async {
+                        proxy.scrollTo("BOTTOM_CHAT_ANCHOR", anchor: .bottom)
+                    }
+                }
+            }
+            .onChange(of: agentService.messageQueue.count) { newCount in
+                if newCount > 0 {
+                    userScrolledUp = false
+                    scrollTracker.lastUserScrollUpTime = .distantPast
+                    DispatchQueue.main.async {
+                        proxy.scrollTo("BOTTOM_CHAT_ANCHOR", anchor: .bottom)
+                    }
+                }
+            }
+            .onChange(of: messages.last?.toolResults.count) { _ in
+                if !userScrolledUp {
                     proxy.scrollTo("BOTTOM_CHAT_ANCHOR", anchor: .bottom)
                 }
             }
@@ -5722,11 +7118,10 @@ struct AgentChatStage: View {
                     let tracker = scrollTracker
                     scrollTracker.monitor = NSEvent.addLocalMonitorForEvents(matching: [.scrollWheel]) { event in
                         // Positive scrollingDeltaY means scrolling upward toward earlier messages
-                        if event.scrollingDeltaY > 0.5 {
+                        if event.scrollingDeltaY > 1.5 {
                             tracker.lastUserScrollUpTime = Date()
-                            if !userScrolledUp {
-                                userScrolledUp = true
-                            }
+                        } else if event.scrollingDeltaY < -2.0 {
+                            tracker.lastUserScrollUpTime = .distantPast
                         }
                         return event
                     }
@@ -5738,6 +7133,7 @@ struct AgentChatStage: View {
                     scrollTracker.monitor = nil
                 }
             }
+            .clipped()
         }
     }
 }
@@ -5962,6 +7358,9 @@ struct PaperContentView: View {
                     Text(html.replacingOccurrences(of: "<[^>]+>", with: "", options: .regularExpression))
                         .font(.system(size: 11))
                         .foregroundColor(.black)
+                    
+                case .media(let kind, let title, let target):
+                    ChatMediaBlockView(kind: kind, title: title, target: target)
                 }
             }
         }
@@ -6144,16 +7543,27 @@ struct LatexBlockWebView: NSViewRepresentable {
 
 struct RichMessageRow: View, Equatable {
     let message: AgentMessageModel
+    var isStreaming: Bool = false
     var onApplyChange: ((PendingChangeModel) -> Void)? = nil
     var onRejectChange: ((PendingChangeModel) -> Void)? = nil
+    var onRevert: (() -> Void)? = nil
+    var onEditAndResend: ((String) -> Void)? = nil
+    var onRetry: (() -> Void)? = nil
+    var onDelete: ((Bool) -> Void)? = nil
     @EnvironmentObject var appState: AppState
+    
+    @State private var isEditing: Bool = false
+    @State private var editedText: String = ""
+    @State private var isCopied: Bool = false
+    @State private var isUserMessageExpanded: Bool = false
     
     static func == (lhs: RichMessageRow, rhs: RichMessageRow) -> Bool {
         return lhs.message.id == rhs.message.id &&
                lhs.message.content == rhs.message.content &&
                lhs.message.toolResults.count == rhs.message.toolResults.count &&
                lhs.message.pendingChanges == rhs.message.pendingChanges &&
-               lhs.message.role == rhs.message.role
+               lhs.message.role == rhs.message.role &&
+               lhs.isStreaming == rhs.isStreaming
     }
     
     private var isUser: Bool { message.role == .user }
@@ -6164,20 +7574,27 @@ struct RichMessageRow: View, Equatable {
             // sentence must never become a full-row rectangle; ViewThatFits
             // keeps that intrinsic shape and only switches to wrapping when a
             // longer message reaches the readable-width cap.
-            HStack {
-                Spacer(minLength: 40)
-
-                ViewThatFits(in: .horizontal) {
-                    userBubbleText
-                        .fixedSize(horizontal: true, vertical: false)
-
-                    userBubbleText
-                        .fixedSize(horizontal: false, vertical: true)
-                        .frame(maxWidth: .infinity, alignment: .leading)
+            HStack(spacing: 0) {
+                Spacer(minLength: 0)
+                VStack(alignment: .trailing, spacing: 4) {
+                    if isEditing {
+                        userInlineEditCard
+                    } else {
+                        HStack(spacing: 0) {
+                            Spacer(minLength: 48)
+                            userBubbleText
+                                .frame(maxWidth: 600, alignment: .trailing)
+                                .contextMenu {
+                                    userMessageContextMenu
+                                }
+                        }
+                        userActionToolbar
+                    }
                 }
-                .frame(maxWidth: 600, alignment: .trailing)
+                .frame(maxWidth: 880, alignment: .trailing)
+                Spacer(minLength: 0)
             }
-            .padding(.horizontal, 28)
+            .padding(.horizontal, 12)
             .padding(.vertical, 6)
         } else {
             // A readable editorial column, inspired by the comfortable line
@@ -6187,24 +7604,364 @@ struct RichMessageRow: View, Equatable {
                 Spacer(minLength: 0)
                 VStack(alignment: .leading, spacing: 8) {
                     aiCellContent
+                        .contextMenu {
+                            assistantMessageContextMenu
+                        }
+                    if !isStreaming && (!message.content.isEmpty || !message.toolResults.isEmpty) {
+                        assistantActionToolbar
+                    }
                 }
                 .frame(maxWidth: 880, alignment: .leading)
                 Spacer(minLength: 0)
             }
-            .padding(.horizontal, 28)
+            .padding(.horizontal, 12)
             .padding(.vertical, 8)
         }
     }
 
+    private var isLongUserMessage: Bool {
+        guard message.content.count > 750 else {
+            var newlineCount = 0
+            for ch in message.content where ch == "\n" {
+                newlineCount += 1
+                if newlineCount > 14 { return true }
+            }
+            return false
+        }
+        return true
+    }
+
+    private var collapsedUserPreviewText: String {
+        let lines = message.content.split(separator: "\n", omittingEmptySubsequences: false)
+        if lines.count > 14 {
+            let joined = lines.prefix(12).joined(separator: "\n")
+            return (joined.count > 750 ? String(joined.prefix(750)) : joined) + "\n…"
+        }
+        if message.content.count > 750 {
+            return String(message.content.prefix(750)) + "…"
+        }
+        return message.content
+    }
+
     private var userBubbleText: some View {
-        Text(message.content)
-            .font(Font.custom(appState.agentFontName, size: appState.agentFontSize))
-            .foregroundColor(.primary)
-            .multilineTextAlignment(.leading)
-            .lineLimit(nil)
-            .padding(12)
-            .background(Color.primary.opacity(0.09))
-            .cornerRadius(8, corners: [.topLeft, .topRight, .bottomLeft])
+        VStack(alignment: .leading, spacing: 8) {
+            Text(isLongUserMessage && !isUserMessageExpanded ? collapsedUserPreviewText : message.content)
+                .font(Font.custom(appState.agentFontName, size: appState.agentFontSize))
+                .foregroundColor(.primary)
+                .multilineTextAlignment(.leading)
+                .lineLimit(isLongUserMessage && !isUserMessageExpanded ? 14 : nil)
+                .textSelection(.enabled)
+                .fixedSize(horizontal: false, vertical: true)
+            
+            if isLongUserMessage {
+                Divider()
+                    .opacity(0.25)
+                Button(action: {
+                    withAnimation(.easeInOut(duration: 0.15)) {
+                        isUserMessageExpanded.toggle()
+                    }
+                }) {
+                    HStack(spacing: 5) {
+                        Image(systemName: isUserMessageExpanded ? "chevron.up" : "chevron.down")
+                            .font(.system(size: 9.5, weight: .bold))
+                        Text(isUserMessageExpanded ? "ย่อข้อความ (Collapse)" : "แสดงข้อความทั้งหมด (\(message.content.count.formatted()) ตัวอักษร)")
+                            .font(.system(size: 11, weight: .semibold))
+                        Spacer(minLength: 0)
+                    }
+                    .foregroundColor(.accentColor)
+                    .padding(.top, 2)
+                    .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+            }
+        }
+        .padding(12)
+        .background(Color.primary.opacity(0.09))
+        .cornerRadius(8, corners: [.topLeft, .topRight, .bottomLeft])
+    }
+    
+    private var userInlineEditCard: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            HStack(spacing: 6) {
+                Image(systemName: "pencil")
+                    .font(.system(size: 10.5, weight: .semibold))
+                    .foregroundColor(.accentColor)
+                Text("แก้ไขข้อความ (จะย้อนกลับข้อความหลังจากจุดนี้และส่งใหม่)")
+                    .font(.system(size: 11, weight: .medium))
+                    .foregroundColor(.secondary)
+                Spacer()
+            }
+            
+            if #available(macOS 13.0, *) {
+                TextField("แก้ไขข้อความของคุณ...", text: $editedText, axis: .vertical)
+                    .textFieldStyle(.plain)
+                    .font(Font.custom(appState.agentFontName, size: appState.agentFontSize))
+                    .lineLimit(2...10)
+                    .padding(10)
+                    .background(Color.primary.opacity(0.05))
+                    .cornerRadius(6)
+                    .overlay(
+                        RoundedRectangle(cornerRadius: 6)
+                            .stroke(Color.accentColor.opacity(0.45), lineWidth: 1)
+                    )
+            } else {
+                TextEditor(text: $editedText)
+                    .font(Font.custom(appState.agentFontName, size: appState.agentFontSize))
+                    .frame(minHeight: 60, maxHeight: 160)
+                    .padding(6)
+                    .background(Color.primary.opacity(0.05))
+                    .cornerRadius(6)
+                    .overlay(
+                        RoundedRectangle(cornerRadius: 6)
+                            .stroke(Color.accentColor.opacity(0.45), lineWidth: 1)
+                    )
+            }
+            
+            HStack(spacing: 8) {
+                Spacer()
+                
+                Button(action: {
+                    isEditing = false
+                }) {
+                    Text("ยกเลิก (Cancel)")
+                        .font(.system(size: 11, weight: .medium))
+                        .foregroundColor(.secondary)
+                        .padding(.horizontal, 10)
+                        .padding(.vertical, 5)
+                        .background(Color.primary.opacity(0.06))
+                        .cornerRadius(5)
+                }
+                .buttonStyle(.plain)
+                
+                Button(action: {
+                    let trimmed = editedText.trimmingCharacters(in: .whitespacesAndNewlines)
+                    guard !trimmed.isEmpty else { return }
+                    isEditing = false
+                    onEditAndResend?(trimmed)
+                }) {
+                    HStack(spacing: 4) {
+                        Image(systemName: "paperplane.fill")
+                            .font(.system(size: 10))
+                        Text("บันทึกและส่งใหม่ (Resend)")
+                            .font(.system(size: 11, weight: .semibold))
+                    }
+                    .foregroundColor(.white)
+                    .padding(.horizontal, 12)
+                    .padding(.vertical, 5)
+                    .background(editedText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? Color.secondary.opacity(0.4) : Color.accentColor)
+                    .cornerRadius(5)
+                }
+                .buttonStyle(.plain)
+                .disabled(editedText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+            }
+        }
+        .padding(12)
+        .frame(maxWidth: 620)
+        .background(Color(nsColor: appState.appTheme.elevatedBackground))
+        .cornerRadius(8)
+        .overlay(
+            RoundedRectangle(cornerRadius: 8)
+                .stroke(Color.accentColor.opacity(0.35), lineWidth: 1)
+        )
+    }
+    
+    private var userActionToolbar: some View {
+        ScrollView(.horizontal, showsIndicators: false) {
+            HStack(spacing: 4) {
+                messageActionButton(
+                    icon: "arrow.uturn.backward",
+                    label: "ย้อนกลับ",
+                    tooltip: "Restore Checkpoint — ย้อนกลับข้อความและการแก้ไขไฟล์มาที่จุดนี้ (Revert to this checkpoint)"
+                ) {
+                    onRevert?()
+                }
+                
+                messageActionButton(
+                    icon: "pencil",
+                    label: "แก้ไข",
+                    tooltip: "แก้ไขข้อความและส่งใหม่ (Edit & Resend)"
+                ) {
+                    editedText = AgentService.cleanUserPromptText(message.content)
+                    isEditing = true
+                }
+                
+                messageActionButton(
+                    icon: "bookmark",
+                    label: "บันทึกกฎ",
+                    tooltip: "บันทึกคำสั่งนี้เป็นกฎของโปรเจกต์ใน .microcode/rules.md (Save as Project Rule)"
+                ) {
+                    let clean = AgentService.cleanUserPromptText(message.content)
+                    let ws = AgentService.shared.currentWorkspace ?? appState.workspaceFolder?.path ?? FileManager.default.currentDirectoryPath
+                    ProjectMemoryService.shared.appendLearnedRule(clean, workspace: ws)
+                }
+                
+                messageActionButton(
+                    icon: isCopied ? "checkmark" : "doc.on.doc",
+                    label: isCopied ? "คัดลอกแล้ว" : "คัดลอก",
+                    tooltip: "คัดลอกข้อความ (Copy message)",
+                    tint: isCopied ? .green : nil
+                ) {
+                    copyTextToClipboard(AgentService.cleanUserPromptText(message.content))
+                }
+                
+                messageActionButton(
+                    icon: "trash",
+                    label: "ลบ",
+                    tooltip: "ลบข้อความนี้ (Delete message)",
+                    isDestructive: true
+                ) {
+                    onDelete?(false)
+                }
+            }
+        }
+        .opacity(0.85)
+    }
+    
+    private var assistantActionToolbar: some View {
+        ScrollView(.horizontal, showsIndicators: false) {
+            HStack(spacing: 4) {
+                messageActionButton(
+                    icon: isCopied ? "checkmark" : "doc.on.doc",
+                    label: isCopied ? "คัดลอกแล้ว" : "คัดลอก",
+                    tooltip: "คัดลอกคำตอบ (Copy response)",
+                    tint: isCopied ? .green : nil
+                ) {
+                    let clean = AIStructuredTurnCodec.stripThoughtTags(message.content)
+                        .trimmingCharacters(in: .whitespacesAndNewlines)
+                    copyTextToClipboard(clean.isEmpty ? message.content : clean)
+                }
+                
+                messageActionButton(
+                    icon: "arrow.clockwise",
+                    label: "ลองใหม่",
+                    tooltip: "สร้างคำตอบใหม่อีกครั้ง (Regenerate response)"
+                ) {
+                    onRetry?()
+                }
+                
+                messageActionButton(
+                    icon: "arrow.uturn.backward",
+                    label: message.pendingChanges.isEmpty ? "ย้อนกลับ" : "ย้อนกลับ (\(message.pendingChanges.count) ไฟล์)",
+                    tooltip: "Restore Checkpoint — ย้อนกลับคำตอบนี้และคืนค่าไฟล์ที่ถูกแก้ไข (Revert turn & restore files)"
+                ) {
+                    onRevert?()
+                }
+                
+                messageActionButton(
+                    icon: "trash",
+                    label: "ลบ",
+                    tooltip: "ลบข้อความนี้ (Delete message)",
+                    isDestructive: true
+                ) {
+                    onDelete?(true)
+                }
+                
+                Spacer(minLength: 0)
+            }
+        }
+        .padding(.top, 2)
+        .opacity(0.85)
+    }
+    
+    @ViewBuilder
+    private var userMessageContextMenu: some View {
+        Button {
+            editedText = AgentService.cleanUserPromptText(message.content)
+            isEditing = true
+        } label: {
+            Label("แก้ไขข้อความและส่งใหม่ (Edit & Resend)", systemImage: "pencil")
+        }
+        
+        Button {
+            onRevert?()
+        } label: {
+            Label("ย้อนกลับข้อความและไฟล์มาที่จุดนี้ (Revert to Here)", systemImage: "arrow.uturn.backward")
+        }
+        
+        Button {
+            copyTextToClipboard(AgentService.cleanUserPromptText(message.content))
+        } label: {
+            Label("คัดลอกข้อความ (Copy)", systemImage: "doc.on.doc")
+        }
+        
+        Divider()
+        
+        Button(role: .destructive) {
+            onDelete?(false)
+        } label: {
+            Label("ลบข้อความนี้ (Delete Message)", systemImage: "trash")
+        }
+    }
+    
+    @ViewBuilder
+    private var assistantMessageContextMenu: some View {
+        Button {
+            let clean = AIStructuredTurnCodec.stripThoughtTags(message.content)
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+            copyTextToClipboard(clean.isEmpty ? message.content : clean)
+        } label: {
+            Label("คัดลอกคำตอบ (Copy Response)", systemImage: "doc.on.doc")
+        }
+        
+        Button {
+            onRetry?()
+        } label: {
+            Label("ลองใหม่ / สร้างคำตอบใหม่ (Regenerate)", systemImage: "arrow.clockwise")
+        }
+        
+        Button {
+            onRevert?()
+        } label: {
+            Label("ย้อนกลับคำตอบนี้และคืนค่าไฟล์ (Revert Turn & Files)", systemImage: "arrow.uturn.backward")
+        }
+        
+        Divider()
+        
+        Button(role: .destructive) {
+            onDelete?(true)
+        } label: {
+            Label("ลบข้อความนี้ (Delete Message)", systemImage: "trash")
+        }
+    }
+    
+    private func messageActionButton(
+        icon: String,
+        label: String,
+        tooltip: String,
+        tint: Color? = nil,
+        isDestructive: Bool = false,
+        action: @escaping () -> Void
+    ) -> some View {
+        Button(action: action) {
+            HStack(spacing: 3.5) {
+                Image(systemName: icon)
+                    .font(.system(size: 9.5, weight: .medium))
+                Text(label)
+                    .font(.system(size: 10, weight: .medium))
+                    .lineLimit(1)
+            }
+            .fixedSize(horizontal: true, vertical: false)
+            .foregroundColor(tint ?? (isDestructive ? .red.opacity(0.85) : .secondary))
+            .padding(.horizontal, 7)
+            .padding(.vertical, 3.5)
+            .background(Color.primary.opacity(0.045))
+            .cornerRadius(5)
+            .overlay(
+                RoundedRectangle(cornerRadius: 5)
+                    .stroke(Color.primary.opacity(0.08), lineWidth: 0.5)
+            )
+        }
+        .buttonStyle(.plain)
+        .help(tooltip)
+    }
+    
+    private func copyTextToClipboard(_ text: String) {
+        NSPasteboard.general.clearContents()
+        NSPasteboard.general.setString(text, forType: .string)
+        isCopied = true
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1.8) {
+            isCopied = false
+        }
     }
     
     private var aiCellContent: some View {
@@ -6225,7 +7982,7 @@ struct RichMessageRow: View, Equatable {
             return Array(blocks[(idx + 1)...])
         }()
         let harness = SubAgentHarness.shared
-        let isLatestStreaming = AgentService.shared.isLoading && AgentService.shared.messages.last?.id == message.id
+        let isLatestStreaming = isStreaming || (AgentService.shared.isLoading && AgentService.shared.messages.last?.id == message.id)
         return VStack(alignment: .leading, spacing: 12) {
             ForEach(preToolBlocks) { block in
                 aiBlockView(block)
@@ -6251,9 +8008,14 @@ struct RichMessageRow: View, Equatable {
                 .padding(.vertical, 6)
             }
             
-            // SubAgent activity cluster (shown on the latest assistant message only)
-            if !harness.activeSubagents.isEmpty && AgentService.shared.messages.last?.id == message.id {
-                SubAgentClusterView(subagents: harness.activeSubagents)
+            // CEO & Specialist Squad Live Boardroom + SubAgent activity cluster (shown on the latest assistant message only)
+            if AgentService.shared.messages.last?.id == message.id {
+                if !harness.interAgentDialogue.isEmpty || !harness.activeContracts.isEmpty {
+                    CEOSquadBoardroomInlineView()
+                }
+                if !harness.activeSubagents.isEmpty {
+                    SubAgentClusterView(subagents: harness.activeSubagents)
+                }
             }
             
             if !message.pendingChanges.isEmpty {
@@ -6262,9 +8024,7 @@ struct RichMessageRow: View, Equatable {
             
             if message.content.contains("Reached maximum tool iteration safety limit") {
                 Button(action: {
-                    Task {
-                        await AgentService.shared.sendMessage("Continue executing the task from where you left off. Continue immediately with the next necessary step.")
-                    }
+                    AgentService.shared.enqueueMessage("Continue executing the task from where you left off. Continue immediately with the next necessary step.")
                 }) {
                     HStack(spacing: 6) {
                         Image(systemName: "play.circle.fill")
@@ -6284,11 +8044,9 @@ struct RichMessageRow: View, Equatable {
                 .padding(.top, 4)
             }
             
-            if message.content.contains("Rate limit reached") || message.content.contains("429") {
+            if !AgentService.shared.isLoading && (message.content.contains("⚠️ Rate limit reached") || message.content.contains("⚠️ Error: Rate limited")) {
                 Button(action: {
-                    Task {
-                        await AgentService.shared.sendMessage("Retry the previous step with pruned context. Proceed with the necessary action.")
-                    }
+                    AgentService.shared.enqueueMessage("Retry the previous step with pruned context. Proceed with the necessary action.")
                 }) {
                     HStack(spacing: 6) {
                         Image(systemName: "arrow.clockwise.circle.fill")
@@ -6333,6 +8091,8 @@ struct RichMessageRow: View, Equatable {
             LaTeXBlockView(expression: expression, isBlock: isBlock)
         case .html(let content):
             HTMLBlockView(content: content)
+        case .media(let kind, let title, let target):
+            ChatMediaBlockView(kind: kind, title: title, target: target)
         }
     }
     
@@ -6394,7 +8154,16 @@ private struct PendingChangeCard: View, Equatable {
                 })
                 .frame(maxHeight: 400)
             } else if showDiff {
-                codeDiffSection
+                if change.filePath.lowercased().hasSuffix(".md") {
+                    ScrollView {
+                        RenderedMarkdownDocumentView(markdown: change.newContent.isEmpty ? change.oldContent : change.newContent)
+                            .padding(14)
+                    }
+                    .frame(maxHeight: 360)
+                    .background(Color.primary.opacity(0.02))
+                } else {
+                    codeDiffSection
+                }
             } else {
                 changeSummaryRow
             }
@@ -6529,56 +8298,52 @@ private struct PendingChangeCard: View, Equatable {
         let visibleLines: ArraySlice<UnifiedDiffLine> = isTruncated
             ? allLines.prefix(initialVisibleLineLimit)
             : allLines[...]
-        let rowMinWidth = max(640, cached.minContentWidth)
         
         return VStack(spacing: 0) {
             Divider().opacity(0.4)
             
-            ScrollView(.horizontal, showsIndicators: false) {
-                VStack(alignment: .leading, spacing: 0) {
-                    ForEach(visibleLines) { (diffLine: UnifiedDiffLine) in
-                        HStack(spacing: 0) {
-                            // Status accent strip (2.5pt)
-                            Rectangle()
-                                .fill(diffLine.accentColor)
-                                .frame(width: 2.5)
-                            
-                            // Pre-formatted monospaced gutter (oldNum + newNum)
-                            Text(diffLine.gutterNumbers)
-                                .font(.system(size: 10, design: .monospaced))
-                                .foregroundColor(diffLine.type == .hunkHeader ? .cyan.opacity(0.7) : .secondary.opacity(0.4))
-                                .frame(width: 72, alignment: .trailing)
-                                .padding(.trailing, 6)
-                            
-                            // Gutter divider line
-                            Rectangle()
-                                .fill(Color.primary.opacity(0.08))
-                                .frame(width: 1)
-                            
-                            // Prefix (+/-) and code text
-                            Text(diffLine.prefix)
-                                .font(.system(size: 11, weight: .bold, design: .monospaced))
-                                .foregroundColor(diffLine.prefixColor)
-                                .frame(width: 20, alignment: .center)
-                            
-                            Text(diffLine.text)
-                                .font(.system(size: 11, design: .monospaced))
-                                .foregroundColor(diffLine.textColor)
-                                .lineLimit(1)
-                            
-                            Spacer(minLength: 0)
-                        }
-                        .frame(height: 18)
-                        .frame(minWidth: rowMinWidth, alignment: .leading)
-                        .background(diffLine.bgColor)
+            VStack(alignment: .leading, spacing: 0) {
+                ForEach(visibleLines) { (diffLine: UnifiedDiffLine) in
+                    HStack(spacing: 0) {
+                        // Status accent strip (2.5pt)
+                        Rectangle()
+                            .fill(diffLine.accentColor)
+                            .frame(width: 2.5)
+                        
+                        // Pre-formatted monospaced gutter (oldNum + newNum)
+                        Text(diffLine.gutterNumbers)
+                            .font(.system(size: 10, design: .monospaced))
+                            .foregroundColor(diffLine.type == .hunkHeader ? .cyan.opacity(0.7) : .secondary.opacity(0.4))
+                            .frame(width: 64, alignment: .trailing)
+                            .padding(.trailing, 6)
+                        
+                        // Gutter divider line
+                        Rectangle()
+                            .fill(Color.primary.opacity(0.08))
+                            .frame(width: 1)
+                        
+                        // Prefix (+/-) and code text
+                        Text(diffLine.prefix)
+                            .font(.system(size: 11, weight: .bold, design: .monospaced))
+                            .foregroundColor(diffLine.prefixColor)
+                            .frame(width: 18, alignment: .center)
+                        
+                        Text(diffLine.text)
+                            .font(.system(size: 11, design: .monospaced))
+                            .foregroundColor(diffLine.textColor)
+                            .lineLimit(1)
+                            .truncationMode(.tail)
+                        
+                        Spacer(minLength: 0)
                     }
+                    .frame(height: 18)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .background(diffLine.bgColor)
                 }
-                .padding(.vertical, 2)
-                // Flatten static diff rows into a single Metal texture so scrolling past
-                // Code Diff cards in AgentChatStage runs at 120fps with zero per-line redraw.
-                .drawingGroup()
             }
+            .padding(.vertical, 2)
             .frame(maxWidth: .infinity, alignment: .leading)
+            .clipped()
             .background(Color(nsColor: .textBackgroundColor).opacity(0.6))
             
             if allLines.count > initialVisibleLineLimit {
@@ -6874,11 +8639,17 @@ public final class DiffCacheManager {
         let entry = CachedDiffEntry(lines: lines, minContentWidth: minContentWidth)
         
         lock.lock()
-        if cache.count > 250 { cache.removeAll(keepingCapacity: true) }
+        if cache.count > 24 { cache.removeAll(keepingCapacity: false) }
         cache[key] = entry
         lock.unlock()
         
         return entry
+    }
+    
+    public static func clearAll() {
+        lock.lock()
+        cache.removeAll(keepingCapacity: false)
+        lock.unlock()
     }
     
     private static func computeDiff(old: String, new: String) -> [UnifiedDiffLine] {
@@ -7235,10 +9006,16 @@ final class MarkdownAttrCache {
         let parsed = (try? AttributedString(markdown: sanitized, options: .init(interpretedSyntax: .inlineOnlyPreservingWhitespace))) ?? AttributedString(sanitized)
         
         lock.lock()
-        if cache.count > 500 { cache.removeAll(keepingCapacity: true) }
+        if cache.count > 64 { cache.removeAll(keepingCapacity: false) }
         cache[text] = parsed
         lock.unlock()
         return parsed
+    }
+    
+    static func clearAll() {
+        lock.lock()
+        cache.removeAll(keepingCapacity: false)
+        lock.unlock()
     }
 }
 
@@ -7328,7 +9105,55 @@ struct HeadingView: View {
     }
 }
 
-/// Renders ordered/unordered list
+/// Renders a full multi-block Markdown document (.md files like task.md, implement.md, walkthrough.md, README.md) as formatted rich text
+struct RenderedMarkdownDocumentView: View, Equatable {
+    let markdown: String
+    @EnvironmentObject var appState: AppState
+    
+    static func == (lhs: RenderedMarkdownDocumentView, rhs: RenderedMarkdownDocumentView) -> Bool {
+        lhs.markdown == rhs.markdown
+    }
+    
+    var body: some View {
+        let blocks = MessageContentParser.parse(markdown)
+        VStack(alignment: .leading, spacing: 10) {
+            ForEach(Array(blocks.enumerated()), id: \.offset) { _, block in
+                switch block {
+                case .thought(let content, let duration):
+                    AntigravityThoughtBlockView(content: content, durationSeconds: duration)
+                case .text(let text):
+                    if !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                        MarkdownTextView(text: text)
+                    }
+                case .code(let lang, let code):
+                    let lower = lang.lowercased().trimmingCharacters(in: .whitespacesAndNewlines)
+                    if lower == "markdown" || lower == "md" || lower.hasSuffix(".md") {
+                        MarkdownTextView(text: code)
+                    } else {
+                        NativeCodeBlockView(language: lang, code: code)
+                    }
+                case .heading(let level, let content):
+                    HeadingView(level: level, content: content)
+                case .list(let items, let isOrdered):
+                    ListView(items: items, isOrdered: isOrdered)
+                case .table(let headers, let rows):
+                    TableBlockView(headers: headers, rows: rows)
+                case .blockquote(let content):
+                    BlockquoteView(content: content)
+                case .latex(let expression, let isBlock):
+                    LaTeXBlockView(expression: expression, isBlock: isBlock)
+                case .html(let content):
+                    HTMLBlockView(content: content)
+                case .media(let kind, let title, let target):
+                    ChatMediaBlockView(kind: kind, title: title, target: target)
+                }
+            }
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+    }
+}
+
+/// Renders ordered/unordered list (with native checkbox support for [ ] and [x])
 struct ListView: View {
     let items: [String]
     let isOrdered: Bool
@@ -7337,13 +9162,33 @@ struct ListView: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 6) {
             ForEach(items.indices, id: \.self) { index in
-                HStack(alignment: .top, spacing: 8) {
-                    Text(isOrdered ? "\(index + 1)." : "•")
-                        .font(.system(size: appState.agentFontSize, weight: .semibold))
-                        .foregroundColor(.secondary)
-                        .frame(width: isOrdered ? 24 : 14, alignment: .trailing)
-                    
-                    MarkdownTextView(text: items[index])
+                let rawItem = items[index]
+                let trimmedItem = rawItem.trimmingCharacters(in: .whitespaces)
+                if trimmedItem.hasPrefix("[x] ") || trimmedItem.hasPrefix("[X] ") {
+                    HStack(alignment: .top, spacing: 8) {
+                        Image(systemName: "checkmark.square.fill")
+                            .font(.system(size: appState.agentFontSize, weight: .semibold))
+                            .foregroundColor(.accentColor)
+                            .padding(.top, 2)
+                        MarkdownTextView(text: String(trimmedItem.dropFirst(4)))
+                    }
+                } else if trimmedItem.hasPrefix("[ ] ") {
+                    HStack(alignment: .top, spacing: 8) {
+                        Image(systemName: "square")
+                            .font(.system(size: appState.agentFontSize, weight: .regular))
+                            .foregroundColor(.secondary)
+                            .padding(.top, 2)
+                        MarkdownTextView(text: String(trimmedItem.dropFirst(4)))
+                    }
+                } else {
+                    HStack(alignment: .top, spacing: 8) {
+                        Text(isOrdered ? "\(index + 1)." : "•")
+                            .font(.system(size: appState.agentFontSize, weight: .semibold))
+                            .foregroundColor(.secondary)
+                            .frame(width: isOrdered ? 24 : 14, alignment: .trailing)
+                        
+                        MarkdownTextView(text: rawItem)
+                    }
                 }
             }
         }
@@ -7834,6 +9679,153 @@ struct DynamicTag: Equatable {
     }
 }
 
+// MARK: - Purpose-Built Agent Mode Diff & Code Block (120fps Metal Rasterized, Zero Nested ScrollView)
+
+fileprivate struct AgentParsedDiffBlock {
+    struct Line: Identifiable {
+        enum Kind {
+            case addition
+            case deletion
+            case hunk
+            case fileComment
+            case context
+        }
+        let id: Int
+        let lineNum: String
+        let symbol: String
+        let text: String
+        let kind: Kind
+    }
+    
+    let isDiff: Bool
+    let title: String
+    let additions: Int
+    let deletions: Int
+    let totalLines: Int
+    let lines: [Line]
+}
+
+fileprivate final class AgentCodeAndDiffCache {
+    private static var diffCache: [Int: AgentParsedDiffBlock] = [:]
+    private static let lock = NSLock()
+    
+    static func parse(language: String, code: String) -> AgentParsedDiffBlock {
+        var hasher = Hasher()
+        hasher.combine(language.lowercased())
+        hasher.combine(code)
+        let key = hasher.finalize()
+        
+        lock.lock()
+        if let cached = diffCache[key] {
+            lock.unlock()
+            return cached
+        }
+        lock.unlock()
+        
+        let rawLines = code.components(separatedBy: "\n")
+        let lowerLang = language.lowercased().trimmingCharacters(in: .whitespacesAndNewlines)
+        
+        var extractedFile: String? = nil
+        var addCount = 0
+        var delCount = 0
+        var parsedLines: [AgentParsedDiffBlock.Line] = []
+        parsedLines.reserveCapacity(min(rawLines.count, 500))
+        
+        var displayLineNum = 1
+        for (idx, rawLine) in rawLines.enumerated() {
+            let trimmed = rawLine.trimmingCharacters(in: .whitespaces)
+            
+            // Detect leading file comment on line 0/1: e.g. "// index.html", "# app.py", "--- a/index.html", "+++ b/index.html"
+            if idx <= 2 && extractedFile == nil {
+                if trimmed.hasPrefix("// ") || trimmed.hasPrefix("# ") || trimmed.hasPrefix("/* ") {
+                    let candidate = trimmed
+                        .replacingOccurrences(of: "//", with: "")
+                        .replacingOccurrences(of: "/*", with: "")
+                        .replacingOccurrences(of: "*/", with: "")
+                        .replacingOccurrences(of: "#", with: "")
+                        .trimmingCharacters(in: .whitespaces)
+                    if candidate.contains(".") && !candidate.contains(" ") && candidate.count <= 80 {
+                        extractedFile = candidate
+                    }
+                } else if trimmed.hasPrefix("+++ b/") || trimmed.hasPrefix("--- a/") {
+                    let candidate = String(trimmed.dropFirst(6)).trimmingCharacters(in: .whitespaces)
+                    if !candidate.isEmpty && candidate != "/dev/null" {
+                        extractedFile = URL(fileURLWithPath: candidate).lastPathComponent
+                    }
+                }
+            }
+            
+            if (trimmed.hasPrefix("+++ ") || trimmed.hasPrefix("--- ")) && (trimmed.contains("a/") || trimmed.contains("b/") || trimmed.contains("/dev/null")) {
+                continue
+            }
+            
+            if trimmed.hasPrefix("@@") {
+                parsedLines.append(.init(id: idx, lineNum: "⋯", symbol: "@@", text: trimmed, kind: .hunk))
+            } else if trimmed == "..." || trimmed == "…" {
+                parsedLines.append(.init(id: idx, lineNum: "⋯", symbol: "·", text: "⋯", kind: .hunk))
+            } else if rawLine.hasPrefix("+") && !rawLine.hasPrefix("+++") {
+                addCount += 1
+                let body = String(rawLine.dropFirst())
+                parsedLines.append(.init(id: idx, lineNum: "\(displayLineNum)", symbol: "+", text: body, kind: .addition))
+                displayLineNum += 1
+            } else if rawLine.hasPrefix("-") && !rawLine.hasPrefix("---") {
+                delCount += 1
+                let body = String(rawLine.dropFirst())
+                parsedLines.append(.init(id: idx, lineNum: "\(displayLineNum)", symbol: "−", text: body, kind: .deletion))
+            } else if trimmed.hasPrefix("+ ") || (trimmed.hasPrefix("+\t")) {
+                addCount += 1
+                let body = String(trimmed.dropFirst()).trimmingCharacters(in: .whitespaces)
+                parsedLines.append(.init(id: idx, lineNum: "\(displayLineNum)", symbol: "+", text: "    " + body, kind: .addition))
+                displayLineNum += 1
+            } else if trimmed.hasPrefix("- ") || (trimmed.hasPrefix("-\t")) {
+                delCount += 1
+                let body = String(trimmed.dropFirst()).trimmingCharacters(in: .whitespaces)
+                parsedLines.append(.init(id: idx, lineNum: "\(displayLineNum)", symbol: "−", text: "    " + body, kind: .deletion))
+            } else if idx == 0 && extractedFile != nil && (trimmed.hasPrefix("//") || trimmed.hasPrefix("#") || trimmed.hasPrefix("/*")) {
+                parsedLines.append(.init(id: idx, lineNum: "\(displayLineNum)", symbol: " ", text: rawLine, kind: .fileComment))
+                displayLineNum += 1
+            } else {
+                parsedLines.append(.init(id: idx, lineNum: "\(displayLineNum)", symbol: " ", text: rawLine, kind: .context))
+                displayLineNum += 1
+            }
+        }
+        
+        let isDiffBlock = lowerLang == "diff" || lowerLang == "patch" || (addCount + delCount >= 2 && (addCount > 0 && delCount > 0))
+        let resolvedTitle: String = {
+            if let file = extractedFile, !file.isEmpty {
+                return file
+            }
+            if isDiffBlock {
+                return "Diff Patch"
+            }
+            return lowerLang.isEmpty ? "Code" : language.uppercased()
+        }()
+        
+        let parsed = AgentParsedDiffBlock(
+            isDiff: isDiffBlock,
+            title: resolvedTitle,
+            additions: addCount,
+            deletions: delCount,
+            totalLines: rawLines.count,
+            lines: parsedLines
+        )
+        
+        lock.lock()
+        if diffCache.count > 32 {
+            diffCache.removeAll(keepingCapacity: false)
+        }
+        diffCache[key] = parsed
+        lock.unlock()
+        return parsed
+    }
+    
+    static func clearAll() {
+        lock.lock()
+        diffCache.removeAll(keepingCapacity: false)
+        lock.unlock()
+    }
+}
+
 struct NativeCodeBlockView: View, Equatable {
     let language: String
     let code: String
@@ -7843,224 +9835,296 @@ struct NativeCodeBlockView: View, Equatable {
     }
     
     @State private var isCopied = false
-    @State private var isHovering = false
     @State private var isExpanded = false
     
-    // Auto-color based on language
-    private var autoColorTheme: CellColorTheme {
-        switch language.lowercased() {
-        case "swift": return .orange
-        case "python": return .blue
-        case "javascript", "js", "typescript", "ts": return .yellow
-        case "html": return .red
-        case "css", "scss", "sass": return .purple
-        case "rust": return .brown
-        case "go", "golang": return .cyan
-        case "java", "kotlin": return .teal
-        case "ruby": return .red
-        case "php": return .indigo
-        case "c", "cpp", "c++", "objc", "objective-c": return .gray
-        case "shell", "bash", "zsh": return .green
-        case "sql": return .mint
-        case "json", "yaml", "xml": return .pink
-        default: return .blue
-        }
-    }
-    
-    private var blockBackground: Color {
-        autoColorTheme.color
-    }
-    
-    private var blockBorder: Color {
-        autoColorTheme.borderColor.opacity(0.4)
-    }
+    private let collapsedLineLimit = 22
     
     var body: some View {
+        let parsed = AgentCodeAndDiffCache.parse(language: language, code: code)
         VStack(alignment: .leading, spacing: 0) {
-            HStack(alignment: .top, spacing: 0) {
-                // Left Gutter (Single Unified Text Block)
-                gutterView
-                
-                // Main Cell Content (Single Unified Text Block)
-                VStack(spacing: 0) {
-                    headerView
-                    codeContentView
-                }
+            agentHeaderView(parsed: parsed)
+            Divider().opacity(0.28)
+            if parsed.isDiff {
+                agentDiffContentView(parsed: parsed)
+            } else {
+                agentCodeContentView(parsed: parsed)
             }
         }
-        .background(blockBackground)
+        .background(Color(nsColor: .textBackgroundColor).opacity(0.55))
         .cornerRadius(8)
         .overlay(
             RoundedRectangle(cornerRadius: 8)
-                .stroke(blockBorder, lineWidth: 1)
+                .stroke(Color.primary.opacity(0.11), lineWidth: 1)
         )
-        .padding(.vertical, 8)
-        .onHover { isHovering = $0 }
+        .padding(.vertical, 6)
     }
     
-    // MARK: - Subviews
+    // MARK: - Agent Mode Header (No Cell Mode tags or Play buttons)
     
-    private var lineCount: Int {
-        code.reduce(into: 1) { count, character in
-            if character == "\n" { count += 1 }
-        }
-    }
-    
-    private var isLongCode: Bool {
-        lineCount > 15 || code.count > 1_200
-    }
-
-    private var isWideSingleLinePayload: Bool {
-        code.count > 1_200 && lineCount <= 2
-    }
-    
-    private var gutterView: some View {
-        let maxLines = min(lineCount, isExpanded ? lineCount : 15)
-        let gutterText = (1...max(1, maxLines)).map { "\($0)" }.joined(separator: "\n") + (isLongCode && !isExpanded ? "\n..." : "")
-        
-        return Text(gutterText)
-            .font(.system(size: 11, design: .monospaced))
-            .lineSpacing(4)
-            .foregroundColor(.secondary.opacity(0.55))
-            .multilineTextAlignment(.trailing)
-            .padding(.vertical, 8)
-            .padding(.horizontal, 6)
-            .frame(minWidth: 32, alignment: .trailing)
-            .background(autoColorTheme.color.opacity(0.3))
-    }
-    
-    private var headerView: some View {
-        HStack(spacing: 8) {
-            // Language Badge
-            HStack(spacing: 6) {
-                Circle()
-                    .fill(autoColorTheme.iconColor)
-                    .frame(width: 8, height: 8)
-                
-                Text(language.isEmpty ? "Plain Text" : language.capitalized)
-                    .font(.system(size: 11, weight: .semibold))
-                    .foregroundColor(.primary)
-            }
-            .padding(.horizontal, 8)
-            .padding(.vertical, 4)
-            .background(Color.black.opacity(0.2))
-            .cornerRadius(4)
+    private func agentHeaderView(parsed: AgentParsedDiffBlock) -> some View {
+        let isLong = parsed.totalLines > collapsedLineLimit || code.count > 1_600
+        return HStack(spacing: 8) {
+            Image(systemName: parsed.isDiff ? "arrow.left.arrow.right.square.fill" : "chevron.left.forwardslash.chevron.right")
+                .font(.system(size: 11, weight: .semibold))
+                .foregroundColor(parsed.isDiff ? .accentColor : .secondary)
             
-            // Auto-Generated Tag
-            if !isWideSingleLinePayload && !dynamicTag.isEmpty {
+            Text(parsed.title)
+                .font(.system(size: 11.5, weight: .semibold, design: .monospaced))
+                .foregroundColor(.primary)
+                .lineLimit(1)
+            
+            if parsed.isDiff {
                 HStack(spacing: 4) {
-                    Image(systemName: "tag.fill")
-                        .font(.system(size: 8))
-                    Text(dynamicTag.name)
-                        .font(.system(size: 9, weight: .medium))
+                    if parsed.additions > 0 {
+                        Text("+\(parsed.additions)")
+                            .font(.system(size: 9.5, weight: .bold, design: .monospaced))
+                            .foregroundColor(.green)
+                            .padding(.horizontal, 5)
+                            .padding(.vertical, 1.5)
+                            .background(Color.green.opacity(0.14))
+                            .cornerRadius(3.5)
+                    }
+                    if parsed.deletions > 0 {
+                        Text("-\(parsed.deletions)")
+                            .font(.system(size: 9.5, weight: .bold, design: .monospaced))
+                            .foregroundColor(.red)
+                            .padding(.horizontal, 5)
+                            .padding(.vertical, 1.5)
+                            .background(Color.red.opacity(0.14))
+                            .cornerRadius(3.5)
+                    }
                 }
-                .foregroundColor(dynamicTag.color)
-                .padding(.horizontal, 6)
-                .padding(.vertical, 2)
-                .background(dynamicTag.color.opacity(0.15))
-                .cornerRadius(3)
+            } else if !language.isEmpty && parsed.title.lowercased() != language.lowercased() {
+                Text(language.uppercased())
+                    .font(.system(size: 9, weight: .semibold, design: .monospaced))
+                    .foregroundColor(.secondary)
+                    .padding(.horizontal, 5)
+                    .padding(.vertical, 1.5)
+                    .background(Color.primary.opacity(0.06))
+                    .cornerRadius(3.5)
             }
             
-            // Line Count Badge
-            Text("\(lineCount) lines")
-                .font(.system(size: 9))
-                .foregroundColor(.secondary)
-                .padding(.horizontal, 6)
-                .padding(.vertical, 2)
-                .background(Color.white.opacity(0.05))
-                .cornerRadius(3)
+            Text("\(parsed.totalLines) lines")
+                .font(.system(size: 9.5, design: .monospaced))
+                .foregroundColor(.secondary.opacity(0.75))
             
-            Spacer()
+            Spacer(minLength: 8)
             
-            // Tools (Always visible but subtle, brighter on hover)
-            HStack(spacing: 4) {
-                // Run Menu (NEW!)
-                Menu {
-                    Button(action: runInPlayground) {
-                        Label("Run in Playground", systemImage: "play.rectangle")
-                    }
-                    Button(action: runInCellMode) {
-                        Label("Run in Cell Mode", systemImage: "square.grid.2x2")
-                    }
-                    Divider()
+            HStack(spacing: 6) {
+                if !parsed.isDiff {
                     Button(action: openInEditor) {
-                        Label("Open in Editor", systemImage: "doc.text")
-                    }
-                } label: {
-                    Image(systemName: "play.fill")
-                        .font(.system(size: 11))
-                        .foregroundColor(.green.opacity(isHovering ? 1 : 0.6))
-                }
-                .menuStyle(.borderlessButton)
-                .frame(width: 20)
-                .help("Run Code")
-                
-                // Expand/Collapse (for long code)
-                if isLongCode {
-                    Button(action: { 
-                        withAnimation(.easeInOut(duration: 0.2)) {
-                            isExpanded.toggle() 
+                        HStack(spacing: 3) {
+                            Image(systemName: "arrow.up.right.square")
+                                .font(.system(size: 9.5))
+                            Text("Editor")
+                                .font(.system(size: 9.5, weight: .medium))
                         }
-                    }) {
-                        Image(systemName: isExpanded ? "chevron.up" : "chevron.down")
-                            .font(.system(size: 10))
-                            .foregroundColor(.secondary.opacity(isHovering ? 1 : 0.5))
+                        .foregroundColor(.secondary)
+                        .padding(.horizontal, 6)
+                        .padding(.vertical, 3)
+                        .background(Color.primary.opacity(0.05))
+                        .cornerRadius(4)
                     }
                     .buttonStyle(.plain)
-                    .frame(width: 20)
+                    .help("Open snippet in Code Editor")
                 }
                 
-                // Copy Button
-                Button(action: copyCode) {
-                    HStack(spacing: 3) {
-                        Image(systemName: isCopied ? "checkmark" : "doc.on.doc")
-                            .font(.system(size: 10))
-                        if isHovering {
-                            Text(isCopied ? "Copied" : "Copy")
-                                .font(.system(size: 9))
+                if isLong {
+                    Button(action: {
+                        isExpanded.toggle()
+                    }) {
+                        HStack(spacing: 3) {
+                            Image(systemName: isExpanded ? "chevron.up" : "chevron.down")
+                                .font(.system(size: 9, weight: .semibold))
+                            Text(isExpanded ? "Collapse" : "Expand")
+                                .font(.system(size: 9.5, weight: .medium))
                         }
+                        .foregroundColor(.secondary)
+                        .padding(.horizontal, 6)
+                        .padding(.vertical, 3)
+                        .background(Color.primary.opacity(0.05))
+                        .cornerRadius(4)
                     }
-                    .foregroundColor(isCopied ? .green : .secondary.opacity(isHovering ? 1 : 0.6))
-                    .padding(.horizontal, isHovering ? 6 : 4)
+                    .buttonStyle(.plain)
+                }
+                
+                Button(action: copyCode) {
+                    HStack(spacing: 3.5) {
+                        Image(systemName: isCopied ? "checkmark" : "doc.on.doc")
+                            .font(.system(size: 9.5, weight: .medium))
+                        Text(isCopied ? "Copied" : "Copy")
+                            .font(.system(size: 9.5, weight: .medium))
+                    }
+                    .foregroundColor(isCopied ? .green : .secondary)
+                    .padding(.horizontal, 7)
                     .padding(.vertical, 3)
-                    .background(Color.white.opacity(isHovering ? 0.08 : 0.03))
+                    .background(Color.primary.opacity(0.06))
                     .cornerRadius(4)
                 }
                 .buttonStyle(.plain)
             }
-            .animation(.easeInOut(duration: 0.15), value: isHovering)
         }
-        .padding(.horizontal, 10)
-        .padding(.vertical, 6)
-        .background(Color(nsColor: .controlBackgroundColor).opacity(0.6))
+        .padding(.horizontal, 12)
+        .padding(.vertical, 7)
+        .background(Color.primary.opacity(0.035))
     }
     
-    // MARK: - Dynamic Tag
+    // MARK: - 120fps Agent Mode Diff Body (Zero Nested ScrollView, Metal Rasterized)
     
-    private var dynamicTag: DynamicTag {
-        DynamicTag(name: CodeTagGenerator.generateTag(from: code, language: language))
+    private func agentDiffContentView(parsed: AgentParsedDiffBlock) -> some View {
+        let isTruncated = !isExpanded && parsed.lines.count > collapsedLineLimit
+        let visibleLines = isTruncated ? Array(parsed.lines.prefix(collapsedLineLimit)) : parsed.lines
+        
+        return VStack(alignment: .leading, spacing: 0) {
+            VStack(alignment: .leading, spacing: 0) {
+                ForEach(visibleLines) { line in
+                    HStack(spacing: 0) {
+                        Rectangle()
+                            .fill(diffBarColor(line.kind))
+                            .frame(width: 3)
+                        
+                        Text(line.lineNum)
+                            .font(.system(size: 10, design: .monospaced))
+                            .foregroundColor(.secondary.opacity(0.45))
+                            .frame(width: 32, alignment: .trailing)
+                            .padding(.trailing, 6)
+                        
+                        Text(line.symbol)
+                            .font(.system(size: 11, weight: .bold, design: .monospaced))
+                            .foregroundColor(diffSymbolColor(line.kind))
+                            .frame(width: 16, alignment: .center)
+                        
+                        Text(line.text)
+                            .font(.custom("Menlo", size: 11.5))
+                            .foregroundColor(diffTextColor(line.kind))
+                            .lineLimit(1)
+                            .truncationMode(.tail)
+                            .padding(.trailing, 10)
+                        
+                        Spacer(minLength: 0)
+                    }
+                    .frame(height: 19)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .background(diffRowBackground(line.kind))
+                }
+            }
+            .padding(.vertical, 4)
+            
+            if isTruncated {
+                Divider().opacity(0.25)
+                Button(action: {
+                    isExpanded = true
+                }) {
+                    HStack(spacing: 5) {
+                        Image(systemName: "chevron.down")
+                            .font(.system(size: 9, weight: .semibold))
+                        Text("Show \(parsed.lines.count - collapsedLineLimit) more diff lines")
+                            .font(.system(size: 10, weight: .medium, design: .monospaced))
+                    }
+                    .foregroundColor(.accentColor)
+                    .frame(maxWidth: .infinity)
+                    .padding(.vertical, 6)
+                    .background(Color.primary.opacity(0.025))
+                    .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+            }
+        }
     }
     
-    // MARK: - Run Actions
-    
-    private func runInPlayground() {
-        NSPasteboard.general.clearContents()
-        NSPasteboard.general.setString(code, forType: .string)
-        NotificationCenter.default.post(
-            name: Notification.Name("OpenInPlayground"), 
-            object: nil, 
-            userInfo: ["code": code, "language": language]
-        )
+    private func diffBarColor(_ kind: AgentParsedDiffBlock.Line.Kind) -> Color {
+        switch kind {
+        case .addition: return .green
+        case .deletion: return .red
+        case .hunk: return .cyan.opacity(0.7)
+        case .fileComment, .context: return .clear
+        }
     }
     
-    private func runInCellMode() {
-        NSPasteboard.general.clearContents()
-        NSPasteboard.general.setString(code, forType: .string)
-        NotificationCenter.default.post(
-            name: Notification.Name("OpenInCellMode"), 
-            object: nil, 
-            userInfo: ["code": code, "language": language]
-        )
+    private func diffSymbolColor(_ kind: AgentParsedDiffBlock.Line.Kind) -> Color {
+        switch kind {
+        case .addition: return .green
+        case .deletion: return .red
+        case .hunk: return .cyan
+        case .fileComment, .context: return .secondary.opacity(0.3)
+        }
+    }
+    
+    private func diffTextColor(_ kind: AgentParsedDiffBlock.Line.Kind) -> Color {
+        switch kind {
+        case .addition: return .primary
+        case .deletion: return .primary.opacity(0.78)
+        case .hunk: return .secondary
+        case .fileComment: return .secondary.opacity(0.85)
+        case .context: return .primary.opacity(0.88)
+        }
+    }
+    
+    private func diffRowBackground(_ kind: AgentParsedDiffBlock.Line.Kind) -> Color {
+        switch kind {
+        case .addition: return Color.green.opacity(0.11)
+        case .deletion: return Color.red.opacity(0.11)
+        case .hunk: return Color.primary.opacity(0.03)
+        case .fileComment, .context: return Color.clear
+        }
+    }
+    
+    // MARK: - 120fps Agent Mode Standard Code Body (Zero Nested ScrollView)
+    
+    private func agentCodeContentView(parsed: AgentParsedDiffBlock) -> some View {
+        let isLong = parsed.totalLines > collapsedLineLimit || code.count > 1_600
+        let isWideSingleLinePayload = code.count > 1_200 && parsed.totalLines <= 2
+        
+        let displayCode: String = {
+            if isExpanded || !isLong {
+                return code
+            } else if isWideSingleLinePayload {
+                return String(code.prefix(1_200)) + "\n…"
+            } else {
+                return code.components(separatedBy: "\n").prefix(collapsedLineLimit).joined(separator: "\n")
+            }
+        }()
+        
+        let highlightedCode: AttributedString = displayCode.count <= 8_000
+            ? SyntaxHighlightingEngine.cachedSwiftUIAttributedString(
+                displayCode,
+                language: language.isEmpty ? "swift" : language,
+                fontSize: 11.5,
+                isDark: true
+            )
+            : AttributedString(displayCode)
+        
+        return VStack(alignment: .leading, spacing: 0) {
+            Text(highlightedCode)
+                .font(.custom("Menlo", size: 11.5))
+                .lineSpacing(3.5)
+                .foregroundColor(Color(nsColor: .textColor))
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .padding(.vertical, 10)
+                .padding(.horizontal, 14)
+            
+            if isLong && !isExpanded {
+                Divider().opacity(0.25)
+                Button(action: {
+                    isExpanded = true
+                }) {
+                    HStack(spacing: 5) {
+                        Image(systemName: "chevron.down")
+                            .font(.system(size: 9, weight: .semibold))
+                        Text(isWideSingleLinePayload
+                             ? "Show \(max(0, code.count - 1_200)) more characters"
+                             : "Show \(max(0, parsed.totalLines - collapsedLineLimit)) more lines")
+                            .font(.system(size: 10, weight: .medium, design: .monospaced))
+                    }
+                    .foregroundColor(.accentColor)
+                    .frame(maxWidth: .infinity)
+                    .padding(.vertical, 6)
+                    .background(Color.primary.opacity(0.025))
+                    .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+            }
+        }
     }
     
     private func openInEditor() {
@@ -8070,8 +10134,8 @@ struct NativeCodeBlockView: View, Equatable {
         do {
             try code.write(to: tempURL, atomically: true, encoding: .utf8)
             NotificationCenter.default.post(
-                name: Notification.Name("OpenFileInEditor"), 
-                object: nil, 
+                name: Notification.Name("OpenFileInEditor"),
+                object: nil,
                 userInfo: ["url": tempURL]
             )
         } catch {
@@ -8100,83 +10164,12 @@ struct NativeCodeBlockView: View, Equatable {
         }
     }
     
-    private var codeContentView: some View {
-        let displayCode: String
-        if isExpanded || !isLongCode {
-            displayCode = code
-        } else if isWideSingleLinePayload {
-            displayCode = String(code.prefix(1_200)) + "\n…"
-        } else {
-            displayCode = code.components(separatedBy: "\n").prefix(15).joined(separator: "\n")
-        }
-        
-        let highlightedCode: AttributedString = displayCode.count <= 8_000
-            ? SyntaxHighlightingEngine.cachedSwiftUIAttributedString(
-                displayCode,
-                language: language.isEmpty ? "swift" : language,
-                fontSize: 12,
-                isDark: true
-            )
-            : AttributedString(displayCode)
-        
-        return VStack(alignment: .leading, spacing: 0) {
-            ScrollView(.horizontal, showsIndicators: false) {
-                Text(highlightedCode)
-                    .font(.custom("Menlo", size: 12))
-                    .lineSpacing(4)
-                    .foregroundColor(Color(nsColor: .textColor))
-                    .padding(.vertical, 8)
-                    .padding(.horizontal, 12)
-                    .textSelection(.enabled)
-            }
-            
-            // Expand indicator
-            if isLongCode && !isExpanded {
-                HStack {
-                    Spacer()
-                    Button(action: { 
-                        withAnimation(.easeInOut(duration: 0.2)) {
-                            isExpanded = true 
-                        }
-                    }) {
-                        HStack(spacing: 4) {
-                            Text(isWideSingleLinePayload
-                                 ? "Show \(max(0, code.count - 1_200)) more characters"
-                                 : "Show \(max(0, lineCount - 15)) more lines")
-                                .font(.system(size: 10))
-                            Image(systemName: "chevron.down")
-                                .font(.system(size: 9))
-                        }
-                        .foregroundColor(.accentColor)
-                        .padding(.horizontal, 10)
-                        .padding(.vertical, 4)
-                    }
-                    .buttonStyle(.plain)
-                    Spacer()
-                }
-                .background(
-                    LinearGradient(
-                        colors: [autoColorTheme.color.opacity(0), autoColorTheme.color.opacity(0.3)],
-                        startPoint: .top,
-                        endPoint: .bottom
-                    )
-                )
-            }
-        }
-        .background(Color(nsColor: .textBackgroundColor).opacity(0.15))
-    }
-    
     private func copyCode() {
         NSPasteboard.general.clearContents()
         NSPasteboard.general.setString(code, forType: .string)
-        withAnimation(.easeInOut(duration: 0.2)) {
-            isCopied = true
-        }
-        
-        DispatchQueue.main.asyncAfter(deadline: .now() + 2) {
-            withAnimation(.easeInOut(duration: 0.2)) {
-                isCopied = false
-            }
+        isCopied = true
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1.8) {
+            isCopied = false
         }
     }
 }
@@ -8774,6 +10767,18 @@ struct ToolActivityItemRow: View {
         case "git_diff":
             return ("arrow.triangle.branch", "Inspected", "git diff", nil)
             
+        case "generate_image":
+            let promptText = (params["prompt"] as? String) ?? "AI Image"
+            return ("photo.artframe", "Generated Image", "\"\(promptText.prefix(40))\"", nil)
+            
+        case "generate_video":
+            let promptText = (params["prompt"] as? String) ?? "AI Video"
+            return ("film.stack", "Generated Video", "\"\(promptText.prefix(40))\"", nil)
+            
+        case "generate_music":
+            let promptText = (params["prompt"] as? String) ?? "AI Music Track"
+            return ("music.note.list", "Generated Music", "\"\(promptText.prefix(40))\"", nil)
+            
         default:
             let cleanName = result.toolName.replacingOccurrences(of: "_", with: " ")
             return ("wrench.and.screwdriver", "Executed", cleanName, nil)
@@ -8841,6 +10846,27 @@ struct ToolActivityItemRow: View {
                     
                     Spacer()
                     
+                    if !result.success {
+                        Button(action: {
+                            let errText = (result.error ?? result.output).trimmingCharacters(in: .whitespacesAndNewlines)
+                            let snippet = String(errText.prefix(1500))
+                            AgentService.shared.enqueueMessage("Please diagnose and fix this error from `\(displayItem.detail)`:\n\n```\n\(snippet)\n```")
+                        }) {
+                            HStack(spacing: 3) {
+                                Image(systemName: "wrench.and.screwdriver.fill")
+                                    .font(.system(size: 8.5))
+                                Text("Fix in Agent")
+                                    .font(.system(size: 9.5, weight: .semibold))
+                            }
+                            .foregroundColor(.orange)
+                            .padding(.horizontal, 6)
+                            .padding(.vertical, 2)
+                            .background(Color.orange.opacity(0.12))
+                            .cornerRadius(4)
+                        }
+                        .buttonStyle(.plain)
+                    }
+                    
                     Image(systemName: showDetails ? "chevron.down" : "chevron.right")
                         .font(.system(size: 8, weight: .semibold))
                         .foregroundColor(.secondary.opacity(0.5))
@@ -8849,19 +10875,36 @@ struct ToolActivityItemRow: View {
             }
             .buttonStyle(.plain)
             
-            if showDetails {
+            if showDetails || (displayItem.detail.lowercased().hasSuffix(".md") && ["file_write", "write_to_file", "replace_in_file"].contains(result.toolName)) {
                 let rawOutput = result.success ? result.output : (result.error ?? result.output)
+                let mdParamContent = (result.toolParams?["content"] as? String) ?? (result.toolParams?["CodeContent"] as? String) ?? (result.toolParams?["ReplacementContent"] as? String) ?? ""
                 let trimmedOutput = rawOutput.trimmingCharacters(in: .whitespacesAndNewlines)
-                Text(trimmedOutput.isEmpty ? "(No output)" : String(trimmedOutput.prefix(1500)))
-                    .font(.system(size: 11, design: .monospaced))
-                    .foregroundColor(result.success ? .secondary : .red.opacity(0.85))
-                    .lineLimit(16)
-                    .textSelection(.enabled)
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                    .padding(8)
-                    .background(Color.black.opacity(0.2))
-                    .cornerRadius(6)
-                    .padding(.leading, 20)
+                if displayItem.detail.lowercased().hasSuffix(".md") {
+                    let docText = !mdParamContent.isEmpty ? mdParamContent : trimmedOutput
+                    if !docText.isEmpty {
+                        RenderedMarkdownDocumentView(markdown: String(docText.prefix(6000)))
+                            .padding(12)
+                            .background(Color.primary.opacity(0.03))
+                            .cornerRadius(8)
+                            .overlay(
+                                RoundedRectangle(cornerRadius: 8)
+                                    .stroke(Color.primary.opacity(0.08), lineWidth: 0.5)
+                            )
+                            .padding(.leading, 20)
+                            .padding(.top, 4)
+                    }
+                } else {
+                    Text(trimmedOutput.isEmpty ? "(No output)" : String(trimmedOutput.prefix(1500)))
+                        .font(.system(size: 11, design: .monospaced))
+                        .foregroundColor(result.success ? .secondary : .red.opacity(0.85))
+                        .lineLimit(16)
+                        .textSelection(.enabled)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .padding(8)
+                        .background(Color.black.opacity(0.2))
+                        .cornerRadius(6)
+                        .padding(.leading, 20)
+                }
             }
         }
     }
@@ -8971,20 +11014,30 @@ struct ProjectWorkspaceSelectorMenu: View {
                 }
                 .buttonStyle(.plain)
                 
-                Button(action: { isPresented = false }) {
+                Button(action: quickStartAction) {
+                    let generated = nextQuickStartFolderInfo()
                     HStack(spacing: 8) {
-                        Image(systemName: "bolt")
+                        Image(systemName: "bolt.fill")
                             .font(.system(size: 11))
-                            .foregroundColor(.secondary)
+                            .foregroundColor(.accentColor)
                         Text("Quick Start")
-                            .font(.system(size: 11.5))
+                            .font(.system(size: 11.5, weight: .medium))
                             .foregroundColor(.primary)
                         Spacer()
+                        Text(generated.name)
+                            .font(.system(size: 9.5, weight: .medium, design: .monospaced))
+                            .foregroundColor(.secondary)
+                            .padding(.horizontal, 5)
+                            .padding(.vertical, 1.5)
+                            .background(Color.primary.opacity(0.06))
+                            .cornerRadius(4)
                     }
                     .padding(.horizontal, 8)
                     .padding(.vertical, 4)
+                    .contentShape(Rectangle())
                 }
                 .buttonStyle(.plain)
+                .help("Auto-generate a new project folder (\(nextQuickStartFolderInfo().name)) and start immediately")
                 
                 Button(action: noProjectAction) {
                     HStack(spacing: 8) {
@@ -9006,6 +11059,61 @@ struct ProjectWorkspaceSelectorMenu: View {
         }
         .frame(width: 250)
         .background(Color(nsColor: appState.appTheme.panelBackground))
+    }
+    
+    private func quickStartParentDirectory() -> URL {
+        let fm = FileManager.default
+        let candidatePaths: [String] = [
+            appState.workspaceFolder?.path,
+            agent.currentWorkspace,
+            agent.projectGroups.compactMap(\.projectPath).first
+        ].compactMap { $0 }.filter { !$0.isEmpty }
+        
+        for path in candidatePaths {
+            let parent = URL(fileURLWithPath: path).deletingLastPathComponent()
+            let parentPath = parent.path
+            if parentPath != "/" && parentPath != "/Volumes" && parentPath != "/Users" && fm.isWritableFile(atPath: parentPath) {
+                return parent
+            }
+        }
+        
+        let defaultRoot = fm.homeDirectoryForCurrentUser
+            .appendingPathComponent("Documents", isDirectory: true)
+            .appendingPathComponent("MicroCodeProjects", isDirectory: true)
+        try? fm.createDirectory(at: defaultRoot, withIntermediateDirectories: true)
+        return defaultRoot
+    }
+    
+    private func nextQuickStartFolderInfo() -> (name: String, url: URL) {
+        let parent = quickStartParentDirectory()
+        let fm = FileManager.default
+        let existingNames = Set(agent.projectGroups.map { $0.projectName.lowercased() })
+        
+        var index = 1
+        while index < 1000 {
+            let candidateName = String(format: "QuickStart-%02d", index)
+            let candidateURL = parent.appendingPathComponent(candidateName, isDirectory: true)
+            if !fm.fileExists(atPath: candidateURL.path) && !existingNames.contains(candidateName.lowercased()) {
+                return (candidateName, candidateURL)
+            }
+            index += 1
+        }
+        
+        let formatter = DateFormatter()
+        formatter.dateFormat = "MMdd-HHmmss"
+        let fallbackName = "QuickStart-\(formatter.string(from: Date()))"
+        return (fallbackName, parent.appendingPathComponent(fallbackName, isDirectory: true))
+    }
+    
+    private func quickStartAction() {
+        let info = nextQuickStartFolderInfo()
+        do {
+            try FileManager.default.createDirectory(at: info.url, withIntermediateDirectories: true)
+        } catch {
+            print("[QuickStart] Failed to create directory at \(info.url.path): \(error)")
+        }
+        AppState.recordRecentWorkspace(url: info.url)
+        selectProject(info.url.path)
     }
     
     private func selectProject(_ path: String) {
@@ -9094,6 +11202,38 @@ struct SubAgentSelectorMenu: View {
                         .opacity(0.3)
                         .padding(.vertical, 4)
                     
+                    HStack {
+                        Text("👑 CEO & SPECIALIST SQUADS")
+                            .font(.system(size: 8.5, weight: .bold))
+                            .foregroundColor(.orange.opacity(0.9))
+                        Spacer()
+                        Button {
+                            isPresented = false
+                            harness.showSquadBuilderSheet = true
+                        } label: {
+                            Text("+ Custom Squad")
+                                .font(.system(size: 9, weight: .semibold))
+                                .foregroundColor(.accentColor)
+                        }
+                        .buttonStyle(.plain)
+                    }
+                    .padding(.horizontal, 8)
+                    .padding(.top, 2)
+                    .padding(.bottom, 2)
+                    
+                    ForEach(harness.squadPresets) { preset in
+                        agentOptionRow(
+                            type: "squad:\(preset.id)",
+                            icon: preset.icon,
+                            title: preset.name,
+                            subtitle: preset.subtitle
+                        )
+                    }
+                    
+                    Divider()
+                        .opacity(0.3)
+                        .padding(.vertical, 4)
+                    
                     Text("SPECIALIZED SUBAGENTS")
                         .font(.system(size: 8.5, weight: .bold))
                         .foregroundColor(.secondary.opacity(0.6))
@@ -9114,7 +11254,7 @@ struct SubAgentSelectorMenu: View {
                 }
                 .padding(6)
             }
-            .frame(maxHeight: 270)
+            .frame(maxHeight: 330)
             
             Divider()
                 .opacity(0.4)
@@ -9123,13 +11263,30 @@ struct SubAgentSelectorMenu: View {
             HStack {
                 Button(action: {
                     isPresented = false
+                    harness.showSquadBuilderSheet = true
+                }) {
+                    HStack(spacing: 4) {
+                        Image(systemName: "slider.horizontal.3")
+                            .font(.system(size: 10))
+                        Text("Customize Squad")
+                            .font(.system(size: 10.5, weight: .medium))
+                    }
+                    .foregroundColor(.accentColor)
+                }
+                .buttonStyle(.plain)
+                
+                Text("•")
+                    .foregroundColor(.secondary.opacity(0.4))
+                
+                Button(action: {
+                    isPresented = false
                     harness.showSubAgentMonitor = true
                 }) {
-                    HStack(spacing: 5) {
+                    HStack(spacing: 4) {
                         Image(systemName: "cpu")
                             .font(.system(size: 10))
-                        Text("Open Monitor HUD")
-                            .font(.system(size: 11, weight: .regular))
+                        Text("Monitor HUD")
+                            .font(.system(size: 10.5, weight: .regular))
                     }
                     .foregroundColor(.secondary)
                 }
@@ -9377,6 +11534,476 @@ struct AttachmentChipView: View {
             return "PDF • \(pages > 0 ? "\(pages) p • " : "")\(file.formattedSize)"
         case .text:
             return "File • \(file.formattedSize)"
+        }
+    }
+}
+
+// MARK: - Inline Generated Media Renderer (Image, Video, Music/Audio)
+
+@MainActor
+final class ChatAudioPlayerController: NSObject, ObservableObject, AVAudioPlayerDelegate {
+    @Published var isPlaying: Bool = false
+    @Published var currentTime: Double = 0
+    @Published var duration: Double = 0
+    
+    private var audioPlayer: AVAudioPlayer?
+    private var timer: Timer?
+    private var loadedURL: URL?
+    
+    func loadIfNeeded(url: URL) {
+        guard loadedURL != url else { return }
+        stop()
+        loadedURL = url
+        if let player = try? AVAudioPlayer(contentsOf: url) {
+            player.delegate = self
+            player.prepareToPlay()
+            audioPlayer = player
+            duration = max(player.duration, 0.1)
+        }
+    }
+    
+    func togglePlay(url: URL) {
+        loadIfNeeded(url: url)
+        guard let player = audioPlayer else {
+            NSWorkspace.shared.open(url)
+            return
+        }
+        if player.isPlaying {
+            player.pause()
+            isPlaying = false
+            timer?.invalidate()
+        } else {
+            player.play()
+            isPlaying = true
+            timer?.invalidate()
+            timer = Timer.scheduledTimer(withTimeInterval: 0.1, repeats: true) { [weak self] _ in
+                Task { @MainActor in
+                    guard let self = self, let p = self.audioPlayer else { return }
+                    self.currentTime = p.currentTime
+                    if !p.isPlaying {
+                        self.isPlaying = false
+                        self.timer?.invalidate()
+                    }
+                }
+            }
+        }
+    }
+    
+    func seek(to time: Double) {
+        audioPlayer?.currentTime = time
+        currentTime = time
+    }
+    
+    func stop() {
+        audioPlayer?.stop()
+        isPlaying = false
+        currentTime = 0
+        timer?.invalidate()
+        timer = nil
+    }
+    
+    nonisolated func audioPlayerDidFinishPlaying(_ player: AVAudioPlayer, successfully flag: Bool) {
+        Task { @MainActor in
+            self.isPlaying = false
+            self.currentTime = 0
+            self.timer?.invalidate()
+        }
+    }
+}
+
+/// Native AppKit `AVPlayerView` wrapper so `.mp4` / `.mov` videos always render their frames and playback controls reliably inside macOS `ScrollView`.
+struct NativeAVPlayerView: NSViewRepresentable {
+    let player: AVPlayer
+
+    func makeNSView(context: Context) -> AVPlayerView {
+        let view = AVPlayerView()
+        view.controlsStyle = .inline
+        view.videoGravity = .resizeAspect
+        view.showsFullScreenToggleButton = true
+        view.player = player
+        return view
+    }
+
+    func updateNSView(_ nsView: AVPlayerView, context: Context) {
+        if nsView.player !== player {
+            nsView.player = player
+        }
+    }
+}
+
+struct ChatMediaBlockView: View {
+    let kind: GeneratedMediaKind
+    let title: String
+    let target: String
+    
+    @StateObject private var audioController = ChatAudioPlayerController()
+    @State private var videoPlayer: AVPlayer? = nil
+    @State private var copiedFeedback: Bool = false
+    
+    private var resolvedFileURL: URL? {
+        let trimmed = target.trimmingCharacters(in: .whitespacesAndNewlines)
+        if trimmed.hasPrefix("file://") {
+            let rawPath = String(trimmed.dropFirst("file://".count))
+            let decoded = rawPath.removingPercentEncoding ?? rawPath
+            return URL(fileURLWithPath: decoded)
+        } else if trimmed.hasPrefix("/") || trimmed.hasPrefix("~") {
+            let expanded = (trimmed as NSString).expandingTildeInPath
+            return URL(fileURLWithPath: expanded)
+        } else if let u = URL(string: trimmed), u.isFileURL {
+            return u
+        }
+        return nil
+    }
+    
+    private var loadedNSImage: NSImage? {
+        if let fileURL = resolvedFileURL, let img = NSImage(contentsOf: fileURL) {
+            return img
+        }
+        if target.hasPrefix("data:image/"),
+           let commaIdx = target.firstIndex(of: ",") {
+            let b64 = String(target[target.index(after: commaIdx)...])
+            if let data = Data(base64Encoded: b64, options: .ignoreUnknownCharacters),
+               let img = NSImage(data: data) {
+                return img
+            }
+        }
+        return nil
+    }
+    
+    var body: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            // Formal Monochrome Header Bar
+            HStack(spacing: 8) {
+                Image(systemName: headerIcon)
+                    .font(.system(size: 11, weight: .medium))
+                    .foregroundColor(.secondary)
+                
+                Text(badgeLabel)
+                    .font(.system(size: 9, weight: .semibold, design: .monospaced))
+                    .tracking(0.5)
+                    .padding(.horizontal, 6)
+                    .padding(.vertical, 2)
+                    .background(Color.primary.opacity(0.07))
+                    .foregroundColor(.secondary)
+                    .cornerRadius(3)
+                
+                Text(displaySubtitle)
+                    .font(.system(size: 11, weight: .regular, design: .monospaced))
+                    .foregroundColor(.primary.opacity(0.82))
+                    .lineLimit(1)
+                
+                Spacer(minLength: 12)
+                
+                HStack(spacing: 10) {
+                    if kind == .image, let img = loadedNSImage {
+                        Button {
+                            NSPasteboard.general.clearContents()
+                            NSPasteboard.general.writeObjects([img])
+                            copiedFeedback = true
+                            DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) {
+                                copiedFeedback = false
+                            }
+                        } label: {
+                            HStack(spacing: 3) {
+                                Image(systemName: copiedFeedback ? "checkmark" : "doc.on.doc")
+                                Text(copiedFeedback ? "Copied" : "Copy")
+                            }
+                            .font(.system(size: 10, weight: .medium))
+                            .foregroundColor(.secondary)
+                        }
+                        .buttonStyle(.plain)
+                    }
+                    
+                    if let fileURL = resolvedFileURL {
+                        Button {
+                            saveMediaAs(from: fileURL)
+                        } label: {
+                            HStack(spacing: 3) {
+                                Image(systemName: "square.and.arrow.down")
+                                Text("Save As")
+                            }
+                            .font(.system(size: 10, weight: .medium))
+                            .foregroundColor(.secondary)
+                        }
+                        .buttonStyle(.plain)
+                        
+                        Button {
+                            NSWorkspace.shared.activateFileViewerSelecting([fileURL])
+                        } label: {
+                            HStack(spacing: 3) {
+                                Image(systemName: "folder")
+                                Text("Finder")
+                            }
+                            .font(.system(size: 10, weight: .medium))
+                            .foregroundColor(.secondary)
+                        }
+                        .buttonStyle(.plain)
+                        
+                        Button {
+                            NSWorkspace.shared.open(fileURL)
+                        } label: {
+                            HStack(spacing: 3) {
+                                Image(systemName: "arrow.up.right.square")
+                                Text("Open")
+                            }
+                            .font(.system(size: 10, weight: .medium))
+                            .foregroundColor(.primary.opacity(0.85))
+                        }
+                        .buttonStyle(.plain)
+                    }
+                }
+            }
+            .padding(.horizontal, 12)
+            .padding(.vertical, 8)
+            .background(Color.primary.opacity(0.03))
+            
+            Divider().opacity(0.25)
+            
+            // Media Content Body
+            Group {
+                switch kind {
+                case .image:
+                    imageBody
+                case .video:
+                    videoBody
+                case .audio:
+                    audioBody
+                }
+            }
+            .padding(10)
+        }
+        .frame(maxWidth: 520, alignment: .leading)
+        .background(Color(nsColor: .controlBackgroundColor).opacity(0.35))
+        .cornerRadius(8)
+        .overlay(
+            RoundedRectangle(cornerRadius: 8)
+                .stroke(Color.primary.opacity(0.10), lineWidth: 1)
+        )
+        .padding(.vertical, 4)
+        .onDisappear {
+            audioController.stop()
+            videoPlayer?.pause()
+        }
+    }
+    
+    @ViewBuilder
+    private var imageBody: some View {
+        if let nsImage = loadedNSImage {
+            VStack(alignment: .leading, spacing: 6) {
+                Image(nsImage: nsImage)
+                    .resizable()
+                    .scaledToFit()
+                    .frame(maxWidth: 500, maxHeight: 400)
+                    .cornerRadius(6)
+                    .overlay(
+                        RoundedRectangle(cornerRadius: 6)
+                            .stroke(Color.primary.opacity(0.08), lineWidth: 0.5)
+                    )
+                    .onTapGesture {
+                        if let fileURL = resolvedFileURL {
+                            NSWorkspace.shared.open(fileURL)
+                        }
+                    }
+                
+                HStack(spacing: 8) {
+                    Text("\(Int(nsImage.size.width)) × \(Int(nsImage.size.height)) px")
+                        .font(.system(size: 10, design: .monospaced))
+                        .foregroundColor(.secondary)
+                    if let fileURL = resolvedFileURL {
+                        Text("· \(fileURL.lastPathComponent)")
+                            .font(.system(size: 10, design: .monospaced))
+                            .foregroundColor(.secondary.opacity(0.75))
+                            .lineLimit(1)
+                    }
+                }
+            }
+        } else {
+            HStack(spacing: 8) {
+                Image(systemName: "photo")
+                    .foregroundColor(.secondary)
+                Text(resolvedFileURL?.lastPathComponent ?? target)
+                    .font(.system(size: 11, design: .monospaced))
+                    .foregroundColor(.secondary)
+            }
+            .padding(8)
+        }
+    }
+    
+    @ViewBuilder
+    private var videoBody: some View {
+        if let fileURL = resolvedFileURL, FileManager.default.fileExists(atPath: fileURL.path) {
+            VStack(alignment: .leading, spacing: 8) {
+                if let player = videoPlayer {
+                    NativeAVPlayerView(player: player)
+                        .frame(width: 500, height: 282)
+                        .cornerRadius(6)
+                        .overlay(
+                            RoundedRectangle(cornerRadius: 6)
+                                .stroke(Color.primary.opacity(0.08), lineWidth: 0.5)
+                        )
+                } else {
+                    RoundedRectangle(cornerRadius: 6)
+                        .fill(Color.black.opacity(0.4))
+                        .frame(width: 500, height: 282)
+                        .overlay(
+                            ProgressView()
+                                .controlSize(.small)
+                        )
+                }
+                
+                HStack(spacing: 12) {
+                    Button {
+                        if let player = videoPlayer {
+                            if player.rate == 0 {
+                                player.seek(to: .zero)
+                                player.play()
+                            } else {
+                                player.pause()
+                            }
+                        }
+                    } label: {
+                        HStack(spacing: 4) {
+                            Image(systemName: "play.fill")
+                                .font(.system(size: 9.5))
+                            Text("Play / Replay")
+                                .font(.system(size: 10.5, weight: .medium))
+                        }
+                        .foregroundColor(.primary.opacity(0.85))
+                        .padding(.horizontal, 8)
+                        .padding(.vertical, 3.5)
+                        .background(Color.primary.opacity(0.07))
+                        .cornerRadius(4)
+                    }
+                    .buttonStyle(.plain)
+                    
+                    Text("1280 × 720 px · H.264 MP4 · \(fileURL.lastPathComponent)")
+                        .font(.system(size: 10, design: .monospaced))
+                        .foregroundColor(.secondary)
+                        .lineLimit(1)
+                }
+            }
+            .onAppear {
+                if videoPlayer == nil {
+                    let player = AVPlayer(url: fileURL)
+                    videoPlayer = player
+                }
+            }
+        } else {
+            HStack(spacing: 8) {
+                Image(systemName: "film")
+                    .foregroundColor(.secondary)
+                Text(resolvedFileURL?.lastPathComponent ?? target)
+                    .font(.system(size: 11, design: .monospaced))
+                    .foregroundColor(.secondary)
+            }
+            .padding(8)
+        }
+    }
+    
+    @ViewBuilder
+    private var audioBody: some View {
+        if let fileURL = resolvedFileURL, FileManager.default.fileExists(atPath: fileURL.path) {
+            VStack(alignment: .leading, spacing: 8) {
+                HStack(spacing: 12) {
+                    Button {
+                        audioController.togglePlay(url: fileURL)
+                    } label: {
+                        ZStack {
+                            RoundedRectangle(cornerRadius: 6)
+                                .fill(Color.primary.opacity(0.08))
+                                .frame(width: 34, height: 34)
+                            Image(systemName: audioController.isPlaying ? "pause.fill" : "play.fill")
+                                .font(.system(size: 12, weight: .semibold))
+                                .foregroundColor(.primary)
+                        }
+                    }
+                    .buttonStyle(.plain)
+                    
+                    VStack(alignment: .leading, spacing: 4) {
+                        Text(fileURL.lastPathComponent)
+                            .font(.system(size: 11, weight: .medium, design: .monospaced))
+                            .foregroundColor(.primary.opacity(0.9))
+                            .lineLimit(1)
+                        
+                        Slider(
+                            value: Binding(
+                                get: { audioController.currentTime },
+                                set: { audioController.seek(to: $0) }
+                            ),
+                            in: 0...max(audioController.duration, 1.0)
+                        )
+                        .tint(.primary)
+                        
+                        HStack {
+                            Text(formatTime(audioController.currentTime))
+                                .font(.system(size: 10, design: .monospaced))
+                                .foregroundColor(.secondary)
+                            Spacer()
+                            Text(formatTime(audioController.duration))
+                                .font(.system(size: 10, design: .monospaced))
+                                .foregroundColor(.secondary)
+                        }
+                    }
+                }
+                .onAppear {
+                    audioController.loadIfNeeded(url: fileURL)
+                }
+            }
+        } else {
+            HStack(spacing: 8) {
+                Image(systemName: "waveform")
+                    .foregroundColor(.secondary)
+                Text(resolvedFileURL?.lastPathComponent ?? target)
+                    .font(.system(size: 11, design: .monospaced))
+                    .foregroundColor(.secondary)
+            }
+            .padding(8)
+        }
+    }
+    
+    private var headerIcon: String {
+        switch kind {
+        case .image: return "photo"
+        case .video: return "film"
+        case .audio: return "waveform"
+        }
+    }
+    
+    private var badgeLabel: String {
+        switch kind {
+        case .image: return "IMAGE"
+        case .video: return "VIDEO"
+        case .audio: return "AUDIO"
+        }
+    }
+    
+    private var displaySubtitle: String {
+        if title.contains("·") {
+            let parts = title.components(separatedBy: "·")
+            if let modelPart = parts.last?.trimmingCharacters(in: .whitespacesAndNewlines), !modelPart.isEmpty {
+                return modelPart
+            }
+        }
+        if let fileURL = resolvedFileURL {
+            return fileURL.lastPathComponent
+        }
+        return title
+    }
+    
+    private func formatTime(_ seconds: Double) -> String {
+        guard seconds.isFinite && seconds >= 0 else { return "0:00" }
+        let mins = Int(seconds) / 60
+        let secs = Int(seconds) % 60
+        return String(format: "%d:%02d", mins, secs)
+    }
+    
+    private func saveMediaAs(from sourceURL: URL) {
+        let panel = NSSavePanel()
+        panel.nameFieldStringValue = sourceURL.lastPathComponent
+        panel.canCreateDirectories = true
+        if panel.runModal() == .OK, let destURL = panel.url {
+            try? FileManager.default.removeItem(at: destURL)
+            try? FileManager.default.copyItem(at: sourceURL, to: destURL)
         }
     }
 }

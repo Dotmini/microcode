@@ -169,3 +169,153 @@ public enum AgentPrivacyGuard {
         return (!isClean, finalContent.utf8.count)
     }
 }
+
+// MARK: - Feature #7: 1-Click Secret & API Key Leak Shield
+
+public struct SecretLeakAlert: Identifiable, Equatable {
+    public let id = UUID()
+    public let filePath: String
+    public let fileName: String
+    public let findings: [AgentPrivacyFinding]
+    public let timestamp: Date
+}
+
+@MainActor
+public final class SecretShieldMonitor: ObservableObject {
+    public static let shared = SecretShieldMonitor()
+
+    @Published public var activeAlerts: [SecretLeakAlert] = []
+
+    private init() {}
+
+    /// Inspects a source file write for accidentally hardcoded API keys or credentials.
+    /// Returns a warning string if secrets are detected, or `nil` if clean.
+    @discardableResult
+    public func inspectFileWrite(content: String, filePath: String) -> String? {
+        let fileName = URL(fileURLWithPath: filePath).lastPathComponent
+        // Skip .env files, .microcode files, and lockfiles
+        if fileName == ".env" || fileName.hasPrefix(".env.") || filePath.contains("/.microcode/") || fileName.hasSuffix(".lock") {
+            return nil
+        }
+        let (isClean, findings) = AgentPrivacyGuard.audit(content)
+        guard !isClean, !findings.isEmpty else {
+            activeAlerts.removeAll { $0.filePath == filePath }
+            return nil
+        }
+
+        let alert = SecretLeakAlert(
+            filePath: filePath,
+            fileName: fileName,
+            findings: findings,
+            timestamp: Date()
+        )
+        activeAlerts.removeAll { $0.filePath == filePath }
+        activeAlerts.insert(alert, at: 0)
+        if activeAlerts.count > 10 {
+            activeAlerts = Array(activeAlerts.prefix(10))
+        }
+
+        let ruleSummary = Array(Set(findings.map(\.ruleName))).sorted().joined(separator: ", ")
+        return "\n\n⚠️ [Secret Leak Shield Warning]: Detected \(findings.count) potential hardcoded credential(s) (\(ruleSummary)) in `\(fileName)`. Consider moving secrets to `.env` and referencing environment variables instead."
+    }
+
+    /// 1-Click Action: Extracts detected secrets from the source file, writes them to `<workspace>/.env`,
+    /// ensures `.env` is in `.gitignore`, and replaces hardcoded strings with environment variable lookups.
+    public func moveSecretsToEnv(alert: SecretLeakAlert, workspaceRoot: String?) -> String {
+        guard let rawContent = try? String(contentsOfFile: alert.filePath, encoding: .utf8) else {
+            activeAlerts.removeAll { $0.id == alert.id }
+            return "Could not read \(alert.fileName)"
+        }
+
+        let rootDir = workspaceRoot ?? URL(fileURLWithPath: alert.filePath).deletingLastPathComponent().path
+        let envPath = (rootDir as NSString).appendingPathComponent(".env")
+        let gitignorePath = (rootDir as NSString).appendingPathComponent(".gitignore")
+        let ext = URL(fileURLWithPath: alert.filePath).pathExtension.lowercased()
+
+        // Audit fresh content so ranges are exact
+        let (_, findings) = AgentPrivacyGuard.audit(rawContent)
+        guard !findings.isEmpty else {
+            activeAlerts.removeAll { $0.id == alert.id }
+            return "No active secrets found in \(alert.fileName)"
+        }
+
+        var updatedContent = rawContent
+        var envEntries: [(key: String, value: String)] = []
+        var counter = 1
+
+        // Process findings in reverse range order so string indices remain valid
+        let sortedFindings = findings.sorted { $0.range.lowerBound > $1.range.lowerBound }
+        for finding in sortedFindings {
+            let matchedText = String(updatedContent[finding.range])
+            let envKey: String = {
+                switch finding.ruleName {
+                case "OpenAI / Codex API Key": return counter == 1 ? "OPENAI_API_KEY" : "OPENAI_API_KEY_\(counter)"
+                case "Anthropic Claude API Key": return counter == 1 ? "ANTHROPIC_API_KEY" : "ANTHROPIC_API_KEY_\(counter)"
+                case "Google AI / Gemini API Key": return counter == 1 ? "GEMINI_API_KEY" : "GEMINI_API_KEY_\(counter)"
+                case "GitHub Token": return counter == 1 ? "GITHUB_TOKEN" : "GITHUB_TOKEN_\(counter)"
+                case "AWS Access Key": return counter == 1 ? "AWS_ACCESS_KEY_ID" : "AWS_ACCESS_KEY_ID_\(counter)"
+                case "Dotmini Platform Key": return counter == 1 ? "DOTMINI_API_KEY" : "DOTMINI_API_KEY_\(counter)"
+                default: return "APP_SECRET_\(counter)"
+                }
+            }()
+            counter += 1
+
+            // If it's a hardcoded assignment like `apiKey = "sk-..."`, extract just the quoted value if possible
+            if finding.ruleName == "Hardcoded Credential Assignment" {
+                let sanitizedAssignment = AgentPrivacyGuard.sanitize(matchedText)
+                updatedContent.replaceSubrange(finding.range, with: sanitizedAssignment)
+                envEntries.append((key: envKey, value: matchedText))
+            } else {
+                envEntries.append((key: envKey, value: matchedText))
+                let envRef: String = {
+                    switch ext {
+                    case "js", "jsx", "ts", "tsx", "mjs", "cjs":
+                        return "process.env.\(envKey)"
+                    case "py":
+                        return "os.environ.get(\"\(envKey)\", \"\")"
+                    case "swift":
+                        return "(ProcessInfo.processInfo.environment[\"\(envKey)\"] ?? \"\")"
+                    case "rs":
+                        return "std::env::var(\"\(envKey)\").unwrap_or_default()"
+                    case "go":
+                        return "os.Getenv(\"\(envKey)\")"
+                    default:
+                        return "${\(envKey)}"
+                    }
+                }()
+                updatedContent.replaceSubrange(finding.range, with: envRef)
+            }
+        }
+
+        // Write updated source file
+        try? updatedContent.write(toFile: alert.filePath, atomically: true, encoding: .utf8)
+
+        // Append extracted secrets to .env
+        var existingEnv = (try? String(contentsOfFile: envPath, encoding: .utf8)) ?? ""
+        if !existingEnv.isEmpty && !existingEnv.hasSuffix("\n") {
+            existingEnv += "\n"
+        }
+        for entry in envEntries.reversed() {
+            if !existingEnv.contains("\(entry.key)=") {
+                existingEnv += "\(entry.key)=\"\(entry.value.replacingOccurrences(of: "\"", with: "\\\""))\"\n"
+            }
+        }
+        try? existingEnv.write(toFile: envPath, atomically: true, encoding: .utf8)
+
+        // Ensure .env is in .gitignore
+        var gitignore = (try? String(contentsOfFile: gitignorePath, encoding: .utf8)) ?? ""
+        if !gitignore.components(separatedBy: .newlines).contains(where: { $0.trimmingCharacters(in: .whitespaces) == ".env" }) {
+            if !gitignore.isEmpty && !gitignore.hasSuffix("\n") { gitignore += "\n" }
+            gitignore += ".env\n"
+            try? gitignore.write(toFile: gitignorePath, atomically: true, encoding: .utf8)
+        }
+
+        activeAlerts.removeAll { $0.id == alert.id }
+        return "Moved \(envEntries.count) secret(s) from \(alert.fileName) to .env & updated .gitignore"
+    }
+
+    public func dismissAlert(_ alert: SecretLeakAlert) {
+        activeAlerts.removeAll { $0.id == alert.id }
+    }
+}
+

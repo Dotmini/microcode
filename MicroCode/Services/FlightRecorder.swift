@@ -344,9 +344,11 @@ final class FlightRecorder: ObservableObject {
             let url = await self.currentLogURL
             if FileManager.default.fileExists(atPath: url.path) {
                 if let handle = try? FileHandle(forWritingTo: url) {
-                    handle.seekToEndOfFile()
-                    handle.write(jsonString.data(using: .utf8) ?? Data())
-                    handle.closeFile()
+                    defer { try? handle.close() }
+                    _ = try? handle.seekToEnd()
+                    if let d = jsonString.data(using: .utf8) {
+                        try? handle.write(contentsOf: d)
+                    }
                 }
             } else {
                 try? jsonString.write(to: url, atomically: true, encoding: .utf8)

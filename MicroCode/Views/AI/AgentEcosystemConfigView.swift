@@ -558,10 +558,10 @@ public struct AgentEcosystemConfigView: View {
     private var platformRulesSection: some View {
         VStack(alignment: .leading, spacing: 16) {
             VStack(alignment: .leading, spacing: 3) {
-                Text("Discovered Workspace Guidelines & Platform Rules")
+                Text("Discovered Workspace Guidelines, Rules & Lifecycle Hooks")
                     .font(.system(size: 13, weight: .semibold))
                     .foregroundColor(.primary)
-                Text("Rules automatically loaded from Cursor (.cursorrules, .cursor/rules/*.mdc), Windsurf (.windsurfrules), Cline (.clinerules), Zed, Copilot, and MicroCode.")
+                Text("Rules automatically loaded from AGENTS.md (root & nested), CLAUDE.md, Cursor (.cursorrules, .cursor/rules/*.mdc), Windsurf, Cline, Zed, Copilot, TX Code (.txcode-rules), and MicroCode.")
                     .font(.system(size: 11))
                     .foregroundColor(.secondary)
             }
@@ -614,6 +614,41 @@ public struct AgentEcosystemConfigView: View {
                         ruleItemView(rule: rule)
                     }
                 }
+            }
+
+            if !rulesEngine.discoveredHooks.isEmpty {
+                VStack(alignment: .leading, spacing: 8) {
+                    Text("Active Lifecycle Hooks (pre_tool / post_tool / pre_finish)")
+                        .font(.system(size: 11, weight: .semibold))
+                        .foregroundColor(.primary)
+                    ForEach(rulesEngine.discoveredHooks) { hook in
+                        HStack(spacing: 8) {
+                            Text(hook.stage.badge)
+                                .font(.system(size: 9, weight: .bold, design: .monospaced))
+                                .padding(.horizontal, 6)
+                                .padding(.vertical, 2)
+                                .background(Color.accentColor.opacity(0.14))
+                                .foregroundColor(.accentColor)
+                                .cornerRadius(4)
+                            Text(hook.command)
+                                .font(.system(size: 11, design: .monospaced))
+                                .foregroundColor(.primary)
+                                .lineLimit(1)
+                            Spacer()
+                            Text("match: \(hook.matcher)")
+                                .font(.system(size: 10, design: .monospaced))
+                                .foregroundColor(.secondary)
+                            Text(hook.sourceFile)
+                                .font(.system(size: 9.5))
+                                .foregroundColor(.secondary)
+                        }
+                        .padding(8)
+                        .background(inputBackground)
+                        .cornerRadius(6)
+                        .overlay(RoundedRectangle(cornerRadius: 6).stroke(cardBorder, lineWidth: 1))
+                    }
+                }
+                .padding(.top, 8)
             }
 
             if !rulesEngine.ignoredPatterns.isEmpty {

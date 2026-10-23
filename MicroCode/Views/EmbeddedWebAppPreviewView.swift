@@ -225,6 +225,9 @@ struct EmbeddedWebAppPreviewView: View {
     @State private var isLiveReloadEnabled: Bool = true
     @State private var localWorkspaceIndexURL: URL? = nil
     @State private var isHoveringHandle: Bool = false
+    @ObservedObject private var browserAutomation = IDEBrowserAutomationService.shared
+    @State private var inspectInstructionText: String = ""
+    @State private var showPortRadarPopover: Bool = false
     
     var body: some View {
         VStack(spacing: 0) {
@@ -472,6 +475,32 @@ struct EmbeddedWebAppPreviewView: View {
                     .buttonStyle(.borderless)
                     .help("Reload Page (⌘R)")
                 }
+
+                // Feature #1: Pinned Click-to-Inspect DOM Element Toggle (Always Visible)
+                Button {
+                    browserAutomation.toggleInspectMode(target: "preview")
+                } label: {
+                    HStack(spacing: 3) {
+                        Image(systemName: "viewfinder")
+                            .font(.system(size: 9.5, weight: .bold))
+                        Text(browserAutomation.isInspectMode ? "Inspecting" : "Inspect")
+                            .font(.system(size: 9.5, weight: .semibold))
+                            .lineLimit(1)
+                            .fixedSize(horizontal: true, vertical: false)
+                    }
+                    .padding(.horizontal, 7)
+                    .padding(.vertical, 3)
+                    .background(browserAutomation.isInspectMode ? Color.cyan.opacity(0.22) : Color.cyan.opacity(0.10))
+                    .foregroundColor(.cyan)
+                    .cornerRadius(5)
+                    .overlay(
+                        RoundedRectangle(cornerRadius: 5)
+                            .stroke(Color.cyan.opacity(browserAutomation.isInspectMode ? 0.6 : 0.25), lineWidth: 0.8)
+                    )
+                }
+                .buttonStyle(.plain)
+                .fixedSize(horizontal: true, vertical: false)
+                .help("Click-to-Inspect Element (or Right-Click / Drag-Select anywhere in Preview) → Direct Agent Edit")
                 
                 // Quick Source Switchers (Local index.html / DevServer)
                 if let localURL = localWorkspaceIndexURL {
@@ -514,6 +543,123 @@ struct EmbeddedWebAppPreviewView: View {
                     }
                     .buttonStyle(.plain)
                     .help("Switch to detected local dev server on port \(devPort)")
+                }
+
+                // Feature #6: Active Port & Zombie Process Radar Popover Button
+                Button {
+                    showPortRadarPopover.toggle()
+                    if showPortRadarPopover {
+                        browserAutomation.scanActivePorts()
+                    }
+                } label: {
+                    HStack(spacing: 3) {
+                        Image(systemName: "antenna.radiowaves.left.and.right")
+                            .font(.system(size: 8.5, weight: .semibold))
+                        Text(browserAutomation.activePortProcesses.isEmpty ? "Ports" : "Ports (\(browserAutomation.activePortProcesses.count))")
+                            .font(.system(size: 9, weight: .medium))
+                            .lineLimit(1)
+                            .fixedSize(horizontal: true, vertical: false)
+                    }
+                    .padding(.horizontal, 5)
+                    .padding(.vertical, 2)
+                    .background(showPortRadarPopover ? Color.accentColor.opacity(0.18) : Color.primary.opacity(0.06))
+                    .foregroundColor(showPortRadarPopover ? .accentColor : .secondary)
+                    .cornerRadius(4)
+                }
+                .buttonStyle(.plain)
+                .help("Active Port & Zombie Process Radar — Switch localhost ports or kill stuck dev servers")
+                .popover(isPresented: $showPortRadarPopover, arrowEdge: .bottom) {
+                    VStack(alignment: .leading, spacing: 8) {
+                        HStack {
+                            Image(systemName: "antenna.radiowaves.left.and.right")
+                                .font(.system(size: 11, weight: .semibold))
+                                .foregroundColor(.accentColor)
+                            Text("Active Localhost Ports")
+                                .font(.system(size: 11, weight: .bold))
+                            Spacer()
+                            Button {
+                                browserAutomation.scanActivePorts()
+                            } label: {
+                                Image(systemName: "arrow.clockwise")
+                                    .font(.system(size: 10))
+                            }
+                            .buttonStyle(.plain)
+                            .help("Rescan listening TCP ports")
+                            if !browserAutomation.activePortProcesses.isEmpty {
+                                Button("Kill All") {
+                                    browserAutomation.killAllDevPortProcesses()
+                                }
+                                .font(.system(size: 9.5, weight: .semibold))
+                                .foregroundColor(.red)
+                                .buttonStyle(.plain)
+                            }
+                        }
+                        Divider()
+                        if browserAutomation.isScanningPorts {
+                            HStack(spacing: 6) {
+                                ProgressView().scaleEffect(0.5)
+                                Text("Scanning listening TCP ports...")
+                                    .font(.system(size: 10))
+                                    .foregroundColor(.secondary)
+                            }
+                            .padding(.vertical, 8)
+                        } else if browserAutomation.activePortProcesses.isEmpty {
+                            Text("No active user localhost servers detected.")
+                                .font(.system(size: 10))
+                                .foregroundColor(.secondary)
+                                .padding(.vertical, 8)
+                        } else {
+                            ScrollView {
+                                VStack(alignment: .leading, spacing: 5) {
+                                    ForEach(browserAutomation.activePortProcesses) { item in
+                                        HStack(spacing: 8) {
+                                            Text(":\(item.port)")
+                                                .font(.system(size: 10.5, weight: .bold, design: .monospaced))
+                                                .foregroundColor(.green)
+                                                .frame(width: 48, alignment: .leading)
+                                            VStack(alignment: .leading, spacing: 1) {
+                                                Text(item.processName)
+                                                    .font(.system(size: 10, weight: .medium))
+                                                    .lineLimit(1)
+                                                Text("PID \(item.pid)")
+                                                    .font(.system(size: 8.5, design: .monospaced))
+                                                    .foregroundColor(.secondary)
+                                            }
+                                            Spacer()
+                                            Button("Preview") {
+                                                sanitizeAndSetURL("http://localhost:\(item.port)")
+                                                showPortRadarPopover = false
+                                            }
+                                            .font(.system(size: 9.5, weight: .semibold))
+                                            .padding(.horizontal, 6)
+                                            .padding(.vertical, 2)
+                                            .background(Color.accentColor.opacity(0.14))
+                                            .foregroundColor(.accentColor)
+                                            .cornerRadius(4)
+                                            .buttonStyle(.plain)
+
+                                            Button {
+                                                browserAutomation.killPortProcess(item)
+                                            } label: {
+                                                Image(systemName: "xmark.octagon.fill")
+                                                    .font(.system(size: 11))
+                                                    .foregroundColor(.red.opacity(0.85))
+                                            }
+                                            .buttonStyle(.plain)
+                                            .help("Kill process \(item.processName) (PID \(item.pid)) on port \(item.port)")
+                                        }
+                                        .padding(.horizontal, 6)
+                                        .padding(.vertical, 4)
+                                        .background(Color.primary.opacity(0.04))
+                                        .cornerRadius(5)
+                                    }
+                                }
+                            }
+                            .frame(maxHeight: 200)
+                        }
+                    }
+                    .padding(10)
+                    .frame(width: 290)
                 }
                 
                 // URL input bar
@@ -583,6 +729,197 @@ struct EmbeddedWebAppPreviewView: View {
             .padding(.horizontal, 10)
             .padding(.vertical, 5)
             .background(canvasColor)
+            
+            // Feature #1: Picked DOM Element Action Bar (Direct Agent Edit)
+            if let picked = browserAutomation.lastPickedElement {
+                Divider()
+                VStack(alignment: .leading, spacing: 6) {
+                    HStack(spacing: 6) {
+                        Image(systemName: "viewfinder.circle.fill")
+                            .font(.system(size: 12, weight: .semibold))
+                            .foregroundColor(.cyan)
+                        Text("Direct Agent Edit:")
+                            .font(.system(size: 10.5, weight: .bold))
+                            .foregroundColor(.cyan)
+                        Text(picked.selector)
+                            .font(.system(size: 10, weight: .semibold, design: .monospaced))
+                            .padding(.horizontal, 6)
+                            .padding(.vertical, 2)
+                            .background(Color.cyan.opacity(0.14))
+                            .foregroundColor(.cyan)
+                            .cornerRadius(4)
+                            .lineLimit(1)
+                        if !picked.text.isEmpty {
+                            Text(picked.text)
+                                .font(.system(size: 10))
+                                .foregroundColor(.secondary)
+                                .lineLimit(1)
+                                .truncationMode(.tail)
+                        }
+                        Spacer()
+                        Button {
+                            browserAutomation.clearPickedElement(target: "preview")
+                        } label: {
+                            Image(systemName: "xmark.circle.fill")
+                                .font(.system(size: 11))
+                                .foregroundColor(.secondary)
+                        }
+                        .buttonStyle(.plain)
+                        .help("Cancel selection")
+                    }
+
+                    // Quick Action Preset Chips
+                    ScrollView(.horizontal, showsIndicators: false) {
+                        HStack(spacing: 5) {
+                            ForEach([
+                                ("🎨 เปลี่ยนสี/ดีไซน์", "ปรับดีไซน์และสีของส่วนนี้ให้สวยงามทันสมัยขึ้น"),
+                                ("✏️ แก้ข้อความ", "แก้ไขข้อความในส่วนนี้ให้เป็น: "),
+                                ("📐 ปรับขนาด/Layout", "จัด Layout และระยะห่าง (padding/alignment) ของส่วนนี้ให้สมดุล"),
+                                ("✨ เพิ่ม Animation", "เพิ่ม transition/hover animation ให้ส่วนนี้ดูลื่นไหล"),
+                                ("🐛 แก้บั๊กส่วนนี้", "ตรวจสอบและแก้ไขบั๊กการทำงานของปุ่ม/ส่วนนี้")
+                            ], id: \.0) { label, preset in
+                                Button {
+                                    if label.contains("แก้ข้อความ") {
+                                        inspectInstructionText = preset
+                                    } else {
+                                        browserAutomation.sendPickedElementToAgent(
+                                            picked,
+                                            instruction: preset,
+                                            pageURL: urlString,
+                                            autoSend: true
+                                        )
+                                        inspectInstructionText = ""
+                                    }
+                                } label: {
+                                    Text(label)
+                                        .font(.system(size: 9.5, weight: .medium))
+                                        .padding(.horizontal, 7)
+                                        .padding(.vertical, 2.5)
+                                        .background(Color.primary.opacity(0.06))
+                                        .foregroundColor(.primary.opacity(0.85))
+                                        .cornerRadius(4)
+                                }
+                                .buttonStyle(.plain)
+                            }
+                        }
+                    }
+
+                    HStack(spacing: 6) {
+                        TextField("สั่ง AI แก้ส่วนที่เลือก... (กด Enter เพื่อส่งให้ AI แก้ทันที)", text: $inspectInstructionText)
+                            .textFieldStyle(.plain)
+                            .font(.system(size: 11))
+                            .padding(.horizontal, 8)
+                            .padding(.vertical, 5)
+                            .background(Color.primary.opacity(0.07))
+                            .cornerRadius(5)
+                            .onSubmit {
+                                browserAutomation.sendPickedElementToAgent(
+                                    picked,
+                                    instruction: inspectInstructionText,
+                                    pageURL: urlString,
+                                    autoSend: true
+                                )
+                                inspectInstructionText = ""
+                            }
+
+                        Button("Attach to Chat") {
+                            browserAutomation.sendPickedElementToAgent(
+                                picked,
+                                instruction: inspectInstructionText,
+                                pageURL: urlString,
+                                autoSend: false
+                            )
+                            inspectInstructionText = ""
+                        }
+                        .font(.system(size: 9.5, weight: .medium))
+                        .padding(.horizontal, 7)
+                        .padding(.vertical, 5)
+                        .background(Color.primary.opacity(0.08))
+                        .foregroundColor(.secondary)
+                        .cornerRadius(5)
+                        .buttonStyle(.plain)
+                        .help("Insert element context into the chat input box without sending yet")
+
+                        Button {
+                            browserAutomation.sendPickedElementToAgent(
+                                picked,
+                                instruction: inspectInstructionText.isEmpty ? "ช่วยปรับปรุงและแก้ไขส่วนนี้" : inspectInstructionText,
+                                pageURL: urlString,
+                                autoSend: true
+                            )
+                            inspectInstructionText = ""
+                        } label: {
+                            HStack(spacing: 3) {
+                                Image(systemName: "paperplane.fill")
+                                    .font(.system(size: 9))
+                                Text("Send to Agent")
+                                    .font(.system(size: 10, weight: .semibold))
+                            }
+                            .padding(.horizontal, 9)
+                            .padding(.vertical, 5)
+                            .background(Color.cyan.opacity(0.22))
+                            .foregroundColor(.cyan)
+                            .cornerRadius(5)
+                        }
+                        .buttonStyle(.plain)
+                        .help("Send directly to AI Agent and start editing code immediately")
+                    }
+                }
+                .padding(.horizontal, 10)
+                .padding(.vertical, 7)
+                .background(Color.cyan.opacity(0.07))
+            }
+
+            // Feature #2: Live DOM & Console Error Auto-Healer Banner
+            if browserAutomation.totalRuntimeIssueCount > 0 {
+                Divider()
+                HStack(spacing: 6) {
+                    Image(systemName: "exclamationmark.triangle.fill")
+                        .font(.system(size: 10))
+                        .foregroundColor(.orange)
+                    Text("\(browserAutomation.totalRuntimeIssueCount) Error(s)")
+                        .font(.system(size: 9.5, weight: .bold))
+                        .foregroundColor(.orange)
+                        .fixedSize(horizontal: true, vertical: false)
+                    Text(browserAutomation.runtimeErrorEntries.last?.message ?? "Failed network/asset request")
+                        .font(.system(size: 9.5, design: .monospaced))
+                        .foregroundColor(.secondary)
+                        .lineLimit(1)
+                        .truncationMode(.tail)
+                    Spacer(minLength: 4)
+                    Button {
+                        browserAutomation.dispatchAutoHealToAgent(pageURL: urlString)
+                    } label: {
+                        HStack(spacing: 3) {
+                            Image(systemName: "wand.and.stars")
+                                .font(.system(size: 8.5))
+                            Text("Fix in Agent")
+                                .font(.system(size: 9.5, weight: .semibold))
+                        }
+                        .padding(.horizontal, 7)
+                        .padding(.vertical, 2.5)
+                        .background(Color.orange.opacity(0.18))
+                        .foregroundColor(.orange)
+                        .cornerRadius(4)
+                    }
+                    .buttonStyle(.plain)
+                    .fixedSize(horizontal: true, vertical: false)
+                    .help("Send all console errors, stack traces, and broken asset URLs to AI Agent to fix")
+
+                    Button {
+                        browserAutomation.clearRuntimeIssues()
+                    } label: {
+                        Image(systemName: "xmark")
+                            .font(.system(size: 8.5))
+                            .foregroundColor(.secondary)
+                    }
+                    .buttonStyle(.plain)
+                    .help("Clear error badge")
+                }
+                .padding(.horizontal, 10)
+                .padding(.vertical, 4)
+                .background(Color.orange.opacity(0.06))
+            }
             
             Divider()
             

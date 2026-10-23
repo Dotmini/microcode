@@ -42,7 +42,7 @@ struct AIProviderConfig: Identifiable, Codable, Equatable {
 // MARK: - Provider Metadata
 
 enum AIProviderMeta: String, CaseIterable, Identifiable {
-    case openai, anthropic, deepseek, gemini, grok, codex, qwen, glm
+    case openai, anthropic, deepseek, gemini, openrouter, groq, mistral, kimi, perplexity, typhoon, cerebras, together, fireworks, minimax, nvidia, grok, codex, qwen, glm
     
     var id: String { rawValue }
     
@@ -52,6 +52,17 @@ enum AIProviderMeta: String, CaseIterable, Identifiable {
         case .anthropic: return "Claude (Anthropic)"
         case .deepseek: return "DeepSeek"
         case .gemini: return "Google Gemini"
+        case .openrouter: return "OpenRouter"
+        case .groq: return "Groq (LPU Inference)"
+        case .mistral: return "Mistral AI & Codestral"
+        case .kimi: return "Moonshot AI (Kimi)"
+        case .perplexity: return "Perplexity Sonar"
+        case .typhoon: return "SCB 10X Typhoon"
+        case .cerebras: return "Cerebras Inference"
+        case .together: return "Together AI"
+        case .fireworks: return "Fireworks AI"
+        case .minimax: return "MiniMax"
+        case .nvidia: return "NVIDIA NIM"
         case .grok: return "Grok (xAI)"
         case .qwen: return "Qwen (Alibaba)"
         case .glm: return "GLM (Zhipu AI)"
@@ -65,6 +76,17 @@ enum AIProviderMeta: String, CaseIterable, Identifiable {
         case .anthropic: return "bubble.left.and.text.bubble.right"
         case .deepseek: return "water.waves"
         case .gemini: return "sparkles"
+        case .openrouter: return "point.3.connected.trianglepath.dotted"
+        case .groq: return "bolt.horizontal.fill"
+        case .mistral: return "wind"
+        case .kimi: return "moon.stars.fill"
+        case .perplexity: return "magnifyingglass.circle.fill"
+        case .typhoon: return "hurricane"
+        case .cerebras: return "memorychip.fill"
+        case .together: return "square.stack.3d.up.fill"
+        case .fireworks: return "flame.fill"
+        case .minimax: return "waveform.path.ecg"
+        case .nvidia: return "cpu.fill"
         case .grok: return "bolt.fill"
         case .qwen: return "cloud.fill"
         case .glm: return "globe.asia.australia"
@@ -78,6 +100,17 @@ enum AIProviderMeta: String, CaseIterable, Identifiable {
         case .anthropic: return .orange
         case .deepseek: return .blue
         case .gemini: return .purple
+        case .openrouter: return .indigo
+        case .groq: return .orange
+        case .mistral: return .orange
+        case .kimi: return .cyan
+        case .perplexity: return .teal
+        case .typhoon: return .purple
+        case .cerebras: return .pink
+        case .together: return .blue
+        case .fireworks: return .orange
+        case .minimax: return .pink
+        case .nvidia: return .green
         case .grok: return .purple
         case .qwen: return .indigo
         case .glm: return .red
@@ -91,6 +124,17 @@ enum AIProviderMeta: String, CaseIterable, Identifiable {
         case .anthropic: return "sk-ant-"
         case .deepseek: return "sk-"
         case .gemini: return "AI"
+        case .openrouter: return "sk-or-"
+        case .groq: return "gsk_"
+        case .mistral: return ""
+        case .kimi: return "sk-"
+        case .perplexity: return "pplx-"
+        case .typhoon: return "sk-"
+        case .cerebras: return "csk-"
+        case .together: return ""
+        case .fireworks: return "fw_"
+        case .minimax: return ""
+        case .nvidia: return "nvapi-"
         case .grok: return "xai-"
         case .qwen: return "sk-"
         case .glm: return ""
@@ -103,6 +147,17 @@ enum AIProviderMeta: String, CaseIterable, Identifiable {
         case .anthropic: return "https://api.anthropic.com/v1"
         case .deepseek: return "https://api.deepseek.com/v1"
         case .gemini: return "https://generativelanguage.googleapis.com/v1beta"
+        case .openrouter: return "https://openrouter.ai/api/v1"
+        case .groq: return "https://api.groq.com/openai/v1"
+        case .mistral: return "https://api.mistral.ai/v1"
+        case .kimi: return "https://api.moonshot.ai/v1"
+        case .perplexity: return "https://api.perplexity.ai"
+        case .typhoon: return "https://api.opentyphoon.ai/v1"
+        case .cerebras: return "https://api.cerebras.ai/v1"
+        case .together: return "https://api.together.xyz/v1"
+        case .fireworks: return "https://api.fireworks.ai/inference/v1"
+        case .minimax: return "https://api.minimax.io/v1"
+        case .nvidia: return "https://integrate.api.nvidia.com/v1"
         case .grok: return "https://api.x.ai/v1"
         case .qwen: return "https://dashscope.aliyuncs.com/compatible-mode/v1"
         case .glm: return "https://open.bigmodel.cn/api/paas/v4"
@@ -116,8 +171,19 @@ enum AIProviderMeta: String, CaseIterable, Identifiable {
         case .anthropic: return ["claude-3-7-sonnet-20250219", "claude-3-5-sonnet-20241022", "claude-3-5-haiku-20241022", "claude-3-opus-20240229"]
         case .deepseek: return ["deepseek-chat", "deepseek-reasoner"]
         case .gemini: return ["gemini-2.5-pro", "gemini-2.5-flash", "gemini-2.0-flash", "gemini-2.0-flash-thinking-exp-01-21", "gemini-1.5-pro", "gemini-1.5-flash"]
-        case .grok: return ["grok-2-1212", "grok-2-vision-1212", "grok-beta"]
-        case .qwen: return ["qwen-plus", "qwen-max", "qwen-turbo", "qwen/qwen-2.5-coder-32b-instruct", "qwen/qwen-2.5-72b-instruct"]
+        case .openrouter: return ["anthropic/claude-sonnet-4", "google/gemini-2.5-pro", "deepseek/deepseek-r1-0528", "qwen/qwen3-coder"]
+        case .groq: return ["llama-3.3-70b-versatile", "llama-3.1-8b-instant", "deepseek-r1-distill-llama-70b", "qwen/qwen3-32b"]
+        case .mistral: return ["codestral-latest", "devstral-small-latest", "mistral-large-latest", "mistral-small-latest"]
+        case .kimi: return ["kimi-k2-0711-preview", "kimi-latest", "moonshot-v1-128k"]
+        case .perplexity: return ["sonar-reasoning-pro", "sonar-pro", "sonar-reasoning", "sonar"]
+        case .typhoon: return ["typhoon-v2.1-12b-instruct", "typhoon-v2-70b-instruct", "typhoon-v2-r1-70b-preview"]
+        case .cerebras: return ["llama-3.3-70b", "qwen-3-32b", "llama3.1-8b"]
+        case .together: return ["Qwen/Qwen2.5-Coder-32B-Instruct", "deepseek-ai/DeepSeek-R1", "meta-llama/Llama-3.3-70B-Instruct-Turbo"]
+        case .fireworks: return ["accounts/fireworks/models/deepseek-v3", "accounts/fireworks/models/deepseek-r1", "accounts/fireworks/models/qwen2p5-coder-32b-instruct"]
+        case .minimax: return ["MiniMax-M1", "MiniMax-Text-01", "abab6.5s-chat"]
+        case .nvidia: return ["nvidia/llama-3.1-nemotron-ultra-253b-v1", "deepseek-ai/deepseek-r1", "qwen/qwen2.5-coder-32b-instruct"]
+        case .grok: return ["grok-3", "grok-3-mini", "grok-2-1212"]
+        case .qwen: return ["qwen-max", "qwen-plus", "qwen3-coder-plus", "qwen2.5-coder-32b-instruct"]
         case .glm: return ["glm-4-plus", "glm-4-0520", "glm-4-air", "codegeex-4", "glm-4-flash"]
         case .codex: return ["o3-mini", "o1", "gpt-4o", "gpt-4o-mini"]
         }
@@ -144,6 +210,17 @@ enum AIProviderMeta: String, CaseIterable, Identifiable {
         case .anthropic: return .anthropic
         case .deepseek: return .deepseek
         case .gemini: return .gemini
+        case .openrouter: return .openrouter
+        case .groq: return .groq
+        case .mistral: return .mistral
+        case .kimi: return .kimi
+        case .perplexity: return .perplexity
+        case .typhoon: return .typhoon
+        case .cerebras: return .cerebras
+        case .together: return .together
+        case .fireworks: return .fireworks
+        case .minimax: return .minimax
+        case .nvidia: return .nvidia
         case .grok: return .grok
         case .qwen: return .qwen
         case .glm: return .glm
@@ -280,7 +357,9 @@ class AIProviderAuthService: ObservableObject {
                 return try await validateOpenAI(apiKey: apiKey, baseURL: meta.baseURL)
             case .gemini:
                 return try await validateGemini(apiKey: apiKey)
-            case .grok, .qwen, .glm:
+            case .perplexity, .minimax:
+                return !apiKey.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+            case .openrouter, .groq, .mistral, .kimi, .typhoon, .cerebras, .together, .fireworks, .nvidia, .grok, .qwen, .glm:
                 return try await validateOpenAI(apiKey: apiKey, baseURL: meta.baseURL)
             }
         } catch {
@@ -322,7 +401,9 @@ class AIProviderAuthService: ObservableObject {
     func fetchModels(_ meta: AIProviderMeta, apiKey: String) async -> [String]? {
         do {
             switch meta {
-            case .openai, .codex, .deepseek, .grok, .qwen, .glm:
+            case .perplexity, .minimax:
+                return meta.defaultModels
+            case .openai, .codex, .deepseek, .openrouter, .groq, .mistral, .kimi, .typhoon, .cerebras, .together, .fireworks, .nvidia, .grok, .qwen, .glm:
                 var request = URLRequest(url: URL(string: "\(meta.baseURL)/models")!)
                 request.setValue("Bearer \(apiKey)", forHTTPHeaderField: "Authorization")
                 request.timeoutInterval = 10

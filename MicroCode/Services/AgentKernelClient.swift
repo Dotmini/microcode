@@ -9,11 +9,12 @@ final class AgentKernelClient {
 
     private let baseURL = URL(string: "http://127.0.0.1:3000/api/agent-kernel")!
     private let session: URLSession
+    private var lastUnreachableAt: Date = .distantPast
 
     private init() {
         let configuration = URLSessionConfiguration.ephemeral
-        configuration.timeoutIntervalForRequest = 8
-        configuration.timeoutIntervalForResource = 12
+        configuration.timeoutIntervalForRequest = 0.6
+        configuration.timeoutIntervalForResource = 1.0
         configuration.waitsForConnectivity = false
         session = URLSession(configuration: configuration)
     }
@@ -80,17 +81,25 @@ final class AgentKernelClient {
     }
 
     private func post<Body: Encodable, Response: Decodable>(path: String, body: Body) async throws -> Response {
+        if Date().timeIntervalSince(lastUnreachableAt) < 30 {
+            throw AgentKernelClientError.invalidResponse
+        }
         let relativePath = path.trimmingCharacters(in: CharacterSet(charactersIn: "/"))
         let url = baseURL.appendingPathComponent(relativePath)
         var request = LocalBackendAuth.request(url: url)
         request.httpMethod = "POST"
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
         request.httpBody = try JSONEncoder.microCodeKernel.encode(body)
-        let (data, response) = try await session.data(for: request)
-        guard let http = response as? HTTPURLResponse, (200..<300).contains(http.statusCode) else {
-            throw AgentKernelClientError.invalidResponse
+        do {
+            let (data, response) = try await session.data(for: request)
+            guard let http = response as? HTTPURLResponse, (200..<300).contains(http.statusCode) else {
+                throw AgentKernelClientError.invalidResponse
+            }
+            return try JSONDecoder.microCodeKernel.decode(Response.self, from: data)
+        } catch {
+            lastUnreachableAt = Date()
+            throw error
         }
-        return try JSONDecoder.microCodeKernel.decode(Response.self, from: data)
     }
 }
 

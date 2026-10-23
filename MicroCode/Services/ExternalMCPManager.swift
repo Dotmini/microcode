@@ -19,6 +19,7 @@ class ExternalMCPConnection: ObservableObject, Identifiable {
     let args: [String]
     let env: [String: String]
     let source: String
+    let remoteURL: String?
     
     @Published var isConnected = false
     @Published var availableTools: [MCPClient.MCPToolSchema] = []
@@ -44,6 +45,7 @@ class ExternalMCPConnection: ObservableObject, Identifiable {
         self.args = server.args
         self.env = server.env
         self.source = server.sourcePlatform
+        self.remoteURL = server.url ?? ((server.command.hasPrefix("http://") || server.command.hasPrefix("https://")) ? server.command : nil)
     }
     
     // MARK: - Lifecycle
@@ -51,6 +53,27 @@ class ExternalMCPConnection: ObservableObject, Identifiable {
     func start() {
         guard !isConnected else { return }
         manuallyStopped = false
+        
+        if let httpURL = remoteURL, !httpURL.isEmpty {
+            isConnected = true
+            error = nil
+            sendRequest(method: "initialize", params: [
+                "protocolVersion": "2025-06-18",
+                "capabilities": ["roots": ["listChanged": false]],
+                "clientInfo": ["name": "MicroCode-HyperMesh", "version": "3.0.0"]
+            ] as [String: Any]) { [weak self] result in
+                switch result {
+                case .success(_):
+                    self?.sendNotification(method: "notifications/initialized")
+                    self?.fetchTools()
+                    print("[ExternalMCP:\(self?.serverName ?? "?")] HTTP Initialized (\(httpURL))")
+                case .failure(let err):
+                    self?.error = "HTTP Init failed: \(err.localizedDescription)"
+                    self?.isConnected = false
+                }
+            }
+            return
+        }
         
         let process = Process()
         
@@ -330,8 +353,32 @@ class ExternalMCPConnection: ObservableObject, Identifiable {
     }
     
     private func sendRaw(_ obj: [String: Any]) {
-        guard let data = try? JSONSerialization.data(withJSONObject: obj),
-              let pipe = stdinPipe else { return }
+        guard let data = try? JSONSerialization.data(withJSONObject: obj) else { return }
+        if let httpURL = remoteURL, let url = URL(string: httpURL) {
+            var req = URLRequest(url: url)
+            req.httpMethod = "POST"
+            req.setValue("application/json", forHTTPHeaderField: "Content-Type")
+            req.setValue("application/json, text/event-stream", forHTTPHeaderField: "Accept")
+            req.httpBody = data
+            URLSession.shared.dataTask(with: req) { [weak self] respData, _, err in
+                guard let self else { return }
+                if let respData = respData, !respData.isEmpty {
+                    var newlineData = respData
+                    if newlineData.last != 0x0A { newlineData.append(0x0A) }
+                    DispatchQueue.main.async {
+                        self.handleOutput(newlineData)
+                    }
+                } else if let err = err, let reqId = obj["id"] as? Int {
+                    DispatchQueue.main.async {
+                        if let cb = self.pendingRequests.removeValue(forKey: reqId) {
+                            cb(.failure(err))
+                        }
+                    }
+                }
+            }.resume()
+            return
+        }
+        guard let pipe = stdinPipe else { return }
         var d = data
         d.append("\n".data(using: .utf8)!)
         try? pipe.fileHandleForWriting.write(contentsOf: d)
@@ -489,8 +536,8 @@ class ExternalMCPManager: ObservableObject {
     
     private init() {}
     
-    /// Auto-discover and launch all MCP servers from workspace & IDE config files
-    func syncWithDiscoveredServers(_ servers: [DiscoveredMCPServer]) {
+    /// Discover MCP servers from workspace & IDE config files (lazy by default so opening a folder doesn't spawn 5+ Node/Python processes)
+    func syncWithDiscoveredServers(_ servers: [DiscoveredMCPServer], autoStart: Bool = false) {
         let currentNames = Set(servers.map(\.name))
         for (name, conn) in connections where !currentNames.contains(name) && conn.source != "Synthesized" {
             conn.stop()
@@ -501,7 +548,9 @@ class ExternalMCPManager: ObservableObject {
             if connections[server.name] == nil {
                 let connection = ExternalMCPConnection(server: server)
                 connections[server.name] = connection
-                connection.start()
+                if autoStart {
+                    connection.start()
+                }
             }
         }
         

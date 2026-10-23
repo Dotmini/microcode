@@ -547,6 +547,8 @@ struct CellAIMessageRow: View {
                                 }
                             }
                         }
+                    case .media(let kind, let title, let target):
+                        ChatMediaBlockView(kind: kind, title: title, target: target)
                     default:
                         EmptyView()
                     }

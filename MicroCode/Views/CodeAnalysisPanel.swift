@@ -14,7 +14,6 @@ struct CodeAnalysisPanel: View {
     @State private var metrics: CodeMetrics?
     @State private var aiReport: AICodeReport?
     @State private var isAnalyzing: Bool = false
-    @State private var isAIAnalyzing: Bool = false
     @State private var selectedTab: AnalysisTab = .overview
     
     enum AnalysisTab: String, CaseIterable {
@@ -53,11 +52,11 @@ struct CodeAnalysisPanel: View {
                 }
                 Spacer()
                 
-                // Analyze Buttons
+                // Analyze Button
                 HStack(spacing: 8) {
-                    if isAnalyzing || isAIAnalyzing {
+                    if isAnalyzing {
                         ProgressView().scaleEffect(0.6)
-                        Text(isAIAnalyzing ? "AI Thinking..." : "Analyzing...")
+                        Text("Analyzing...")
                             .font(.caption)
                             .foregroundColor(.secondary)
                     }
@@ -65,13 +64,9 @@ struct CodeAnalysisPanel: View {
                     Button("Analyze") {
                         analyzeCode()
                     }
-                    .disabled(appState.currentFile == nil || isAnalyzing || isAIAnalyzing)
-                    
-                    Button("AI Deep Scan") {
-                        runAIAnalysis()
-                    }
                     .buttonStyle(.borderedProminent)
-                    .disabled(appState.currentFile == nil || isAnalyzing || isAIAnalyzing)
+                    .controlSize(.small)
+                    .disabled(appState.currentFile == nil || isAnalyzing)
                 }
                 .padding(.horizontal, 8)
             }
@@ -263,79 +258,62 @@ struct CodeAnalysisPanel: View {
         guard let file = appState.currentFile else { return }
         isAnalyzing = true
         
-        DispatchQueue.global().async {
+        let code = file.content
+        let language = file.language
+        let fileName = file.name
+        
+        DispatchQueue.global(qos: .userInitiated).async {
             let analyzer = CodeAnalyzer.shared
-            let result = analyzer.analyzeComplexity(code: file.content, language: file.language)
+            let result = analyzer.analyzeComplexity(code: code, language: language)
+            
+            let smellPenalty = min(45, result.codeSmells.count * 5)
+            let complexityPenalty = max(0, (result.complexity - 15) * 2)
+            let score = max(20, min(100, 100 - smellPenalty - complexityPenalty))
+            
+            var strengths: [AIAnalysisResult.AnalysisItem] = []
+            if result.complexity <= 15 {
+                strengths.append(.init(title: "Low Cyclomatic Complexity", description: "Control flow complexity (\(result.complexity)) is clean and maintainable.", line: nil))
+            }
+            if result.codeSmells.isEmpty {
+                strengths.append(.init(title: "Clean Code Structure", description: "No code smells or structural warnings detected across \(result.linesOfCode) LOC.", line: nil))
+            }
+            if result.functions > 0 {
+                strengths.append(.init(title: "Modular Decomposition", description: "Organized into \(result.functions) function(s) and \(result.classes) type(s).", line: nil))
+            }
+            
+            let weaknesses: [AIAnalysisResult.AnalysisItem] = result.codeSmells.map { smell in
+                .init(title: "\(smell.type) (Line \(smell.line))", description: smell.message, line: smell.line)
+            }
+            
+            var recommendations: [AIAnalysisResult.AnalysisItem] = []
+            if result.complexity > 20 {
+                recommendations.append(.init(title: "Reduce Cyclomatic Complexity", description: "Extract deeply nested branches or switch statements into helper functions.", line: nil))
+            }
+            if !result.codeSmells.isEmpty {
+                recommendations.append(.init(title: "Resolve Static Code Smells", description: "Address \(result.codeSmells.count) flagged line(s) to improve readability and maintainability.", line: nil))
+            }
+            
+            let analysisResult = AIAnalysisResult(
+                qualityScore: score,
+                summary: "Static analysis of \(fileName) (\(result.linesOfCode) LOC, complexity \(result.complexity), \(result.functions) functions, \(result.codeSmells.count) findings).",
+                strengths: strengths,
+                weaknesses: weaknesses,
+                recommendations: recommendations,
+                securityIssues: []
+            )
+            
+            let generatedReport = PaperReportGenerator.generate(
+                fileName: fileName,
+                language: language,
+                metrics: result,
+                aiAnalysis: analysisResult
+            )
+            
             DispatchQueue.main.async {
                 self.metrics = result
+                self.aiReport = generatedReport
                 self.isAnalyzing = false
             }
         }
-    }
-    
-    private func runAIAnalysis() {
-        guard let file = appState.currentFile else { return }
-        isAIAnalyzing = true
-        
-        Task {
-            do {
-                let analyzer = CodeAnalyzer.shared
-                let basicMetrics = analyzer.analyzeComplexity(code: file.content, language: file.language)
-                
-                // Using existing BackendService (assumed available as per CodeAnalysisWindow)
-                // Note: Simulating response logic for now to match CodeAnalysisWindow port
-                 let analysisResult = try await performAIAnalysis(code: file.content, language: file.language)
-                
-                await MainActor.run {
-                    self.metrics = basicMetrics
-                    self.aiReport = PaperReportGenerator.generate(
-                        fileName: file.name,
-                        language: file.language,
-                        metrics: basicMetrics,
-                        aiAnalysis: analysisResult
-                    )
-                    self.isAIAnalyzing = false
-                }
-            } catch {
-                await MainActor.run { isAIAnalyzing = false }
-            }
-        }
-    }
-    
-    private func performAIAnalysis(code: String, language: String) async throws -> AIAnalysisResult {
-         let prompt = """
-        Analyze this \(language) code and provide a comprehensive review. Return a JSON response with:
-        {
-            "quality_score": <0-100>,
-            "summary": "<brief summary>",
-            "strengths": [{"title": "", "description": ""}],
-            "weaknesses": [{"title": "", "description": "", "line": <optional>}],
-            "recommendations": [{"title": "", "description": ""}],
-            "security_issues": [{"type": "", "description": "", "severity": "low|medium|high|critical", "suggestion": ""}]
-        }
-        Code:
-        \(code)
-        """
-        
-        _ = try await BackendService.shared.explainCode(
-            code: prompt,
-            provider: appState.aiProvider,
-            model: appState.aiModel,
-            apiKey: appState.apiKeys[appState.aiProvider] ?? ""
-        )
-        
-        // Parse JSON (Simplified port)
-        // ... (reuse existing parsing logic from CodeAnalysisWindow if needed or rely on robust parser)
-        // For brevity in this panel port, assuming response is parsed or handled carefully.
-        
-        // Using fallback for safety if parsing fails in this context snippet
-         return AIAnalysisResult(
-            qualityScore: 85,
-            summary: "Analysis complete. Code structure appears sound.",
-            strengths: [AIAnalysisResult.AnalysisItem(title: "Readability", description: "Code is easy to follow", line: nil)],
-            weaknesses: [],
-            recommendations: [AIAnalysisResult.AnalysisItem(title: "Add comments", description: "Function documentation missing", line: nil)],
-            securityIssues: []
-        )
     }
 }

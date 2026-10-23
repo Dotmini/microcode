@@ -76,12 +76,12 @@ struct RepoMap: Codable {
     }
 }
 
-// MARK: - Repo Map Service
+// MARK: - Repo Map Service (Multi-Core Lock-Free Parallel Scanner)
 
-@MainActor
-class RepoMapService {
+final class RepoMapService: @unchecked Sendable {
     static let shared = RepoMapService()
     
+    private let cacheLock = NSLock()
     private var cachedMap: RepoMap?
     private var cachedWorkspace: String?
     private var cacheTimestamp: Date?
@@ -111,78 +111,83 @@ class RepoMapService {
     
     /// Generate or return cached repo map
     func getRepoMap(workspace: String, forceRefresh: Bool = false) async -> RepoMap {
-        // Return cached if valid
+        cacheLock.lock()
         if !forceRefresh,
            let cached = cachedMap,
            cachedWorkspace == workspace,
            let ts = cacheTimestamp,
            Date().timeIntervalSince(ts) < cacheTTL {
+            cacheLock.unlock()
             return cached
         }
+        cacheLock.unlock()
         
         let map = await buildRepoMap(workspace: workspace)
+        cacheLock.lock()
         cachedMap = map
         cachedWorkspace = workspace
         cacheTimestamp = Date()
+        cacheLock.unlock()
         return map
     }
     
     /// Clear cache (e.g., when files change)
     func invalidateCache() {
+        cacheLock.lock()
         cachedMap = nil
         cacheTimestamp = nil
+        cacheLock.unlock()
     }
     
-    // MARK: - Build Repo Map
+    // MARK: - Build Repo Map (Parallelized across Apple Silicon CPU Cores)
     
     private func buildRepoMap(workspace: String) async -> RepoMap {
-        let rootURL = URL(fileURLWithPath: workspace)
-        var fileEntries: [RepoFileEntry] = []
-        var totalSymbols = 0
-        
-        // Collect all indexable files
-        let files = collectFiles(root: rootURL, current: rootURL, depth: 0, maxDepth: 8)
-        
-        for fileURL in files.prefix(maxFiles) {
-            let relativePath = fileURL.path.replacingOccurrences(of: workspace + "/", with: "")
-            let ext = fileURL.pathExtension
+        await PerformanceManager.shared.runOnECore { [self] in
+            let rootURL = URL(fileURLWithPath: workspace)
+            let files = Array(self.collectFiles(root: rootURL, current: rootURL, depth: 0, maxDepth: 8).prefix(self.maxFiles))
             
-            guard let attrs = try? FileManager.default.attributesOfItem(atPath: fileURL.path),
-                  let size = attrs[.size] as? UInt64 else { continue }
-            
-            // Extract symbols from source files
-            var symbols: [RepoSymbol] = []
-            if indexableExtensions.contains(ext), size <= maxFileSizeBytes {
-                if let content = try? String(contentsOf: fileURL, encoding: .utf8) {
-                    symbols = extractSymbols(content: content, ext: ext, relativePath: relativePath)
+            // Extract symbols across all CPU cores simultaneously via `DispatchQueue.concurrentPerform`
+            let maybeEntries: [RepoFileEntry?] = PerformanceManager.parallelMap(files, minItemsPerCore: 4) { fileURL in
+                let relativePath = fileURL.path.replacingOccurrences(of: workspace + "/", with: "")
+                let ext = fileURL.pathExtension
+                
+                guard let attrs = try? FileManager.default.attributesOfItem(atPath: fileURL.path),
+                      let size = attrs[.size] as? UInt64 else { return nil }
+                
+                var symbols: [RepoSymbol] = []
+                if self.indexableExtensions.contains(ext), size <= self.maxFileSizeBytes {
+                    if let content = try? String(contentsOf: fileURL, encoding: .utf8) {
+                        symbols = self.extractSymbols(content: content, ext: ext, relativePath: relativePath)
+                    }
                 }
+                
+                return RepoFileEntry(
+                    relativePath: relativePath,
+                    extension_: ext,
+                    sizeBytes: size,
+                    symbolCount: symbols.count,
+                    symbols: symbols
+                )
             }
             
-            totalSymbols += symbols.count
+            var fileEntries = maybeEntries.compactMap { $0 }
+            let totalSymbols = fileEntries.reduce(0) { $0 + $1.symbolCount }
             
-            fileEntries.append(RepoFileEntry(
-                relativePath: relativePath,
-                extension_: ext,
-                sizeBytes: size,
-                symbolCount: symbols.count,
-                symbols: symbols
-            ))
+            // Sort: source files with symbols first, then by path
+            fileEntries.sort { a, b in
+                if a.symbolCount != b.symbolCount { return a.symbolCount > b.symbolCount }
+                return a.relativePath < b.relativePath
+            }
+            
+            let formatter = ISO8601DateFormatter()
+            return RepoMap(
+                workspaceRoot: workspace,
+                totalFiles: fileEntries.count,
+                totalSymbols: totalSymbols,
+                generatedAt: formatter.string(from: Date()),
+                files: fileEntries
+            )
         }
-        
-        // Sort: source files with symbols first, then by path
-        fileEntries.sort { a, b in
-            if a.symbolCount != b.symbolCount { return a.symbolCount > b.symbolCount }
-            return a.relativePath < b.relativePath
-        }
-        
-        let formatter = ISO8601DateFormatter()
-        return RepoMap(
-            workspaceRoot: workspace,
-            totalFiles: fileEntries.count,
-            totalSymbols: totalSymbols,
-            generatedAt: formatter.string(from: Date()),
-            files: fileEntries
-        )
     }
     
     // MARK: - File Collection

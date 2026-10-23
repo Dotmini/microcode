@@ -20,8 +20,8 @@ struct MicroCodeApp: App {
     // Core state - Initialized lazily where possible inside AppState
     @StateObject private var appState = AppState()
     
-    // Services
-    @StateObject private var performanceManager = PerformanceManager.shared
+    // Services (non-observed reference so memory telemetry never invalidates the root WindowGroup)
+    private let performanceManager = PerformanceManager.shared
 
     init() {
         // Install crash/error capture as early as possible so Swift traps,
@@ -49,6 +49,7 @@ struct MicroCodeApp: App {
         WindowGroup {
             ContentView()
                 .environmentObject(appState)
+                .ignoresSafeArea(.all, edges: .top)
                 .frame(minWidth: 1200, minHeight: 800)
                 .preferredColorScheme(appState.appTheme.colorScheme)
                 .onAppear {
@@ -108,7 +109,6 @@ struct MicroCodeApp: App {
         }
         .handlesExternalEvents(matching: Set(arrayLiteral: "*"))
         .windowStyle(.hiddenTitleBar)
-        .windowToolbarStyle(.unified)
         .commands {
             // ... (Menu commands remain same, omitted for brevity in optimization view)
             AppCommands(appState: appState)
@@ -118,6 +118,7 @@ struct MicroCodeApp: App {
 
     private func setupWindow() {
         if let window = NSApplication.shared.windows.first {
+            window.toolbar = nil
             window.titlebarAppearsTransparent = true
             window.titleVisibility = .hidden
             window.styleMask.insert(.fullSizeContentView)
@@ -621,11 +622,43 @@ struct AppCommands: Commands {
         CommandMenu("Code") {
             Button("Run Code") { appState.runCode() }
                 .keyboardShortcut("r", modifiers: .command)
+            Button("Debug with LLDB (DAP)") {
+                if let file = appState.currentFile {
+                    appState.consoleVisible = true
+                    let wsPath = appState.workspaceFolder?.path
+                    Task { @MainActor in
+                        await DebugService.shared.startDebugSession(
+                            filePath: file.path,
+                            workspacePath: wsPath
+                        )
+                    }
+                }
+            }
+                .keyboardShortcut("y", modifiers: [.command, .option])
             Button("Build Project") { appState.buildProject() }
                 .keyboardShortcut("b", modifiers: [.command, .shift])
             Button("Stop Execution") { appState.stopExecution() }
                 .keyboardShortcut(".", modifiers: .command)
                 .disabled(!appState.isExecuting)
+            Divider()
+            Button("Find in Workspace...") {
+                appState.sidebarVisible = true
+                NotificationCenter.default.post(
+                    name: Notification.Name("MicroCodeOpenWorkspaceSearch"),
+                    object: nil,
+                    userInfo: ["replace": false]
+                )
+            }
+                .keyboardShortcut("f", modifiers: [.command, .shift])
+            Button("Replace in Workspace...") {
+                appState.sidebarVisible = true
+                NotificationCenter.default.post(
+                    name: Notification.Name("MicroCodeOpenWorkspaceSearch"),
+                    object: nil,
+                    userInfo: ["replace": true]
+                )
+            }
+                .keyboardShortcut("h", modifiers: [.command, .shift])
             Divider()
             Button("Format Code") { appState.formatCode() }
                 .keyboardShortcut("f", modifiers: [.command, .option])

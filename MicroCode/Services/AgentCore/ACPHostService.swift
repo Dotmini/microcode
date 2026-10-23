@@ -527,15 +527,22 @@ class ACPAgentSession: ObservableObject, Identifiable {
             "--dangerously-skip-permissions"
         ]
         
-        if let model = model, !model.isEmpty, !model.contains("/") {
-            args += ["--model", model]
-        }
+        let resolvedModel: String = {
+            guard let raw = model?.trimmingCharacters(in: .whitespacesAndNewlines),
+                  !raw.isEmpty,
+                  !raw.contains("/"),
+                  raw != "gemini-3-flash-agent" else {
+                return "gemini-3.8-flash-low"
+            }
+            return raw
+        }()
+        args += ["--model", resolvedModel]
         
-        // Fast reasoning effort by default: low/medium starts emitting tokens immediately without 30s delay
+        // Fast reasoning effort by default: match model tier suffix (low/medium/high)
         if !config.arguments.contains("--effort") {
-            if let model = model, model.contains("high") {
+            if resolvedModel.contains("high") {
                 args += ["--effort", "high"]
-            } else if let model = model, model.contains("medium") {
+            } else if resolvedModel.contains("medium") {
                 args += ["--effort", "medium"]
             } else {
                 args += ["--effort", "low"]
@@ -863,6 +870,12 @@ class ACPHostService: ObservableObject {
         
         // If already an absolute path, verify it is an executable file; if stale, fallback to basename lookup
         if trimmed.hasPrefix("/") {
+            if trimmed.contains(".plugin-appserver/codex-cli") {
+                let localCodex = "\(FileManager.default.homeDirectoryForCurrentUser.path)/.local/bin/codex"
+                if FileManager.default.isExecutableFile(atPath: localCodex) {
+                    return localCodex
+                }
+            }
             if FileManager.default.isExecutableFile(atPath: trimmed) {
                 return trimmed
             }
@@ -921,7 +934,8 @@ class ACPHostService: ObservableObject {
             detectedAgents[type] = path
             print("[ACP] Detected \(type.displayName) at \(path)")
             if let existingIdx = registeredConfigs.firstIndex(where: { $0.type == type }) {
-                if !FileManager.default.isExecutableFile(atPath: registeredConfigs[existingIdx].command) {
+                let existingCmd = registeredConfigs[existingIdx].command
+                if !FileManager.default.isExecutableFile(atPath: existingCmd) || existingCmd.contains(".plugin-appserver/codex-cli") {
                     registeredConfigs[existingIdx].command = path
                     saveConfigs()
                 }
@@ -1064,7 +1078,7 @@ class ACPHostService: ObservableObject {
         if let data = UserDefaults.standard.data(forKey: configKey),
            var configs = try? JSONDecoder().decode([ACPAgentConfig].self, from: data) {
             for i in configs.indices {
-                if !FileManager.default.isExecutableFile(atPath: configs[i].command),
+                if (!FileManager.default.isExecutableFile(atPath: configs[i].command) || configs[i].command.contains(".plugin-appserver/codex-cli")),
                    let healed = Self.resolveExecutablePath(configs[i].type.defaultCommand) {
                     configs[i].command = healed
                 }

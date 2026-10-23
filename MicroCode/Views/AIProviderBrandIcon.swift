@@ -28,10 +28,44 @@ struct AIProviderBrandIcon: View {
     
     @ViewBuilder
     private var fallbackIcon: some View {
-        Image(systemName: "cpu")
-            .font(.system(size: size * 0.7))
-            .foregroundColor(.white.opacity(0.6))
+        let meta = Self.fallbackSymbol(for: provider)
+        Image(systemName: meta.symbol)
+            .font(.system(size: size * 0.72, weight: .semibold))
+            .foregroundColor(meta.color)
             .frame(width: size, height: size)
+    }
+
+    private static func fallbackSymbol(for provider: String) -> (symbol: String, color: Color) {
+        switch provider.lowercased() {
+        case "openrouter":
+            return ("point.3.connected.trianglepath.dotted", .indigo)
+        case "groq":
+            return ("bolt.horizontal.fill", .orange)
+        case "mistral":
+            return ("wind", .orange)
+        case "kimi", "moonshot":
+            return ("moon.stars.fill", .cyan)
+        case "perplexity":
+            return ("magnifyingglass.circle.fill", .teal)
+        case "typhoon":
+            return ("hurricane", .purple)
+        case "cerebras":
+            return ("memorychip.fill", .pink)
+        case "together":
+            return ("square.stack.3d.up.fill", .blue)
+        case "fireworks":
+            return ("flame.fill", .orange)
+        case "minimax":
+            return ("waveform.path.ecg", .pink)
+        case "nvidia":
+            return ("cpu.fill", .green)
+        case "qwen":
+            return ("cloud.fill", .indigo)
+        case "grok":
+            return ("bolt.fill", .purple)
+        default:
+            return ("cpu", .white.opacity(0.65))
+        }
     }
     
     private static var iconCache: [String: NSImage] = [:]
@@ -60,6 +94,8 @@ struct AIProviderBrandIcon: View {
             resolvedKey = "zed"
         case "free_model", "freemodel":
             resolvedKey = "local"
+        case "aipass", "thai_passport", "th_ai_pass":
+            resolvedKey = "omni"
         default:
             resolvedKey = rawKey
         }

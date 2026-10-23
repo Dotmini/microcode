@@ -94,10 +94,12 @@ struct WebBrowserView: NSViewRepresentable {
     
     func makeNSView(context: Context) -> WKWebView {
         let config = WebEngine.shared.createConfiguration()
+        IDEBrowserAutomationService.shared.attachTelemetry(to: config)
         let webView = WKWebView(frame: .zero, configuration: config)
         
         webView.navigationDelegate = context.coordinator
         webView.uiDelegate = context.coordinator
+        IDEBrowserAutomationService.shared.activePreviewWebView = webView
         
         // Load initial content
         loadContent(in: webView)
@@ -149,6 +151,18 @@ struct WebBrowserView: NSViewRepresentable {
     
     func makeCoordinator() -> Coordinator {
         Coordinator(self)
+    }
+    
+    static func dismantleNSView(_ webView: WKWebView, coordinator: Coordinator) {
+        webView.stopLoading()
+        webView.navigationDelegate = nil
+        webView.uiDelegate = nil
+        webView.configuration.userContentController.removeScriptMessageHandler(forName: "mcBrowserBridge")
+        webView.configuration.userContentController.removeAllUserScripts()
+        if IDEBrowserAutomationService.shared.activePreviewWebView === webView {
+            IDEBrowserAutomationService.shared.activePreviewWebView = nil
+        }
+        webView.loadHTMLString("", baseURL: nil)
     }
     
     class Coordinator: NSObject, WKNavigationDelegate, WKUIDelegate {

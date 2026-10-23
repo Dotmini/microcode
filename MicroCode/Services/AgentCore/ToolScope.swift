@@ -24,19 +24,12 @@ enum ToolTier: CaseIterable {
 }
 
 struct ToolScope {
-    static let minimal: Set<ToolTier> = [.core]
-    static let standard: Set<ToolTier> = [.core, .navigation, .editing, .lsp]
+    static let minimal: Set<ToolTier> = [.core, .mcp]
+    static let standard: Set<ToolTier> = [.core, .navigation, .editing, .planning, .lsp, .execution, .mcp]
     static let full: Set<ToolTier> = Set(ToolTier.allCases)
     
     static func scopeFor(complexity: TaskComplexity, domain: AgentDomain?, hasMobilePreview: Bool) -> Set<ToolTier> {
-        var tiers: Set<ToolTier> = [.core, .navigation, .editing, .lsp]
-        
-        switch complexity {
-        case .trivial, .simple:
-            break
-        case .moderate, .complex, .reasoning:
-            tiers.insert(.planning)
-        }
+        var tiers: Set<ToolTier> = [.core, .navigation, .editing, .planning, .lsp, .execution, .mcp]
         
         if domain == .science {
             tiers.insert(.science)
@@ -44,8 +37,6 @@ struct ToolScope {
         if hasMobilePreview {
             tiers.insert(.device)
         }
-        
-        tiers.insert(.mcp)
         
         return tiers
     }
@@ -55,6 +46,7 @@ struct ToolScope {
         "multi_replace_in_file": .core, "apply_patch": .core,
         "grep_search": .core, "shell": .core, "git_status": .core,
         "skill_engine": .core, "mcp_orchestrator": .mcp, "swarm_orchestrator": .planning,
+        "generate_image": .core, "generate_video": .core, "generate_music": .core,
         "find_symbol": .navigation, "list_directory_tree": .navigation,
         "file_search": .navigation, "multi_file_read": .navigation,
         "git_diff": .navigation, "git_log": .navigation,

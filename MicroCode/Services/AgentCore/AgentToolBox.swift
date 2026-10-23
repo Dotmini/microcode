@@ -109,6 +109,10 @@ class AgentToolBox: ObservableObject {
         register(SendMessageTool())
         register(DeviceRuntimeTool())
         register(PreviewControlTool())
+        register(IDEBrowserTool())
+        register(EditorControlTool())
+        register(APIStudioTool())
+        register(DatabaseStudioTool())
         register(VisualRegressionTool())
         register(RepoMapTool())
         // Feature 8: LSP Agent Bridge
@@ -125,6 +129,10 @@ class AgentToolBox: ObservableObject {
         register(SkillEngineTool())
         register(MCPOrchestratorTool())
         register(SwarmOrchestratorTool())
+        // Feature 12: TH-AI Passport Multimodal Generation (Image, Video, Music/Audio)
+        register(GenerateImageTool())
+        register(GenerateVideoTool())
+        register(GenerateMusicTool())
     }
     
     func register(_ tool: any AgentTool) {
@@ -172,12 +180,13 @@ class AgentToolBox: ObservableObject {
             }
             
             // Validate every declared local path, including list and rename arguments.
+            let isReadOnlyFS = ["file_read", "multi_file_read", "list_directory_tree", "grep_search", "file_search"].contains(toolName)
             for key in ["path", "directory", "old_path", "new_path", "cwd"] {
-                if let path = resolvedParams[key] as? String { try validateSandbox(path) }
+                if let path = resolvedParams[key] as? String { try validateSandbox(path, allowGlobalReadOnly: isReadOnlyFS) }
             }
             if let paths = resolvedParams["paths"] as? String {
                 for path in paths.components(separatedBy: ",") {
-                    try validateSandbox(path.trimmingCharacters(in: .whitespacesAndNewlines))
+                    try validateSandbox(path.trimmingCharacters(in: .whitespacesAndNewlines), allowGlobalReadOnly: isReadOnlyFS)
                 }
             }
         } else if let remoteBase = RemoteWorkspaceManager.shared.currentWorkspace?.remotePath, !remoteBase.isEmpty {
@@ -225,6 +234,32 @@ class AgentToolBox: ObservableObject {
             return true
         }()
         if !isRemoteTarget && isMutatingCall {
+            // Feature #4: Scope Lock & Protected Files Guard enforcement
+            for key in ["path", "old_path", "new_path"] {
+                if let targetFile = resolvedParams[key] as? String,
+                   let blockReason = WorkspaceScopeGuard.shared.validateMutationAllowed(path: targetFile, workspaceRoot: workspaceRoot) {
+                    throw ToolBoxError.executionFailed(blockReason)
+                }
+            }
+            if let patchText = resolvedParams["patch"] as? String, let root = workspaceRoot {
+                for line in patchText.components(separatedBy: "\n") {
+                    let trimmed = line.trimmingCharacters(in: .whitespacesAndNewlines)
+                    var relPath: String? = nil
+                    if trimmed.hasPrefix("*** Update File:") {
+                        relPath = String(trimmed.dropFirst("*** Update File:".count)).trimmingCharacters(in: .whitespaces)
+                    } else if trimmed.hasPrefix("*** Delete File:") {
+                        relPath = String(trimmed.dropFirst("*** Delete File:".count)).trimmingCharacters(in: .whitespaces)
+                    } else if trimmed.hasPrefix("--- a/") {
+                        relPath = String(trimmed.dropFirst("--- a/".count)).trimmingCharacters(in: .whitespaces)
+                    }
+                    if let rel = relPath, !rel.isEmpty {
+                        let absPath = rel.hasPrefix("/") ? rel : (root as NSString).appendingPathComponent(rel)
+                        if let blockReason = WorkspaceScopeGuard.shared.validateMutationAllowed(path: absPath, workspaceRoot: workspaceRoot) {
+                            throw ToolBoxError.executionFailed(blockReason)
+                        }
+                    }
+                }
+            }
             AutoCommitService.shared.workspaceRoot = workspaceRoot
             let targetPath = resolvedParams["path"] as? String ?? resolvedParams["directory"] as? String
             await AutoCommitService.shared.createCheckpoint(toolName: toolName, targetPath: targetPath)
@@ -240,14 +275,17 @@ class AgentToolBox: ObservableObject {
         if cacheable { TokenOptimizer.shared.recordContextCache(hit: false, tokens: 0) }
         
         do {
+            let timeoutNs = defaultToolTimeout
             let rawResult: String
-            if case .remote(let server) = executionTarget,
+            if let server = executionTarget.remoteServer,
                let remoteHandled = try await executeRemoteToolIfApplicable(toolName: toolName, server: server, params: resolvedParams) {
-                rawResult = remoteHandled
+                rawResult = await Task.detached(priority: .userInitiated) {
+                    AgentPrivacyGuard.sanitize(remoteHandled)
+                }.value
             } else {
-                rawResult = try await executeWithTimeout(tool: tool, params: resolvedParams)
+                rawResult = try await executeWithTimeout(tool: tool, params: resolvedParams, timeoutNs: timeoutNs)
             }
-            let result = AgentPrivacyGuard.sanitize(rawResult)
+            var result = rawResult
             let execution = ToolExecution(toolName: toolName, params: resolvedParams, result: result, success: true, duration: Date().timeIntervalSince(startTime))
             executionHistory.append(execution)
             if executionHistory.count > 300 { executionHistory.removeFirst(executionHistory.count - 300) }
@@ -256,6 +294,11 @@ class AgentToolBox: ObservableObject {
                 readCache.removeAll(keepingCapacity: true)
                 if !isRemoteTarget, let path = resolvedParams["path"] as? String {
                     AutoCommitService.shared.modifiedFiles.insert(path)
+                    // Feature #7: 1-Click Secret & API Key Leak Shield audit on modified source files
+                    if let updatedContent = try? String(contentsOfFile: path, encoding: .utf8),
+                       let secretWarning = SecretShieldMonitor.shared.inspectFileWrite(content: updatedContent, filePath: path) {
+                        result += secretWarning
+                    }
                     if RemoteWorkspaceManager.shared.currentWorkspace != nil {
                         await RemoteWorkspaceManager.shared.syncFile(localURL: URL(fileURLWithPath: path))
                     }
@@ -438,17 +481,38 @@ class AgentToolBox: ObservableObject {
         case "git_status":
             let dir = (params["directory"] as? String) ?? (params["path"] as? String) ?? "."
             return try await runRemoteShell("git -C \(Self.posixQuote(dir)) status --short --branch && git -C \(Self.posixQuote(dir)) diff --stat")
+
+        case "git_diff":
+            let dir = (params["directory"] as? String) ?? "."
+            if let file = params["path"] as? String, !file.isEmpty {
+                return try await runRemoteShell("git -C \(Self.posixQuote(dir)) diff -- \(Self.posixQuote(file))")
+            }
+            return try await runRemoteShell("git -C \(Self.posixQuote(dir)) diff")
+
+        case "file_delete", "delete_file":
+            guard let path = params["path"] as? String, !path.isEmpty else {
+                throw ToolBoxError.invalidParams("Missing 'path'")
+            }
+            if (try? await BackendService.shared.remoteRemove(id: serverId, path: path, isDirectory: false)) == nil {
+                _ = try await runRemoteShell("rm -rf -- \(Self.posixQuote(path))")
+            }
+            return "Deleted remote path \(path) on \(server.name)"
             
         default:
             return nil
         }
     }
 
-    private func executeWithTimeout(tool: any AgentTool, params: [String: Any]) async throws -> String {
+    /// Nonisolated multi-core execution wrapper so concurrent tool calls (e.g. `withTaskGroup` in `AgentService`)
+    /// execute truly in parallel across Apple Silicon P-Cores/E-Cores without serializing on `@MainActor`.
+    nonisolated private func executeWithTimeout(tool: any AgentTool, params: [String: Any], timeoutNs: UInt64) async throws -> String {
         try await withThrowingTaskGroup(of: String.self) { group in
-            group.addTask { try await tool.execute(params: params) }
-            group.addTask {
-                try await Task.sleep(nanoseconds: self.defaultToolTimeout)
+            group.addTask(priority: .userInitiated) {
+                let raw = try await tool.execute(params: params)
+                return AgentPrivacyGuard.sanitize(raw)
+            }
+            group.addTask(priority: .utility) {
+                try await Task.sleep(nanoseconds: timeoutNs)
                 throw ToolBoxError.executionFailed("Tool timed out after 10 minutes")
             }
             guard let first = try await group.next() else {
@@ -466,9 +530,25 @@ class AgentToolBox: ObservableObject {
     
     // MARK: - Sandbox Validation
     
-    private func validateSandbox(_ path: String) throws {
+    private func validateSandbox(_ path: String, allowGlobalReadOnly: Bool = false) throws {
         guard let root = workspaceRoot, !root.isEmpty else {
             throw ToolBoxError.executionFailed("Open a workspace before accessing files")
+        }
+        if allowGlobalReadOnly {
+            let home = FileManager.default.homeDirectoryForCurrentUser.path
+            let globalAgentDirs = [
+                "\(home)/.gemini",
+                "\(home)/.microcode",
+                "\(home)/.agents",
+                "\(home)/.codex",
+                "\(home)/.claude",
+                "\(home)/.cursor"
+            ]
+            for allowedDir in globalAgentDirs {
+                if WorkspacePathPolicy.contains(path, in: allowedDir) {
+                    return
+                }
+            }
         }
         guard WorkspacePathPolicy.contains(path, in: root) else {
             let rootName = URL(fileURLWithPath: root).lastPathComponent
@@ -1002,13 +1082,31 @@ struct VisualRegressionTool: AgentTool {
 
 struct PreviewControlTool: AgentTool {
     let name = "preview_control"
-    let description = "Directly control and inspect the IDE's live Embedded Preview Dock (WebApp, Apple Simulator, Android Device). Supports opening URLs (e.g. http://localhost:3000, Vite, Next.js), reloading pages, changing viewports (Desktop, Tablet, Mobile, Responsive), and toggling between Web, iOS, and Android modes."
+    let description = "Directly control and inspect the IDE's live Embedded Preview Dock (WebApp, Apple Simulator, Android Device). Supports opening URLs (e.g. http://localhost:3000, Vite, Next.js), reloading pages, changing viewports (Desktop, Tablet, Mobile, Responsive), reading live JS console.error/warn & network logs, and taking screenshots."
     let parameters = [
-        ToolParameter(name: "action", type: "string", description: "Action to perform: 'open', 'close', 'reload', 'set_url', 'switch_mode', 'set_viewport', 'status'", required: true),
+        ToolParameter(name: "action", type: "string", description: "Action to perform: 'open', 'close', 'reload', 'set_url', 'switch_mode', 'set_viewport', 'status', 'console_logs', 'network_logs', 'inspect', 'screenshot'", required: true),
         ToolParameter(name: "url", type: "string", description: "Target URL for WebApp preview (e.g. http://localhost:3000, http://127.0.0.1:5173)", required: false),
         ToolParameter(name: "mode", type: "string", description: "Dock mode: 'web', 'ios', or 'android'", required: false),
         ToolParameter(name: "viewport", type: "string", description: "Viewport size: 'responsive', 'desktop', 'tablet', or 'mobile'", required: false)
     ]
+
+    @MainActor
+    private func livePreviewDiagnosticsSuffix() -> String {
+        let browser = IDEBrowserAutomationService.shared
+        let errors = browser.consoleLogs.filter { $0.level == "error" || $0.level == "warn" }.suffix(8)
+        let failedNet = browser.failedNetworkEntries.suffix(5)
+        guard !errors.isEmpty || !failedNet.isEmpty else {
+            return "\n[Preview Console: 0 runtime errors]"
+        }
+        var lines: [String] = ["\n⚠️ [Live Preview Console / Network Telemetry]:"]
+        for entry in errors {
+            lines.append("  • [console.\(entry.level)] \(entry.message.prefix(240))")
+        }
+        for req in failedNet {
+            lines.append("  • [network \(req.status)] \(req.method) \(req.url)")
+        }
+        return lines.joined(separator: "\n")
+    }
 
     func execute(params: [String: Any]) async throws -> String {
         guard let action = (params["action"] as? String)?.lowercased() else {
@@ -1017,6 +1115,16 @@ struct PreviewControlTool: AgentTool {
         let url = params["url"] as? String
         let mode = (params["mode"] as? String)?.lowercased()
         let viewport = (params["viewport"] as? String)?.lowercased()
+
+        // Delegate rich inspection/console/screenshot actions directly to IDEBrowserAutomationService targeting the Preview WebView
+        if ["console_logs", "console", "network_logs", "network", "inspect", "inspect_elements", "screenshot", "get_dom"].contains(action) {
+            var forwarded = params
+            forwarded["target"] = "preview"
+            if action == "console" { forwarded["action"] = "console_logs" }
+            if action == "network" { forwarded["action"] = "network_logs" }
+            if action == "inspect" { forwarded["action"] = "inspect_elements" }
+            return try await IDEBrowserAutomationService.shared.executeAction(params: forwarded)
+        }
 
         return try await MainActor.run {
             let runtime = DeviceRuntimeService.shared
@@ -1052,7 +1160,7 @@ struct PreviewControlTool: AgentTool {
                 if let viewport = viewport {
                     runtime.targetViewport = viewport
                 }
-                return "✅ Live Preview Dock opened in \(runtime.embeddedDockMode.rawValue) mode\(url != nil ? " with URL: \(url!)" : "")."
+                return "✅ Live Preview Dock opened in \(runtime.embeddedDockMode.rawValue) mode\(url != nil ? " with URL: \(url!)" : "").\(livePreviewDiagnosticsSuffix())"
 
             case "close":
                 runtime.showingEmbeddedDeviceDock = false
@@ -1062,7 +1170,7 @@ struct PreviewControlTool: AgentTool {
             case "reload", "refresh":
                 runtime.showingEmbeddedDeviceDock = true
                 runtime.webRefreshTrigger.toggle()
-                return "✅ Live Preview reload triggered."
+                return "✅ Live Preview reload triggered.\(livePreviewDiagnosticsSuffix())"
 
             case "set_url":
                 runtime.showingEmbeddedDeviceDock = true
@@ -1080,7 +1188,7 @@ struct PreviewControlTool: AgentTool {
                     throw ToolBoxError.invalidParams("Invalid URL format: \(urlString)")
                 }
                 runtime.targetWebURL = target
-                return "✅ WebApp Preview URL navigated to: \(target.absoluteString)"
+                return "✅ WebApp Preview URL navigated to: \(target.absoluteString)\(livePreviewDiagnosticsSuffix())"
 
             case "switch_mode":
                 runtime.showingEmbeddedDeviceDock = true
@@ -1113,12 +1221,303 @@ struct PreviewControlTool: AgentTool {
                 let visible = runtime.showingEmbeddedDeviceDock ? "Visible" : "Hidden"
                 let currentMode = runtime.embeddedDockMode.rawValue
                 let currentURL = runtime.targetWebURL?.absoluteString ?? "http://localhost:3000"
-                return "Live Preview Dock: \(visible) | Mode: \(currentMode) | URL: \(currentURL) | Viewport: \(runtime.targetViewport)"
+                return "Live Preview Dock: \(visible) | Mode: \(currentMode) | URL: \(currentURL) | Viewport: \(runtime.targetViewport)\(livePreviewDiagnosticsSuffix())"
 
             default:
-                throw ToolBoxError.invalidParams("Unknown action '\(action)'. Supported: open, close, reload, set_url, switch_mode, set_viewport, status")
+                throw ToolBoxError.invalidParams("Unknown action '\(action)'. Supported: open, close, reload, set_url, switch_mode, set_viewport, status, console_logs, network_logs, inspect, screenshot")
             }
         }
+    }
+}
+
+// MARK: - Native IDE Browser & WebEngine Automation Tool
+
+struct IDEBrowserTool: AgentTool {
+    let name = "ide_browser"
+    let description = "Control and inspect MicroCode's built-in IDE Browser and Live WebApp Preview (WebKit). Supports navigating to URLs, inspecting interactive DOM elements with selectors & bounding boxes, reading DOM text/HTML, clicking elements, typing into inputs (React/Vue compatible), evaluating JavaScript, reading live console.log/error & fetch/XHR network logs, and taking high-res PNG snapshots."
+    let parameters = [
+        ToolParameter(name: "action", type: "string", description: "Action: 'navigate', 'inspect_elements', 'get_dom', 'click', 'type', 'eval_js', 'console_logs', 'network_logs', 'screenshot', or 'status'", required: true),
+        ToolParameter(name: "target", type: "string", description: "Target WebView: 'auto' (default), 'browser' (IDE Browser), or 'preview' (Live WebApp Preview Dock)", required: false),
+        ToolParameter(name: "url", type: "string", description: "URL to open (for 'navigate')", required: false),
+        ToolParameter(name: "selector", type: "string", description: "CSS selector or button text (for 'click', 'type', 'get_dom')", required: false),
+        ToolParameter(name: "text", type: "string", description: "Text to type into input (for 'type')", required: false),
+        ToolParameter(name: "submit", type: "boolean", description: "Submit form after typing (for 'type')", required: false),
+        ToolParameter(name: "script", type: "string", description: "JavaScript expression to evaluate in page (for 'eval_js')", required: false),
+        ToolParameter(name: "format", type: "string", description: "'text' or 'html' (for 'get_dom')", required: false),
+        ToolParameter(name: "level", type: "string", description: "Console filter: 'error', 'warn', 'info', 'log' (for 'console_logs')", required: false),
+        ToolParameter(name: "clear", type: "boolean", description: "Clear buffered logs after reading (for 'console_logs' / 'network_logs')", required: false),
+        ToolParameter(name: "output_path", type: "string", description: "PNG file path (for 'screenshot')", required: false)
+    ]
+
+    func execute(params: [String: Any]) async throws -> String {
+        return try await IDEBrowserAutomationService.shared.executeAction(params: params)
+    }
+}
+
+struct EditorControlTool: AgentTool {
+    let name = "editor_control"
+    let description = "Inspect and control the active MicroCode IDE Editor tabs, active file, cursor state, and workspace navigation."
+    let parameters = [
+        ToolParameter(name: "action", type: "string", description: "Action: 'status', 'open_file', 'list_tabs', 'switch_mode'", required: true),
+        ToolParameter(name: "path", type: "string", description: "File path to open in editor (for 'open_file')", required: false),
+        ToolParameter(name: "mode", type: "string", description: "IDE mode: 'editor', 'browser', 'notebook', 'playground', 'agent', 'science' (for 'switch_mode')", required: false)
+    ]
+
+    func execute(params: [String: Any]) async throws -> String {
+        let action = (params["action"] as? String ?? "status").lowercased()
+        return await MainActor.run {
+            guard let appState = AppState.shared else {
+                return "AppState not initialized."
+            }
+            switch action {
+            case "status":
+                let activeTab = appState.currentFile?.name ?? "None"
+                let activePath = appState.currentFile?.path ?? "None"
+                let openTabs = appState.openFiles.map { "\($0.name) (\($0.path))" }.joined(separator: ", ")
+                return "Mode: \(appState.editorMode.displayName) | Active File: \(activeTab) (\(activePath)) | Open Files (\(appState.openFiles.count)): [\(openTabs)] | Workspace: \(appState.workspaceFolder?.path ?? "None")"
+            case "list_tabs":
+                if appState.openFiles.isEmpty { return "No open editor files." }
+                return appState.openFiles.enumerated().map { idx, t in
+                    "\(idx == appState.currentFileIndex ? "▶ " : "  ")[\(idx)] \(t.name) — \(t.path)\(t.isUnsaved ? " (unsaved)" : "")"
+                }.joined(separator: "\n")
+            case "open_file":
+                guard let path = params["path"] as? String, !path.isEmpty else {
+                    return "Error: 'path' is required for open_file"
+                }
+                let ws = appState.activeTerminalDirectory
+                let fullPath = path.hasPrefix("/") ? path : (ws as NSString).appendingPathComponent(path)
+                Task { @MainActor in
+                    await appState.loadFile(url: URL(fileURLWithPath: fullPath))
+                }
+                return "✅ Opened file in MicroCode Editor: \(fullPath)"
+            case "switch_mode":
+                let mode = (params["mode"] as? String ?? "").lowercased()
+                if mode == "browser" {
+                    appState.editorMode = .browser
+                    return "✅ Switched IDE to Browser Mode."
+                } else if mode == "editor" || mode == "code" {
+                    appState.editorMode = .code
+                    return "✅ Switched IDE to Code Editor Mode."
+                } else if mode == "notebook" || mode == "cells" {
+                    appState.editorMode = .notebook
+                    return "✅ Switched IDE to Notebook Mode."
+                } else if mode == "playground" {
+                    appState.editorMode = .playground
+                    return "✅ Switched IDE to Playground Mode."
+                } else if mode == "agent" || mode == "ai" {
+                    appState.editorMode = .aiAgent
+                    return "✅ Switched IDE to AI Agent Mode."
+                } else if mode == "science" {
+                    appState.editorMode = .science
+                    return "✅ Switched IDE to Science Mode."
+                } else if mode == "api" || mode == "apistudio" || mode == "api_studio" {
+                    appState.editorMode = .apiClient
+                    return "✅ Switched IDE to API Studio Mode."
+                }
+                return "Unknown mode '\(mode)'."
+            default:
+                return "Unknown editor_control action '\(action)'."
+            }
+        }
+    }
+}
+
+// MARK: - API Studio MCP Tool (Postman-Grade HTTP Client & Route Scanner)
+
+struct APIStudioTool: AgentTool {
+    let name = "api_studio"
+    let description = "Control MicroCode's built-in API Studio (Postman-level HTTP Client). Supports executing HTTP requests with AI Test Suite assertions, scanning the workspace for backend API routes (FastAPI, Express, Next.js, Rust Axum, Go), listing collections, importing .env variables, and generating multi-language SDK snippets (cURL, Swift, TypeScript, Python, Rust)."
+    let parameters = [
+        ToolParameter(name: "action", type: "string", description: "Action: 'execute', 'scan_routes', 'list_collections', 'load_env', or 'generate_snippet'", required: true),
+        ToolParameter(name: "method", type: "string", description: "HTTP method: GET, POST, PUT, DELETE, PATCH (for 'execute' / 'generate_snippet')", required: false),
+        ToolParameter(name: "url", type: "string", description: "Target URL (supports {{base_url}} environment variables)", required: false),
+        ToolParameter(name: "headers", type: "string", description: "JSON object of HTTP headers (e.g. '{\"Authorization\":\"Bearer ...\"}')", required: false),
+        ToolParameter(name: "body", type: "string", description: "Request body payload (JSON or text)", required: false),
+        ToolParameter(name: "language", type: "string", description: "Target SDK language for 'generate_snippet': 'curl', 'swift', 'typescript', 'python', 'rust'", required: false),
+        ToolParameter(name: "save", type: "boolean", description: "Save request to active API Studio collection", required: false)
+    ]
+
+    func execute(params: [String: Any]) async throws -> String {
+        let action = (params["action"] as? String ?? "list_collections").lowercased()
+        let service = await MainActor.run { APIClientService.shared }
+
+        switch action {
+        case "execute", "request", "send":
+            guard let url = params["url"] as? String, !url.isEmpty else {
+                return "Error: 'url' parameter is required for api_studio execute."
+            }
+            let method = (params["method"] as? String ?? "GET").uppercased()
+            let body = params["body"] as? String
+            var headers: [String: String] = ["Content-Type": "application/json"]
+            if let hdrStr = params["headers"] as? String,
+               let data = hdrStr.data(using: .utf8),
+               let parsed = try? JSONSerialization.jsonObject(with: data) as? [String: String] {
+                for (k, v) in parsed { headers[k] = v }
+            } else if let hdrDict = params["headers"] as? [String: String] {
+                for (k, v) in hdrDict { headers[k] = v }
+            }
+            let req = APIRequest(
+                name: "\(method) \(url)",
+                method: method,
+                url: url,
+                headers: headers,
+                body: body
+            )
+            if (params["save"] as? Bool) == true {
+                await MainActor.run { service.saveToCollection(req) }
+            }
+            let resp = try await service.execute(req)
+            let assertions = await MainActor.run { service.activeTestAssertions }
+            let assertionSummary = assertions.map { "  \($0.passed ? "✅" : "❌") \($0.name): \($0.details)" }.joined(separator: "\n")
+            let bodyPreview = resp.formattedBody.count > 4000 ? String(resp.formattedBody.prefix(4000)) + "\n... (truncated)" : resp.formattedBody
+            return """
+            === API Studio Response ===
+            HTTP \(resp.status) \(resp.statusText) • \(resp.duration_ms) ms • \(resp.bodySize) bytes
+            AI Test Suite Assertions:
+            \(assertionSummary)
+            Body:
+            \(bodyPreview)
+            """
+
+        case "scan_routes", "scan":
+            let ws = await MainActor.run { AppState.shared?.activeTerminalDirectory }
+            let routes = await service.scanWorkspaceRoutes(workspacePath: ws)
+            if routes.isEmpty {
+                return "No backend API routes detected in workspace (\(ws ?? "unknown"))."
+            }
+            let list = routes.prefix(50).map { "- [\($0.method)] \($0.url)" }.joined(separator: "\n")
+            return "✅ Discovered \(routes.count) API endpoints and added to API Studio Collections:\n\(list)"
+
+        case "load_env", "env":
+            let ws = await MainActor.run { AppState.shared?.activeTerminalDirectory }
+            let count = await MainActor.run { service.loadProjectDotEnv(workspacePath: ws) }
+            return "✅ Loaded \(count) environment variables from project .env into API Studio."
+
+        case "generate_snippet", "snippet":
+            let url = params["url"] as? String ?? "http://localhost:3000/api/health"
+            let method = (params["method"] as? String ?? "GET").uppercased()
+            let body = params["body"] as? String
+            let langRaw = (params["language"] as? String ?? "curl").lowercased()
+            let lang: CodeSnippetLanguage = {
+                switch langRaw {
+                case "swift": return .swift
+                case "ts", "typescript", "js", "javascript": return .typescript
+                case "py", "python": return .python
+                case "rs", "rust": return .rust
+                default: return .curl
+                }
+            }()
+            let req = APIRequest(name: "\(method) \(url)", method: method, url: url, headers: ["Content-Type": "application/json"], body: body)
+            return await MainActor.run { service.generateCodeSnippet(for: req, language: lang) }
+
+        case "list_collections", "status", "list":
+            return await MainActor.run {
+                let colSummary = service.collections.map { col in
+                    let items = col.requests.prefix(15).map { "    • [\($0.method)] \($0.url) (\($0.name))" }.joined(separator: "\n")
+                    return "📁 \(col.name) (\(col.requests.count) requests)\(items.isEmpty ? "" : "\n" + items)"
+                }.joined(separator: "\n")
+                return "API Studio Status:\n- Collections (\(service.collections.count)):\n\(colSummary)\n- History Entries: \(service.history.count)"
+            }
+
+        default:
+            return "Unknown api_studio action '\(action)'. Supported: execute, scan_routes, list_collections, load_env, generate_snippet"
+        }
+    }
+}
+
+// MARK: - Database Studio MCP Tool (SQLite / Postgres / MySQL Schema & Query Engine)
+
+struct DatabaseStudioTool: AgentTool {
+    let name = "database_studio"
+    let description = "Inspect and query databases in MicroCode Database Studio. Supports discovering database files (.sqlite, .db, .sqlite3, schema.prisma, migrations) in the workspace, listing tables, inspecting table DDL schemas, and executing SQL queries."
+    let parameters = [
+        ToolParameter(name: "action", type: "string", description: "Action: 'discover', 'list_tables', 'schema', or 'query'", required: true),
+        ToolParameter(name: "path", type: "string", description: "Path to SQLite database file (or ':memory:'). Optional if using active DatabaseStudio connection.", required: false),
+        ToolParameter(name: "query", type: "string", description: "SQL query to execute (for 'query' action)", required: false),
+        ToolParameter(name: "table", type: "string", description: "Optional table name (for 'schema' action)", required: false)
+    ]
+
+    func execute(params: [String: Any]) async throws -> String {
+        let action = (params["action"] as? String ?? "discover").lowercased()
+        let ws = await MainActor.run { AppState.shared?.activeTerminalDirectory ?? FileManager.default.currentDirectoryPath }
+
+        switch action {
+        case "discover":
+            var found: [String] = []
+            if let enumerator = FileManager.default.enumerator(atPath: ws) {
+                while let rel = enumerator.nextObject() as? String {
+                    if rel.contains("node_modules/") || rel.contains(".git/") || rel.contains(".build/") || rel.contains("target/") {
+                        enumerator.skipDescendants()
+                        continue
+                    }
+                    let lower = rel.lowercased()
+                    if lower.hasSuffix(".sqlite") || lower.hasSuffix(".sqlite3") || lower.hasSuffix(".db") || lower.hasSuffix("schema.prisma") || lower.hasSuffix(".sql") {
+                        found.append(rel)
+                    }
+                    if found.count >= 40 { break }
+                }
+            }
+            if found.isEmpty {
+                return "No database files (.sqlite, .db, .sql, schema.prisma) found in \(ws)."
+            }
+            return "Discovered Database & Schema Files in \(ws):\n" + found.map { "- \($0)" }.joined(separator: "\n")
+
+        case "list_tables":
+            let dbPath = resolveDBPath(params["path"] as? String, workspace: ws)
+            return try runSQLite(dbPath: dbPath, sql: "SELECT name, type FROM sqlite_master WHERE type IN ('table','view') AND name NOT LIKE 'sqlite_%' ORDER BY name;")
+
+        case "schema":
+            let dbPath = resolveDBPath(params["path"] as? String, workspace: ws)
+            if let table = params["table"] as? String, !table.isEmpty {
+                let safeTable = table.replacingOccurrences(of: "'", with: "''")
+                return try runSQLite(dbPath: dbPath, sql: "SELECT sql FROM sqlite_master WHERE name = '\(safeTable)';")
+            }
+            return try runSQLite(dbPath: dbPath, sql: "SELECT name, sql FROM sqlite_master WHERE type IN ('table','view') AND name NOT LIKE 'sqlite_%' ORDER BY name;")
+
+        case "query":
+            guard let sql = params["query"] as? String, !sql.isEmpty else {
+                return "Error: 'query' parameter is required for database_studio query."
+            }
+            if let rawPath = params["path"] as? String, !rawPath.isEmpty {
+                let dbPath = resolveDBPath(rawPath, workspace: ws)
+                return try runSQLite(dbPath: dbPath, sql: sql)
+            }
+            if DatabaseService.shared.activeConnectionId != nil {
+                let res = try await DatabaseService.shared.executeQuery(sql)
+                let header = res.columns.joined(separator: " | ")
+                let rows = res.rows.prefix(100).map { r in r.map { "\($0.value)" }.joined(separator: " | ") }.joined(separator: "\n")
+                return "Columns: \(header)\nAffected Rows: \(res.affectedRows)\n\(rows)"
+            }
+            let dbPath = resolveDBPath(nil, workspace: ws)
+            return try runSQLite(dbPath: dbPath, sql: sql)
+
+        default:
+            return "Unknown database_studio action '\(action)'. Supported: discover, list_tables, schema, query"
+        }
+    }
+
+    private func resolveDBPath(_ input: String?, workspace: String) -> String {
+        guard let input = input, !input.isEmpty else { return ":memory:" }
+        if input == ":memory:" || input.hasPrefix("/") { return input }
+        return (workspace as NSString).appendingPathComponent(input)
+    }
+
+    private func runSQLite(dbPath: String, sql: String) throws -> String {
+        let proc = Process()
+        proc.executableURL = URL(fileURLWithPath: "/usr/bin/sqlite3")
+        proc.arguments = ["-header", "-column", dbPath, sql]
+        let outPipe = Pipe()
+        let errPipe = Pipe()
+        proc.standardOutput = outPipe
+        proc.standardError = errPipe
+        try proc.run()
+        proc.waitUntilExit()
+        let out = String(data: outPipe.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? ""
+        let err = String(data: errPipe.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? ""
+        if proc.terminationStatus != 0 {
+            throw NSError(domain: "DatabaseStudio", code: Int(proc.terminationStatus), userInfo: [NSLocalizedDescriptionKey: err.isEmpty ? "sqlite3 error" : err])
+        }
+        return out.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? "✅ Query executed successfully (0 rows returned)." : out
     }
 }
 
@@ -2930,7 +3329,7 @@ struct ApplyPatchTool: AgentTool {
 
 struct MultiFileReadTool: AgentTool {
     let name = "multi_file_read"
-    let description = "Read multiple files at once. More efficient than multiple file_read calls. Returns combined content with file headers."
+    let description = "Read multiple files at once in parallel across CPU cores. More efficient than multiple file_read calls. Returns combined content with file headers."
     let parameters = [
         ToolParameter(name: "paths", type: "string", description: "Comma-separated list of absolute file paths to read", required: true),
         ToolParameter(name: "max_lines", type: "integer", description: "Maximum lines per file (default: 100)", required: false)
@@ -2942,36 +3341,44 @@ struct MultiFileReadTool: AgentTool {
         }
         
         let maxLines = params["max_lines"] as? Int ?? 100
-        let paths = pathsStr.components(separatedBy: ",").map { $0.trimmingCharacters(in: .whitespaces) }
+        let paths = pathsStr
+            .components(separatedBy: ",")
+            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+            .filter { !$0.isEmpty }
+        
+        guard !paths.isEmpty else { return "" }
+        
+        // Read & slice all files across all CPU cores simultaneously via PerformanceManager.parallelMap
+        let perFileSections: [(section: String, charCount: Int)] = await Task.detached(priority: .userInitiated) {
+            PerformanceManager.parallelMap(paths, minItemsPerCore: 1) { path in
+                let url = URL(fileURLWithPath: path)
+                do {
+                    let content = try String(contentsOf: url, encoding: .utf8)
+                    let lines = content.components(separatedBy: "\n")
+                    let limited = Array(lines.prefix(maxLines))
+                    let fileContent = limited.joined(separator: "\n")
+                    let truncated = lines.count > maxLines
+                    var sec = "\n═══ \(url.lastPathComponent) ═══\n" + fileContent
+                    if truncated { sec += "\n... (\(lines.count - maxLines) more lines)" }
+                    sec += "\n"
+                    return (sec, fileContent.count)
+                } catch {
+                    let sec = "\n═══ \(url.lastPathComponent) ═══\n⚠️ Error: \(error.localizedDescription)\n"
+                    return (sec, 0)
+                }
+            }
+        }.value
         
         var result = ""
         var totalChars = 0
         let charBudget = 12000 // Total budget across all files
-        
-        for path in paths {
+        for item in perFileSections {
             guard totalChars < charBudget else {
                 result += "\n--- (remaining files skipped - token budget reached) ---"
                 break
             }
-            
-            let url = URL(fileURLWithPath: path)
-            
-            do {
-                let content = try String(contentsOf: url, encoding: .utf8)
-                let lines = content.components(separatedBy: "\n")
-                let limited = Array(lines.prefix(maxLines))
-                let fileContent = limited.joined(separator: "\n")
-                let truncated = lines.count > maxLines
-                
-                result += "\n═══ \(url.lastPathComponent) ═══\n"
-                result += fileContent
-                if truncated { result += "\n... (\(lines.count - maxLines) more lines)" }
-                result += "\n"
-                
-                totalChars += fileContent.count
-            } catch {
-                result += "\n═══ \(url.lastPathComponent) ═══\n⚠️ Error: \(error.localizedDescription)\n"
-            }
+            result += item.section
+            totalChars += item.charCount
         }
         
         return result
@@ -3000,6 +3407,14 @@ class MCPClient: ObservableObject {
         let name: String
         let description: String
         let inputSchema: [String: AnyCodable]
+    }
+    
+    /// Records the workspace path lazily without spawning the Python MCP server until needed.
+    func configure(workspacePath: String) {
+        if isConnected, activeWorkspacePath != workspacePath {
+            stop()
+        }
+        activeWorkspacePath = workspacePath
     }
     
     func start(workspacePath: String) {
@@ -3474,12 +3889,13 @@ struct DefineSubagentTool: AgentTool {
 
 struct InvokeSubagentTool: AgentTool {
     let name = "invoke_subagent"
-    let description = "Runs a specialized SubAgent and waits for verified completion by default. Set wait_for_completion=false only for deliberate background work."
+    let description = "Runs a specialized SubAgent (routing automatically to its assigned model/auth preset if active) and waits for verified completion by default."
     let parameters = [
         ToolParameter(name: "type_name", type: "string", description: "Name of the subagent archetype (e.g. architect, frontend_engineer, backend_engineer, bug_hunter, test_runner, security_auditor)", required: true),
         ToolParameter(name: "role", type: "string", description: "Brief role description for distinguishing this instance", required: true),
         ToolParameter(name: "prompt", type: "string", description: "Detailed subtask objective and instructions for the subagent", required: true),
-        ToolParameter(name: "model", type: "string", description: "Optional model ID; defaults to the subagent definition or selected model", required: false),
+        ToolParameter(name: "model", type: "string", description: "Optional model ID; defaults to the active Squad Preset or subagent definition", required: false),
+        ToolParameter(name: "owned_paths", type: "string", description: "Optional comma-separated file paths/directories locked exclusively for this SubAgent", required: false),
         ToolParameter(name: "wait_for_completion", type: "boolean", description: "Wait for the SubAgent result before this tool succeeds (default true)", required: false)
     ]
     
@@ -3492,6 +3908,8 @@ struct InvokeSubagentTool: AgentTool {
         guard let prompt = params["prompt"] as? String, !prompt.isEmpty else {
             throw ToolBoxError.invalidParams("prompt is required")
         }
+        let ownedStr = params["owned_paths"] as? String ?? ""
+        let ownedPaths = ownedStr.isEmpty ? [] : ownedStr.components(separatedBy: ",").map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }.filter { !$0.isEmpty }
         
         let instance = await MainActor.run {
             let ws = AgentToolBox.shared.workspaceRoot
@@ -3500,7 +3918,8 @@ struct InvokeSubagentTool: AgentTool {
                 role: role,
                 prompt: prompt,
                 workspacePath: ws,
-                preferredModel: model
+                preferredModel: model,
+                ownedPaths: ownedPaths
             )
         }
         if params["wait_for_completion"] as? Bool == false {
@@ -3515,7 +3934,7 @@ struct InvokeSubagentTool: AgentTool {
         }
         let prefix = outcome.verifiedWorkspaceChange
             ? AgentExecutionEvidence.verifiedSubagentPrefix : AgentExecutionEvidence.completedSubagentPrefix
-        return "\(prefix)SubAgent #\(instance.id.prefix(6)) completed: \(finished.finalReport ?? "No report")"
+        return "\(prefix)SubAgent #\(instance.id.prefix(6)) [\(finished.endpointBadge ?? role)] completed: \(finished.finalReport ?? "No report")"
     }
 }
 
@@ -3726,11 +4145,11 @@ struct MCPOrchestratorTool: AgentTool {
 
 struct SwarmOrchestratorTool: AgentTool {
     let name = "swarm_orchestrator"
-    let description = "SubAgent Swarm Harness 2.0: Dispatch multiple specialized SubAgents concurrently ('parallel_swarm'), run an adversarial Red-Team security & bug review ('adversarial_review'), or post/read shared architectural facts on the cross-agent Swarm Blackboard ('post_fact', 'read_blackboard')."
+    let description = "SubAgent Swarm & CEO Executive Harness 3.0: Run a full CEO & Subordinate Executive Squad session ('ceo_squad'), dispatch multiple specialized SubAgents concurrently ('parallel_swarm'), run an adversarial Red-Team security & bug review ('adversarial_review'), or post/read shared architectural facts on the cross-agent Swarm Blackboard ('post_fact', 'read_blackboard')."
     let parameters = [
-        ToolParameter(name: "action", type: "string", description: "Action: 'parallel_swarm', 'adversarial_review', 'post_fact', 'read_blackboard', or 'status'", required: true),
+        ToolParameter(name: "action", type: "string", description: "Action: 'ceo_squad', 'parallel_swarm', 'adversarial_review', 'post_fact', 'read_blackboard', or 'status'", required: true),
         ToolParameter(name: "tasks_json", type: "string", description: "JSON array of parallel tasks: [{\"type_name\":\"frontend_engineer\",\"role\":\"UI Builder\",\"prompt\":\"...\"}] (for 'parallel_swarm')", required: false),
-        ToolParameter(name: "focus", type: "string", description: "Focus area or file list for 'adversarial_review'", required: false),
+        ToolParameter(name: "focus", type: "string", description: "Objective for 'ceo_squad' or focus area/file list for 'adversarial_review'", required: false),
         ToolParameter(name: "key", type: "string", description: "Blackboard fact key (for 'post_fact')", required: false),
         ToolParameter(name: "value", type: "string", description: "Blackboard fact value (for 'post_fact')", required: false),
         ToolParameter(name: "author_role", type: "string", description: "Author role posting the fact (optional)", required: false)
@@ -3741,6 +4160,9 @@ struct SwarmOrchestratorTool: AgentTool {
         let ws = await MainActor.run { AgentToolBox.shared.workspaceRoot }
         
         switch action {
+        case "ceo_squad", "ceo", "executive_squad":
+            let objective = (params["focus"] as? String) ?? (params["value"] as? String) ?? "Execute current workspace engineering task"
+            return await SubAgentHarness.shared.runCEOSquadSession(objective: objective, workspacePath: ws)
         case "post_fact", "write_blackboard":
             let key = params["key"] as? String ?? ""
             let value = params["value"] as? String ?? ""
@@ -3780,5 +4202,88 @@ struct SwarmOrchestratorTool: AgentTool {
         default:
             return "Unknown swarm_orchestrator action '\(action)'. Supported: parallel_swarm, adversarial_review, post_fact, read_blackboard, status."
         }
+    }
+}
+
+// MARK: - Feature 12: TH-AI Passport Multimodal Generation Tools (Image, Video, Music)
+
+struct GenerateImageTool: AgentTool {
+    let name = "generate_image"
+    let description = "Generate an AI image using TH-AI Passport models (e.g., gemini-3.1-flash-image, gemini-3-pro-image, FLUX.2-pro, gpt-image-2.5-sunburst, seedream-5.0-pro). Saves the image to the workspace and returns a markdown preview."
+    let parameters: [ToolParameter] = [
+        ToolParameter(name: "prompt", type: "string", description: "Detailed visual prompt describing the image to generate", required: true),
+        ToolParameter(name: "model", type: "string", description: "Optional TH-AI Passport image model ID (default: gemini-3.1-flash-image). Options: gemini-3.1-flash-image, gemini-3-pro-image, gemini-2.5-flash-image, gemini-nano-banana-2.1, FLUX.2-pro, gpt-image-2, gpt-image-2.5-sunburst, seedream-5.0-pro", required: false)
+    ]
+
+    func execute(params: [String: Any]) async throws -> String {
+        guard let prompt = params["prompt"] as? String, !prompt.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+            throw ToolBoxError.invalidParams("Missing required parameter: prompt")
+        }
+        let model = params["model"] as? String
+        let result = try await AIClient.shared.generateAiPassMedia(
+            kind: "image",
+            prompt: prompt,
+            model: model
+        )
+        return """
+        Generated Image: `\(result.fileURL.path)`
+
+        \(result.markdown)
+        """
+    }
+}
+
+struct GenerateVideoTool: AgentTool {
+    let name = "generate_video"
+    let description = "Generate an AI video (.mp4) using TH-AI Passport video models (e.g., veo-3.1-fast-generate-001, veo-3.1-generate-001, seedance-2.0-fast, sora-2, wan2.2@jts). Saves the video to the workspace and returns a markdown preview."
+    let parameters: [ToolParameter] = [
+        ToolParameter(name: "prompt", type: "string", description: "Detailed cinematic prompt describing the video scene, motion, and camera movement", required: true),
+        ToolParameter(name: "model", type: "string", description: "Optional TH-AI Passport video model ID (default: veo-3.1-fast-generate-001). Options: veo-3.1-fast-generate-001, veo-3.1-generate-001, veo-3.0-generate-001, seedance-2.0-fast, seedance-2.0, sora-2, wan2.2@jts", required: false),
+        ToolParameter(name: "aspect_ratio", type: "string", description: "Optional aspect ratio: 16:9 or 9:16 (default: 16:9)", required: false)
+    ]
+
+    func execute(params: [String: Any]) async throws -> String {
+        guard let prompt = params["prompt"] as? String, !prompt.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+            throw ToolBoxError.invalidParams("Missing required parameter: prompt")
+        }
+        let model = params["model"] as? String
+        let aspectRatio = (params["aspect_ratio"] as? String) ?? "16:9"
+        let result = try await AIClient.shared.generateAiPassMedia(
+            kind: "video",
+            prompt: prompt,
+            model: model,
+            aspectRatio: aspectRatio
+        )
+        return """
+        Generated Video: `\(result.fileURL.path)`
+
+        \(result.markdown)
+        """
+    }
+}
+
+struct GenerateMusicTool: AgentTool {
+    let name = "generate_music"
+    let description = "Generate an AI music / audio track using TH-AI Passport Lyria 3 music models (lyria-3-clip-preview, lyria-3-pro-preview). Saves the audio file to the workspace and returns an interactive player link."
+    let parameters: [ToolParameter] = [
+        ToolParameter(name: "prompt", type: "string", description: "Detailed musical prompt describing genre, instruments, tempo/BPM, mood, and vocals/lyrics", required: true),
+        ToolParameter(name: "model", type: "string", description: "Optional TH-AI Passport music model ID (default: lyria-3-clip-preview). Options: lyria-3-clip-preview, lyria-3-pro-preview", required: false)
+    ]
+
+    func execute(params: [String: Any]) async throws -> String {
+        guard let prompt = params["prompt"] as? String, !prompt.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+            throw ToolBoxError.invalidParams("Missing required parameter: prompt")
+        }
+        let model = params["model"] as? String
+        let result = try await AIClient.shared.generateAiPassMedia(
+            kind: "music",
+            prompt: prompt,
+            model: model
+        )
+        return """
+        Generated Audio: `\(result.fileURL.path)`
+
+        \(result.markdown)
+        """
     }
 }

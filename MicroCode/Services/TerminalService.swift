@@ -20,7 +20,8 @@ class TerminalService: ObservableObject {
     private var errorPipe: Pipe?
     
     init() {
-        startShell()
+        // Lazy initialization: do not spawn a background /bin/zsh process on app launch.
+        // Interactive terminals use TerminalSessionManager (AuthenticTerminal).
     }
     
     func startShell(directory: String? = nil) {
@@ -108,15 +109,21 @@ class TerminalService: ObservableObject {
     
     func setWorkingDirectory(_ directory: String) {
         guard directory != currentDirectory else { return }
-        startShell(directory: directory)
+        currentDirectory = directory
+        if isRunning {
+            startShell(directory: directory)
+        }
     }
     
     func sendCommand(_ command: String) {
+        if !isRunning {
+            startShell(directory: currentDirectory)
+        }
         guard isRunning, let inputPipe = inputPipe else { return }
         
         let cmdWithNewline = command + "\n"
         if let data = cmdWithNewline.data(using: .utf8) {
-            inputPipe.fileHandleForWriting.write(data)
+            try? inputPipe.fileHandleForWriting.write(contentsOf: data)
         }
     }
     

@@ -84,21 +84,24 @@ public class ReportLogManager {
     private func appendToFile(url: URL, content: String) {
         if !fileManager.fileExists(atPath: url.path) {
             // Create new file
-            do {
-                try content.write(to: url, atomically: true, encoding: .utf8)
-            } catch {
-                print("[ReportLog] Failed to create log file: \(error)")
-            }
+            try? content.write(to: url, atomically: true, encoding: .utf8)
         } else {
-            // Append to existing
-            if let fileHandle = try? FileHandle(forWritingTo: url) {
-                fileHandle.seekToEndOfFile()
-                if let data = content.data(using: .utf8) {
-                    fileHandle.write(data)
+            // Append to existing using Swift's throwing FileHandle APIs so disk-full
+            // (ENOSPC / errno 28) or I/O errors never raise an uncaught ObjC
+            // NSFileHandleOperationException and crash the app.
+            do {
+                let fileHandle = try FileHandle(forWritingTo: url)
+                defer { try? fileHandle.close() }
+                let size = try fileHandle.seekToEnd()
+                if size > 2_000_000 {
+                    try? fileHandle.truncate(atOffset: 0)
+                    _ = try? fileHandle.seekToEnd()
                 }
-                fileHandle.closeFile()
-            } else {
-                print("[ReportLog] Failed to open file handle for logging")
+                if let data = content.data(using: .utf8) {
+                    try fileHandle.write(contentsOf: data)
+                }
+            } catch {
+                // Silently ignore logging write failures (e.g., No space left on device)
             }
         }
     }

@@ -336,6 +336,6 @@ class ACPServerService: ObservableObject {
         guard let data = try? JSONSerialization.data(withJSONObject: json) else { return }
         var outputData = data
         outputData.append(0x0A)
-        FileHandle.standardOutput.write(outputData)
+        try? FileHandle.standardOutput.write(contentsOf: outputData)
     }
 }

@@ -31,7 +31,8 @@ public final class IdleStateCompactor: ObservableObject {
     private var idleTimer: Timer?
     private var lastUserActivity: Date = .distantPast
     private var eventMonitor: Any?
-    private let defaultIdleThreshold: TimeInterval = 45.0 // Inactivity threshold (avoid compacting during brief reading pauses)
+    private var memoryPressureSource: DispatchSourceMemoryPressure?
+    private let defaultIdleThreshold: TimeInterval = 30.0 // Inactivity threshold
     private var isMonitoringStarted: Bool = false
     
     private init() {}
@@ -41,7 +42,19 @@ public final class IdleStateCompactor: ObservableObject {
         guard !isMonitoringStarted else { return }
         isMonitoringStarted = true
         setupEventMonitors()
+        setupKernelMemoryPressureMonitor()
         resetIdleTimer(delay: defaultIdleThreshold)
+    }
+    
+    private func setupKernelMemoryPressureMonitor() {
+        let source = DispatchSource.makeMemoryPressureSource(eventMask: [.warning, .critical], queue: .main)
+        source.setEventHandler { [weak self] in
+            Task { @MainActor in
+                self?.performIdleCompaction()
+            }
+        }
+        source.resume()
+        self.memoryPressureSource = source
     }
     
     /// Record active user interaction (keystroke, click, scroll).
@@ -113,6 +126,9 @@ public final class IdleStateCompactor: ObservableObject {
             // 2. Purge cached NSScrollViews and NSTextViews for closed or hidden tabs
             await MainActor.run {
                 SyntaxHighlightedCodeView.purgeNonVisibleViewCache()
+                SyntaxHighlightingEngine.purgeQuickHighlightCache()
+                DiffCacheManager.clearAll()
+                MarkdownAttrCache.clearAll()
             }
             
             // 3. Clear syntax highlight line caches
@@ -141,6 +157,9 @@ public final class IdleStateCompactor: ObservableObject {
     public nonisolated func performAIWorkloadCompaction() {
         Task.detached(priority: .background) {
             autoreleasepool {
+                DiffCacheManager.clearAll()
+                MarkdownAttrCache.clearAll()
+                SyntaxHighlightingEngine.purgeQuickHighlightCache()
                 Self.relieveAllMallocZones()
                 URLCache.shared.removeAllCachedResponses()
             }

@@ -75,10 +75,27 @@ public final class CrashReporter: @unchecked Sendable {
             CrashReporter.shared.handleException(exception)
         }
 
+        // Ignore SIGPIPE globally so writing to a closed subprocess/socket pipe
+        // returns EPIPE instead of terminating the entire IDE process.
+        signal(SIGPIPE, SIG_IGN)
+
         // 4. Fatal signals — incl. SIGTRAP/SIGILL which is how Swift `brk #1`
         //    (force-unwrap / fatalError / precondition / OOB) surfaces.
+        //    Use sigaction with SA_RESETHAND | SA_NODEFER so the kernel atomically
+        //    resets disposition to SIG_DFL BEFORE entering signalHandler. This
+        //    guarantees that a secondary fault (e.g. SIGBUS if the binary on an
+        //    external volume was replaced) can NEVER enter an infinite 200% CPU loop.
+        let handlerAddr = unsafeBitCast(CrashReporter.signalHandler, to: UInt.self)
+        let pageMask = ~UInt(vm_page_size - 1)
+        if let pagePtr = UnsafeRawPointer(bitPattern: handlerAddr & pageMask) {
+            _ = mlock(pagePtr, Int(vm_page_size) * 2)
+        }
         for sig in [SIGABRT, SIGILL, SIGSEGV, SIGFPE, SIGBUS, SIGTRAP, SIGSYS] {
-            signal(sig, CrashReporter.signalHandler)
+            var action = sigaction()
+            action.__sigaction_u.__sa_handler = CrashReporter.signalHandler
+            sigemptyset(&action.sa_mask)
+            action.sa_flags = Int32(SA_RESETHAND | SA_NODEFER)
+            sigaction(sig, &action, nil)
         }
     }
 
@@ -135,20 +152,73 @@ public final class CrashReporter: @unchecked Sendable {
         writeCrashReport(report, kind: "exception")
     }
 
-    /// C signal handler. MUST stay minimal & not call Swift runtime/alloc.
+    /// C signal handler. MUST stay 100% async-signal-safe & never call malloc/Swift heap alloc.
     private static let signalHandler: @convention(c) (Int32) -> Void = { sig in
-        if CrashReporter.signalFD >= 0 {
-            let header = "\n*** FATAL SIGNAL \(sig) (\(CrashReporter.signalName(sig))) ***\nSee breadcrumbs.log for the event trail.\nBacktrace:\n"
-            header.withCString { _ = write(CrashReporter.signalFD, $0, strlen($0)) }
-
-            var frames = [UnsafeMutableRawPointer?](repeating: nil, count: 128)
-            let n = backtrace(&frames, 128)
-            backtrace_symbols_fd(&frames, n, CrashReporter.signalFD)
-            fsync(CrashReporter.signalFD)
-        }
-        // Restore default handler and re-raise so the OS still produces its
-        // own report and the process terminates normally.
         signal(sig, SIG_DFL)
+        let fd = CrashReporter.signalFD
+        if fd >= 0 {
+            let prefix: StaticString = "\n*** FATAL SIGNAL "
+            _ = write(fd, prefix.utf8Start, prefix.utf8CodeUnitCount)
+            var s = sig
+            var digits: (UInt8, UInt8, UInt8, UInt8) = (0, 0, 0, 0)
+            withUnsafeMutableBytes(of: &digits) { buf in
+                var i = 0
+                if s <= 0 {
+                    buf[0] = UInt8(ascii: "0")
+                    i = 1
+                } else {
+                    var temp = s
+                    var rev: (UInt8, UInt8, UInt8, UInt8) = (0, 0, 0, 0)
+                    var count = 0
+                    withUnsafeMutableBytes(of: &rev) { rbuf in
+                        while temp > 0 && count < 4 {
+                            rbuf[count] = UInt8(ascii: "0") + UInt8(temp % 10)
+                            temp /= 10
+                            count += 1
+                        }
+                        while count > 0 {
+                            count -= 1
+                            buf[i] = rbuf[count]
+                            i += 1
+                        }
+                    }
+                }
+                _ = write(fd, buf.baseAddress, i)
+            }
+            let suffix: StaticString = " ***\nSee breadcrumbs.log for the event trail.\nBacktrace:\n"
+            _ = write(fd, suffix.utf8Start, suffix.utf8CodeUnitCount)
+
+            typealias FrameBuffer64 = (
+                UnsafeMutableRawPointer?, UnsafeMutableRawPointer?, UnsafeMutableRawPointer?, UnsafeMutableRawPointer?,
+                UnsafeMutableRawPointer?, UnsafeMutableRawPointer?, UnsafeMutableRawPointer?, UnsafeMutableRawPointer?,
+                UnsafeMutableRawPointer?, UnsafeMutableRawPointer?, UnsafeMutableRawPointer?, UnsafeMutableRawPointer?,
+                UnsafeMutableRawPointer?, UnsafeMutableRawPointer?, UnsafeMutableRawPointer?, UnsafeMutableRawPointer?,
+                UnsafeMutableRawPointer?, UnsafeMutableRawPointer?, UnsafeMutableRawPointer?, UnsafeMutableRawPointer?,
+                UnsafeMutableRawPointer?, UnsafeMutableRawPointer?, UnsafeMutableRawPointer?, UnsafeMutableRawPointer?,
+                UnsafeMutableRawPointer?, UnsafeMutableRawPointer?, UnsafeMutableRawPointer?, UnsafeMutableRawPointer?,
+                UnsafeMutableRawPointer?, UnsafeMutableRawPointer?, UnsafeMutableRawPointer?, UnsafeMutableRawPointer?,
+                UnsafeMutableRawPointer?, UnsafeMutableRawPointer?, UnsafeMutableRawPointer?, UnsafeMutableRawPointer?,
+                UnsafeMutableRawPointer?, UnsafeMutableRawPointer?, UnsafeMutableRawPointer?, UnsafeMutableRawPointer?,
+                UnsafeMutableRawPointer?, UnsafeMutableRawPointer?, UnsafeMutableRawPointer?, UnsafeMutableRawPointer?,
+                UnsafeMutableRawPointer?, UnsafeMutableRawPointer?, UnsafeMutableRawPointer?, UnsafeMutableRawPointer?,
+                UnsafeMutableRawPointer?, UnsafeMutableRawPointer?, UnsafeMutableRawPointer?, UnsafeMutableRawPointer?,
+                UnsafeMutableRawPointer?, UnsafeMutableRawPointer?, UnsafeMutableRawPointer?, UnsafeMutableRawPointer?,
+                UnsafeMutableRawPointer?, UnsafeMutableRawPointer?, UnsafeMutableRawPointer?, UnsafeMutableRawPointer?,
+                UnsafeMutableRawPointer?, UnsafeMutableRawPointer?, UnsafeMutableRawPointer?, UnsafeMutableRawPointer?
+            )
+            var frames: FrameBuffer64 = (
+                nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil,
+                nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil,
+                nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil,
+                nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil
+            )
+            withUnsafeMutablePointer(to: &frames) { tuplePtr in
+                let ptr = UnsafeMutableRawPointer(tuplePtr).assumingMemoryBound(to: UnsafeMutableRawPointer?.self)
+                let n = backtrace(ptr, 64)
+                backtrace_symbols_fd(ptr, n, fd)
+            }
+            fsync(fd)
+        }
         raise(sig)
     }
 
@@ -227,13 +297,13 @@ public final class CrashReporter: @unchecked Sendable {
     private static func append(_ text: String, to url: URL) {
         guard let data = text.data(using: .utf8) else { return }
         if let handle = try? FileHandle(forWritingTo: url) {
-            let size = handle.seekToEndOfFile()
-            if size > 512_000 {
+            defer { try? handle.close() }
+            if let size = try? handle.seekToEnd(), size > 512_000 {
                 // Prevent unbounded log growth on disk
                 try? handle.truncate(atOffset: 0)
+                _ = try? handle.seekToEnd()
             }
-            handle.write(data)
-            try? handle.close()
+            try? handle.write(contentsOf: data)
         } else {
             try? data.write(to: url)
         }

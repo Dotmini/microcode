@@ -19,7 +19,7 @@ echo "🦀 Using: $(cargo --version 2>/dev/null || echo 'cargo not available')"
 
 APP_NAME="MicroCode"
 BUNDLE_ID="com.dotmini.microcode"
-VERSION="2.5.28"
+VERSION="2.5.29"
 
 # Directories
 BUILD_ROOT=".build_dist"

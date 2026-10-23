@@ -47,15 +47,12 @@ class RemoteWorkspaceManager: ObservableObject {
             }
         }
         
-        // Create local cache directory for this project
+        // Create or reuse incremental local cache directory for this project
         let projectName = URL(fileURLWithPath: remotePath).lastPathComponent
         let localCachePath = cacheRootURL.appendingPathComponent("\(server.id.uuidString)_\(projectName)")
-        
-        // Clean existing cache
-        try? FileManager.default.removeItem(at: localCachePath)
         try FileManager.default.createDirectory(at: localCachePath, withIntermediateDirectories: true)
         
-        // Download project structure
+        // Download project structure (incremental + lazy file stubs)
         try await downloadProjectStructure(serverId: server.id.uuidString, remotePath: remotePath, localPath: localCachePath)
         
         // Create workspace config
@@ -83,10 +80,10 @@ class RemoteWorkspaceManager: ObservableObject {
         "Pods", "DerivedData", ".gradle", ".idea", ".cache", "checkpoints", "wandb"
     ]
     
-    private static let maxAutoDownloadFileSize: UInt64 = 2 * 1024 * 1024 // 2 MB cap for initial workspace sync
-    private static let maxInitialDepth: Int = 3
+    private static let maxAutoDownloadFileSize: UInt64 = 64 * 1024 // 64 KB cap for root config eager sync
+    private static let maxInitialDepth: Int = 2
 
-    // MARK: - Download Project Structure
+    // MARK: - Download Project Structure (Lazy Stub Sync)
     
     private func downloadProjectStructure(
         serverId: String,
@@ -113,15 +110,46 @@ class RemoteWorkspaceManager: ObservableObject {
                     depth: depth + 1
                 )
             } else {
-                // Skip huge binary/checkpoint files during workspace open
-                if file.size > Self.maxAutoDownloadFileSize {
-                    continue
+                let localFile = localPath.appendingPathComponent(file.name)
+                let exists = FileManager.default.fileExists(atPath: localFile.path)
+                if depth == 0 && file.size <= Self.maxAutoDownloadFileSize && !exists {
+                    if let fileData = try? await BackendService.shared.downloadRemoteFile(id: serverId, path: file.path) {
+                        try? fileData.write(to: localFile)
+                        continue
+                    }
                 }
-                if let fileData = try? await BackendService.shared.downloadRemoteFile(id: serverId, path: file.path) {
-                    let localFile = localPath.appendingPathComponent(file.name)
-                    try? fileData.write(to: localFile)
+                // Create lightweight placeholder if not cached yet; full content is fetched lazily on open
+                if !exists {
+                    FileManager.default.createFile(atPath: localFile.path, contents: Data())
                 }
             }
+        }
+    }
+
+    /// Lazily downloads a remote workspace file when opened in the editor if the local cache file is a 0-byte placeholder.
+    func ensureFileDownloadedIfNeeded(localURL: URL) async {
+        guard let workspace = currentWorkspace else { return }
+        let baseLocalPath = workspace.localCachePath.standardizedFileURL.path
+        let fileLocalPath = localURL.standardizedFileURL.path
+        guard fileLocalPath.hasPrefix(baseLocalPath) else { return }
+
+        let size = (try? FileManager.default.attributesOfItem(atPath: fileLocalPath)[.size] as? UInt64) ?? 0
+        guard size == 0 else { return }
+
+        var relativePath = String(fileLocalPath.dropFirst(baseLocalPath.count))
+        if !relativePath.hasPrefix("/") {
+            relativePath = "/" + relativePath
+        }
+        let cleanRemoteRoot = workspace.remotePath.hasSuffix("/")
+            ? String(workspace.remotePath.dropLast())
+            : workspace.remotePath
+        let remotePath = cleanRemoteRoot + relativePath
+
+        if let data = try? await BackendService.shared.downloadRemoteFile(
+            id: workspace.serverId.uuidString,
+            path: remotePath
+        ), !data.isEmpty {
+            try? data.write(to: localURL, options: .atomic)
         }
     }
     

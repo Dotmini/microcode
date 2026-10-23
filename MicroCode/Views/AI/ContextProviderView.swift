@@ -132,7 +132,7 @@ struct ContextProviderSecondLevelView: View {
                     }
                 }
             }
-            .frame(maxHeight: 300)
+            .frame(height: service.secondLevelItems.isEmpty ? 46 : min(CGFloat(service.secondLevelItems.count) * 40, 240))
         }
         .background(
             RoundedRectangle(cornerRadius: 12)

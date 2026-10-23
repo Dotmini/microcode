@@ -123,6 +123,9 @@ final class LocalEcosystemDiscovery: ObservableObject {
         if models.isEmpty, let cached = engines.first(where: { $0.id == "agy" })?.models, !cached.isEmpty {
             models = cached
         }
+        if models.isEmpty && isInstalled {
+            models = Self.defaultAGYModels
+        }
         
         let active = models.first?.id
         
@@ -140,6 +143,22 @@ final class LocalEcosystemDiscovery: ObservableObject {
                 : "Live models fetched via `agy models` (\(models.count) models)"
         )
     }
+    
+    static let defaultAGYModels: [AIModelDefinition] = [
+        AIModelDefinition(id: "gemini-3.8-flash-low", name: "Gemini 3 Flash (Low)", provider: "agy", badge: "FAST"),
+        AIModelDefinition(id: "gemini-3.8-flash-medium", name: "Gemini 3 Flash (Medium)", provider: "agy", badge: "FAST"),
+        AIModelDefinition(id: "gemini-3.8-flash-high", name: "Gemini 3 Flash (High)", provider: "agy", badge: "HIGH REASONING"),
+        AIModelDefinition(id: "gemini-4-argon-low", name: "Gemini 3.1 Pro (Low)", provider: "agy", badge: "FLAGSHIP"),
+        AIModelDefinition(id: "gemini-4-argon-medium", name: "Gemini 3.1 Pro (Medium)", provider: "agy", badge: "FLAGSHIP"),
+        AIModelDefinition(id: "gemini-4-argon-high", name: "Gemini 3.1 Pro (High)", provider: "agy", badge: "FLAGSHIP"),
+        AIModelDefinition(id: "claude-sonnet-5-5-low", name: "Claude Sonnet 4.6 (Low)", provider: "agy", badge: "PRO"),
+        AIModelDefinition(id: "claude-sonnet-5-5-medium", name: "Claude Sonnet 4.6 (Medium)", provider: "agy", badge: "PRO"),
+        AIModelDefinition(id: "claude-sonnet-5-5-high", name: "Claude Sonnet 4.6 (High)", provider: "agy", badge: "HIGH REASONING"),
+        AIModelDefinition(id: "claude-opus-5-5-low", name: "Claude Opus 4.6 (Low)", provider: "agy", badge: "REASONING"),
+        AIModelDefinition(id: "claude-opus-5-5-medium", name: "Claude Opus 4.6 (Medium)", provider: "agy", badge: "REASONING"),
+        AIModelDefinition(id: "claude-opus-5-5-high", name: "Claude Opus 4.6 (High)", provider: "agy", badge: "HIGH REASONING"),
+        AIModelDefinition(id: "gpt-oss-120b-medium", name: "GPT-OSS 120B (Medium)", provider: "agy", badge: "AGY LIVE")
+    ]
     
     private func parseAGYModelsOutput(_ output: String) -> [AIModelDefinition] {
         var results: [AIModelDefinition] = []
@@ -644,24 +663,42 @@ final class LocalEcosystemDiscovery: ObservableObject {
         if let data = UserDefaults.standard.data(forKey: userDefaultsCacheKey),
            let cached = try? JSONDecoder().decode([EcosystemEngineInfo].self, from: data),
            !cached.isEmpty {
-            self.engines = cached
+            self.engines = cached.map { eng in
+                if eng.id == "codex", let bp = eng.binaryPath, bp.contains(".plugin-appserver/codex-cli"),
+                   let healed = resolveBinaryFast("codex") {
+                    return EcosystemEngineInfo(
+                        id: eng.id, name: eng.name, icon: eng.icon, binaryPath: healed,
+                        isInstalled: eng.isInstalled, isAuthenticated: eng.isAuthenticated,
+                        activeModel: eng.activeModel, models: eng.models, details: eng.details
+                    )
+                }
+                if eng.id == "agy" && eng.models.isEmpty && eng.isInstalled {
+                    return EcosystemEngineInfo(
+                        id: eng.id, name: eng.name, icon: eng.icon, binaryPath: eng.binaryPath,
+                        isInstalled: eng.isInstalled, isAuthenticated: true,
+                        activeModel: Self.defaultAGYModels.first?.id, models: Self.defaultAGYModels, details: eng.details
+                    )
+                }
+                return eng
+            }
             return
         }
         
         // 2. Otherwise synchronously read fast local disk caches (~/.codex/models_cache.json, ~/.claude/settings.json, ~/.config/zed/settings.json)
         let codex = discoverCodex()
         let zed = discoverZed()
+        let agyBin = resolveBinaryFast("agy")
         self.engines = [
             EcosystemEngineInfo(
                 id: "agy",
                 name: "Google Antigravity (AGY)",
                 icon: "sparkles",
-                binaryPath: resolveBinaryFast("agy"),
-                isInstalled: resolveBinaryFast("agy") != nil,
-                isAuthenticated: resolveBinaryFast("agy") != nil,
-                activeModel: nil,
-                models: [],
-                details: "Fetching live models from `agy models`..."
+                binaryPath: agyBin,
+                isInstalled: agyBin != nil,
+                isAuthenticated: agyBin != nil,
+                activeModel: agyBin != nil ? Self.defaultAGYModels.first?.id : nil,
+                models: agyBin != nil ? Self.defaultAGYModels : [],
+                details: "Live models from `agy models`"
             ),
             EcosystemEngineInfo(
                 id: "opencode",

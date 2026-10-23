@@ -280,24 +280,92 @@ struct GitPanelView: View {
     }
     
     private func diffPopover(path: String) -> some View {
-        VStack(alignment: .leading, spacing: 0) {
+        let hunks = GitParsedHunk.parseHunks(from: appState.gitDiff)
+        return VStack(alignment: .leading, spacing: 0) {
             HStack {
                 Image(systemName: "doc.text.magnifyingglass").foregroundColor(.blue)
-                Text(path).font(.system(size: 11, weight: .medium, design: .monospaced))
+                Text(path).font(.system(size: 11, weight: .semibold, design: .monospaced))
                 Spacer()
+                Text("\(hunks.count) hunk\(hunks.count == 1 ? "" : "s")")
+                    .font(.system(size: 9.5, design: .monospaced))
+                    .foregroundColor(.secondary)
                 Button { showDiffFor = nil } label: {
                     Image(systemName: "xmark.circle.fill").foregroundColor(.secondary)
                 }.buttonStyle(.plain)
             }.padding(8)
             Divider()
             ScrollView {
-                Text(appState.gitDiff.isEmpty ? "(no diff)" : appState.gitDiff)
-                    .font(.system(size: 10, design: .monospaced))
-                    .foregroundColor(.primary)
-                    .frame(maxWidth: .infinity, alignment: .leading)
+                if hunks.isEmpty {
+                    Text(appState.gitDiff.isEmpty ? "(no diff)" : appState.gitDiff)
+                        .font(.system(size: 10, design: .monospaced))
+                        .foregroundColor(.primary)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .padding(8)
+                } else {
+                    VStack(alignment: .leading, spacing: 10) {
+                        ForEach(hunks) { hunk in
+                            VStack(alignment: .leading, spacing: 0) {
+                                HStack(spacing: 6) {
+                                    Text(hunk.header)
+                                        .font(.system(size: 9.5, weight: .semibold, design: .monospaced))
+                                        .foregroundColor(.cyan)
+                                        .lineLimit(1)
+                                    Spacer()
+                                    Button("Stage Hunk") {
+                                        appState.gitApplyHunkPatch(hunk.fullPatchText, mode: .stage)
+                                    }
+                                    .buttonStyle(.bordered)
+                                    .controlSize(.mini)
+                                    .tint(.green)
+                                    
+                                    Button("Unstage Hunk") {
+                                        appState.gitApplyHunkPatch(hunk.fullPatchText, mode: .unstage)
+                                    }
+                                    .buttonStyle(.bordered)
+                                    .controlSize(.mini)
+                                    .tint(.orange)
+                                    
+                                    Button("Discard Hunk") {
+                                        appState.gitApplyHunkPatch(hunk.fullPatchText, mode: .discard)
+                                    }
+                                    .buttonStyle(.bordered)
+                                    .controlSize(.mini)
+                                    .tint(.red)
+                                }
+                                .padding(.horizontal, 8)
+                                .padding(.vertical, 5)
+                                .background(Color.cyan.opacity(0.08))
+                                
+                                VStack(alignment: .leading, spacing: 1) {
+                                    ForEach(Array(hunk.bodyLines.enumerated()), id: \.offset) { _, line in
+                                        Text(line.isEmpty ? " " : line)
+                                            .font(.system(size: 10, design: .monospaced))
+                                            .foregroundColor(
+                                                line.hasPrefix("+") ? .green :
+                                                (line.hasPrefix("-") ? .red : .primary.opacity(0.85))
+                                            )
+                                            .frame(maxWidth: .infinity, alignment: .leading)
+                                            .padding(.horizontal, 8)
+                                            .padding(.vertical, 1)
+                                            .background(
+                                                line.hasPrefix("+") ? Color.green.opacity(0.10) :
+                                                (line.hasPrefix("-") ? Color.red.opacity(0.10) : Color.clear)
+                                            )
+                                    }
+                                }
+                                .padding(.vertical, 4)
+                            }
+                            .overlay(
+                                RoundedRectangle(cornerRadius: 6)
+                                    .stroke(Color.primary.opacity(0.10), lineWidth: 1)
+                            )
+                            .cornerRadius(6)
+                        }
+                    }
                     .padding(8)
+                }
             }
-        }.frame(width: 500, height: 300)
+        }.frame(width: 580, height: 380)
     }
     
     private func statusBadge(_ status: String) -> some View {

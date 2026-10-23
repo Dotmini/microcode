@@ -11,6 +11,10 @@ enum SlashCommandType: String, CaseIterable, Identifiable {
     case fix = "fix"
     case test = "test"
     case refactor = "refactor"
+    case review = "review"
+    case learn = "learn"
+    case compare = "compare"
+    case squad = "squad"
     case search = "search"
     case terminal = "terminal"
     case help = "help"
@@ -29,6 +33,10 @@ enum SlashCommandType: String, CaseIterable, Identifiable {
         case .fix: return "Fix errors in selected code"
         case .test: return "Write unit tests for selected code"
         case .refactor: return "Refactor selected code"
+        case .review: return "Perform a comprehensive senior code review"
+        case .learn: return "Save a persistent rule into .microcode/rules.md"
+        case .compare: return "Compare responses from 2 AI models side-by-side"
+        case .squad: return "Configure or launch CEO & Specialist SubAgent Squad"
         case .search: return "Search workspace for query"
         case .terminal: return "Include last terminal output"
         case .help: return "Show list of all slash commands"
@@ -47,6 +55,10 @@ enum SlashCommandType: String, CaseIterable, Identifiable {
         case .fix: return "wrench.and.screwdriver"
         case .test: return "checkmark.seal"
         case .refactor: return "hammer"
+        case .review: return "checkmark.shield"
+        case .learn: return "bookmark"
+        case .compare: return "rectangle.split.2x1"
+        case .squad: return "crown.fill"
         case .search: return "magnifyingglass"
         case .terminal: return "terminal"
         case .help: return "info.circle"
@@ -57,7 +69,7 @@ enum SlashCommandType: String, CaseIterable, Identifiable {
     
     var requiresArgument: Bool {
         switch self {
-        case .file, .model, .search: return true
+        case .file, .model, .search, .learn: return true
         default: return false
         }
     }
@@ -110,7 +122,7 @@ class SlashCommandService: ObservableObject {
     func executeCommand(_ command: SlashCommandType, argument: String) -> String? {
         switch command {
         case .file:
-            return "File content for \(argument)" // Placeholder for actual file reading
+            return "@\(argument)"
         case .compact:
             return nil
         case .clear:
@@ -118,19 +130,27 @@ class SlashCommandService: ObservableObject {
         case .model:
             return nil
         case .explain:
-            return "Explain this code:\n"
+            return "Explain this code thoroughly with concrete details:\n\(argument)"
         case .fix:
-            return "Fix the errors in this code:\n"
+            return "Diagnose and fix the errors in this code:\n\(argument)"
         case .test:
-            return "Write unit tests for:\n"
+            return "Write comprehensive unit tests for:\n\(argument)"
         case .refactor:
-            return "Refactor this code:\n"
+            return "Refactor this code for clarity, maintainability, and performance:\n\(argument)"
+        case .review:
+            return "Perform a thorough senior engineering code review (bugs, edge cases, security, performance, architecture) on the current changes or specified target:\n\(argument)"
+        case .learn:
+            return nil
+        case .compare:
+            return argument
+        case .squad:
+            return argument
         case .search:
-            return "Search results for: \(argument)\n"
+            return "Search the workspace and analyze results for: \(argument)"
         case .terminal:
-            return "Terminal output context...\n"
+            return "@terminal \(argument)"
         case .help:
-            return "Available Commands:\n" + SlashCommandType.allCases.map { "/\($0.rawValue) - \($0.description)" }.joined(separator: "\n")
+            return "Available Commands:\n" + SlashCommandType.allCases.map { "- `/\($0.rawValue)` — \($0.description)" }.joined(separator: "\n")
         case .plan:
             let trimmedArg = argument.trimmingCharacters(in: .whitespacesAndNewlines)
             let objective = trimmedArg.isEmpty ? "the requested task" : trimmedArg

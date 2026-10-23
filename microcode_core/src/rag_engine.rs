@@ -62,63 +62,77 @@ impl RagEngine {
         // Clear existing chunks
         self.chunks.clear();
         
-        // Collect and process files
+        // Step 1: Collect candidate code files
+        let mut candidate_files: Vec<(PathBuf, String)> = Vec::new();
         for entry in WalkDir::new(&root)
             .follow_links(false)
             .into_iter()
             .filter_map(|e| e.ok())
         {
             let file_path = entry.path();
-            
-            // Skip directories
             if file_path.is_dir() {
                 continue;
             }
-            
-            // Skip if ignored
             if let Some(ref gi) = gitignore {
                 if gi.matched(file_path, false).is_ignore() {
                     continue;
                 }
             }
-            
-            // Only index code files
             if !is_code_file(file_path) {
                 continue;
             }
-
-            // Enterprise guard: Skip files larger than 2MB to prevent OOM
             if let Ok(meta) = entry.metadata() {
                 if meta.len() > 2 * 1024 * 1024 {
                     continue;
                 }
             }
-            
             let relative_path = file_path.strip_prefix(&root)
                 .unwrap_or(file_path)
                 .to_string_lossy()
                 .to_string();
+            candidate_files.push((file_path.to_path_buf(), relative_path));
+            if candidate_files.len() >= 10_000 {
+                break;
+            }
+        }
+        
+        // Step 2: Multi-Core Parallel File Reading, Chunking & Embedding across all CPU cores
+        let cores = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(8).max(1);
+        let batch_size = (candidate_files.len() + cores - 1) / cores;
+        if batch_size > 0 {
+            let worker_results: Vec<Vec<CodeChunk>> = std::thread::scope(|s| {
+                let mut handles = Vec::new();
+                for slice in candidate_files.chunks(batch_size) {
+                    handles.push(s.spawn(move || {
+                        let mut local_chunks = Vec::new();
+                        for (file_path, relative_path) in slice {
+                            if let Ok(content) = std::fs::read_to_string(file_path) {
+                                local_chunks.extend(chunk_code(relative_path, &content));
+                            }
+                        }
+                        local_chunks
+                    }));
+                }
+                handles.into_iter().filter_map(|h| h.join().ok()).collect()
+            });
             
-            // Read and chunk file
-            if let Ok(content) = std::fs::read_to_string(file_path) {
-                let new_chunks = chunk_code(&relative_path, &content);
-                self.chunks.extend(new_chunks);
-
-                // Enterprise guard: Limit total in-memory chunks to prevent OOM
-                if self.chunks.len() >= 100_000 {
+            for batch in worker_results {
+                let remaining = 100_000usize.saturating_sub(self.chunks.len());
+                if remaining == 0 {
                     println!("Reached maximum indexing capacity (100,000 chunks) for memory stability.");
                     break;
                 }
+                self.chunks.extend(batch.into_iter().take(remaining));
             }
         }
         
         let duration = start_time.elapsed();
-        println!("Indexed {} chunks in {:.2}s", self.chunks.len(), duration.as_secs_f64());
+        println!("Indexed {} chunks across {} CPU cores in {:.2}s", self.chunks.len(), cores, duration.as_secs_f64());
         
         Ok(self.chunks.len() as u32)
     }
     
-    /// Perform semantic search
+    /// Perform multi-core semantic search across all available CPU cores
     pub async fn search(&self, query: &str, limit: usize) -> Result<Vec<SearchResult>> {
         if self.chunks.is_empty() {
             return Ok(Vec::new());
@@ -127,12 +141,44 @@ impl RagEngine {
         // Generate query embedding
         let query_emb = text_to_embedding(query);
         
-        // Calculate similarities
-        let mut scores: Vec<(usize, f32)> = self.chunks
-            .iter()
-            .enumerate()
-            .map(|(i, chunk)| (i, cosine_similarity(&query_emb, &chunk.embedding)))
-            .collect();
+        // Calculate cosine similarities in parallel across all CPU cores when chunk count is large
+        let total = self.chunks.len();
+        let cores = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(8).max(1);
+        let mut scores: Vec<(usize, f32)> = if total >= 512 && cores > 1 {
+            let chunk_size = (total + cores - 1) / cores;
+            let chunks_ref = &self.chunks;
+            let q_ref = &query_emb;
+            std::thread::scope(|s| {
+                let mut handles = Vec::with_capacity(cores);
+                for (worker_idx, slice) in chunks_ref.chunks(chunk_size).enumerate() {
+                    let base_idx = worker_idx * chunk_size;
+                    handles.push(s.spawn(move || {
+                        let mut local: Vec<(usize, f32)> = Vec::with_capacity(slice.len());
+                        for (offset, chunk) in slice.iter().enumerate() {
+                            let sim = cosine_similarity(q_ref, &chunk.embedding);
+                            if sim > 0.1 {
+                                local.push((base_idx + offset, sim));
+                            }
+                        }
+                        local
+                    }));
+                }
+                let mut merged = Vec::new();
+                for h in handles {
+                    if let Ok(local) = h.join() {
+                        merged.extend(local);
+                    }
+                }
+                merged
+            })
+        } else {
+            self.chunks
+                .iter()
+                .enumerate()
+                .map(|(i, chunk)| (i, cosine_similarity(&query_emb, &chunk.embedding)))
+                .filter(|(_, score)| *score > 0.1)
+                .collect()
+        };
         
         // Sort by score descending
         scores.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
@@ -141,7 +187,6 @@ impl RagEngine {
         let results: Vec<SearchResult> = scores
             .into_iter()
             .take(limit)
-            .filter(|(_, score)| *score > 0.1) // Minimum threshold
             .map(|(idx, score)| {
                 let chunk = &self.chunks[idx];
                 SearchResult {

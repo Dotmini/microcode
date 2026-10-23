@@ -67,6 +67,25 @@ final class EmbeddedAIAgentViewModel: ObservableObject {
         messages.removeAll()
     }
     
+    func deleteMessage(id: String) {
+        guard let idx = messages.firstIndex(where: { $0.id == id }) else { return }
+        if isLoading && idx == messages.count - 1 {
+            cancelStream()
+        }
+        messages.remove(at: idx)
+    }
+    
+    @discardableResult
+    func revertToMessage(id: String) -> String? {
+        guard let idx = messages.firstIndex(where: { $0.id == id }) else { return nil }
+        if isLoading {
+            cancelStream()
+        }
+        let target = messages[idx]
+        messages.removeSubrange(idx..<messages.count)
+        return target.role == .user ? target.content : nil
+    }
+    
     func triggerNotice(_ text: String) {
         lastAppliedNotice = text
         DispatchQueue.main.asyncAfter(deadline: .now() + 2.5) { [weak self] in
@@ -261,7 +280,7 @@ struct EmbeddedAIAgentPanel: View {
                             ForEach(viewModel.messages) { msg in
                                 EmbeddedAIMessageRow(
                                     message: msg,
-                                    isLoading: viewModel.isLoading,
+                                    isLoading: viewModel.isLoading && viewModel.messages.last?.id == msg.id,
                                     isDark: isDark,
                                     onReplaceSketch: { code in
                                         editorSourceCode = code
@@ -274,6 +293,20 @@ struct EmbeddedAIAgentPanel: View {
                                         envManager.analyzeIncludes(code: editorSourceCode)
                                         envManager.autoResolveAndInstallDependencies(code: editorSourceCode)
                                         viewModel.triggerNotice("Code appended to Sketch!")
+                                    },
+                                    onRevert: {
+                                        if let text = viewModel.revertToMessage(id: msg.id) {
+                                            inputText = text
+                                            isInputFocused = true
+                                        }
+                                    },
+                                    onEditAndResend: { newText in
+                                        _ = viewModel.revertToMessage(id: msg.id)
+                                        inputText = newText
+                                        sendMessage()
+                                    },
+                                    onDelete: {
+                                        viewModel.deleteMessage(id: msg.id)
                                     }
                                 )
                                 .id(msg.id)
@@ -859,19 +892,80 @@ struct EmbeddedAIMessageRow: View {
     var isDark: Bool = true
     let onReplaceSketch: (String) -> Void
     let onAppendSketch: (String) -> Void
+    var onRevert: (() -> Void)? = nil
+    var onEditAndResend: ((String) -> Void)? = nil
+    var onDelete: (() -> Void)? = nil
+    
+    @State private var isEditing: Bool = false
+    @State private var editedText: String = ""
+    @State private var isCopied: Bool = false
     
     var body: some View {
         if message.role == .user {
-            HStack {
-                Spacer(minLength: 30)
-                Text(message.content)
-                    .font(.system(size: 11, design: .monospaced))
-                    .foregroundColor(isDark ? .white : .black)
-                    .padding(.horizontal, 10)
-                    .padding(.vertical, 8)
-                    .background(isDark ? Color.white.opacity(0.14) : Color.black.opacity(0.08))
+            VStack(alignment: .trailing, spacing: 4) {
+                if isEditing {
+                    VStack(alignment: .leading, spacing: 6) {
+                        TextField("แก้ไขข้อความ...", text: $editedText)
+                            .textFieldStyle(.plain)
+                            .font(.system(size: 11, design: .monospaced))
+                            .foregroundColor(isDark ? .white : .black)
+                            .padding(8)
+                            .background(isDark ? Color.white.opacity(0.08) : Color.black.opacity(0.06))
+                            .cornerRadius(4)
+                        
+                        HStack(spacing: 6) {
+                            Spacer()
+                            Button("ยกเลิก") { isEditing = false }
+                                .buttonStyle(.plain)
+                                .font(.system(size: 9.5, design: .monospaced))
+                                .foregroundColor(.secondary)
+                            Button("ส่งใหม่") {
+                                let trimmed = editedText.trimmingCharacters(in: .whitespacesAndNewlines)
+                                guard !trimmed.isEmpty else { return }
+                                isEditing = false
+                                onEditAndResend?(trimmed)
+                            }
+                            .buttonStyle(.plain)
+                            .font(.system(size: 9.5, weight: .bold, design: .monospaced))
+                            .padding(.horizontal, 8)
+                            .padding(.vertical, 3)
+                            .background(Color.accentColor)
+                            .foregroundColor(.white)
+                            .cornerRadius(4)
+                        }
+                    }
+                    .padding(8)
+                    .background(isDark ? Color.white.opacity(0.1) : Color.black.opacity(0.06))
                     .cornerRadius(6)
-                    .overlay(RoundedRectangle(cornerRadius: 6).stroke(isDark ? Color.white.opacity(0.2) : Color.black.opacity(0.15), lineWidth: 1))
+                } else {
+                    HStack {
+                        Spacer(minLength: 30)
+                        Text(message.content)
+                            .font(.system(size: 11, design: .monospaced))
+                            .foregroundColor(isDark ? .white : .black)
+                            .textSelection(.enabled)
+                            .padding(.horizontal, 10)
+                            .padding(.vertical, 8)
+                            .background(isDark ? Color.white.opacity(0.14) : Color.black.opacity(0.08))
+                            .cornerRadius(6)
+                            .overlay(RoundedRectangle(cornerRadius: 6).stroke(isDark ? Color.white.opacity(0.2) : Color.black.opacity(0.15), lineWidth: 1))
+                    }
+                    
+                    HStack(spacing: 4) {
+                        embeddedActionButton(icon: "arrow.uturn.backward", label: "ย้อนกลับ") { onRevert?() }
+                        embeddedActionButton(icon: "pencil", label: "แก้ไข") {
+                            editedText = message.content
+                            isEditing = true
+                        }
+                        embeddedActionButton(icon: isCopied ? "checkmark" : "doc.on.doc", label: isCopied ? "คัดลอกแล้ว" : "คัดลอก") {
+                            NSPasteboard.general.clearContents()
+                            NSPasteboard.general.setString(message.content, forType: .string)
+                            isCopied = true
+                            DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) { isCopied = false }
+                        }
+                        embeddedActionButton(icon: "trash", label: "ลบ", isDestructive: true) { onDelete?() }
+                    }
+                }
             }
         } else {
             VStack(alignment: .leading, spacing: 8) {
@@ -950,6 +1044,8 @@ struct EmbeddedAIMessageRow: View {
                                         }
                                     }
                                 }
+                            case .media(let kind, let title, let target):
+                                ChatMediaBlockView(kind: kind, title: title, target: target)
                             default:
                                 Text(message.content)
                                     .font(.system(size: 11, design: .monospaced))
@@ -958,6 +1054,21 @@ struct EmbeddedAIMessageRow: View {
                             }
                         }
                     }
+                    
+                    if !isLoading {
+                        HStack(spacing: 4) {
+                            embeddedActionButton(icon: isCopied ? "checkmark" : "doc.on.doc", label: isCopied ? "คัดลอกแล้ว" : "คัดลอก") {
+                                NSPasteboard.general.clearContents()
+                                NSPasteboard.general.setString(message.content, forType: .string)
+                                isCopied = true
+                                DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) { isCopied = false }
+                            }
+                            embeddedActionButton(icon: "arrow.uturn.backward", label: "ย้อนกลับ") { onRevert?() }
+                            embeddedActionButton(icon: "trash", label: "ลบ", isDestructive: true) { onDelete?() }
+                            Spacer()
+                        }
+                        .padding(.top, 2)
+                    }
                 }
             }
             .padding(10)
@@ -965,6 +1076,23 @@ struct EmbeddedAIMessageRow: View {
             .cornerRadius(6)
             .overlay(RoundedRectangle(cornerRadius: 6).stroke(isDark ? Color.white.opacity(0.08) : Color.black.opacity(0.08), lineWidth: 1))
         }
+    }
+    
+    private func embeddedActionButton(icon: String, label: String, isDestructive: Bool = false, action: @escaping () -> Void) -> some View {
+        Button(action: action) {
+            HStack(spacing: 3) {
+                Image(systemName: icon)
+                    .font(.system(size: 8.5))
+                Text(label)
+                    .font(.system(size: 9, weight: .medium, design: .monospaced))
+            }
+            .foregroundColor(isDestructive ? .red.opacity(0.85) : (isDark ? Color(white: 0.65) : Color(white: 0.4)))
+            .padding(.horizontal, 6)
+            .padding(.vertical, 3)
+            .background(isDark ? Color.white.opacity(0.05) : Color.black.opacity(0.04))
+            .cornerRadius(4)
+        }
+        .buttonStyle(.plain)
     }
 }
 

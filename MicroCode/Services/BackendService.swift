@@ -15,6 +15,8 @@ class BackendService {
     private let baseURL = "http://127.0.0.1:3000"
     private var backendProcess: Process?
     private let session: URLSession
+    private var nativeRemoteConfigs: [String: RemoteConnectionConfig] = [:]
+    private let nativeRemoteLock = NSLock()
 
     private init() {
         let config = URLSessionConfiguration.default
@@ -545,85 +547,279 @@ class BackendService {
         let response: SqlResponse = try await post(url: url, body: payload)
         return response.result
     }
-    // MARK: - Remote X Operations
+    // MARK: - Remote X Operations (Hybrid Backend + Native SSH ControlMaster Fallback)
+
+    private var isBackendRunning: Bool {
+        backendProcess?.isRunning == true
+    }
+
+    private func cachedRemoteConfig(id: String) -> RemoteConnectionConfig? {
+        nativeRemoteLock.lock()
+        defer { nativeRemoteLock.unlock() }
+        return nativeRemoteConfigs[id]
+    }
+
+    private func storeRemoteConfig(_ config: RemoteConnectionConfig) {
+        nativeRemoteLock.lock()
+        nativeRemoteConfigs[config.id.uuidString] = config
+        nativeRemoteLock.unlock()
+    }
+
+    private func removeRemoteConfig(id: String) {
+        nativeRemoteLock.lock()
+        nativeRemoteConfigs.removeValue(forKey: id)
+        nativeRemoteLock.unlock()
+    }
+
+    private func shellSingleQuote(_ raw: String) -> String {
+        "'" + raw.replacingOccurrences(of: "'", with: "'\\''") + "'"
+    }
+
+    private func runNativeSSH(config: RemoteConnectionConfig, remoteCommand: String, stdinData: Data? = nil) async throws -> Data {
+        try await Task.detached(priority: .userInitiated) {
+            let proc = Process()
+            proc.executableURL = URL(fileURLWithPath: "/usr/bin/ssh")
+            var args: [String] = [
+                "-p", "\(config.port)",
+                "-o", "ControlMaster=auto",
+                "-o", "ControlPath=/tmp/mc-ssh-%r@%h:%p",
+                "-o", "ControlPersist=10m",
+                "-o", "ConnectTimeout=8",
+                "-o", "StrictHostKeyChecking=accept-new"
+            ]
+            if config.authType == .key && !config.keyPath.isEmpty {
+                let expandedKey = (config.keyPath as NSString).expandingTildeInPath
+                args.append(contentsOf: ["-i", expandedKey, "-o", "BatchMode=yes"])
+            }
+            let target = config.username.isEmpty ? config.host : "\(config.username)@\(config.host)"
+            args.append(target)
+            args.append(remoteCommand)
+            proc.arguments = args
+
+            let outPipe = Pipe()
+            let errPipe = Pipe()
+            proc.standardOutput = outPipe
+            proc.standardError = errPipe
+
+            let inPipe: Pipe?
+            if stdinData != nil {
+                let p = Pipe()
+                proc.standardInput = p
+                inPipe = p
+            } else {
+                inPipe = nil
+            }
+
+            try proc.run()
+            if let input = stdinData, let handle = inPipe?.fileHandleForWriting {
+                try? handle.write(contentsOf: input)
+                try? handle.close()
+            }
+
+            let outData = outPipe.fileHandleForReading.readDataToEndOfFile()
+            let errData = errPipe.fileHandleForReading.readDataToEndOfFile()
+            proc.waitUntilExit()
+
+            if proc.terminationStatus != 0 {
+                let errMsg = String(data: errData, encoding: .utf8)?.trimmingCharacters(in: .whitespacesAndNewlines) ?? "SSH exited with code \(proc.terminationStatus)"
+                throw BackendError.serverError(errMsg)
+            }
+            return outData
+        }.value
+    }
 
     func connectRemote(config: RemoteConnectionConfig) async throws -> StatusResponse {
-        let url = URL(string: "\(baseURL)/api/remote/connect")!
-        let request = RemoteConnectRequest(
-            id: config.id.uuidString,
-            host: config.host,
-            port: config.port,
-            username: config.username,
-            auth_type: config.authType.rawValue,
-            password: config.password,
-            key_path: config.keyPath,
-            connection_type: config.connectionType.rawValue,
-            otp: config.otp.isEmpty ? nil : config.otp
-        )
-        return try await post(url: url, body: request)
+        storeRemoteConfig(config)
+
+        if isBackendRunning {
+            let url = URL(string: "\(baseURL)/api/remote/connect")!
+            let request = RemoteConnectRequest(
+                id: config.id.uuidString,
+                host: config.host,
+                port: config.port,
+                username: config.username,
+                auth_type: config.authType.rawValue,
+                password: config.password,
+                key_path: config.keyPath,
+                connection_type: config.connectionType.rawValue,
+                otp: config.otp.isEmpty ? nil : config.otp
+            )
+            if let res: StatusResponse = try? await post(url: url, body: request) {
+                return res
+            }
+        }
+
+        // Native SSH ControlMaster warmup & verification
+        _ = try await runNativeSSH(config: config, remoteCommand: "echo connected")
+        return StatusResponse(success: true, message: "Connected via Native SSH ControlMaster")
     }
     
     func disconnectRemote(id: String) async throws {
+        if let cfg = cachedRemoteConfig(id: id) {
+            _ = try? await runNativeSSH(config: cfg, remoteCommand: "exit")
+            removeRemoteConfig(id: id)
+        }
+        guard isBackendRunning else { return }
         let url = URL(string: "\(baseURL)/api/remote/disconnect")!
         let payload = ["id": id]
-        let _: StatusResponse = try await post(url: url, body: payload)
+        let _: StatusResponse? = try? await post(url: url, body: payload)
     }
     
     func pingRemote(host: String, port: UInt16) async throws -> Bool {
-        let url = URL(string: "\(baseURL)/api/remote/ping")!
-        let request = PingRequest(host: host, port: port)
-        let response: StatusResponse = try await post(url: url, body: request)
-        return response.success
+        if isBackendRunning {
+            let url = URL(string: "\(baseURL)/api/remote/ping")!
+            let request = PingRequest(host: host, port: port)
+            if let response: StatusResponse = try? await post(url: url, body: request) {
+                return response.success
+            }
+        }
+        // Native TCP reachability probe via nc -z -G 3
+        return await Task.detached(priority: .utility) {
+            let proc = Process()
+            proc.executableURL = URL(fileURLWithPath: "/usr/bin/nc")
+            proc.arguments = ["-z", "-G", "3", host, "\(port)"]
+            proc.standardOutput = FileHandle.nullDevice
+            proc.standardError = FileHandle.nullDevice
+            do {
+                try proc.run()
+                proc.waitUntilExit()
+                return proc.terminationStatus == 0
+            } catch {
+                return false
+            }
+        }.value
     }
 
     func executeRemoteCommand(id: String, command: String) async throws -> String {
-        let url = URL(string: "\(baseURL)/api/remote/exec")!
-        let request = RemoteExecRequest(id: id, command: command)
-        let response: RemoteExecResponse = try await post(url: url, body: request)
-        return response.output
+        if isBackendRunning {
+            let url = URL(string: "\(baseURL)/api/remote/exec")!
+            let request = RemoteExecRequest(id: id, command: command)
+            if let response: RemoteExecResponse = try? await post(url: url, body: request) {
+                return response.output
+            }
+        }
+        guard let cfg = cachedRemoteConfig(id: id) else {
+            throw BackendError.serverError("Remote session not found for ID \(id)")
+        }
+        let data = try await runNativeSSH(config: cfg, remoteCommand: command)
+        return String(data: data, encoding: .utf8) ?? ""
     }
 
     func listRemoteFiles(id: String, path: String) async throws -> [FileInfo] {
-        let url = URL(string: "\(baseURL)/api/remote/files")!
-        let request = RemoteListFilesRequest(id: id, path: path)
-        let response: ListFilesResponse = try await post(url: url, body: request)
-        return response.files
+        if isBackendRunning {
+            let url = URL(string: "\(baseURL)/api/remote/files")!
+            let request = RemoteListFilesRequest(id: id, path: path)
+            if let response: ListFilesResponse = try? await post(url: url, body: request) {
+                return response.files
+            }
+        }
+        guard let cfg = cachedRemoteConfig(id: id) else {
+            throw BackendError.serverError("Remote session not found for ID \(id)")
+        }
+        let quotedPath = shellSingleQuote(path)
+        let cmd = "ls -la \(quotedPath) 2>/dev/null"
+        let outData = try await runNativeSSH(config: cfg, remoteCommand: cmd)
+        let output = String(data: outData, encoding: .utf8) ?? ""
+        var items: [FileInfo] = []
+        let cleanBase = path.hasSuffix("/") ? String(path.dropLast()) : path
+        for line in output.components(separatedBy: "\n") {
+            let parts = line.split(separator: " ", maxSplits: 8, omittingEmptySubsequences: true)
+            guard parts.count >= 9 else { continue }
+            let perms = String(parts[0])
+            guard perms.first == "d" || perms.first == "-" || perms.first == "l" else { continue }
+            let name = String(parts[8])
+            if name == "." || name == ".." { continue }
+            let isDir = perms.first == "d"
+            let size = UInt64(parts[4]) ?? 0
+            let fullPath = "\(cleanBase)/\(name)"
+            let ext = (name as NSString).pathExtension
+            items.append(
+                FileInfo(
+                    name: name,
+                    path: fullPath,
+                    isDirectory: isDir,
+                    size: size,
+                    modified: "\(parts[5]) \(parts[6]) \(parts[7])",
+                    extension: ext.isEmpty ? nil : ext
+                )
+            )
+        }
+        return items
     }
 
     func uploadRemoteFile(id: String, path: String, content: Data) async throws {
-        let url = URL(string: "\(baseURL)/api/remote/upload")!
-        let base64 = content.base64EncodedString()
-        let request = RemoteUploadRequest(id: id, path: path, content_base64: base64)
-        let _: StatusResponse = try await post(url: url, body: request)
+        if isBackendRunning {
+            let url = URL(string: "\(baseURL)/api/remote/upload")!
+            let base64 = content.base64EncodedString()
+            let request = RemoteUploadRequest(id: id, path: path, content_base64: base64)
+            if let _: StatusResponse = try? await post(url: url, body: request) {
+                return
+            }
+        }
+        guard let cfg = cachedRemoteConfig(id: id) else {
+            throw BackendError.serverError("Remote session not found for ID \(id)")
+        }
+        let quotedPath = shellSingleQuote(path)
+        _ = try await runNativeSSH(config: cfg, remoteCommand: "cat > \(quotedPath)", stdinData: content)
     }
 
     func downloadRemoteFile(id: String, path: String) async throws -> Data {
-        let url = URL(string: "\(baseURL)/api/remote/download")!
-        let request = RemoteDownloadRequest(id: id, path: path)
-        let response: RemoteDownloadResponse = try await post(url: url, body: request)
-        
-        guard let data = Data(base64Encoded: response.content) else {
-            throw BackendError.invalidResponse
+        if isBackendRunning {
+            let url = URL(string: "\(baseURL)/api/remote/download")!
+            let request = RemoteDownloadRequest(id: id, path: path)
+            if let response: RemoteDownloadResponse = try? await post(url: url, body: request),
+               let data = Data(base64Encoded: response.content) {
+                return data
+            }
         }
-        return data
+        guard let cfg = cachedRemoteConfig(id: id) else {
+            throw BackendError.serverError("Remote session not found for ID \(id)")
+        }
+        let quotedPath = shellSingleQuote(path)
+        return try await runNativeSSH(config: cfg, remoteCommand: "cat \(quotedPath)")
     }
     
     func remoteMkdir(id: String, path: String) async throws {
-        let url = URL(string: "\(baseURL)/api/remote/mkdir")!
-        let request = RemoteMkdirRequest(id: id, path: path)
-        let _: StatusResponse = try await post(url: url, body: request)
+        if isBackendRunning {
+            let url = URL(string: "\(baseURL)/api/remote/mkdir")!
+            let request = RemoteMkdirRequest(id: id, path: path)
+            if let _: StatusResponse = try? await post(url: url, body: request) {
+                return
+            }
+        }
+        guard let cfg = cachedRemoteConfig(id: id) else {
+            throw BackendError.serverError("Remote session not found for ID \(id)")
+        }
+        _ = try await runNativeSSH(config: cfg, remoteCommand: "mkdir -p \(shellSingleQuote(path))")
     }
     
     func remoteRemove(id: String, path: String, isDirectory: Bool) async throws {
-        let url = URL(string: "\(baseURL)/api/remote/remove")!
-        let request = RemoteRemoveRequest(id: id, path: path, is_directory: isDirectory)
-        let _: StatusResponse = try await post(url: url, body: request)
+        if isBackendRunning {
+            let url = URL(string: "\(baseURL)/api/remote/remove")!
+            let request = RemoteRemoveRequest(id: id, path: path, is_directory: isDirectory)
+            if let _: StatusResponse = try? await post(url: url, body: request) {
+                return
+            }
+        }
+        guard let cfg = cachedRemoteConfig(id: id) else {
+            throw BackendError.serverError("Remote session not found for ID \(id)")
+        }
+        let flag = isDirectory ? "-rf" : "-f"
+        _ = try await runNativeSSH(config: cfg, remoteCommand: "rm \(flag) \(shellSingleQuote(path))")
     }
     
     func remoteRename(id: String, source: String, destination: String) async throws {
-        let url = URL(string: "\(baseURL)/api/remote/rename")!
-        let request = RemoteRenameRequest(id: id, source: source, destination: destination)
-        let _: StatusResponse = try await post(url: url, body: request)
+        if isBackendRunning {
+            let url = URL(string: "\(baseURL)/api/remote/rename")!
+            let request = RemoteRenameRequest(id: id, source: source, destination: destination)
+            if let _: StatusResponse = try? await post(url: url, body: request) {
+                return
+            }
+        }
+        guard let cfg = cachedRemoteConfig(id: id) else {
+            throw BackendError.serverError("Remote session not found for ID \(id)")
+        }
+        _ = try await runNativeSSH(config: cfg, remoteCommand: "mv \(shellSingleQuote(source)) \(shellSingleQuote(destination))")
     }
     
     func remoteShellWebSocketURL(id: String) -> URL? {

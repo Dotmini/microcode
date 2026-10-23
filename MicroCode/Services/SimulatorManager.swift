@@ -332,7 +332,9 @@ class SimulatorManager {
         process.standardInput = inputPipe
         
         try process.run()
-        inputPipe.fileHandleForWriting.write("no\n".data(using: .utf8)!)
+        if let d = "no\n".data(using: .utf8) {
+            try? inputPipe.fileHandleForWriting.write(contentsOf: d)
+        }
         process.waitUntilExit()
         
         if process.terminationStatus != 0 {

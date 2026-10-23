@@ -9,10 +9,28 @@
 
 use std::path::PathBuf;
 use std::process::{Command, Stdio};
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 use anyhow::Result;
 use thiserror::Error;
 use tokio::sync::RwLock;
+
+/// Shared Multi-Core Tokio Runtime (eliminates per-FFI-call OS thread pool creation/destruction overhead)
+fn shared_runtime() -> Result<&'static tokio::runtime::Runtime, CoreError> {
+    static RUNTIME: OnceLock<std::result::Result<tokio::runtime::Runtime, String>> = OnceLock::new();
+    let res = RUNTIME.get_or_init(|| {
+        let cores = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(8);
+        tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(cores)
+            .thread_name("microcode-core-worker")
+            .enable_all()
+            .build()
+            .map_err(|e| e.to_string())
+    });
+    match res {
+        Ok(rt) => Ok(rt),
+        Err(msg) => Err(CoreError::Io { msg: msg.clone() }),
+    }
+}
 
 mod fs_editor;
 mod rag_engine;
@@ -184,14 +202,12 @@ impl MicroCore {
     }
     
     // ========================================================================
-    // RAG (The Memory)
+    // RAG (The Memory) — Powered by Shared Multi-Core Tokio Runtime
     // ========================================================================
     
-    /// Index a project directory for semantic search
+    /// Index a project directory for semantic search across all CPU cores
     pub fn index_project(&self, path: String) -> Result<u32, CoreError> {
-        let rt = tokio::runtime::Runtime::new()
-            .map_err(|e| CoreError::Io { msg: e.to_string() })?;
-        
+        let rt = shared_runtime()?;
         rt.block_on(async {
             let mut rag = self.rag_engine.write().await;
             rag.index_directory(&path).await
@@ -199,11 +215,9 @@ impl MicroCore {
         })
     }
     
-    /// Perform semantic search on indexed codebase
+    /// Perform multi-core semantic search on indexed codebase
     pub fn semantic_search(&self, query: String, limit: u32) -> Result<Vec<SearchResult>, CoreError> {
-        let rt = tokio::runtime::Runtime::new()
-            .map_err(|e| CoreError::Io { msg: e.to_string() })?;
-        
+        let rt = shared_runtime()?;
         rt.block_on(async {
             let rag = self.rag_engine.read().await;
             rag.search(&query, limit as usize).await
@@ -213,9 +227,7 @@ impl MicroCore {
     
     /// Clear the vector database
     pub fn clear_index(&self) -> Result<(), CoreError> {
-        let rt = tokio::runtime::Runtime::new()
-            .map_err(|e| CoreError::Io { msg: e.to_string() })?;
-        
+        let rt = shared_runtime()?;
         rt.block_on(async {
             let mut rag = self.rag_engine.write().await;
             rag.clear().await
@@ -225,9 +237,7 @@ impl MicroCore {
     
     /// Get indexing statistics as JSON
     pub fn get_index_stats(&self) -> Result<String, CoreError> {
-        let rt = tokio::runtime::Runtime::new()
-            .map_err(|e| CoreError::Io { msg: e.to_string() })?;
-        
+        let rt = shared_runtime()?;
         rt.block_on(async {
             let rag = self.rag_engine.read().await;
             rag.stats().await

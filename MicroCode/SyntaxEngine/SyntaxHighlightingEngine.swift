@@ -454,6 +454,36 @@ public final class SyntaxHighlightingEngine: @unchecked Sendable {
         activeLexer?.cache.markDirty(line: startLine)
     }
     
+    /// Fast O(log N) lookup of 0-indexed (line, character) from a UTF-16 offset using `cachedLineOffsets`.
+    public func lineAndColumn(for utf16Offset: Int) -> (line: Int, character: Int) {
+        lock.lock()
+        let offsets = cachedLineOffsets
+        let content = documentContent
+        lock.unlock()
+        
+        if let offsets = offsets, !offsets.isEmpty {
+            var low = 0
+            var high = offsets.count
+            while low < high {
+                let mid = low + (high - low) / 2
+                if offsets[mid] <= utf16Offset {
+                    low = mid + 1
+                } else {
+                    high = mid
+                }
+            }
+            let line = max(0, low - 1)
+            let lineStart = offsets[line]
+            return (line, max(0, utf16Offset - lineStart))
+        }
+        
+        let nsText = content as NSString
+        let safeLoc = max(0, min(utf16Offset, nsText.length))
+        let prefix = nsText.substring(to: safeLoc)
+        let lines = prefix.components(separatedBy: "\n")
+        return (max(0, lines.count - 1), lines.last?.utf16.count ?? 0)
+    }
+    
     // MARK: - Highlighting API
     
     /// Get highlighted NSAttributedString for the current document.
@@ -511,8 +541,17 @@ public final class SyntaxHighlightingEngine: @unchecked Sendable {
         currentApplyTask = nil
     }
     
+    /// Releases cached document string, attributed string, and lexer line cache from RAM.
+    public func clearCache() {
+        lock.lock()
+        documentContent = ""
+        cachedAttributedString = nil
+        activeLexer = nil
+        lock.unlock()
+    }
+    
     /// Asynchronously apply highlighting to an existing NSTextStorage.
-    /// Performs lexing on a background thread and updates attributes on the main thread.
+    /// Uses true dirty-line incremental application so typing on a single line only updates that line's tokens.
     @MainActor
     public func applyHighlightingAsync(to textStorage: NSTextStorage, fontSize: CGFloat, font: NSFont? = nil, completion: (@MainActor @Sendable () -> Void)? = nil) {
         // Cancel previous tasks to prevent "task explosion" and race conditions
@@ -523,6 +562,7 @@ public final class SyntaxHighlightingEngine: @unchecked Sendable {
         let content = documentContent
         let lexer = activeLexer
         let version = currentVersion
+        let cachedLines = cachedLineOffsets?.count ?? 200
         lock.unlock()
         
         guard let lexer = lexer else {
@@ -530,63 +570,82 @@ public final class SyntaxHighlightingEngine: @unchecked Sendable {
             return
         }
         
-        // HYBRID APPROACH: only highlight synchronously for genuinely small
-        // documents. 500 lines was far too high — a few hundred lines of dense
-        // code (or long minified lines) tokenized on the main thread, twice
-        // per change, across many SwiftUI update passes, froze the editor on
-        // open ("loading นานค้าง"). Gate by BOTH line count and char count and
-        // keep the budget tight; anything bigger is lexed off-thread (the
-        // plain text is already on screen, so colours just arrive a beat late).
-        let lineCount = content.filter({ $0 == "\n" }).count
-        if lineCount < 150 && content.utf16.count < 6000 {
+        if cachedLines < 150 && content.utf16.count < 6000 {
             // SYNC PATH (Zero Flash) — small files only
-            let tokens = lexer.retokenizeDirtyRegions(in: content)
-            self.applyTokens(tokens, to: textStorage, fontSize: fontSize, font: font, expectedVersion: version)
+            let update = lexer.retokenizeDirtyRegionsIncremental(in: content)
+            self.applyIncrementalUpdate(update, to: textStorage, fontSize: fontSize, font: font, expectedVersion: version)
             completion?()
             return
         }
         
         // ASYNC PATH (Large Docs)
-        // Use a detached task for background work, but keep reference for cancellation
         currentHighlightTask = Task.detached(priority: .userInitiated) { [weak self] in
             guard let self = self else {
                 await MainActor.run { completion?() }
                 return
             }
             
-            // Check cancellation before heavy work
             if Task.isCancelled {
                 await MainActor.run { completion?() }
                 return
             }
             
-            // 1. Re-lex dirty regions (this is the expensive part)
-            let tokens = lexer.retokenizeDirtyRegions(in: content)
+            // 1. Re-lex dirty regions incrementally
+            let update = lexer.retokenizeDirtyRegionsIncremental(in: content)
             
-            // Check cancellation mid-work
             if Task.isCancelled {
                 await MainActor.run { completion?() }
                 return
             }
             
-            // 2. Apply attributes on the main thread
+            // 2. Apply attributes on the main thread (only dirty lines for edits!)
             await MainActor.run {
-                // ALWAYS call completion when we exit this closure to prevent isUpdating deadlocks
                 defer { completion?() }
-                
-                // Check cancellation right before applying
                 if Task.isCancelled { return }
                 
-                // Verify text still matches to prevent crashes or misaligned highlighting
                 self.lock.lock()
                 let isStillValid = (self.currentVersion == version && self.documentContent.utf16.count == textStorage.length)
                 self.lock.unlock()
                 
                 if isStillValid {
-                    self.applyTokens(tokens, to: textStorage, fontSize: fontSize, font: font, expectedVersion: version)
+                    self.applyIncrementalUpdate(update, to: textStorage, fontSize: fontSize, font: font, expectedVersion: version)
                 }
             }
         }
+    }
+    
+    @MainActor
+    private func applyIncrementalUpdate(
+        _ update: IncrementalLexer.IncrementalHighlightUpdate,
+        to textStorage: NSTextStorage,
+        fontSize: CGFloat,
+        font: NSFont?,
+        expectedVersion: Int? = nil
+    ) {
+        if update.isFullDocument {
+            applyTokens(update.tokens, to: textStorage, fontSize: fontSize, font: font, expectedVersion: expectedVersion)
+            return
+        }
+        guard let dirtyRange = update.dirtyCharRange, dirtyRange.length > 0 else { return }
+        let storageLength = textStorage.length
+        guard dirtyRange.location >= 0, dirtyRange.location < storageLength else { return }
+        let clampedLength = min(dirtyRange.length, storageLength - dirtyRange.location)
+        guard clampedLength > 0 else { return }
+        let safeRange = NSRange(location: dirtyRange.location, length: clampedLength)
+        
+        let defaultFont = font ?? NSFont.monospacedSystemFont(ofSize: fontSize, weight: .regular)
+        let defaultColor = themeManager.editorForegroundColor
+        
+        textStorage.beginEditing()
+        // Reset the edited line(s) to default foreground/font first so removed keywords lose stale colors immediately
+        textStorage.addAttributes([
+            .foregroundColor: defaultColor,
+            .font: defaultFont,
+            .ligature: 0
+        ], range: safeRange)
+        textStorage.removeAttribute(.underlineStyle, range: safeRange)
+        applyTokensBatch(update.tokens, to: textStorage, defaultFont: defaultFont, fontSize: fontSize)
+        textStorage.endEditing()
     }
     
     /// Internal helper to apply attributes for specific tokens.
@@ -818,19 +877,59 @@ public final class SyntaxHighlightingEngine: @unchecked Sendable {
         sharedQuickEngine.themeManager.setActiveTheme(isDark ? "dark" : "light")
         sharedQuickEngine.setDocument(code, language: language)
         let nsAttr = sharedQuickEngine.highlightedAttributedString(fontSize: fontSize)
+        sharedQuickEngine.clearCache()
         let swiftAttr = (try? AttributedString(nsAttr, including: \.appKit)) ?? AttributedString(code)
-        if swiftUIAttributedCache.count > 256 {
-            swiftUIAttributedCache.removeAll(keepingCapacity: true)
+        if swiftUIAttributedCache.count > 32 {
+            swiftUIAttributedCache.removeAll(keepingCapacity: false)
         }
         swiftUIAttributedCache[key] = swiftAttr
         quickHighlightLock.unlock()
         return swiftAttr
+    }
+    
+    public static func purgeQuickHighlightCache() {
+        quickHighlightLock.lock()
+        swiftUIAttributedCache.removeAll(keepingCapacity: false)
+        sharedQuickEngine.clearCache()
+        quickHighlightLock.unlock()
     }
 }
 
 // MARK: - SwiftUI Integration
 
 import SwiftUI
+
+/// Interactive NSTextView supporting Cmd+Click (Go to Definition), Option+Click (Quick Help Hover), and F12.
+final class IDEInteractiveTextView: NSTextView {
+    var onGoToDefinitionAtCharIndex: ((Int) -> Void)?
+    var onQuickHelpAtCharIndex: ((Int, NSPoint) -> Void)?
+
+    override func mouseDown(with event: NSEvent) {
+        let flags = event.modifierFlags.intersection(.deviceIndependentFlagsMask)
+        if flags.contains(.command) && !flags.contains(.shift) {
+            let point = convert(event.locationInWindow, from: nil)
+            let charIdx = characterIndexForInsertion(at: point)
+            onGoToDefinitionAtCharIndex?(charIdx)
+            return
+        }
+        if flags.contains(.option) && !flags.contains(.command) {
+            let point = convert(event.locationInWindow, from: nil)
+            let charIdx = characterIndexForInsertion(at: point)
+            onQuickHelpAtCharIndex?(charIdx, point)
+            return
+        }
+        super.mouseDown(with: event)
+    }
+
+    override func keyDown(with event: NSEvent) {
+        // F12 -> Go to Definition
+        if event.keyCode == 111 {
+            onGoToDefinitionAtCharIndex?(selectedRange().location)
+            return
+        }
+        super.keyDown(with: event)
+    }
+}
 
 // Custom NSScrollView to prevent SwiftUI from attempting to size the scroll view
 // based on the length of the code inside the NSTextView. This definitively breaks
@@ -886,7 +985,7 @@ class NoIntrinsicScrollView: NSScrollView {
                 didResize = true
             }
             if didResize {
-                tv.layoutManager?.ensureLayout(for: tc)
+                tv.layoutManager?.ensureLayout(forBoundingRect: contentView.bounds, in: tc)
                 tv.needsDisplay = true
                 contentView.needsDisplay = true
                 lineNumberGutter?.needsDisplay = true
@@ -897,16 +996,18 @@ class NoIntrinsicScrollView: NSScrollView {
     func configureLineNumbers(
         visible: Bool,
         textView: NSTextView,
-        themeManager: ThemeManager
+        themeManager: ThemeManager,
+        fileURL: URL? = nil
     ) {
         if visible {
             if let gutter = lineNumberGutter {
-                gutter.updateAppearance(themeManager: themeManager)
+                gutter.updateAppearance(themeManager: themeManager, fileURL: fileURL)
             } else {
                 let gutter = EditorLineNumberGutterView(
                     textView: textView,
                     clipView: contentView,
-                    themeManager: themeManager
+                    themeManager: themeManager,
+                    fileURL: fileURL
                 )
                 addSubview(gutter, positioned: .above, relativeTo: contentView)
                 lineNumberGutter = gutter
@@ -959,6 +1060,9 @@ public struct SyntaxHighlightedCodeView: NSViewRepresentable {
         let keys = Array(viewCache.keys)
         for key in keys {
             if let sv = viewCache[key], sv.window == nil {
+                if let tv = sv.documentView as? NSTextView {
+                    tv.string = ""
+                }
                 viewCache.removeValue(forKey: key)
             }
         }
@@ -1031,7 +1135,8 @@ public struct SyntaxHighlightedCodeView: NSViewRepresentable {
         // correct, so the blank editor was a TextKit-stack/rendering quirk, not
         // geometry or colour. `NSTextView(usingTextLayoutManager: false)` builds
         // a fully-wired, render-correct TextKit 1 view (macOS 13+).
-        let textView = NSTextView(usingTextLayoutManager: false)
+        let textView = IDEInteractiveTextView(usingTextLayoutManager: false)
+        textView.layoutManager?.allowsNonContiguousLayout = true
         textView.frame = NSRect(x: 0, y: 0, width: initialWidth, height: initialHeight)
         textView.minSize = NSSize(width: 0, height: 0)
         textView.maxSize = NSSize(width: CGFloat.greatestFiniteMagnitude, height: CGFloat.greatestFiniteMagnitude)
@@ -1047,6 +1152,15 @@ public struct SyntaxHighlightedCodeView: NSViewRepresentable {
         textView.delegate = context.coordinator
         textView.textStorage?.delegate = context.coordinator
         context.coordinator.textView = textView
+        let coord = context.coordinator
+        textView.onGoToDefinitionAtCharIndex = { [weak coord, weak textView] charIdx in
+            guard let coord, let tv = textView else { return }
+            coord.handleGoToDefinition(at: charIdx, in: tv)
+        }
+        textView.onQuickHelpAtCharIndex = { [weak coord, weak textView] charIdx, point in
+            guard let coord, let tv = textView else { return }
+            coord.handleQuickHelp(at: charIdx, point: point, in: tv)
+        }
 
         // Initialize engine and assign to coordinator NOW.
         let engine = SyntaxHighlightingEngine()
@@ -1137,7 +1251,8 @@ public struct SyntaxHighlightedCodeView: NSViewRepresentable {
             scrollView.configureLineNumbers(
                 visible: coordinator.parent.showLineNumbers,
                 textView: tv,
-                themeManager: engine.themeManager
+                themeManager: engine.themeManager,
+                fileURL: coordinator.parent.fileURL
             )
             scrollView.hasVerticalScroller   = coordinator.parent.isScrollEnabled
             scrollView.hasHorizontalScroller = coordinator.parent.isScrollEnabled
@@ -1172,14 +1287,16 @@ public struct SyntaxHighlightedCodeView: NSViewRepresentable {
         // Cache so subsequent SwiftUI identity churn reuses THIS view.
         if let id = editorID {
             Self.viewCache[id] = scrollView
-            // Bound the cache so long sessions with many files don't grow
-            // without limit.
-            if Self.viewCache.count > 12 {
+            // Keep at most 2 cached editor scrollViews (primary + split); immediately release unmounted TextKit buffers.
+            if Self.viewCache.count > 2 {
                 for key in Self.viewCache.keys where key != id {
-                    if (Self.viewCache[key]?.window) == nil {
+                    if let evicted = Self.viewCache[key], evicted.window == nil {
+                        if let tv = evicted.documentView as? NSTextView {
+                            tv.string = ""
+                        }
                         Self.viewCache.removeValue(forKey: key)
                     }
-                    if Self.viewCache.count <= 12 { break }
+                    if Self.viewCache.count <= 2 { break }
                 }
             }
         }
@@ -1208,7 +1325,10 @@ public struct SyntaxHighlightedCodeView: NSViewRepresentable {
         var parent: SyntaxHighlightedCodeView
         var highlightTimer: Timer?
         var lspChangeTask: Task<Void, Never>?
+        var autocompleteTask: Task<Void, Never>?
+        var bindingSyncTask: Task<Void, Never>?
         var isUpdating = false
+        var isInsertingCompletion = false
         var isInvalidated = false // Prevents async callbacks after teardown
         
         // Weak reference to the text view to insert completions
@@ -1229,6 +1349,7 @@ public struct SyntaxHighlightedCodeView: NSViewRepresentable {
         var lastShowLineNumbers: Bool = false
         var lastFileURL: URL? = nil // Added fileURL to cache
         var didRenderSelfTest = false
+        var lastAutocompleteCursorLoc: Int = -1
 
         init(_ parent: SyntaxHighlightedCodeView) {
             self.parent = parent
@@ -1292,8 +1413,7 @@ public struct SyntaxHighlightedCodeView: NSViewRepresentable {
 
         /// Single, synchronous code path that configures geometry/theme/font
         /// and pushes the (highlighted) text into the view. Shared by
-        /// makeNSView (force=true) and updateNSView (force=false). No async
-        /// deferral — that previously raced and left the editor blank.
+        /// makeNSView (force=true) and updateNSView (force=false).
         func applyContent(_ p: SyntaxHighlightedCodeView,
                           to textView: NSTextView,
                           scrollView: NSScrollView,
@@ -1301,13 +1421,6 @@ public struct SyntaxHighlightedCodeView: NSViewRepresentable {
             guard let engine = engine else { return }
             self.parent = p
 
-            // Always keep geometry synced (cheap, idempotent) — this is what
-            // makes the text visible once the scroll view finally gets a real
-            // frame, even on no-content-change update passes.
-            configureTextGeometry(for: textView, in: scrollView)
-
-            let normalizedText = p.text.replacingOccurrences(of: "\r\n", with: "\n")
-            let textChanged = lastText != normalizedText
             let langChanged = lastLanguage != p.language
             let themeNameChanged = lastThemeName != p.themeName
             let fontChanged = lastFontSize != p.fontSize
@@ -1316,10 +1429,26 @@ public struct SyntaxHighlightedCodeView: NSViewRepresentable {
             let editableChanged = lastIsEditable != p.isEditable
             let highlightingChanged = lastEnableHighlighting != p.enableHighlighting
             let lineNumbersChanged = lastShowLineNumbers != p.showLineNumbers
+            let visualConfigChanged = langChanged || themeNameChanged || fontChanged
+                || darkChanged || transparentChanged || editableChanged
+                || highlightingChanged || lineNumbersChanged
 
-            if !force && !textChanged && !langChanged && !themeNameChanged
-                && !fontChanged && !darkChanged && !transparentChanged
-                && !editableChanged && !highlightingChanged && !lineNumbersChanged {
+            // ULTRA-FAST NO-OP PATH DURING LIVE TYPING:
+            // When the user types in `textView`, `lastText` and `textView.string` already contain
+            // the latest characters. Returning here avoids full-file string normalization,
+            // `engine.setDocument` cache resets, redundant full-file re-lexing, and synchronous
+            // `ensureLayout` stalls on every keystroke.
+            if !force && !visualConfigChanged && (lastText == p.text || textView.string == p.text) {
+                return
+            }
+
+            configureTextGeometry(for: textView, in: scrollView)
+
+            let normalizedText = p.text.contains("\r") ? p.text.replacingOccurrences(of: "\r\n", with: "\n") : p.text
+            let textChanged = lastText != normalizedText && textView.string != normalizedText
+
+            if !force && !textChanged && !visualConfigChanged {
+                lastText = normalizedText
                 return
             }
 
@@ -1385,17 +1514,20 @@ public struct SyntaxHighlightedCodeView: NSViewRepresentable {
             textView.typingAttributes[.ligature] = 0
             textView.isEditable = p.isEditable
 
-            if force || lineNumbersChanged || themeNameChanged || darkChanged || fontChanged,
+            if force || lineNumbersChanged || themeNameChanged || darkChanged || fontChanged || lastFileURL != p.fileURL,
                let editorScrollView = scrollView as? NoIntrinsicScrollView {
+                lastFileURL = p.fileURL
                 editorScrollView.configureLineNumbers(
                     visible: p.showLineNumbers,
                     textView: textView,
-                    themeManager: engine.themeManager
+                    themeManager: engine.themeManager,
+                    fileURL: p.fileURL
                 )
             }
 
-            // Content
-            if textView.string != normalizedText {
+            // Content replacement (only when external binding differs from NSTextView buffer)
+            let didReplaceBuffer = (textView.string != normalizedText)
+            if didReplaceBuffer {
                 isUpdating = true
                 let r = NSRange(location: 0, length: (normalizedText as NSString).length)
                 if r.length > 0 {
@@ -1409,27 +1541,26 @@ public struct SyntaxHighlightedCodeView: NSViewRepresentable {
                 (scrollView as? NoIntrinsicScrollView)?.lineNumberGutter?.refreshContentIndex()
             }
 
-            if p.enableHighlighting {
-                engine.setDocument(textView.string, language: p.language)
-            } else {
-                engine.cancelHighlighting()
-            }
-            if p.enableHighlighting, let ts = textView.textStorage, ts.length > 0 {
-                // Single highlight pass. The debounced pass is ONLY for live
-                // typing (Coordinator.textDidChange); doing both here doubled
-                // every retokenization and compounded the open-file freeze.
-                engine.applyHighlightingAsync(to: ts, fontSize: p.fontSize, font: textView.font) { [weak textView, weak scrollView] in
-                    if let tv = textView, let tc = tv.textContainer {
-                        tv.layoutManager?.ensureLayout(for: tc)
-                        tv.needsDisplay = true
+            if force || didReplaceBuffer || langChanged || themeNameChanged || darkChanged || fontChanged || highlightingChanged {
+                if p.enableHighlighting {
+                    engine.setDocument(textView.string, language: p.language)
+                } else {
+                    engine.cancelHighlighting()
+                }
+                if p.enableHighlighting, let ts = textView.textStorage, ts.length > 0 {
+                    engine.applyHighlightingAsync(to: ts, fontSize: p.fontSize, font: textView.font) { [weak textView, weak scrollView] in
+                        if let tv = textView, let tc = tv.textContainer, let sv = scrollView {
+                            tv.layoutManager?.ensureLayout(forBoundingRect: sv.contentView.bounds, in: tc)
+                            tv.needsDisplay = true
+                        }
+                        scrollView?.contentView.needsDisplay = true
+                        (scrollView as? NoIntrinsicScrollView)?.lineNumberGutter?.needsDisplay = true
                     }
-                    scrollView?.contentView.needsDisplay = true
-                    (scrollView as? NoIntrinsicScrollView)?.lineNumberGutter?.needsDisplay = true
                 }
             }
 
             if let tc = textView.textContainer {
-                textView.layoutManager?.ensureLayout(for: tc)
+                textView.layoutManager?.ensureLayout(forBoundingRect: scrollView.contentView.bounds, in: tc)
             }
             textView.needsDisplay = true
             scrollView.contentView.needsDisplay = true
@@ -1437,14 +1568,6 @@ public struct SyntaxHighlightedCodeView: NSViewRepresentable {
         }
 
         func configureTextGeometry(for textView: NSTextView, in scrollView: NSScrollView) {
-            // Canonical, stable "wrapping" NSTextView-in-NSScrollView setup.
-            // We always wrap to the scroll view's width instead of toggling
-            // isHorizontallyResizable. Mixing isHorizontallyResizable = true
-            // with autoresizingMask = [.width] and an infinite-width container
-            // (the previous non-wrap path) made the text view's drawable area
-            // collapse — glyphs were laid out but never drawn (black screen),
-            // and fed size oscillation into SwiftUI's _FlexFrameLayout
-            // (immediate crash inside Playground/Notebook).
             let contentSize = scrollView.contentSize
             let targetWidth = max(1, contentSize.width)
             let targetHeight = max(1, contentSize.height)
@@ -1456,9 +1579,6 @@ public struct SyntaxHighlightedCodeView: NSViewRepresentable {
             textView.maxSize = NSSize(width: CGFloat.greatestFiniteMagnitude,
                                       height: CGFloat.greatestFiniteMagnitude)
 
-            // Make the document view fill the scroll view's width so text is
-            // immediately visible. Height only ever grows (the layout manager
-            // owns the real height once glyphs are laid out).
             let newWidth = targetWidth
             let newHeight = max(textView.frame.height, targetHeight)
             if abs(textView.frame.width - newWidth) > 0.5 ||
@@ -1470,115 +1590,101 @@ public struct SyntaxHighlightedCodeView: NSViewRepresentable {
                 let insetW = textView.textContainerInset.width * 2
                 let containerWidth = max(1, targetWidth - insetW)
                 container.widthTracksTextView = true
-                container.containerSize = NSSize(width: containerWidth,
-                                                 height: CGFloat.greatestFiniteMagnitude)
+                if abs(container.containerSize.width - containerWidth) > 0.5 {
+                    container.containerSize = NSSize(width: containerWidth,
+                                                     height: CGFloat.greatestFiniteMagnitude)
+                }
             }
         }
         
         deinit {
             NotificationCenter.default.removeObserver(self)
-            // Mark as invalidated FIRST so async callbacks bail out
             isInvalidated = true
-            // Cancel any in-flight highlighting task on deallocation
             highlightTimer?.invalidate()
             lspChangeTask?.cancel()
+            autocompleteTask?.cancel()
+            bindingSyncTask?.cancel()
             engine?.cancelHighlighting()
-            
-            // Break possible retain cycles
             engine = nil
         }
         
         // MARK: - NSTextStorageDelegate (Incremental Updates)
         
         public func textStorage(_ textStorage: NSTextStorage, didProcessEditing editedMask: NSTextStorageEditActions, range: NSRange, changeInLength: Int) {
-            // Avoid processing our own highlighting updates
             guard !isUpdating else { return }
             
             // IME-FIRST: Skip processing if IME composition is in progress
-            // This prevents corruption of marked text (e.g., Thai, Japanese, Chinese input)
             if let layoutManager = textStorage.layoutManagers.first,
                let textContainer = layoutManager.textContainers.first,
                let textView = textContainer.textView,
                textView.hasMarkedText() {
-                return // IME is composing, don't interfere
+                return
             }
             
-            // Only process character changes (typing, pasting), not attribute changes
             if editedMask.contains(.editedCharacters) {
-                guard parent.enableHighlighting else { return }
-
-                // Synchronously update the engine's model to keep it in sync
-                engine?.processEdit(range: range, changeInLength: changeInLength, newContent: textStorage.string)
+                let fullString = textStorage.string
+                self.lastText = fullString
                 
-                // Debounce full-document LSP synchronization. Previously every
-                // keystroke copied and sent the entire document immediately.
+                if parent.enableHighlighting {
+                    engine?.processEdit(range: range, changeInLength: changeInLength, newContent: fullString)
+                }
+                
+                // Debounce background LSP didChange when not immediately requesting completion
                 if let url = parent.fileURL {
-                    let content = textStorage.string
                     let language = parent.language
                     lspChangeTask?.cancel()
                     lspChangeTask = Task {
-                        try? await Task.sleep(nanoseconds: 300_000_000)
+                        try? await Task.sleep(nanoseconds: 250_000_000)
                         guard !Task.isCancelled else { return }
-                        await LSPManager.shared.documentChanged(uri: url.absoluteString, language: language, content: content)
+                        await LSPManager.shared.documentChanged(uri: url.absoluteString, language: language, content: fullString)
                     }
                 }
                 
-                // Trigger autocomplete check
-                if let layoutManager = textStorage.layoutManagers.first,
+                // Trigger Official Autocomplete when user is actively typing or editing in the focused editor
+                if !isInsertingCompletion,
+                   let layoutManager = textStorage.layoutManagers.first,
                    let textContainer = layoutManager.textContainers.first,
-                   let textView = textContainer.textView {
+                   let textView = textContainer.textView,
+                   textView.window?.firstResponder === textView {
                     
-                    let insertedString = changeInLength > 0 && range.location + changeInLength <= textStorage.length
-                        ? (textStorage.string as NSString).substring(with: NSRange(location: range.location, length: changeInLength))
-                        : ""
+                    let nsString = fullString as NSString
+                    let isSingleCharInsert = (changeInLength == 1 && range.length == 1 && range.location + 1 <= nsString.length)
+                    let isSingleCharBackspace = (changeInLength == -1 && range.length == 0 && parent.appState.showingCompletions)
                     
-                    if changeInLength == 0 || insertedString.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-                        // Dismiss if deleting or typing spaces
-                        Task { @MainActor in
-                            self.parent.appState.dismissCompletions()
-                        }
-                    } else if let lastChar = insertedString.last {
-                        let isWordChar = lastChar.isLetter || lastChar.isNumber || lastChar == "_"
-                        let isTriggerChar = lastChar == "." || lastChar == ":" || lastChar == ">"
+                    if isSingleCharInsert || isSingleCharBackspace {
+                        let cursorLoc = min(nsString.length, range.location + range.length)
+                        let ctx = Self.extractCompletionContext(at: cursorLoc, in: nsString)
                         
-                        if isWordChar || isTriggerChar {
-                            let cursorLoc = textView.selectedRange().location
-                            let (line, charIndex) = self.getLSPPosition(for: cursorLoc, in: textStorage.string)
-                            
-                            // Calculate cursor bounds
-                            let glyphRange = layoutManager.glyphRange(forCharacterRange: NSRange(location: cursorLoc, length: 0), actualCharacterRange: nil)
-                            let rect = layoutManager.boundingRect(forGlyphRange: glyphRange, in: textContainer)
-                            let containerOrigin = textView.textContainerOrigin
-                            let cursorRect = rect.offsetBy(dx: containerOrigin.x, dy: containerOrigin.y)
-                            let rectInScrollView = textView.convert(cursorRect, to: textView.enclosingScrollView)
-                            
-                            // Convert to SwiftUI top-left coordinates:
-                            let scrollViewHeight = textView.enclosingScrollView?.bounds.height ?? 0
-                            let swiftuiY = scrollViewHeight - rectInScrollView.origin.y
-                            let swiftuiRect = CGRect(x: rectInScrollView.origin.x, y: swiftuiY + 4, width: rectInScrollView.width, height: rectInScrollView.height)
-                            
-                            Task {
-                                await self.parent.appState.requestCompletions(
-                                    line: line,
-                                    character: charIndex,
-                                    cursorRect: swiftuiRect
-                                )
+                        if ctx.shouldTrigger {
+                            self.lastAutocompleteCursorLoc = cursorLoc
+                            triggerAutocompleteRequest(
+                                at: cursorLoc,
+                                context: ctx,
+                                content: fullString,
+                                layoutManager: layoutManager,
+                                textContainer: textContainer,
+                                textView: textView
+                            )
+                        } else {
+                            autocompleteTask?.cancel()
+                            if parent.appState.showingCompletions {
+                                parent.appState.dismissCompletions()
                             }
                         }
+                    } else {
+                        autocompleteTask?.cancel()
+                        if parent.appState.showingCompletions {
+                            parent.appState.dismissCompletions()
+                        }
                     }
                 }
                 
-                // POST-EDIT FIX: Update typingAttributes to match the just-typed content
-                // This ensures continuous typing inherits the NEW color (e.g. typing "import " -> import is pink, space should be pink/white)
-                // We access the TextView via the LayoutManager
+                // Inherit typingAttributes from edited token for zero-flash typing
                 if let layoutManager = textStorage.layoutManagers.first,
                    let textContainer = layoutManager.textContainers.first,
                    let textView = textContainer.textView {
-                    
                     let endLocation = range.location + range.length
                     let checkLocation = max(0, endLocation - 1)
-                    
-                    // CRASH FIX: Validate bounds before accessing attributes
                     if textStorage.length > 0 && checkLocation < textStorage.length {
                         let attributes = textStorage.attributes(at: checkLocation, effectiveRange: nil)
                         if let color = attributes[.foregroundColor] as? NSColor {
@@ -1590,64 +1696,184 @@ public struct SyntaxHighlightedCodeView: NSViewRepresentable {
                             textView.typingAttributes = newAttributes
                         }
                     }
-                    
-                    // NOTE: ensureLayout removed — it was forcing synchronous layout of entire
-                    // document on every keystroke, causing multi-second freezes on large files.
-                    // The layout manager handles incremental layout automatically.
                 }
+            }
+        }
+        
+        private struct CursorCompletionContext {
+            let wordPrefix: String
+            let wordStart: Int
+            let triggerCharacter: String?
+            let isMemberAccess: Bool
+            var shouldTrigger: Bool {
+                isMemberAccess || !wordPrefix.isEmpty
+            }
+        }
+        
+        private static func extractCompletionContext(at cursorLoc: Int, in nsText: NSString) -> CursorCompletionContext {
+            guard cursorLoc > 0, cursorLoc <= nsText.length else {
+                return CursorCompletionContext(wordPrefix: "", wordStart: cursorLoc, triggerCharacter: nil, isMemberAccess: false)
+            }
+            
+            // Scan backwards for identifier characters (`[A-Za-z0-9_@]`)
+            var wordStart = cursorLoc
+            while wordStart > 0 {
+                let ch = nsText.character(at: wordStart - 1)
+                if let scalar = UnicodeScalar(ch),
+                   (CharacterSet.alphanumerics.contains(scalar) || ch == 95 /* _ */ || ch == 64 /* @ */) {
+                    wordStart -= 1
+                } else {
+                    break
+                }
+            }
+            
+            let wordPrefix = nsText.substring(with: NSRange(location: wordStart, length: cursorLoc - wordStart))
+            
+            // Check character immediately before `wordStart` for member access (`.`, `:`, `>`)
+            var isMemberAccess = false
+            var triggerChar: String? = nil
+            if wordStart > 0 {
+                let prevUnichar = nsText.character(at: wordStart - 1)
+                if prevUnichar == 46 /* . */ {
+                    isMemberAccess = true
+                    if wordPrefix.isEmpty { triggerChar = "." }
+                } else if prevUnichar == 58 /* : */ {
+                    // Check `::` or CSS/Swift `:`
+                    isMemberAccess = true
+                    if wordPrefix.isEmpty { triggerChar = ":" }
+                } else if prevUnichar == 62 /* > */ && wordStart >= 2 && nsText.character(at: wordStart - 2) == 45 /* -> */ {
+                    isMemberAccess = true
+                    if wordPrefix.isEmpty { triggerChar = ">" }
+                }
+            }
+            
+            return CursorCompletionContext(
+                wordPrefix: wordPrefix,
+                wordStart: wordStart,
+                triggerCharacter: triggerChar,
+                isMemberAccess: isMemberAccess
+            )
+        }
+        
+        private func triggerAutocompleteRequest(
+            at cursorLoc: Int,
+            context: CursorCompletionContext,
+            content: String,
+            layoutManager: NSLayoutManager,
+            textContainer: NSTextContainer,
+            textView: NSTextView
+        ) {
+            let (line, charIndex) = engine?.lineAndColumn(for: cursorLoc) ?? getLSPPosition(for: cursorLoc, in: content)
+            
+            // Compute cursor rect in NSScrollView top-left coordinates
+            let targetCharIdx = max(0, cursorLoc - 1)
+            let charRange = NSRange(location: targetCharIdx, length: min(1, (content as NSString).length - targetCharIdx))
+            let glyphRange = layoutManager.glyphRange(forCharacterRange: charRange, actualCharacterRange: nil)
+            layoutManager.ensureLayout(forGlyphRange: glyphRange)
+            var rect = layoutManager.boundingRect(forGlyphRange: glyphRange, in: textContainer)
+            if rect.height <= 0, glyphRange.location < layoutManager.numberOfGlyphs {
+                rect = layoutManager.lineFragmentRect(forGlyphAt: glyphRange.location, effectiveRange: nil)
+            }
+            let containerOrigin = textView.textContainerOrigin
+            let cursorRect = rect.offsetBy(dx: containerOrigin.x, dy: containerOrigin.y)
+            let scrollView = textView.enclosingScrollView
+            let rectInScrollView = textView.convert(cursorRect, to: scrollView)
+            
+            let isFlipped = scrollView?.isFlipped ?? true
+            let scrollHeight = scrollView?.bounds.height ?? 600
+            let scrollWidth = scrollView?.bounds.width ?? 800
+            let rawTopY = isFlipped ? rectInScrollView.origin.y : (scrollHeight - rectInScrollView.maxY)
+            let lineHeight = max(18, rectInScrollView.height)
+            let popupWidth: CGFloat = 420
+            let clampedX = max(48, min(rectInScrollView.origin.x, max(48, scrollWidth - popupWidth - 16)))
+            
+            let popupEstimatedHeight: CGFloat = 240
+            let finalY: CGFloat
+            if rawTopY + lineHeight + popupEstimatedHeight > scrollHeight && rawTopY > popupEstimatedHeight {
+                finalY = max(6, rawTopY - popupEstimatedHeight - 4)
+            } else {
+                finalY = max(6, rawTopY + lineHeight + 3)
+            }
+            let swiftuiRect = CGRect(x: clampedX, y: finalY, width: rectInScrollView.width, height: lineHeight)
+            
+            autocompleteTask?.cancel()
+            lspChangeTask?.cancel() // `requestCompletions` will sync `documentChanged` directly
+            autocompleteTask = Task { @MainActor [weak self] in
+                // Brief 25ms coalesce so rapid typing cancels stale keystrokes before hitting LSP
+                try? await Task.sleep(nanoseconds: 25_000_000)
+                guard let self = self, !Task.isCancelled, !self.isInvalidated else { return }
+                await self.parent.appState.requestCompletions(
+                    line: line,
+                    character: charIndex,
+                    cursorRect: swiftuiRect,
+                    content: content,
+                    wordPrefix: context.wordPrefix,
+                    triggerCharacter: context.triggerCharacter,
+                    isMemberAccess: context.isMemberAccess
+                )
             }
         }
         
         public func textDidChange(_ notification: Notification) {
             guard let textView = notification.object as? NSTextView else { return }
-            
-            // IME-FIRST: Skip binding update during IME composition
-            // Prevents corruption of Thai/Japanese/Chinese input while composing
             guard !textView.hasMarkedText() else { return }
-            
-            // Loop Protection: If content matches binding, ignore
-            if parent.text == textView.string { return }
             guard !isUpdating else { return }
             
-            // ASYNC Binding Update: Breaks the Layout Recursion Loop
             let newText = textView.string
-            DispatchQueue.main.async { [weak self] in
-                guard let self = self, !self.isInvalidated else { return }
-                // Double check before updating to prevent race conditions
+            // Keep `lastText` synced immediately so SwiftUI's `updateNSView` knows `textView`
+            // already has this exact text and skips redundant full-document re-application.
+            self.lastText = newText
+            
+            // Debounce SwiftUI `@Binding var text` propagation (90ms) so typing at 60-120 WPM
+            // doesn't force SwiftUI to re-evaluate the parent view hierarchy on every single keystroke.
+            bindingSyncTask?.cancel()
+            bindingSyncTask = Task { @MainActor [weak self] in
+                try? await Task.sleep(nanoseconds: 90_000_000)
+                guard let self = self, !Task.isCancelled, !self.isInvalidated else { return }
                 if self.parent.text != newText {
                     self.parent.text = newText
                 }
             }
 
-            // Trigger highlight
+            // Trigger fast incremental highlight (50ms debounce)
             triggerDebouncedHighlight(for: textView)
+        }
+        
+        public func textDidEndEditing(_ notification: Notification) {
+            guard let textView = notification.object as? NSTextView else { return }
+            bindingSyncTask?.cancel()
+            let finalString = textView.string
+            self.lastText = finalString
+            if parent.text != finalString {
+                parent.text = finalString
+            }
         }
         
         public func textViewDidChangeSelection(_ notification: Notification) {
             guard let textView = notification.object as? NSTextView,
                   let range = textView.selectedRanges.first?.rangeValue,
-                  range.length == 0 else { return } // Only for insertion point
+                  range.length == 0 else {
+                if parent.appState.showingCompletions {
+                    parent.appState.dismissCompletions()
+                }
+                return
+            }
             
-            // CRASH FIX: Early return if text storage is empty
+            if parent.appState.showingCompletions && abs(range.location - lastAutocompleteCursorLoc) > 1 {
+                parent.appState.dismissCompletions()
+            }
+            
             guard let textStorage = textView.textStorage,
                   textStorage.length > 0 else { return }
             
-            // Context-Aware Typing Attributes (Zero-Flash Typing)
-            // When cursor moves, checking the token at the cursor allows us to pre-set the color
-            // So if I click inside a green string, I type green immediately.
-            
             let location = range.location
-            // Check character BEFORE cursor (to inherit)
             let checkLocation = max(0, location - 1)
             
-            // CRASH FIX: Double-check bounds
             if checkLocation < textStorage.length {
-                // Get attributes at check location
                 let attributes = textStorage.attributes(at: checkLocation, effectiveRange: nil)
                 if let color = attributes[.foregroundColor] as? NSColor {
                     var newAttributes = textView.typingAttributes
                     newAttributes[.foregroundColor] = color
-                    // Sync font as well
                     if let font = attributes[.font] as? NSFont {
                         newAttributes[.font] = font
                     }
@@ -1659,7 +1885,7 @@ public struct SyntaxHighlightedCodeView: NSViewRepresentable {
         func triggerDebouncedHighlight(for textView: NSTextView?) {
             guard parent.enableHighlighting else { return }
             highlightTimer?.invalidate()
-            highlightTimer = Timer.scheduledTimer(withTimeInterval: 0.15, repeats: false) { [weak self] _ in
+            highlightTimer = Timer.scheduledTimer(withTimeInterval: 0.05, repeats: false) { [weak self] _ in
                 Task { @MainActor in
                     guard let self = self, !self.isInvalidated else { return }
                     if let tv = textView {
@@ -1669,10 +1895,34 @@ public struct SyntaxHighlightedCodeView: NSViewRepresentable {
             }
         }
         
-        // MARK: - Auto Indentation
+        // MARK: - Keyboard Navigation & Auto Indentation
         
         public func textView(_ textView: NSTextView, doCommandBy commandSelector: Selector) -> Bool {
-            // Check if completions are showing
+            // Manual completion trigger (Opt+Esc / F5 / complete:)
+            if commandSelector == #selector(NSResponder.complete(_:)),
+               let textStorage = textView.textStorage,
+               let layoutManager = textStorage.layoutManagers.first,
+               let textContainer = layoutManager.textContainers.first {
+                let cursorLoc = textView.selectedRange().location
+                let nsString = textStorage.string as NSString
+                let ctx = Self.extractCompletionContext(at: cursorLoc, in: nsString)
+                self.lastAutocompleteCursorLoc = cursorLoc
+                triggerAutocompleteRequest(
+                    at: cursorLoc,
+                    context: CursorCompletionContext(
+                        wordPrefix: ctx.wordPrefix,
+                        wordStart: ctx.wordStart,
+                        triggerCharacter: ctx.triggerCharacter,
+                        isMemberAccess: ctx.isMemberAccess || ctx.wordPrefix.isEmpty
+                    ),
+                    content: textStorage.string,
+                    layoutManager: layoutManager,
+                    textContainer: textContainer,
+                    textView: textView
+                )
+                return true
+            }
+            
             if parent.appState.showingCompletions {
                 if commandSelector == #selector(NSResponder.moveDown(_:)) {
                     parent.appState.selectNextCompletion()
@@ -1700,56 +1950,66 @@ public struct SyntaxHighlightedCodeView: NSViewRepresentable {
         
         private func insertCompletion(_ item: CompletionItem, into textView: NSTextView) {
             guard let range = textView.selectedRanges.first?.rangeValue else { return }
-            let insertText = item.insertText ?? item.label
             let text = textView.string as NSString
             let cursorLocation = range.location
             
-            // Find prefix word start
+            let (resolvedText, cursorOffsetFromEnd) = item.resolvedInsertion()
+            var insertText = resolvedText
+            
+            // Find prefix word start (including `@` for Swift attributes like `@State`)
             var wordStart = cursorLocation
-            let set = CharacterSet.alphanumerics.union(CharacterSet(charactersIn: "_"))
             while wordStart > 0 {
-                let prevCharRange = NSRange(location: wordStart - 1, length: 1)
-                let prevChar = text.substring(with: prevCharRange)
-                if let char = prevChar.unicodeScalars.first, set.contains(char) {
+                let ch = text.character(at: wordStart - 1)
+                if let scalar = UnicodeScalar(ch),
+                   (CharacterSet.alphanumerics.contains(scalar) || ch == 95 /* _ */ || ch == 64 /* @ */) {
                     wordStart -= 1
                 } else {
                     break
                 }
             }
             
+            // Prevent double dot (`..frame`) when inserting a dot-prefixed completion after `.`
+            if wordStart > 0 && text.character(at: wordStart - 1) == 46 /* . */ && insertText.hasPrefix(".") {
+                insertText = String(insertText.dropFirst())
+            }
+            
             let wordRange = NSRange(location: wordStart, length: cursorLocation - wordStart)
             
-            // Avoid trigger loops since replacement will trigger textDidChange
-            isUpdating = true
-            defer { isUpdating = false }
+            autocompleteTask?.cancel()
+            parent.appState.dismissCompletions()
+            
+            isInsertingCompletion = true
+            defer { isInsertingCompletion = false }
             
             if textView.shouldChangeText(in: wordRange, replacementString: insertText) {
                 textView.replaceCharacters(in: wordRange, with: insertText)
                 textView.didChangeText()
                 
-                // Update parent Binding asynchronously
+                let newCursorPos = max(0, wordStart + insertText.utf16.count - cursorOffsetFromEnd)
+                textView.setSelectedRange(NSRange(location: newCursorPos, length: 0))
+                
                 let newText = textView.string
-                DispatchQueue.main.async { [weak self] in
-                    self?.parent.text = newText
+                self.lastText = newText
+                bindingSyncTask?.cancel()
+                if self.parent.text != newText {
+                    self.parent.text = newText
                 }
             }
-            
-            // Dismiss autocomplete
-            parent.appState.dismissCompletions()
         }
         
         private func getLSPPosition(for cursorLocation: Int, in text: String) -> (line: Int, character: Int) {
+            if let engine = engine {
+                return engine.lineAndColumn(for: cursorLocation)
+            }
             var line = 0
             var character = 0
-            
             let textNSString = text as NSString
             if cursorLocation <= textNSString.length {
                 let prefix = textNSString.substring(to: cursorLocation)
                 let lines = prefix.components(separatedBy: "\n")
                 line = max(0, lines.count - 1)
-                character = lines.last?.count ?? 0
+                character = lines.last?.utf16.count ?? 0
             }
-            
             return (line, character)
         }
         
@@ -1758,7 +2018,6 @@ public struct SyntaxHighlightedCodeView: NSViewRepresentable {
             let text = textView.string
             let cursorLocation = range.location
             
-            // Get current line content up to cursor
             let prefix = (text as NSString).substring(to: cursorLocation)
             var currentLine = ""
             if let lastNewline = prefix.range(of: "\n", options: .backwards) {
@@ -1767,7 +2026,6 @@ public struct SyntaxHighlightedCodeView: NSViewRepresentable {
                 currentLine = prefix
             }
             
-            // 1. Calculate base indentation (spaces/tabs from current line)
             var indentation = ""
             for char in currentLine {
                 if char.isWhitespace {
@@ -1777,37 +2035,21 @@ public struct SyntaxHighlightedCodeView: NSViewRepresentable {
                 }
             }
             
-            // 2. Check if we should increase indentation
-            // Rules: Ends with {, (, [, or : (Python)
             let trimmedLine = currentLine.trimmingCharacters(in: .whitespacesAndNewlines)
             let openers: [Character] = ["{", "(", "[", ":"]
             
             var shouldIndent = false
-            if let lastChar = trimmedLine.last {
-                if openers.contains(lastChar) {
-                    shouldIndent = true
-                }
+            if let lastChar = trimmedLine.last, openers.contains(lastChar) {
+                shouldIndent = true
             }
             
-            // 3. Construct new line content
-            // Assuming 4 spaces for indentation (can be configurable later)
             var insertString = "\n" + indentation
             if shouldIndent {
                 insertString += "    "
             }
             
-            // Check for closing brace autocompletion scenarios
-            // e.g. "{" -> "\n    \n}"
-            // This is a more advanced feature, keeping it simple for now as requested "Auto indent"
-            
-            // 4. Insert text
             if textView.shouldChangeText(in: range, replacementString: insertString) {
-                // IMPORTANT: Update engine BEFORE applying change to textStorage if using direct storage manipulation,
-                // but here replaceCharacters will trigger textStorage delegate which calls processEdit.
                 textView.replaceCharacters(in: range, with: insertString)
-                // textView.didChangeText() // CAUTION: Redundant call causing double updates/freezes
-                
-                // Auto-scroll to cursor
                 textView.scrollRangeToVisible(textView.selectedRange())
             }
         }
@@ -1816,18 +2058,135 @@ public struct SyntaxHighlightedCodeView: NSViewRepresentable {
             guard parent.enableHighlighting else { return }
             guard let textStorage = textView.textStorage,
                   let engine = engine else { return }
-            
-            // IME-FIRST: Skip highlighting during IME composition
-            // This preserves the marked text underline and prevents visual corruption
             guard !textView.hasMarkedText() else { return }
             
-            // Only set isUpdating if we are actually editing characters
-            // Here we use it to prevent the delegate from reacting to the attribute changes we are about to make
             isUpdating = true
-            
-            // Use asynchronous application to keep UI responsive
             engine.applyHighlightingAsync(to: textStorage, fontSize: parent.fontSize, font: textView.font) { [weak self] in
                 self?.isUpdating = false
+            }
+        }
+        
+        // MARK: - Cmd+Click / F12 Go-to-Definition & Option+Click Quick Help
+        
+        private static func extractIdentifierToken(at charIdx: Int, in nsText: NSString) -> String {
+            guard nsText.length > 0 else { return "" }
+            let clamped = max(0, min(charIdx, nsText.length - 1))
+            var start = clamped
+            while start > 0 {
+                let c = nsText.character(at: start - 1)
+                if let s = UnicodeScalar(c), (CharacterSet.alphanumerics.contains(s) || c == 95) {
+                    start -= 1
+                } else {
+                    break
+                }
+            }
+            var end = clamped
+            while end < nsText.length {
+                let c = nsText.character(at: end)
+                if let s = UnicodeScalar(c), (CharacterSet.alphanumerics.contains(s) || c == 95) {
+                    end += 1
+                } else {
+                    break
+                }
+            }
+            guard end > start else { return "" }
+            return nsText.substring(with: NSRange(location: start, length: end - start))
+        }
+        
+        func handleGoToDefinition(at charIdx: Int, in textView: NSTextView) {
+            guard let fileURL = parent.fileURL else { return }
+            let content = textView.string
+            let nsText = content as NSString
+            let symbol = Self.extractIdentifierToken(at: charIdx, in: nsText)
+            let (line, character) = getLSPPosition(for: charIdx, in: content)
+            let uri = fileURL.standardizedFileURL.absoluteString
+            let lang = parent.language
+            let wsPath = parent.appState.workspaceFolder?.path
+            
+            Task { @MainActor in
+                let locations = await LSPManager.shared.getDefinition(
+                    uri: uri,
+                    language: lang,
+                    line: line,
+                    character: character,
+                    symbolHint: symbol,
+                    workspacePath: wsPath
+                )
+                guard let loc = locations.first else { return }
+                let targetURL: URL
+                if let parsed = URL(string: loc.uri), parsed.isFileURL {
+                    targetURL = parsed
+                } else {
+                    let cleanPath = loc.uri.replacingOccurrences(of: "file://", with: "")
+                    targetURL = URL(fileURLWithPath: cleanPath)
+                }
+                let targetLine = loc.range.start.line + 1
+                let targetCol = loc.range.start.character + 1
+                
+                if targetURL.standardizedFileURL.path != fileURL.standardizedFileURL.path {
+                    await self.parent.appState.loadFile(url: targetURL)
+                }
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) {
+                    NotificationCenter.default.post(
+                        name: Notification.Name("JumpToLineNotification"),
+                        object: nil,
+                        userInfo: ["line": targetLine, "column": targetCol]
+                    )
+                }
+            }
+        }
+        
+        func handleQuickHelp(at charIdx: Int, point: NSPoint, in textView: NSTextView) {
+            guard let fileURL = parent.fileURL else { return }
+            let content = textView.string
+            let nsText = content as NSString
+            let symbol = Self.extractIdentifierToken(at: charIdx, in: nsText)
+            let (line, character) = getLSPPosition(for: charIdx, in: content)
+            let uri = fileURL.standardizedFileURL.absoluteString
+            let lang = parent.language
+            
+            Task { @MainActor in
+                let hoverText = await LSPManager.shared.getHover(
+                    uri: uri,
+                    language: lang,
+                    line: line,
+                    character: character
+                )
+                let display = (hoverText?.isEmpty == false)
+                    ? hoverText!
+                    : (symbol.isEmpty ? nil : "Symbol: `\(symbol)` (\(lang.capitalized))\nTip: ⌘+Click or press F12 to jump to definition.")
+                guard let display else { return }
+                
+                let popover = NSPopover()
+                popover.behavior = .transient
+                let controller = NSHostingController(
+                    rootView: VStack(alignment: .leading, spacing: 6) {
+                        HStack(spacing: 5) {
+                            Image(systemName: "book.closed.fill")
+                                .font(.system(size: 10))
+                                .foregroundColor(.accentColor)
+                            Text(symbol.isEmpty ? "Quick Help" : symbol)
+                                .font(.system(size: 11, weight: .bold, design: .monospaced))
+                            Spacer()
+                            Text(LSPManager.shared.activeSourceBadge)
+                                .font(.system(size: 9, weight: .medium))
+                                .foregroundColor(.secondary)
+                        }
+                        Divider()
+                        ScrollView {
+                            Text(display)
+                                .font(.system(size: 11, design: .monospaced))
+                                .textSelection(.enabled)
+                                .frame(maxWidth: .infinity, alignment: .leading)
+                        }
+                        .frame(maxHeight: 180)
+                    }
+                    .padding(10)
+                    .frame(width: 380)
+                )
+                popover.contentViewController = controller
+                let anchorRect = NSRect(x: point.x, y: point.y, width: 2, height: 14)
+                popover.show(relativeTo: anchorRect, of: textView, preferredEdge: .maxY)
             }
         }
     }

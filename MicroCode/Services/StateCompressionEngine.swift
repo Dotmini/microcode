@@ -25,8 +25,6 @@ public final class StateCompressionEngine: Sendable {
         guard !data.isEmpty else { return Data() }
         
         let destinationBuffer = UnsafeMutablePointer<UInt8>.allocate(capacity: data.count)
-        defer { destinationBuffer.deallocate() }
-        
         let compressedSize = data.withUnsafeBytes { rawBuffer -> Int in
             guard let sourceAddress = rawBuffer.baseAddress?.assumingMemoryBound(to: UInt8.self) else { return 0 }
             return compression_encode_buffer(
@@ -39,8 +37,20 @@ public final class StateCompressionEngine: Sendable {
             )
         }
         
-        guard compressedSize > 0 else { return nil }
-        return Data(bytes: destinationBuffer, count: compressedSize)
+        guard compressedSize > 0 else {
+            destinationBuffer.deallocate()
+            return nil
+        }
+        // Shrink-to-fit only if compressed buffer is significantly smaller than source capacity;
+        // otherwise transfer pointer ownership directly with zero copy.
+        if compressedSize * 2 < data.count {
+            defer { destinationBuffer.deallocate() }
+            return Data(bytes: destinationBuffer, count: compressedSize)
+        } else {
+            return Data(bytesNoCopy: destinationBuffer, count: compressedSize, deallocator: .custom { ptr, _ in
+                ptr.deallocate()
+            })
+        }
     }
     
     /// Decompresses LZFSE-encoded Data back to its original bytes.

@@ -1008,6 +1008,63 @@ def tool_adb_execute(args: dict) -> str:
     })
 
 # ============================================================
+# Live MicroCode IDE Bridge (http://127.0.0.1:18888/v1/mcp)
+# ============================================================
+
+def _forward_to_live_ide_mcp(tool_name: str, args: dict) -> str:
+    """Forward live IDE tool calls (ide_browser, preview_control, editor_control, lsp_intelligence)
+    directly to the running MicroCode.app HTTP MCP Bridge on port 18888."""
+    import urllib.request
+    import urllib.error
+    payload = json.dumps({
+        "jsonrpc": "2.0",
+        "id": 1,
+        "method": "tools/call",
+        "params": {
+            "name": tool_name,
+            "arguments": args or {}
+        }
+    }).encode("utf-8")
+    req = urllib.request.Request(
+        "http://127.0.0.1:18888/v1/mcp",
+        data=payload,
+        headers={"Content-Type": "application/json"},
+        method="POST"
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=25) as resp:
+            raw = resp.read().decode("utf-8", errors="replace")
+            data = json.loads(raw)
+            if "error" in data and data["error"]:
+                return f"Error from MicroCode IDE: {data['error'].get('message', str(data['error']))}"
+            res = data.get("result") or {}
+            content = res.get("content") or []
+            texts = [c.get("text", "") for c in content if isinstance(c, dict) and "text" in c]
+            return "\n".join(texts) if texts else json.dumps(res)
+    except urllib.error.URLError as e:
+        return f"⚠️ MicroCode.app Live IDE Bridge (127.0.0.1:18888) is not reachable ({e}). Ensure MicroCode.app is running."
+    except Exception as e:
+        return f"⚠️ Live IDE Bridge error: {e}"
+
+def tool_ide_browser(args: dict) -> str:
+    return _forward_to_live_ide_mcp("ide_browser", args)
+
+def tool_preview_control(args: dict) -> str:
+    return _forward_to_live_ide_mcp("preview_control", args)
+
+def tool_editor_control(args: dict) -> str:
+    return _forward_to_live_ide_mcp("editor_control", args)
+
+def tool_lsp_intelligence(args: dict) -> str:
+    return _forward_to_live_ide_mcp("lsp_intelligence", args)
+
+def tool_api_studio(args: dict) -> str:
+    return _forward_to_live_ide_mcp("api_studio", args)
+
+def tool_database_studio(args: dict) -> str:
+    return _forward_to_live_ide_mcp("database_studio", args)
+
+# ============================================================
 # Tool Registry
 # ============================================================
 
@@ -1435,6 +1492,98 @@ TOOLS = {
             "required": ["command"]
         },
         "handler": tool_adb_execute
+    },
+    # --- Live MicroCode IDE & Native Browser Tools ---
+    "ide_browser": {
+        "description": "Control and inspect MicroCode's built-in IDE Browser and Live WebApp Preview (WebKit). Supports navigating to URLs, inspecting interactive DOM elements with selectors & bounding boxes, reading DOM text/HTML, clicking elements, typing into inputs (React/Vue compatible), evaluating JavaScript, reading live console.log/error & fetch/XHR network logs, and taking high-res PNG snapshots.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "action": {"type": "string", "description": "Action: 'navigate', 'inspect_elements', 'get_dom', 'click', 'type', 'eval_js', 'console_logs', 'network_logs', 'screenshot', or 'status'"},
+                "target": {"type": "string", "description": "Target WebView: 'auto' (default), 'browser' (IDE Browser), or 'preview' (Live WebApp Preview Dock)"},
+                "url": {"type": "string", "description": "URL to open (for 'navigate')"},
+                "selector": {"type": "string", "description": "CSS selector or button text (for 'click', 'type', 'get_dom')"},
+                "text": {"type": "string", "description": "Text to type into input (for 'type')"},
+                "submit": {"type": "boolean", "description": "Submit form after typing (for 'type')"},
+                "script": {"type": "string", "description": "JavaScript expression to evaluate in page (for 'eval_js')"},
+                "format": {"type": "string", "description": "'text' or 'html' (for 'get_dom')"},
+                "level": {"type": "string", "description": "Console filter: 'error', 'warn', 'info', 'log' (for 'console_logs')"},
+                "clear": {"type": "boolean", "description": "Clear buffered logs after reading (for 'console_logs' / 'network_logs')"},
+                "output_path": {"type": "string", "description": "PNG file path (for 'screenshot')"}
+            },
+            "required": ["action"]
+        },
+        "handler": tool_ide_browser
+    },
+    "preview_control": {
+        "description": "Inspect and control MicroCode's Live WebApp Preview Dock and Device Preview panel.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "action": {"type": "string", "description": "Action: 'status', 'open_web', 'refresh', 'toggle_dock', or 'close'"},
+                "url": {"type": "string", "description": "Web URL to open in preview (e.g. http://localhost:3000)"}
+            },
+            "required": ["action"]
+        },
+        "handler": tool_preview_control
+    },
+    "editor_control": {
+        "description": "Inspect and control the active MicroCode IDE Editor tabs, active file, and IDE mode (Code Editor, Browser, Notebook, Playground, AI Agent, Science).",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "action": {"type": "string", "description": "Action: 'status', 'open_file', 'list_tabs', 'switch_mode'"},
+                "path": {"type": "string", "description": "File path to open in editor (for 'open_file')"},
+                "mode": {"type": "string", "description": "IDE mode: 'editor', 'browser', 'notebook', 'playground', 'agent', 'science' (for 'switch_mode')"}
+            },
+            "required": ["action"]
+        },
+        "handler": tool_editor_control
+    },
+    "lsp_intelligence": {
+        "description": "Query live Language Server Protocol (LSP) intelligence in MicroCode (hover type info, go-to-definition, completions, active diagnostics, and active LSP servers).",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "action": {"type": "string", "description": "Action: 'hover', 'definition', 'completions', 'active_diagnostics', or 'status'"},
+                "path": {"type": "string", "description": "File path to inspect"},
+                "line": {"type": "integer", "description": "1-based line number (for hover/definition/completions)"},
+                "column": {"type": "integer", "description": "1-based column number (for hover/definition/completions)"}
+            },
+            "required": ["action"]
+        },
+        "handler": tool_lsp_intelligence
+    },
+    "api_studio": {
+        "description": "Control MicroCode's built-in API Studio (Postman-level HTTP Client). Supports executing HTTP requests with AI Test Suite assertions, scanning the workspace for backend API routes (FastAPI, Express, Next.js, Rust Axum, Go), listing collections, importing .env variables, and generating multi-language SDK snippets (cURL, Swift, TypeScript, Python, Rust).",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "action": {"type": "string", "description": "Action: 'execute', 'scan_routes', 'list_collections', 'load_env', or 'generate_snippet'"},
+                "method": {"type": "string", "description": "HTTP method: GET, POST, PUT, DELETE, PATCH"},
+                "url": {"type": "string", "description": "Target URL (supports {{base_url}} environment variables)"},
+                "headers": {"type": "string", "description": "JSON object of HTTP headers"},
+                "body": {"type": "string", "description": "Request body payload (JSON or text)"},
+                "language": {"type": "string", "description": "Target SDK language for 'generate_snippet': 'curl', 'swift', 'typescript', 'python', 'rust'"},
+                "save": {"type": "boolean", "description": "Save request to active API Studio collection"}
+            },
+            "required": ["action"]
+        },
+        "handler": tool_api_studio
+    },
+    "database_studio": {
+        "description": "Inspect and query databases in MicroCode Database Studio. Supports discovering database files (.sqlite, .db, .sqlite3, schema.prisma, migrations) in the workspace, listing tables, inspecting table DDL schemas, and executing SQL queries.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "action": {"type": "string", "description": "Action: 'discover', 'list_tables', 'schema', or 'query'"},
+                "path": {"type": "string", "description": "Path to SQLite database file (or ':memory:')"},
+                "query": {"type": "string", "description": "SQL query to execute (for 'query' action)"},
+                "table": {"type": "string", "description": "Optional table name (for 'schema' action)"}
+            },
+            "required": ["action"]
+        },
+        "handler": tool_database_studio
     },
 }
 

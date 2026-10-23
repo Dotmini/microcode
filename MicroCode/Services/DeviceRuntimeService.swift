@@ -922,7 +922,7 @@ final class DeviceRuntimeService: ObservableObject {
             statusMessage = "Start Flutter with Build & Run first, then use Hot Reload."
             return
         }
-        input.write(Data("r\n".utf8))
+        try? input.write(contentsOf: Data("r\n".utf8))
         statusMessage = "Sent Flutter Hot Reload to the active runtime."
     }
 
@@ -1208,7 +1208,7 @@ final class DeviceRuntimeService: ObservableObject {
             // ADB shell. This keeps keyboard text safe while preserving the
             // no-process-launch fast path for taps, keys and trackpad scroll.
             let command = arguments.dropFirst().map(Self.shellQuote).joined(separator: " ") + "\n"
-            handle.write(Data(command.utf8))
+            try? handle.write(contentsOf: Data(command.utf8))
             return
         }
         Task { [weak self] in
@@ -1266,7 +1266,7 @@ final class DeviceRuntimeService: ObservableObject {
     private func stopAndroidMirrorTransport() {
         AndroidStreamService.shared.stopStreaming()
         androidMirrorReadHandle?.readabilityHandler = nil
-        androidMirrorReadHandle?.closeFile()
+        try? androidMirrorReadHandle?.close()
         androidMirrorReadHandle = nil
         if let proc = androidMirrorProcess, proc.isRunning {
             proc.terminate()

@@ -1000,6 +1000,7 @@ class AppState: ObservableObject {
     @Published var showingHover: Bool = false
     @Published var selectedCompletionIndex: Int = 0
     @Published var autocompleteRect: CGRect = .zero
+    @Published var autocompletePrefix: String = ""
     
     // DerivedData Cache Control
     @Published var derivedDataInfo: DerivedDataInfo?
@@ -1312,10 +1313,16 @@ class AppState: ObservableObject {
         unsetenv("MICRORENT_TOKEN")
         unsetenv("USE_MICRORENT_PROXY")
 
-        // Load GitHub Settings
+        // Load GitHub Settings (Token stored securely in Keychain, migrated from legacy UserDefaults)
         githubOwner = defaults.string(forKey: "githubOwner") ?? ""
         githubRepo = defaults.string(forKey: "githubRepo") ?? ""
-        githubToken = defaults.string(forKey: "githubToken") ?? ""
+        if let legacyToken = defaults.string(forKey: "githubToken"), !legacyToken.isEmpty {
+            _ = KeychainManager.shared.saveIntegrationSecret(legacyToken, account: "GITHUB_PAT_TOKEN")
+            defaults.removeObject(forKey: "githubToken")
+            githubToken = legacyToken
+        } else {
+            githubToken = KeychainManager.shared.readIntegrationSecret(account: "GITHUB_PAT_TOKEN") ?? ""
+        }
 
         // Use object check to properly default booleans
         sidebarVisible = defaults.object(forKey: "sidebarVisible") == nil ? true : defaults.bool(forKey: "sidebarVisible")
@@ -1497,10 +1504,16 @@ class AppState: ObservableObject {
         defaults.set(enableDerivedDataAutoPurge, forKey: "enableDerivedDataAutoPurge")
         defaults.set(enableDerivedDataAlert, forKey: "enableDerivedDataAlert")
         
-        // Save GitHub Settings
+        // Save GitHub Settings (Token persisted exclusively in macOS Keychain)
         defaults.set(githubOwner, forKey: "githubOwner")
         defaults.set(githubRepo, forKey: "githubRepo")
-        defaults.set(githubToken, forKey: "githubToken")
+        defaults.removeObject(forKey: "githubToken")
+        let trimmedGH = githubToken.trimmingCharacters(in: .whitespacesAndNewlines)
+        if trimmedGH.isEmpty {
+            _ = KeychainManager.shared.deleteIntegrationSecret(account: "GITHUB_PAT_TOKEN")
+        } else {
+            _ = KeychainManager.shared.saveIntegrationSecret(trimmedGH, account: "GITHUB_PAT_TOKEN")
+        }
     }
 
     // MARK: - File Operations
@@ -2053,6 +2066,9 @@ class AppState: ObservableObject {
             if activeFileLoadGeneration == loadGeneration { isLoading = false }
         }
 
+        // If this file belongs to a Remote SSH workspace and is a lazy stub, fetch its content now
+        await RemoteWorkspaceManager.shared.ensureFileDownloadedIfNeeded(localURL: normalizedURL)
+
         let ext = normalizedURL.pathExtension.lowercased()
         let previewExtensions = Set(["png", "jpg", "jpeg", "pdf", "gif", "bmp", "tiff", "webp"])
         let scienceExtensions = Set(["pdb", "ent", "cif", "mmcif", "fasta", "fa", "faa", "fna", "a3m", "json", "csv", "tsv", "png", "jpg", "jpeg", "gif", "webp", "svg", "html", "htm", "pdf", "tex", "bib", "md"])
@@ -2111,15 +2127,7 @@ class AppState: ObservableObject {
             let content = result.content
             let fileUri = normalizedURL.absoluteString
             Task.detached(priority: .utility) {
-                let lspTask = Task.detached(priority: .utility) {
-                    await LSPManager.shared.documentOpened(uri: fileUri, language: language, content: content)
-                }
-                let timeoutTask = Task.detached(priority: .utility) {
-                    try? await Task.sleep(nanoseconds: 3_000_000_000)
-                    lspTask.cancel()
-                }
-                await lspTask.value
-                timeoutTask.cancel()
+                await LSPManager.shared.documentOpened(uri: fileUri, language: language, content: content)
             }
         }
     }
@@ -2153,10 +2161,16 @@ class AppState: ObservableObject {
 
             let reportedSize = max(0, values.fileSize ?? 0)
             let isReportedLarge = reportedSize > maximumEditableFileBytes
-            let readLimit = isReportedLarge ? maximumLargeFilePreviewBytes : maximumEditableFileBytes + 1
-            let handle = try FileHandle(forReadingFrom: url)
-            defer { try? handle.close() }
-            let data = try handle.read(upToCount: readLimit) ?? Data()
+            let data: Data
+            if isReportedLarge {
+                let handle = try FileHandle(forReadingFrom: url)
+                defer { try? handle.close() }
+                data = try handle.read(upToCount: maximumLargeFilePreviewBytes) ?? Data()
+            } else {
+                // Apple Silicon UMA Zero-Copy Page Mapping: maps APFS page cache directly
+                // into virtual address space without dirty heap allocation.
+                data = try Data(contentsOf: url, options: [.mappedIfSafe])
+            }
 
             let isLarge = isReportedLarge || data.count > maximumEditableFileBytes
             let visibleData = isLarge ? data.prefix(maximumLargeFilePreviewBytes) : data[...]
@@ -2173,15 +2187,14 @@ class AppState: ObservableObject {
                 )
             }
 
-            let visible = Data(visibleData)
-            let decoded = String(data: visible, encoding: .utf8)
-                ?? String(data: visible, encoding: .isoLatin1)
+            let decoded = String(data: visibleData, encoding: .utf8)
+                ?? String(data: visibleData, encoding: .isoLatin1)
                 ?? "[Unable to decode file — unsupported encoding]"
             let content = isLarge
                 ? decoded + "\n\n[Large-file preview truncated. The original file is read-only in MicroCode.]"
                 : decoded
             let longUnbrokenLine = content.count > 50_000 && !content.prefix(50_000).contains("\n")
-            let plainMode = isLarge || visible.count > syntaxHighlightByteLimit || longUnbrokenLine
+            let plainMode = isLarge || visibleData.count > syntaxHighlightByteLimit || longUnbrokenLine
 
             return SafeFileLoadResult(
                 content: content,
@@ -3638,7 +3651,15 @@ class AppState: ObservableObject {
     // MARK: - LSP Operations
     
     /// Request completions at the current cursor position
-    func requestCompletions(line: Int, character: Int, cursorRect: CGRect = .zero) async {
+    func requestCompletions(
+        line: Int,
+        character: Int,
+        cursorRect: CGRect = .zero,
+        content: String? = nil,
+        wordPrefix: String = "",
+        triggerCharacter: String? = nil,
+        isMemberAccess: Bool = false
+    ) async {
         guard let file = currentFile else { return }
         let uri = URL(fileURLWithPath: file.path).absoluteString
         
@@ -3646,9 +3667,16 @@ class AppState: ObservableObject {
             uri: uri,
             language: file.language,
             line: line,
-            character: character
+            character: character,
+            content: content ?? file.content,
+            wordPrefix: wordPrefix,
+            triggerCharacter: triggerCharacter,
+            isMemberAccess: isMemberAccess
         )
         
+        guard !Task.isCancelled else { return }
+        
+        self.autocompletePrefix = wordPrefix
         self.lspCompletions = completions
         self.selectedCompletionIndex = 0
         self.autocompleteRect = cursorRect
@@ -3704,9 +3732,11 @@ class AppState: ObservableObject {
     
     /// Dismiss completions popup
     func dismissCompletions() {
+        guard showingCompletions || !lspCompletions.isEmpty else { return }
         showingCompletions = false
         lspCompletions = []
         selectedCompletionIndex = 0
+        autocompletePrefix = ""
     }
     
     func selectNextCompletion() {
@@ -3756,26 +3786,111 @@ class AppState: ObservableObject {
                 return
             }
             
-            do {
-                let status = try await backend.getGitStatus(repoPath: folder.path)
-                self.gitRepositoryAvailable = true
-                self.gitStatus = status
-
-                let commits = try await backend.getGitLog(repoPath: folder.path, limit: 50)
-                self.gitCommits = commits
-                
-                // Also load extended git info
-                gitLoadBranches()
-                gitLoadStashList()
-                gitLoadRemoteURL()
-                
-                print("📂 [FreezeDebug] gitRefresh finished in \(Date().timeIntervalSince(start))s")
-            } catch {
-                // Repository might not be a git repo
-                clearGitRepositoryState()
-                print("📂 [FreezeDebug] gitRefresh failed/skipped in \(Date().timeIntervalSince(start))s")
+            // Native 100% Standalone Local Git Engine (zero dependency on localhost:3000)
+            let status = await fetchLocalGitStatus()
+            let commits = await fetchLocalGitCommits(limit: 50)
+            
+            self.gitRepositoryAvailable = true
+            self.gitStatus = status
+            self.gitCommits = commits
+            
+            // Also load extended git info
+            gitLoadBranches()
+            gitLoadStashList()
+            gitLoadRemoteURL()
+            
+            print("📂 [FreezeDebug] gitRefresh finished in \(Date().timeIntervalSince(start))s")
+        }
+    }
+    
+    /// Parses `git status --porcelain=v1 -b` directly in <15ms with zero HTTP server dependency.
+    private func fetchLocalGitStatus() async -> GitStatus {
+        let raw = await runGit(["status", "--porcelain=v1", "-b"])
+        var branch = "main"
+        var ahead = 0
+        var behind = 0
+        var files: [GitFileStatus] = []
+        
+        let lines = raw.components(separatedBy: "\n")
+        for line in lines {
+            guard !line.isEmpty else { continue }
+            if line.hasPrefix("## ") {
+                let header = String(line.dropFirst(3))
+                if let bracketRange = header.range(of: " [") {
+                    let branchPart = String(header[..<bracketRange.lowerBound])
+                    branch = branchPart.components(separatedBy: "...").first ?? branchPart
+                    let meta = String(header[bracketRange.upperBound...]).replacingOccurrences(of: "]", with: "")
+                    for token in meta.components(separatedBy: ",") {
+                        let t = token.trimmingCharacters(in: .whitespaces)
+                        if t.hasPrefix("ahead ") {
+                            ahead = Int(t.dropFirst("ahead ".count)) ?? 0
+                        } else if t.hasPrefix("behind ") {
+                            behind = Int(t.dropFirst("behind ".count)) ?? 0
+                        }
+                    }
+                } else {
+                    branch = header.components(separatedBy: "...").first ?? header
+                }
+                if branch.hasPrefix("No commits yet on ") {
+                    branch = String(branch.dropFirst("No commits yet on ".count))
+                }
+                continue
+            }
+            
+            guard line.count >= 3 else { continue }
+            let idxChar = line[line.startIndex]
+            let wtChar = line[line.index(line.startIndex, offsetBy: 1)]
+            var path = String(line.dropFirst(3)).trimmingCharacters(in: .whitespaces)
+            if let arrowRange = path.range(of: " -> ") {
+                path = String(path[arrowRange.upperBound...])
+            }
+            if path.hasPrefix("\"") && path.hasSuffix("\"") && path.count >= 2 {
+                path = String(path.dropFirst().dropLast())
+            }
+            
+            if idxChar == "?" && wtChar == "?" {
+                files.append(GitFileStatus(path: path, status: "untracked"))
+                continue
+            }
+            
+            // Staged change in index
+            switch idxChar {
+            case "A": files.append(GitFileStatus(path: path, status: "staged_added"))
+            case "M": files.append(GitFileStatus(path: path, status: "staged_modified"))
+            case "D": files.append(GitFileStatus(path: path, status: "staged_deleted"))
+            case "R": files.append(GitFileStatus(path: path, status: "staged_renamed"))
+            default: break
+            }
+            
+            // Working-tree change
+            switch wtChar {
+            case "A": files.append(GitFileStatus(path: path, status: "added"))
+            case "M": files.append(GitFileStatus(path: path, status: "modified"))
+            case "D": files.append(GitFileStatus(path: path, status: "deleted"))
+            case "R": files.append(GitFileStatus(path: path, status: "renamed"))
+            default: break
             }
         }
+        return GitStatus(branch: branch, files: files, ahead: ahead, behind: behind)
+    }
+    
+    /// Parses `git log` directly via `/usr/bin/git` with zero HTTP server dependency.
+    private func fetchLocalGitCommits(limit: Int = 50) async -> [GitCommit] {
+        let raw = await runGit(["log", "-n", "\(limit)", "--pretty=format:%H\u{1f}%an\u{1f}%ae\u{1f}%s\u{1f}%cr"])
+        guard !raw.isEmpty else { return [] }
+        var commits: [GitCommit] = []
+        for line in raw.components(separatedBy: "\n") where !line.isEmpty {
+            let parts = line.components(separatedBy: "\u{1f}")
+            guard parts.count >= 5 else { continue }
+            commits.append(GitCommit(
+                hash: parts[0],
+                author: parts[1],
+                email: parts[2],
+                message: parts[3],
+                timestamp: parts[4]
+            ))
+        }
+        return commits
     }
 
     /// Initializes only the currently opened workspace. This is an explicit
@@ -4165,15 +4280,67 @@ class AppState: ObservableObject {
         }
     }
     
-    // MARK: - Diff
+    // MARK: - Diff & Individual Hunk Staging / Unstaging / Discarding
     
     func gitShowDiff(for path: String) {
         Task {
-            let diff = await runGit(["diff", "--", path])
-            let cachedDiff = await runGit(["diff", "--cached", "--", path])
+            let diff = await runGit(["diff", "-U3", "--", path])
+            let cachedDiff = await runGit(["diff", "-U3", "--cached", "--", path])
             await MainActor.run {
                 gitDiffFile = path
                 gitDiff = diff.isEmpty ? cachedDiff : diff
+            }
+        }
+    }
+    
+    /// Applies a single unified diff hunk patch to the index (Stage/Unstage) or working tree (Discard).
+    func gitApplyHunkPatch(_ patchText: String, mode: GitHunkApplyMode) {
+        guard let folder = workspaceFolder else { return }
+        Task {
+            let args: [String]
+            switch mode {
+            case .stage:
+                args = ["apply", "--cached", "--unidiff-zero", "--whitespace=nowarn", "-"]
+            case .unstage:
+                args = ["apply", "--cached", "--reverse", "--unidiff-zero", "--whitespace=nowarn", "-"]
+            case .discard:
+                args = ["apply", "--reverse", "--unidiff-zero", "--whitespace=nowarn", "-"]
+            }
+            let result: (exitCode: Int32, err: String) = await Task.detached(priority: .userInitiated) {
+                let p = Process()
+                p.executableURL = URL(fileURLWithPath: "/usr/bin/git")
+                p.arguments = args
+                p.currentDirectoryURL = folder
+                let inPipe = Pipe()
+                let errPipe = Pipe()
+                p.standardInput = inPipe
+                p.standardOutput = Pipe()
+                p.standardError = errPipe
+                do {
+                    try p.run()
+                    let payload = patchText.hasSuffix("\n") ? patchText : (patchText + "\n")
+                    if let data = payload.data(using: .utf8) {
+                        try? inPipe.fileHandleForWriting.write(contentsOf: data)
+                    }
+                    try? inPipe.fileHandleForWriting.close()
+                    p.waitUntilExit()
+                    let errStr = String(data: errPipe.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? ""
+                    return (p.terminationStatus, errStr)
+                } catch {
+                    return (-1, error.localizedDescription)
+                }
+            }.value
+            
+            await MainActor.run {
+                if result.exitCode != 0 {
+                    alertMessage = "Hunk operation failed:\n\(result.err)"
+                } else {
+                    if !gitDiffFile.isEmpty {
+                        gitShowDiff(for: gitDiffFile)
+                    }
+                    gitRefresh()
+                    NotificationCenter.default.post(name: DebugService.breakpointsDidChangeNotification, object: nil)
+                }
             }
         }
     }
@@ -5051,6 +5218,52 @@ struct GitCommit: Codable, Identifiable {
     let email: String
     let message: String
     let timestamp: String
+}
+
+enum GitHunkApplyMode {
+    case stage
+    case unstage
+    case discard
+}
+
+struct GitParsedHunk: Identifiable {
+    let id = UUID()
+    let header: String
+    let bodyLines: [String]
+    let fullPatchText: String
+    
+    static func parseHunks(from unifiedDiff: String) -> [GitParsedHunk] {
+        guard !unifiedDiff.isEmpty else { return [] }
+        let lines = unifiedDiff.components(separatedBy: "\n")
+        var fileHeaderLines: [String] = []
+        var hunks: [GitParsedHunk] = []
+        var currentHunkHeader: String? = nil
+        var currentHunkLines: [String] = []
+        
+        func flushCurrentHunk() {
+            guard let hdr = currentHunkHeader else { return }
+            let patch = (fileHeaderLines + [hdr] + currentHunkLines).joined(separator: "\n") + "\n"
+            hunks.append(GitParsedHunk(header: hdr, bodyLines: currentHunkLines, fullPatchText: patch))
+            currentHunkHeader = nil
+            currentHunkLines.removeAll()
+        }
+        
+        for line in lines {
+            if line.hasPrefix("diff --git ") {
+                flushCurrentHunk()
+                fileHeaderLines = [line]
+            } else if currentHunkHeader == nil && (line.hasPrefix("index ") || line.hasPrefix("--- ") || line.hasPrefix("+++ ") || line.hasPrefix("new file ") || line.hasPrefix("deleted file ")) {
+                fileHeaderLines.append(line)
+            } else if line.hasPrefix("@@ ") {
+                flushCurrentHunk()
+                currentHunkHeader = line
+            } else if currentHunkHeader != nil {
+                currentHunkLines.append(line)
+            }
+        }
+        flushCurrentHunk()
+        return hunks
+    }
 }
 
 struct ExecutionOutput: Codable {

@@ -182,9 +182,22 @@ enum DiagnosticCode: Codable {
 
 // MARK: - Completion Types
 
+struct CompletionContext: Codable {
+    /// 1 = Invoked, 2 = TriggerCharacter, 3 = TriggerForIncompleteCompletions
+    let triggerKind: Int
+    let triggerCharacter: String?
+}
+
 struct CompletionParams: Codable {
     let textDocument: TextDocumentIdentifier
     let position: LSPPosition
+    let context: CompletionContext?
+    
+    init(textDocument: TextDocumentIdentifier, position: LSPPosition, context: CompletionContext? = nil) {
+        self.textDocument = textDocument
+        self.position = position
+        self.context = context
+    }
 }
 
 struct CompletionList: Codable {
@@ -192,17 +205,254 @@ struct CompletionList: Codable {
     let items: [CompletionItem]
 }
 
+/// Official LSP 3.17 documentation payload (`string | MarkupContent`)
+enum LSPDocumentation: Codable {
+    case string(String)
+    case markup(MarkupContent)
+    
+    init(from decoder: Decoder) throws {
+        let container = try decoder.singleValueContainer()
+        if let str = try? container.decode(String.self) {
+            self = .string(str)
+        } else if let markup = try? container.decode(MarkupContent.self) {
+            self = .markup(markup)
+        } else {
+            self = .string("")
+        }
+    }
+    
+    func encode(to encoder: Encoder) throws {
+        var container = encoder.singleValueContainer()
+        switch self {
+        case .string(let str): try container.encode(str)
+        case .markup(let markup): try container.encode(markup)
+        }
+    }
+    
+    var displayText: String? {
+        switch self {
+        case .string(let s): return s.isEmpty ? nil : s
+        case .markup(let m): return m.value.isEmpty ? nil : m.value
+        }
+    }
+}
+
+/// Official LSP 3.17 `TextEdit | InsertReplaceEdit`
+struct LSPCompletionTextEdit: Codable {
+    let newText: String
+    let range: LSPRange?
+    
+    enum CodingKeys: String, CodingKey {
+        case newText
+        case range
+        case replace
+        case insert
+    }
+    
+    init(newText: String, range: LSPRange? = nil) {
+        self.newText = newText
+        self.range = range
+    }
+    
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        self.newText = (try? c.decode(String.self, forKey: .newText)) ?? ""
+        if let r = try? c.decode(LSPRange.self, forKey: .range) {
+            self.range = r
+        } else if let r = try? c.decode(LSPRange.self, forKey: .replace) {
+            self.range = r
+        } else {
+            self.range = try? c.decode(LSPRange.self, forKey: .insert)
+        }
+    }
+    
+    func encode(to encoder: Encoder) throws {
+        var c = encoder.container(keyedBy: CodingKeys.self)
+        try c.encode(newText, forKey: .newText)
+        try c.encodeIfPresent(range, forKey: .range)
+    }
+}
+
 struct CompletionItem: Codable, Identifiable {
-    var id: String { label }
+    var id: String { "\(label)-\(kind ?? 0)-\(detail ?? "")" }
     let label: String
     let kind: Int?
     let detail: String?
-    let documentation: String?
+    let documentationContent: LSPDocumentation?
     let insertText: String?
     let insertTextFormat: Int?
+    let filterText: String?
+    let sortText: String?
+    let textEdit: LSPCompletionTextEdit?
+    
+    var documentation: String? {
+        documentationContent?.displayText
+    }
+    
+    enum CodingKeys: String, CodingKey {
+        case label, kind, detail
+        case documentationContent = "documentation"
+        case insertText, insertTextFormat, filterText, sortText, textEdit
+    }
+    
+    init(
+        label: String,
+        kind: Int? = nil,
+        detail: String? = nil,
+        documentation: String? = nil,
+        insertText: String? = nil,
+        insertTextFormat: Int? = nil,
+        filterText: String? = nil,
+        sortText: String? = nil,
+        textEdit: LSPCompletionTextEdit? = nil
+    ) {
+        self.label = label
+        self.kind = kind
+        self.detail = detail
+        self.documentationContent = documentation.map { .string($0) }
+        self.insertText = insertText
+        self.insertTextFormat = insertTextFormat
+        self.filterText = filterText
+        self.sortText = sortText
+        self.textEdit = textEdit
+    }
 }
 
 extension CompletionItem {
+    /// Primary identifier part of the label (e.g. `frame` from `frame(minWidth:maxWidth:)`)
+    var primarySymbolName: String {
+        if let parenIdx = label.firstIndex(of: "(") {
+            let prefix = String(label[..<parenIdx])
+            if !prefix.isEmpty { return prefix }
+        }
+        return label
+    }
+    
+    /// Parameter signature suffix if present (e.g. `(minWidth:maxWidth:)`)
+    var parameterSignature: String? {
+        if let parenIdx = label.firstIndex(of: "(") {
+            let suffix = String(label[parenIdx...])
+            return suffix.isEmpty ? nil : suffix
+        }
+        return nil
+    }
+    
+    /// Produces clean insertion text (resolving LSP snippet placeholders like `${1:value}` and `$0`)
+    /// and returns how many UTF-16 characters from the end of the inserted string the cursor should be placed.
+    func resolvedInsertion() -> (text: String, cursorOffsetFromEnd: Int) {
+        var raw = textEdit?.newText ?? insertText ?? label
+        
+        // If `raw` is a Swift/LSP signature label like `frame(minWidth:idealWidth:)` without snippet placeholders
+        // and no explicit insertText/textEdit was provided, convert `foo(bar:baz:)` -> `foo(bar: , baz: )`
+        if textEdit == nil && insertText == nil,
+           let parenStart = raw.firstIndex(of: "("),
+           raw.hasSuffix(")"),
+           raw.contains(":") {
+            let funcName = String(raw[..<parenStart])
+            let inner = String(raw[raw.index(after: parenStart)..<raw.index(before: raw.endIndex)])
+            let parts = inner.split(separator: ":").map(String.init)
+            if !parts.isEmpty {
+                let formattedParams = parts.compactMap { part -> String? in
+                    let p = part.trimmingCharacters(in: .whitespaces)
+                    if p.isEmpty || p == "_" { return nil }
+                    return "\(p): "
+                }
+                if formattedParams.isEmpty {
+                    let result = "\(funcName)()"
+                    return (result, 1) // place cursor inside ()
+                } else {
+                    let firstParam = formattedParams[0]
+                    let restParams = formattedParams.dropFirst().joined(separator: ", ")
+                    let fullInside = restParams.isEmpty ? firstParam : "\(firstParam), \(restParams)"
+                    let result = "\(funcName)(\(fullInside))"
+                    // Place cursor right after `firstParam`
+                    let offsetFromEnd = (result.utf16.count) - (funcName.utf16.count + 1 + firstParam.utf16.count)
+                    return (result, max(0, offsetFromEnd))
+                }
+            }
+        }
+        
+        // Resolve LSP Snippet syntax: `${1:placeholder}` -> `placeholder`, `${1}` -> ``, `$0` -> cursor marker
+        if raw.contains("$") {
+            var output = ""
+            var cursorUTF16Pos: Int? = nil
+            var firstPlaceholderEndUTF16Pos: Int? = nil
+            var i = raw.startIndex
+            while i < raw.endIndex {
+                if raw[i] == "$" {
+                    let next = raw.index(after: i)
+                    if next < raw.endIndex && raw[next] == "{" {
+                        // Find matching `}`
+                        if let closeBrace = raw[next...].firstIndex(of: "}") {
+                            let inside = String(raw[raw.index(after: next)..<closeBrace])
+                            if let colonIdx = inside.firstIndex(of: ":") {
+                                let numStr = String(inside[..<colonIdx])
+                                let placeholder = String(inside[inside.index(after: colonIdx)...])
+                                // Clean Swift sourcekit-lsp type placeholders like `<#T##CGFloat?#>` if present
+                                let cleanedPlaceholder = Self.cleanSourceKitPlaceholder(placeholder)
+                                output.append(cleanedPlaceholder)
+                                if numStr == "1" && firstPlaceholderEndUTF16Pos == nil {
+                                    firstPlaceholderEndUTF16Pos = output.utf16.count
+                                }
+                            } else if inside == "0" {
+                                cursorUTF16Pos = output.utf16.count
+                            }
+                            i = raw.index(after: closeBrace)
+                            continue
+                        }
+                    } else if next < raw.endIndex && raw[next].isNumber {
+                        var digitEnd = next
+                        while digitEnd < raw.endIndex && raw[digitEnd].isNumber {
+                            digitEnd = raw.index(after: digitEnd)
+                        }
+                        let numStr = String(raw[next..<digitEnd])
+                        if numStr == "0" {
+                            cursorUTF16Pos = output.utf16.count
+                        } else if numStr == "1" && firstPlaceholderEndUTF16Pos == nil {
+                            firstPlaceholderEndUTF16Pos = output.utf16.count
+                        }
+                        i = digitEnd
+                        continue
+                    }
+                }
+                output.append(raw[i])
+                i = raw.index(after: i)
+            }
+            raw = Self.cleanSourceKitPlaceholder(output)
+            let targetPos = cursorUTF16Pos ?? firstPlaceholderEndUTF16Pos ?? raw.utf16.count
+            let offsetFromEnd = max(0, raw.utf16.count - targetPos)
+            return (raw, offsetFromEnd)
+        }
+        
+        raw = Self.cleanSourceKitPlaceholder(raw)
+        if raw.hasSuffix("()") {
+            return (raw, 0)
+        }
+        return (raw, 0)
+    }
+    
+    private static func cleanSourceKitPlaceholder(_ text: String) -> String {
+        guard text.contains("<#") else { return text }
+        var result = ""
+        var idx = text.startIndex
+        while idx < text.endIndex {
+            if text[idx...].hasPrefix("<#"),
+               let endRange = text.range(of: "#>", range: idx..<text.endIndex) {
+                let inner = String(text[text.index(idx, offsetBy: 2)..<endRange.lowerBound])
+                // Format is often `T##Type##Display` or `T##Display`
+                let parts = inner.components(separatedBy: "##")
+                if let last = parts.last, !last.isEmpty, last != "T" {
+                    result.append(last)
+                }
+                idx = endRange.upperBound
+            } else {
+                result.append(text[idx])
+                idx = text.index(after: idx)
+            }
+        }
+        return result
+    }
+
     var kindDescription: String {
         switch kind {
         case 1: return "Text"
@@ -230,7 +480,7 @@ extension CompletionItem {
         case 23: return "Event"
         case 24: return "Operator"
         case 25: return "TypeParameter"
-        default: return "Unknown"
+        default: return "Symbol"
         }
     }
 }
@@ -559,6 +809,29 @@ class LSPClientService: ObservableObject {
         }
 
         let fm = FileManager.default
+        
+        // For Apple toolchain servers (sourcekit-lsp, clangd), prefer `xcrun --find` first
+        // so the server has full access to Xcode's macOS/iOS SDKs (SwiftUI, AppKit, Foundation)
+        // even when Xcode resides on an external volume like /Volumes/MAC/Xcode.app.
+        if (name == "sourcekit-lsp" || name == "clangd"), fm.isExecutableFile(atPath: "/usr/bin/xcrun") {
+            let xc = Process()
+            xc.executableURL = URL(fileURLWithPath: "/usr/bin/xcrun")
+            xc.arguments = ["--find", name]
+            let pipe = Pipe(); xc.standardOutput = pipe; xc.standardError = Pipe()
+            if (try? xc.run()) != nil {
+                xc.waitUntilExit()
+                if xc.terminationStatus == 0,
+                   let out = String(data: pipe.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8)?
+                    .split(separator: "\n").first.map(String.init)?
+                    .trimmingCharacters(in: .whitespacesAndNewlines),
+                   !out.isEmpty,
+                   fm.isExecutableFile(atPath: out) {
+                    setCachedBinary(out, for: name)
+                    return out
+                }
+            }
+        }
+
         for path in searchPaths where fm.isExecutableFile(atPath: path) {
             setCachedBinary(path, for: name)
             return path
@@ -861,10 +1134,17 @@ class LSPClientService: ObservableObject {
     }
     
     /// Request completions at a position (single RPC call, supports both CompletionList and [CompletionItem])
-    func completion(uri: String, line: Int, character: Int) async throws -> [CompletionItem] {
+    func completion(uri: String, line: Int, character: Int, triggerCharacter: String? = nil) async throws -> [CompletionItem] {
+        let context: CompletionContext?
+        if let trig = triggerCharacter, !trig.isEmpty {
+            context = CompletionContext(triggerKind: 2, triggerCharacter: trig)
+        } else {
+            context = CompletionContext(triggerKind: 1, triggerCharacter: nil)
+        }
         let params = CompletionParams(
             textDocument: TextDocumentIdentifier(uri: uri),
-            position: LSPPosition(line: line, character: character)
+            position: LSPPosition(line: line, character: character),
+            context: context
         )
         
         let responseData = try await sendRawRequest(method: "textDocument/completion", params: params)
