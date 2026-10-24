@@ -26,7 +26,7 @@ struct AIAgentView: View {
     @EnvironmentObject var appState: AppState
     @StateObject private var agent = AgentService.shared
     @StateObject private var modelCatalog = AIModelCatalog.shared
-    @StateObject private var tokenOptimizer = TokenOptimizer.shared
+    private var tokenOptimizer: TokenOptimizer { TokenOptimizer.shared }
     var allowsChatSidebar: Bool = true
     var sessionScope: AgentSessionScope = .editor
     /// Science Mode supplies an independent research root. Editor Mode retains
@@ -56,7 +56,6 @@ struct AIAgentView: View {
     @State private var agentEcosystemTab: EcosystemTab = .agents
     @State private var activeACPAgent: ACPAgentConfig? = nil
     @StateObject private var acpHost = ACPHostService.shared
-    @ObservedObject private var ecosystemDiscovery = LocalEcosystemDiscovery.shared
     @ObservedObject private var teamIntegrations = TeamIntegrationService.shared
     @ObservedObject private var deviceRuntime = DeviceRuntimeService.shared
     @ObservedObject private var previewDock = PreviewDockService.shared
@@ -75,6 +74,7 @@ struct AIAgentView: View {
     @State private var contextSearchPrefix = ""
     @State private var showRawMarkdownPlan = false
     @State private var isPlanFullscreen = false
+    @AppStorage("microcode_preview_dock_width") private var previewDockWidth: Double = 520
     @AppStorage("studioAspectRatio") private var studioAspectRatio: String = "16:9"
     @AppStorage("studioResolution") private var studioResolution: String = "1080p"
     @AppStorage("studioDuration") private var studioDuration: String = "5s"
@@ -333,7 +333,11 @@ struct AIAgentView: View {
             let hasRightInspector = appState.agenticContextVisible
             let isPlanActive = isPlanMode || planManager.isPlanVisible
             let sidebarW: CGFloat = (allowsChatSidebar && agent.showChatSidebar) ? 220 : 0
-            let dockW: CGFloat = hasEmbeddedDock ? 420 : (hasRightInspector ? 320 : 0)
+            let maxAllowedDockW: CGFloat = max(420, (rootGeo.size.width - sidebarW) * 0.66)
+            let targetDockW: CGFloat = previewDock.isExpandedWidth
+                ? max(520, (rootGeo.size.width - sidebarW) * 0.60)
+                : min(maxAllowedDockW, max(360, CGFloat(previewDockWidth)))
+            let dockW: CGFloat = hasEmbeddedDock ? targetDockW : (hasRightInspector ? 320 : 0)
             let mainColumnAvailWidth = rootGeo.size.width - sidebarW - dockW
             // Auto-promote Plan to full main column when available width cannot comfortably fit Chat (min 420) + Plan (min 400) side-by-side
             let shouldShowPlanFullColumn = isPlanActive && (
@@ -402,53 +406,47 @@ struct AIAgentView: View {
                     } else {
                         // Chat & Plan Side-by-Side Split View
                         HStack(spacing: 0) {
-                            // Left Pane: Chat Workspace (Fluid, strictly bounded to column width via GeometryReader)
-                            GeometryReader { chatColGeo in
-                                VStack(spacing: 0) {
-                                    if agent.messages.isEmpty && !agent.isLoading && agent.messageQueue.isEmpty && planManager.currentPlan == nil && !isPlanMode && !planManager.isPlanVisible {
-                                        centeredEmptyStateView
-                                    } else {
-                                        VStack(spacing: 0) {
-                                            AgentChatStage(
-                                                messages: agent.messages,
-                                                isLoading: agent.isLoading,
-                                                domain: agent.domain,
-                                                currentToolExecution: agent.currentToolExecution,
-                                                onApplyChange: { change in applyChange(change) },
-                                                onRejectChange: { change in rejectChange(change) },
-                                                onSuggestionTap: { suggestion in inputText = suggestion; sendMessage() },
-                                                onViewPlan: {
-                                                    withAnimation(.easeInOut(duration: 0.2)) {
-                                                        planManager.isPlanVisible.toggle()
-                                                        if planManager.isPlanVisible && planManager.currentPlan == nil, let ws = appState.workspaceFolder?.path {
-                                                            planManager.loadFromTaskMarkdown(workspacePath: ws)
-                                                        }
+                            // Left Pane: Chat Workspace
+                            VStack(spacing: 0) {
+                                if agent.messages.isEmpty && !agent.isLoading && agent.messageQueue.isEmpty && planManager.currentPlan == nil && !isPlanMode && !planManager.isPlanVisible {
+                                    centeredEmptyStateView
+                                } else {
+                                    VStack(spacing: 0) {
+                                        AgentChatStage(
+                                            messages: agent.messages,
+                                            isLoading: agent.isLoading,
+                                            domain: agent.domain,
+                                            currentToolExecution: agent.currentToolExecution,
+                                            onApplyChange: { change in applyChange(change) },
+                                            onRejectChange: { change in rejectChange(change) },
+                                            onSuggestionTap: { suggestion in inputText = suggestion; sendMessage() },
+                                            onViewPlan: {
+                                                withAnimation(.easeInOut(duration: 0.2)) {
+                                                    planManager.isPlanVisible.toggle()
+                                                    if planManager.isPlanVisible && planManager.currentPlan == nil, let ws = appState.workspaceFolder?.path {
+                                                        planManager.loadFromTaskMarkdown(workspacePath: ws)
                                                     }
-                                                },
-                                                onRevertToMessage: { msgId in handleRevertToMessage(msgId) },
-                                                onEditAndResendMessage: { msgId, newText in handleEditAndResendMessage(id: msgId, newContent: newText) },
-                                                onRetryAssistantMessage: { msgId in handleRetryAssistantMessage(msgId) },
-                                                onDeleteMessage: { msgId, revertFiles in handleDeleteMessage(msgId, revertFiles: revertFiles) }
-                                            )
-                                            .environmentObject(appState)
-                                            
-                                            if let suggestion = agent.suggestedAction {
-                                                suggestedActionBar(suggestion)
-                                            }
-                                            
-                                            if agent.contextLimitReached {
-                                                contextLimitBanner
-                                            }
-                                            
-                                            if agent.isLoading {
-                                                liveTaskActivityBanner
-                                            }
-                                            
-                                            inputArea
+                                                }
+                                            },
+                                            onRevertToMessage: { msgId in handleRevertToMessage(msgId) },
+                                            onEditAndResendMessage: { msgId, newText in handleEditAndResendMessage(id: msgId, newContent: newText) },
+                                            onRetryAssistantMessage: { msgId in handleRetryAssistantMessage(msgId) },
+                                            onDeleteMessage: { msgId, revertFiles in handleDeleteMessage(msgId, revertFiles: revertFiles) }
+                                        )
+                                        .equatable()
+                                        .environmentObject(appState)
+                                        
+                                        if let suggestion = agent.suggestedAction {
+                                            suggestedActionBar(suggestion)
                                         }
+                                        
+                                        if agent.contextLimitReached {
+                                            contextLimitBanner
+                                        }
+                                        
+                                        inputArea
                                     }
                                 }
-                                .frame(width: chatColGeo.size.width, height: chatColGeo.size.height)
                             }
                             .frame(minWidth: 320, maxWidth: .infinity, maxHeight: .infinity)
                             .clipped()
@@ -474,9 +472,36 @@ struct AIAgentView: View {
                 // (and if a transport needs to retry) so one click always gives
                 // the user immediate feedback beside Chat.
                 if hasEmbeddedDock {
-                    Divider()
+                    // Draggable Split Divider (matching Antigravity side-by-side Code Preview Pane)
+                    Rectangle()
+                        .fill(Color.primary.opacity(0.09))
+                        .frame(width: 1)
+                        .overlay(
+                            Rectangle()
+                                .fill(Color.clear)
+                                .frame(width: 7)
+                                .contentShape(Rectangle())
+                                .onHover { hovering in
+                                    if hovering {
+                                        NSCursor.resizeLeftRight.push()
+                                    } else {
+                                        NSCursor.pop()
+                                    }
+                                }
+                                .gesture(
+                                    DragGesture(minimumDistance: 1)
+                                        .onChanged { value in
+                                            if previewDock.isExpandedWidth {
+                                                previewDock.isExpandedWidth = false
+                                            }
+                                            let proposed = CGFloat(previewDockWidth) - value.translation.width
+                                            previewDockWidth = Double(min(maxAllowedDockW, max(340, proposed)))
+                                        }
+                                )
+                        )
                     embeddedDeviceDock
-                        .frame(minWidth: 300, idealWidth: 400, maxWidth: 500, maxHeight: .infinity)
+                        .frame(width: targetDockW)
+                        .frame(maxHeight: .infinity)
                         .clipped()
                 }
             }
@@ -1173,9 +1198,9 @@ struct AIAgentView: View {
                     
                     Spacer(minLength: 4)
                     
-                    // Model Selector + Menu (hide duplicate modelSelector on narrow splits since it is in inputBottomToolbar)
+                    // Model Selector + Menu (only render in header when bottom input toolbar is hidden, avoiding duplicate 1,000+ item SwiftUI Menu trees)
                     HStack(spacing: 4) {
-                        if !isVeryCompact {
+                        if !isVeryCompact && (isPlanMode || isTaskMode || isWalkthroughMode || isCellMode || isPaperMode) {
                             modelSelector
                         }
 
@@ -1938,17 +1963,17 @@ struct AIAgentView: View {
                 
                 if let fileLink = step.fileLink, !fileLink.isEmpty {
                     Button(action: {
-                        let cleanPath = fileLink.replacingOccurrences(of: "file://", with: "")
-                        let targetURL: URL
-                        if cleanPath.hasPrefix("/") {
-                            targetURL = URL(fileURLWithPath: cleanPath)
-                        } else if let ws = appState.workspaceFolder {
-                            targetURL = ws.appendingPathComponent(cleanPath)
-                        } else {
-                            targetURL = URL(fileURLWithPath: cleanPath)
-                        }
-                        Task {
-                            await appState.loadFile(url: targetURL)
+                        if !PreviewDockService.shared.openFileFromReference(fileLink, workspacePath: appState.workspaceFolder?.path) {
+                            let cleanPath = fileLink.replacingOccurrences(of: "file://", with: "")
+                            let targetURL: URL
+                            if cleanPath.hasPrefix("/") {
+                                targetURL = URL(fileURLWithPath: cleanPath)
+                            } else if let ws = appState.workspaceFolder {
+                                targetURL = ws.appendingPathComponent(cleanPath)
+                            } else {
+                                targetURL = URL(fileURLWithPath: cleanPath)
+                            }
+                            PreviewDockService.shared.openFile(url: targetURL, makeActive: true)
                         }
                     }) {
                         HStack(spacing: 3) {
@@ -2676,22 +2701,31 @@ struct AIAgentView: View {
                         }
                     }
                     .onChange(of: inputText) { newValue in
-                        // Slash Commands: detect /prefix
+                        // Slash Commands: detect /prefix without redundant @State mutations on normal keystrokes
                         slashCommandService.updateSuggestions(for: newValue)
-                        showSlashSuggestions = slashCommandService.isShowingSuggestions
-                        if !showSlashSuggestions { slashSelectedIndex = 0 }
+                        let shouldShowSlash = slashCommandService.isShowingSuggestions
+                        if showSlashSuggestions != shouldShowSlash {
+                            showSlashSuggestions = shouldShowSlash
+                        }
+                        if !shouldShowSlash && slashSelectedIndex != 0 {
+                            slashSelectedIndex = 0
+                        }
                         
                         // @ Context Provider: detect @prefix only when actively typing a short token at the end
+                        var nextShowContext = false
+                        var nextContextPrefix = contextSearchPrefix
                         if newValue.count <= 2000, let atIdx = newValue.lastIndex(of: "@") {
                             let afterAt = String(newValue[newValue.index(after: atIdx)...])
                             if afterAt.count <= 48 && !afterAt.contains(" ") && !afterAt.contains("\n") && !afterAt.contains("/") && (atIdx == newValue.startIndex || newValue[newValue.index(before: atIdx)] == " " || newValue[newValue.index(before: atIdx)] == "\n") {
-                                showContextSuggestions = true
-                                contextSearchPrefix = afterAt
-                            } else {
-                                showContextSuggestions = false
+                                nextShowContext = true
+                                nextContextPrefix = afterAt
                             }
-                        } else {
-                            showContextSuggestions = false
+                        }
+                        if showContextSuggestions != nextShowContext {
+                            showContextSuggestions = nextShowContext
+                        }
+                        if nextShowContext && contextSearchPrefix != nextContextPrefix {
+                            contextSearchPrefix = nextContextPrefix
                         }
                     }
             } else {
@@ -5237,14 +5271,11 @@ struct AIAgentView: View {
         // MARK: - 5. ☁️ Dotmini Cloud (Sovereign AI)
         Menu {
             if let omni = AIModelCatalog.shared.provider("omni") {
-                // Group 1: 🌟 Flagship & Deep Reasoning
-                let reasoningModels = omni.models.filter {
-                    let id = $0.id.lowercased()
-                    return id.contains("argon") || id.contains("astra") || id.contains("opus") || id.contains("sonnet") || id.contains("3.8-flash") || id.contains("reasoner") || id.contains("o3") || id.contains("o1") || id.contains("sol")
-                }
-                if !reasoningModels.isEmpty {
+                let groups = Self.groupedOmniModels(from: omni.models)
+                
+                if !groups.reasoning.isEmpty {
                     Menu("🌟 Flagship & Deep Reasoning") {
-                        ForEach(reasoningModels) { m in
+                        ForEach(groups.reasoning) { m in
                             Button(action: {
                                 switchToNativeMode(mode: "cloud")
                                 setModel("omni", m.id)
@@ -5260,11 +5291,9 @@ struct AIAgentView: View {
                     }
                 }
                 
-                // Group 2: 🟣 Google Gemini
-                let geminiModels = omni.models.filter { $0.id.lowercased().contains("gemini") && !reasoningModels.contains($0) }
-                if !geminiModels.isEmpty {
+                if !groups.gemini.isEmpty {
                     Menu("Google Gemini") {
-                        ForEach(geminiModels) { m in
+                        ForEach(groups.gemini) { m in
                             Button(action: {
                                 switchToNativeMode(mode: "cloud")
                                 setModel("omni", m.id)
@@ -5280,11 +5309,9 @@ struct AIAgentView: View {
                     }
                 }
                 
-                // Group 3: 🟠 Anthropic Claude
-                let claudeModels = omni.models.filter { $0.id.lowercased().contains("claude") && !reasoningModels.contains($0) }
-                if !claudeModels.isEmpty {
+                if !groups.claude.isEmpty {
                     Menu("Anthropic Claude") {
-                        ForEach(claudeModels) { m in
+                        ForEach(groups.claude) { m in
                             Button(action: {
                                 switchToNativeMode(mode: "cloud")
                                 setModel("omni", m.id)
@@ -5300,11 +5327,9 @@ struct AIAgentView: View {
                     }
                 }
                 
-                // Group 4: 🟢 OpenAI
-                let openAIModels = omni.models.filter { ($0.id.lowercased().contains("gpt") || $0.id.lowercased().contains("o3") || $0.id.lowercased().contains("o1")) && !reasoningModels.contains($0) }
-                if !openAIModels.isEmpty {
+                if !groups.openAI.isEmpty {
                     Menu("OpenAI") {
-                        ForEach(openAIModels) { m in
+                        ForEach(groups.openAI) { m in
                             Button(action: {
                                 switchToNativeMode(mode: "cloud")
                                 setModel("omni", m.id)
@@ -5320,11 +5345,9 @@ struct AIAgentView: View {
                     }
                 }
                 
-                // Group 5: 🔵 DeepSeek
-                let deepseekModels = omni.models.filter { $0.id.lowercased().contains("deepseek") && !reasoningModels.contains($0) }
-                if !deepseekModels.isEmpty {
+                if !groups.deepseek.isEmpty {
                     Menu("DeepSeek") {
-                        ForEach(deepseekModels) { m in
+                        ForEach(groups.deepseek) { m in
                             Button(action: {
                                 switchToNativeMode(mode: "cloud")
                                 setModel("omni", m.id)
@@ -5340,14 +5363,9 @@ struct AIAgentView: View {
                     }
                 }
                 
-                // Group 6: 🇹🇭 Thai AI & Open Source
-                let openSourceModels = omni.models.filter {
-                    let id = $0.id.lowercased()
-                    return id.contains("typhoon") || id.contains("qwen") || id.contains("llama") || id.contains("codegeex") || id.contains("glm")
-                }
-                if !openSourceModels.isEmpty {
+                if !groups.openSource.isEmpty {
                     Menu("Thai AI & Open Source") {
-                        ForEach(openSourceModels) { m in
+                        ForEach(groups.openSource) { m in
                             Button(action: {
                                 switchToNativeMode(mode: "cloud")
                                 setModel("omni", m.id)
@@ -5357,24 +5375,6 @@ struct AIAgentView: View {
                                     if currentExecutionMode == .cloud && appState.aiModel == m.id {
                                         Image(systemName: "checkmark")
                                     }
-                                }
-                            }
-                        }
-                    }
-                }
-                
-                // Group 7: All Models Flat Submenu
-                Divider()
-                Menu("All Cloud Models (\(omni.models.count))") {
-                    ForEach(omni.models) { m in
-                        Button(action: {
-                            switchToNativeMode(mode: "cloud")
-                            setModel("omni", m.id)
-                        }) {
-                            HStack {
-                                Text(m.name)
-                                if currentExecutionMode == .cloud && appState.aiModel == m.id {
-                                    Image(systemName: "checkmark")
                                 }
                             }
                         }
@@ -5461,41 +5461,106 @@ struct AIAgentView: View {
         }
     }
     
+    private struct OmniModelGroups {
+        let count: Int
+        let reasoning: [AIModelDefinition]
+        let gemini: [AIModelDefinition]
+        let claude: [AIModelDefinition]
+        let openAI: [AIModelDefinition]
+        let deepseek: [AIModelDefinition]
+        let openSource: [AIModelDefinition]
+    }
+    private static var cachedOmniGroups: OmniModelGroups?
+
+    private static func groupedOmniModels(from models: [AIModelDefinition]) -> OmniModelGroups {
+        if let cached = cachedOmniGroups, cached.count == models.count {
+            return cached
+        }
+        let reasoning = models.filter {
+            let id = $0.id.lowercased()
+            return id.contains("argon") || id.contains("astra") || id.contains("opus") || id.contains("sonnet") || id.contains("3.8-flash") || id.contains("reasoner") || id.contains("o3") || id.contains("o1") || id.contains("sol")
+        }
+        let reasoningIds = Set(reasoning.map(\.id))
+        let gemini = models.filter { $0.id.lowercased().contains("gemini") && !reasoningIds.contains($0.id) }
+        let claude = models.filter { $0.id.lowercased().contains("claude") && !reasoningIds.contains($0.id) }
+        let openAI = models.filter { ($0.id.lowercased().contains("gpt") || $0.id.lowercased().contains("o3") || $0.id.lowercased().contains("o1")) && !reasoningIds.contains($0.id) }
+        let deepseek = models.filter { $0.id.lowercased().contains("deepseek") && !reasoningIds.contains($0.id) }
+        let openSource = models.filter {
+            let id = $0.id.lowercased()
+            return id.contains("typhoon") || id.contains("qwen") || id.contains("llama") || id.contains("codegeex") || id.contains("glm")
+        }
+        let built = OmniModelGroups(
+            count: models.count,
+            reasoning: reasoning,
+            gemini: gemini,
+            claude: claude,
+            openAI: openAI,
+            deepseek: deepseek,
+            openSource: openSource
+        )
+        cachedOmniGroups = built
+        return built
+    }
+
+    private struct AiPassModelGroups {
+        let count: Int
+        let chat: [SubscriptionModelInfo]
+        let image: [SubscriptionModelInfo]
+        let video: [SubscriptionModelInfo]
+        let music: [SubscriptionModelInfo]
+    }
+    private static var cachedAiPassGroups: AiPassModelGroups?
+
+    private static func groupedAiPassModels(from allModels: [SubscriptionModelInfo]) -> AiPassModelGroups {
+        if let cached = cachedAiPassGroups, cached.count == allModels.count {
+            return cached
+        }
+        let imageModels = allModels.filter { $0.badge == "IMAGE" || AIClient.isAiPassImageModel($0.modelID) }
+        let videoModels = allModels.filter { $0.badge == "VIDEO" || AIClient.isAiPassVideoModel($0.modelID) }
+        let musicModels = allModels.filter { $0.badge == "MUSIC" || AIClient.isAiPassMusicModel($0.modelID) }
+        let chatModels = allModels.filter { !AIClient.isAiPassMediaModel($0.modelID) && $0.badge != "IMAGE" && $0.badge != "VIDEO" && $0.badge != "MUSIC" }
+        let built = AiPassModelGroups(
+            count: allModels.count,
+            chat: chatModels,
+            image: imageModels,
+            video: videoModels,
+            music: musicModels
+        )
+        cachedAiPassGroups = built
+        return built
+    }
+
     @ViewBuilder
     private func subscriptionProviderSubmenu(prov: SubscriptionProviderType) -> some View {
         let isConnected = SubscriptionAuthManager.shared.isConnected(prov)
         Menu("\(prov.displayName)\(isConnected ? " (Active)" : "")") {
             if prov == .aipass {
-                let allModels = prov.modelInfos
-                let imageModels = allModels.filter { $0.badge == "IMAGE" || AIClient.isAiPassImageModel($0.modelID) }
-                let videoModels = allModels.filter { $0.badge == "VIDEO" || AIClient.isAiPassVideoModel($0.modelID) }
-                let musicModels = allModels.filter { $0.badge == "MUSIC" || AIClient.isAiPassMusicModel($0.modelID) }
-                let chatModels = allModels.filter { !AIClient.isAiPassMediaModel($0.modelID) && $0.badge != "IMAGE" && $0.badge != "VIDEO" && $0.badge != "MUSIC" }
+                let groups = Self.groupedAiPassModels(from: prov.modelInfos)
                 
-                Menu("Chat, Coding & Reasoning (\(chatModels.count))") {
-                    ForEach(chatModels) { subModel in
+                Menu("Chat, Coding & Reasoning (\(groups.chat.count))") {
+                    ForEach(groups.chat) { subModel in
                         subscriptionModelButton(subModel)
                     }
                 }
-                Menu("Image Generation (\(imageModels.count))") {
-                    ForEach(imageModels) { subModel in
+                Menu("Image Generation (\(groups.image.count))") {
+                    ForEach(groups.image) { subModel in
                         subscriptionModelButton(subModel)
                     }
                 }
-                Menu("Video Generation (\(videoModels.count))") {
-                    ForEach(videoModels) { subModel in
+                Menu("Video Generation (\(groups.video.count))") {
+                    ForEach(groups.video) { subModel in
                         subscriptionModelButton(subModel)
                     }
                 }
-                Menu("Audio & Music Generation (\(musicModels.count))") {
-                    ForEach(musicModels) { subModel in
+                Menu("Audio & Music Generation (\(groups.music.count))") {
+                    ForEach(groups.music) { subModel in
                         subscriptionModelButton(subModel)
                     }
                 }
-                Divider()
-            }
-            ForEach(prov.modelInfos) { subModel in
-                subscriptionModelButton(subModel)
+            } else {
+                ForEach(prov.modelInfos.prefix(32)) { subModel in
+                    subscriptionModelButton(subModel)
+                }
             }
             Divider()
             Button("Enter Custom Model ID...") {
@@ -5540,8 +5605,9 @@ struct AIAgentView: View {
     @ViewBuilder
     private func byokProviderSubmenu(prov: AIProviderDefinition) -> some View {
         let hasKey = hasActiveKey(prov.id)
+        let displayedModels = Array(prov.models.prefix(24))
         Menu("\(prov.name)\(hasKey ? "" : " (No Key)")") {
-            ForEach(prov.models) { m in
+            ForEach(displayedModels) { m in
                 Button(action: {
                     switchToNativeMode(mode: "direct")
                     setModel(prov.id, m.id)
@@ -5553,6 +5619,11 @@ struct AIAgentView: View {
                             Image(systemName: "checkmark")
                         }
                     }
+                }
+            }
+            if prov.models.count > displayedModels.count {
+                Button("Browse All \(prov.models.count) Models in Settings...") {
+                    appState.showingSettingsDialog = true
                 }
             }
             Divider()
@@ -6341,7 +6412,7 @@ struct MessageContentParser {
     }
 
     private static func doParse(_ content: String) -> [MessageBlock] {
-        let remaining = content
+        let remaining = AIStructuredTurnCodec.stripToolCallArtifacts(content)
         let hasClosingThoughtTag =
             remaining.range(of: "</think", options: .caseInsensitive) != nil ||
             remaining.range(of: "</thought", options: .caseInsensitive) != nil
@@ -6433,7 +6504,6 @@ struct MessageContentParser {
     }
     
     private static func parseLatexAndCode(_ content: String) -> [MessageBlock] {
-        var blocks: [MessageBlock] = []
         var remaining = content
         
         // Sanitize any stray/residual reasoning tags to prevent leaking raw XML into prose
@@ -6442,56 +6512,40 @@ struct MessageContentParser {
             remaining = remaining.replacingOccurrences(of: tag, with: "")
         }
         
-        // Extract LaTeX blocks ($$...$$ or \[...\])
+        // Extract fenced code blocks FIRST so `$$` or `\[...\]` inside code blocks are never misparsed as LaTeX
+        return parseCodeBlocks(remaining)
+    }
+    
+    private static func parseMathAndTextContent(_ text: String) -> [MessageBlock] {
         if let latexRegex = latexRegex {
-            let nsContent = remaining as NSString
-            let latexMatches = latexRegex.matches(in: remaining, options: [], range: NSRange(location: 0, length: nsContent.length))
-            
-            var processedRanges: [NSRange] = []
-            var lastEnd = 0
-            var tempBlocks: [MessageBlock] = []
-            
-            for match in latexMatches {
-                if match.range.location > lastEnd {
-                    let beforeRange = NSRange(location: lastEnd, length: match.range.location - lastEnd)
-                    let beforeText = nsContent.substring(with: beforeRange)
-                    tempBlocks.append(.text(beforeText))
-                }
-                
-                var latexContent = ""
-                if match.numberOfRanges > 1, match.range(at: 1).location != NSNotFound {
-                    latexContent = nsContent.substring(with: match.range(at: 1))
-                } else if match.numberOfRanges > 2, match.range(at: 2).location != NSNotFound {
-                    latexContent = nsContent.substring(with: match.range(at: 2))
-                }
-                
-                tempBlocks.append(.latex(latexContent.trimmingCharacters(in: .whitespacesAndNewlines), true))
-                
-                lastEnd = match.range.location + match.range.length
-                processedRanges.append(match.range)
-            }
-            
-            if lastEnd < nsContent.length {
-                let afterText = nsContent.substring(from: lastEnd)
-                tempBlocks.append(.text(afterText))
-            }
-            
-            if !processedRanges.isEmpty {
-                for block in tempBlocks {
-                    switch block {
-                    case .text(let text):
-                        blocks.append(contentsOf: parseCodeBlocks(text))
-                    default:
-                        blocks.append(block)
+            let nsContent = text as NSString
+            let latexMatches = latexRegex.matches(in: text, options: [], range: NSRange(location: 0, length: nsContent.length))
+            if !latexMatches.isEmpty {
+                var blocks: [MessageBlock] = []
+                var lastEnd = 0
+                for match in latexMatches {
+                    if match.range.location > lastEnd {
+                        let beforeRange = NSRange(location: lastEnd, length: match.range.location - lastEnd)
+                        let beforeText = nsContent.substring(with: beforeRange)
+                        blocks.append(contentsOf: parseTextContent(beforeText))
                     }
+                    var latexContent = ""
+                    if match.numberOfRanges > 1, match.range(at: 1).location != NSNotFound {
+                        latexContent = nsContent.substring(with: match.range(at: 1))
+                    } else if match.numberOfRanges > 2, match.range(at: 2).location != NSNotFound {
+                        latexContent = nsContent.substring(with: match.range(at: 2))
+                    }
+                    blocks.append(.latex(latexContent.trimmingCharacters(in: .whitespacesAndNewlines), true))
+                    lastEnd = match.range.location + match.range.length
+                }
+                if lastEnd < nsContent.length {
+                    let afterText = nsContent.substring(from: lastEnd)
+                    blocks.append(contentsOf: parseTextContent(afterText))
                 }
                 return blocks
             }
         }
-        
-        // No LaTeX blocks found, process code blocks
-        blocks.append(contentsOf: parseCodeBlocks(remaining))
-        return blocks
+        return parseTextContent(text)
     }
     
     private static func parseCodeBlocks(_ content: String) -> [MessageBlock] {
@@ -6508,7 +6562,7 @@ struct MessageContentParser {
                 if match.range.location > lastEnd {
                     let beforeRange = NSRange(location: lastEnd, length: match.range.location - lastEnd)
                     let beforeText = nsContent.substring(with: beforeRange)
-                    blocks.append(contentsOf: parseTextContent(beforeText))
+                    blocks.append(contentsOf: parseMathAndTextContent(beforeText))
                 }
                 
                 // Code block
@@ -6523,7 +6577,7 @@ struct MessageContentParser {
                 if lowerLang == "latex" || lowerLang == "math" || lowerLang == "tex" {
                     blocks.append(.latex(trimmedCode, true))
                 } else if lowerLang == "markdown" || lowerLang == "md" || lowerLang.hasSuffix(".md") {
-                    blocks.append(contentsOf: parseTextContent(trimmedCode))
+                    blocks.append(contentsOf: parseMathAndTextContent(trimmedCode))
                 } else {
                     blocks.append(.code(lang, trimmedCode))
                 }
@@ -6534,11 +6588,11 @@ struct MessageContentParser {
             // Remaining text after last code block
             if lastEnd < nsContent.length {
                 let afterText = nsContent.substring(from: lastEnd)
-                blocks.append(contentsOf: parseTextContent(afterText))
+                blocks.append(contentsOf: parseMathAndTextContent(afterText))
             }
         } else {
             // Fallback: simple split
-            blocks.append(contentsOf: parseTextContent(content))
+            blocks.append(contentsOf: parseMathAndTextContent(content))
         }
         
         return blocks
@@ -6777,7 +6831,7 @@ private final class ChatScrollInteractionTracker {
     var monitor: Any? = nil
 }
 
-struct AgentChatStage: View {
+struct AgentChatStage: View, Equatable {
     @EnvironmentObject var appState: AppState
     let messages: [AgentMessageModel]
     let isLoading: Bool
@@ -6796,6 +6850,18 @@ struct AgentChatStage: View {
     @ObservedObject private var agentService = AgentService.shared
     @State private var userScrolledUp: Bool = false
     @State private var scrollTracker = ChatScrollInteractionTracker()
+    
+    static func == (lhs: AgentChatStage, rhs: AgentChatStage) -> Bool {
+        lhs.isLoading == rhs.isLoading &&
+        lhs.domain == rhs.domain &&
+        lhs.currentToolExecution == rhs.currentToolExecution &&
+        lhs.messages.count == rhs.messages.count &&
+        lhs.messages.first?.id == rhs.messages.first?.id &&
+        lhs.messages.last?.id == rhs.messages.last?.id &&
+        lhs.messages.last?.content == rhs.messages.last?.content &&
+        lhs.messages.last?.toolResults.count == rhs.messages.last?.toolResults.count &&
+        lhs.messages.last?.pendingChanges == rhs.messages.last?.pendingChanges
+    }
     
     var body: some View {
         ScrollViewReader { proxy in
@@ -7466,76 +7532,9 @@ struct PaperLaTeXView: View {
     let isBlock: Bool
     
     var body: some View {
-        HStack {
-            if isBlock { Spacer() }
-            
-            LatexBlockWebView(latex: expression, isBlock: isBlock)
-                .frame(minHeight: isBlock ? 100 : 40) // Minimum height
-                .fixedSize(horizontal: false, vertical: true) // Allow expansion if possible, or scroll
-                .frame(maxWidth: isBlock ? .infinity : 300)
-                .background(Color.clear)
-            
-            if isBlock { Spacer() }
-        }
-        .padding(.vertical, 4)
-    }
-}
-
-struct LatexBlockWebView: NSViewRepresentable {
-    let latex: String
-    let isBlock: Bool
-    
-    func makeNSView(context: Context) -> WKWebView {
-        let config = WKWebViewConfiguration()
-        config.preferences.javaScriptEnabled = true
-        let webView = WKWebView(frame: .zero, configuration: config)
-        webView.setValue(false, forKey: "drawsBackground") // Transparent
-        return webView
-    }
-    
-    func updateNSView(_ webView: WKWebView, context: Context) {
-        // Prepare HTML for Light/Paper Mode
-        let displayMode = isBlock ? "true" : "false"
-        let fontSize = isBlock ? "1.2em" : "1.0em"
-        
-        let html = """
-        <!DOCTYPE html>
-        <html>
-        <head>
-            <meta charset="utf-8">
-            <meta name="viewport" content="width=device-width, initial-scale=1">
-            <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.css">
-            <script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.js"></script>
-            <script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/contrib/auto-render.min.js"></script>
-            <style>
-                body {
-                    margin: 0;
-                    padding: 4px;
-                    background: transparent;
-                    color: black;
-                    font-family: 'Times New Roman', serif;
-                    display: flex;
-                    justify-content: \(isBlock ? "center" : "flex-start");
-                    align-items: center;
-                    height: 100vh;
-                }
-                .katex { font-size: \(fontSize); }
-            </style>
-        </head>
-        <body>
-            <div id="content"></div>
-            <script>
-                document.addEventListener("DOMContentLoaded", function() {
-                    katex.render(String.raw`\(latex)`, document.getElementById('content'), {
-                        throwOnError: false,
-                        displayMode: \(displayMode)
-                    });
-                });
-            </script>
-        </body>
-        </html>
-        """
-        webView.loadHTMLString(html, baseURL: nil)
+        LaTeXBlockView(expression: expression, isBlock: isBlock)
+            .colorScheme(.light)
+            .padding(.vertical, 4)
     }
 }
 
@@ -7556,6 +7555,7 @@ struct RichMessageRow: View, Equatable {
     @State private var editedText: String = ""
     @State private var isCopied: Bool = false
     @State private var isUserMessageExpanded: Bool = false
+    @State private var isHoveringMessage: Bool = false
     
     static func == (lhs: RichMessageRow, rhs: RichMessageRow) -> Bool {
         return lhs.message.id == rhs.message.id &&
@@ -7570,28 +7570,30 @@ struct RichMessageRow: View, Equatable {
     
     var body: some View {
         if isUser {
-            // User bubbles should use their natural content width.  A short
-            // sentence must never become a full-row rectangle; ViewThatFits
-            // keeps that intrinsic shape and only switches to wrapping when a
-            // longer message reaches the readable-width cap.
+            // AGY-style editorial prompt card: clean full-width rounded container
+            // with hover-only action toolbar so the canvas stays minimal.
             HStack(spacing: 0) {
                 Spacer(minLength: 0)
-                VStack(alignment: .trailing, spacing: 4) {
+                VStack(alignment: .leading, spacing: 4) {
                     if isEditing {
                         userInlineEditCard
                     } else {
-                        HStack(spacing: 0) {
-                            Spacer(minLength: 48)
-                            userBubbleText
-                                .frame(maxWidth: 600, alignment: .trailing)
-                                .contextMenu {
-                                    userMessageContextMenu
-                                }
-                        }
+                        userBubbleText
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                            .contextMenu {
+                                userMessageContextMenu
+                            }
                         userActionToolbar
+                            .opacity((isHoveringMessage || isCopied) ? 0.92 : 0)
+                            .allowsHitTesting(isHoveringMessage || isCopied)
                     }
                 }
-                .frame(maxWidth: 880, alignment: .trailing)
+                .frame(maxWidth: 880, alignment: .leading)
+                .onHover { hovering in
+                    if isHoveringMessage != hovering {
+                        isHoveringMessage = hovering
+                    }
+                }
                 Spacer(minLength: 0)
             }
             .padding(.horizontal, 12)
@@ -7602,16 +7604,24 @@ struct RichMessageRow: View, Equatable {
             // but never turns a wide editor into one long line of prose.
             HStack(spacing: 0) {
                 Spacer(minLength: 0)
-                VStack(alignment: .leading, spacing: 8) {
+                VStack(alignment: .leading, spacing: 6) {
                     aiCellContent
+                        .textSelection(.enabled)
                         .contextMenu {
                             assistantMessageContextMenu
                         }
                     if !isStreaming && (!message.content.isEmpty || !message.toolResults.isEmpty) {
                         assistantActionToolbar
+                            .opacity((isHoveringMessage || isCopied) ? 0.92 : 0)
+                            .allowsHitTesting(isHoveringMessage || isCopied)
                     }
                 }
                 .frame(maxWidth: 880, alignment: .leading)
+                .onHover { hovering in
+                    if isHoveringMessage != hovering {
+                        isHoveringMessage = hovering
+                    }
+                }
                 Spacer(minLength: 0)
             }
             .padding(.horizontal, 12)
@@ -7647,7 +7657,7 @@ struct RichMessageRow: View, Equatable {
         VStack(alignment: .leading, spacing: 8) {
             Text(isLongUserMessage && !isUserMessageExpanded ? collapsedUserPreviewText : message.content)
                 .font(Font.custom(appState.agentFontName, size: appState.agentFontSize))
-                .foregroundColor(.primary)
+                .foregroundColor(.primary.opacity(0.92))
                 .multilineTextAlignment(.leading)
                 .lineLimit(isLongUserMessage && !isUserMessageExpanded ? 14 : nil)
                 .textSelection(.enabled)
@@ -7675,9 +7685,15 @@ struct RichMessageRow: View, Equatable {
                 .buttonStyle(.plain)
             }
         }
-        .padding(12)
-        .background(Color.primary.opacity(0.09))
-        .cornerRadius(8, corners: [.topLeft, .topRight, .bottomLeft])
+        .padding(.horizontal, 14)
+        .padding(.vertical, 11)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(Color.primary.opacity(0.05))
+        .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
+        .overlay(
+            RoundedRectangle(cornerRadius: 10, style: .continuous)
+                .stroke(Color.primary.opacity(0.08), lineWidth: 0.5)
+        )
     }
     
     private var userInlineEditCard: some View {
@@ -7985,7 +8001,7 @@ struct RichMessageRow: View, Equatable {
         let isLatestStreaming = isStreaming || (AgentService.shared.isLoading && AgentService.shared.messages.last?.id == message.id)
         return VStack(alignment: .leading, spacing: 12) {
             ForEach(preToolBlocks) { block in
-                aiBlockView(block)
+                aiBlockView(block, isLatestStreaming: isLatestStreaming)
             }
             
             if !message.toolResults.isEmpty {
@@ -7993,7 +8009,7 @@ struct RichMessageRow: View, Equatable {
             }
             
             ForEach(postToolBlocks) { block in
-                aiBlockView(block)
+                aiBlockView(block, isLatestStreaming: isLatestStreaming)
             }
             
             // Immediate active progress indicator while agent is connecting/thinking and no content yet
@@ -8069,10 +8085,14 @@ struct RichMessageRow: View, Equatable {
     }
     
     @ViewBuilder
-    private func aiBlockView(_ block: MessageBlock) -> some View {
+    private func aiBlockView(_ block: MessageBlock, isLatestStreaming: Bool) -> some View {
         switch block {
         case .thought(let content, let duration):
-            AntigravityThoughtBlockView(content: content, durationSeconds: duration)
+            AntigravityThoughtBlockView(
+                content: content,
+                durationSeconds: duration,
+                isActivelyStreaming: isLatestStreaming && duration == nil
+            )
         case .text(let text):
             if !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
                 MarkdownTextView(text: text)
@@ -8132,12 +8152,16 @@ private struct PendingChangeCard: View, Equatable {
     var onApply: ((PendingChangeModel) -> Void)?
     var onReject: ((PendingChangeModel) -> Void)?
     var onPartialApply: ((PendingChangeModel, String) -> Void)?  // P4: partial hunk apply
-    @State private var showDiff = true  // Auto-expand diff
+    @State private var showDiffOverride: Bool? = nil
     @State private var showAllDiffLines = false
     @State private var showHunkReview = false  // P4: hunk-level review mode
     @State private var hunkDiffResult = DiffResult(oldContent: "", newContent: "", hunks: [], additions: 0, deletions: 0)
     
     private let initialVisibleLineLimit = 64
+    
+    private var showDiff: Bool {
+        showDiffOverride ?? (change.status == .pending)
+    }
     
     static func == (lhs: PendingChangeCard, rhs: PendingChangeCard) -> Bool {
         return lhs.change == rhs.change
@@ -8187,49 +8211,64 @@ private struct PendingChangeCard: View, Equatable {
     
     private var changeCardHeader: some View {
         HStack(spacing: 8) {
-            Image(systemName: change.status == .accepted ? "checkmark.circle.fill" : change.status == .rejected ? "xmark.circle.fill" : "doc.text.fill")
-                .foregroundColor(change.status == .accepted ? .green : change.status == .rejected ? .red : .blue)
-                .font(.system(size: 13))
-            
-            VStack(alignment: .leading, spacing: 1) {
-                HStack(spacing: 6) {
-                    Text(URL(fileURLWithPath: change.filePath).lastPathComponent)
-                        .font(.system(size: 11, weight: .semibold, design: .monospaced))
-                        .foregroundColor(.primary)
+            Button(action: {
+                let targetURL = URL(fileURLWithPath: change.filePath)
+                if FileManager.default.fileExists(atPath: targetURL.path) {
+                    PreviewDockService.shared.openFile(url: targetURL, makeActive: true)
+                } else {
+                    PreviewDockService.shared.openFileFromReference(change.filePath)
+                }
+            }) {
+                HStack(spacing: 8) {
+                    ProgrammingLanguageIconView(
+                        fileName: URL(fileURLWithPath: change.filePath).lastPathComponent,
+                        size: 16
+                    )
                     
-                    // Additions / Deletions pills
-                    HStack(spacing: 4) {
-                        if change.additions > 0 {
-                            Text("+\(change.additions)")
-                                .font(.system(size: 9, weight: .semibold, design: .monospaced))
-                                .foregroundColor(.green)
-                                .padding(.horizontal, 4)
-                                .padding(.vertical, 1)
-                                .background(Color.green.opacity(0.12))
-                                .cornerRadius(3)
+                    VStack(alignment: .leading, spacing: 1) {
+                        HStack(spacing: 6) {
+                            Text(URL(fileURLWithPath: change.filePath).lastPathComponent)
+                                .font(.system(size: 11, weight: .semibold, design: .monospaced))
+                                .foregroundColor(.primary)
+                            
+                            // Additions / Deletions pills
+                            HStack(spacing: 4) {
+                                if change.additions > 0 {
+                                    Text("+\(change.additions)")
+                                        .font(.system(size: 9, weight: .semibold, design: .monospaced))
+                                        .foregroundColor(.green)
+                                        .padding(.horizontal, 4)
+                                        .padding(.vertical, 1)
+                                        .background(Color.green.opacity(0.12))
+                                        .cornerRadius(3)
+                                }
+                                if change.deletions > 0 {
+                                    Text("-\(change.deletions)")
+                                        .font(.system(size: 9, weight: .semibold, design: .monospaced))
+                                        .foregroundColor(.red)
+                                        .padding(.horizontal, 4)
+                                        .padding(.vertical, 1)
+                                        .background(Color.red.opacity(0.12))
+                                        .cornerRadius(3)
+                                }
+                            }
                         }
-                        if change.deletions > 0 {
-                            Text("-\(change.deletions)")
-                                .font(.system(size: 9, weight: .semibold, design: .monospaced))
-                                .foregroundColor(.red)
-                                .padding(.horizontal, 4)
-                                .padding(.vertical, 1)
-                                .background(Color.red.opacity(0.12))
-                                .cornerRadius(3)
-                        }
+                        
+                        Text(change.description)
+                            .font(.system(size: 9))
+                            .foregroundColor(.secondary)
+                            .lineLimit(1)
                     }
                 }
-                
-                Text(change.description)
-                    .font(.system(size: 9))
-                    .foregroundColor(.secondary)
-                    .lineLimit(1)
+                .contentShape(Rectangle())
             }
+            .buttonStyle(.plain)
+            .help("Click to preview file in Right Split Pane")
             
             Spacer()
             
             // Toggle diff
-            Button(action: { withAnimation(.easeInOut(duration: 0.15)) { showDiff.toggle() } }) {
+            Button(action: { withAnimation(.easeInOut(duration: 0.15)) { showDiffOverride = !showDiff } }) {
                 HStack(spacing: 3) {
                     Text(showDiff ? "Hide Diff" : "Show Diff")
                         .font(.system(size: 10, weight: .medium))
@@ -8278,7 +8317,10 @@ private struct PendingChangeCard: View, Equatable {
     
     private var changeSummaryRow: some View {
         HStack(spacing: 6) {
-            Image(systemName: "doc.text").font(.system(size: 10)).foregroundColor(.secondary)
+            ProgrammingLanguageIconView(
+                fileName: URL(fileURLWithPath: change.filePath).lastPathComponent,
+                size: 12
+            )
             Text(change.description).font(.system(size: 10)).foregroundColor(.secondary)
             Spacer()
         }
@@ -8981,6 +9023,11 @@ final class MarkdownAttrCache {
     private static var cache: [String: AttributedString] = [:]
     private static let lock = NSLock()
     
+    private static let inlineCodeFileRegex = try? NSRegularExpression(
+        pattern: #"(?<!\[)`([^`\n]+?\.(?:swift|ts|tsx|js|jsx|svelte|vue|astro|py|rs|go|java|kt|kts|c|cpp|cc|h|hpp|m|mm|html|css|scss|json|yaml|yml|toml|sql|sh|md|ar|dart|rb|php|cs|proto|graphql)(?:#L\d+(?:-L?\d+)?)?)`(?!\])"#,
+        options: [.caseInsensitive]
+    )
+
     private static func sanitizeStreamingMarkdown(_ text: String) -> String {
         var working = text
         // During streaming, if the text ends with an unclosed markdown link `[label](url_fragment`,
@@ -8990,6 +9037,19 @@ final class MarkdownAttrCache {
            !working[midParen.upperBound...].contains(")") {
             let label = working[working.index(after: lastOpenBracket)..<midParen.lowerBound]
             working.replaceSubrange(lastOpenBracket..<working.endIndex, with: "`\(label)`")
+        }
+        // Auto-convert standalone backticked code file names (e.g. `+page.svelte`, `AIUsageTracker.swift#L10-20`)
+        // into clickable `microcode-file://` links so clicking them opens the AGY-style Right Code Preview Split Pane.
+        if let regex = inlineCodeFileRegex {
+            let ns = working as NSString
+            let matches = regex.matches(in: working, options: [], range: NSRange(location: 0, length: ns.length))
+            for match in matches.reversed() where match.numberOfRanges >= 2 {
+                let rawFile = ns.substring(with: match.range(at: 1))
+                if let encoded = rawFile.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed.union(.init(charactersIn: "#-:"))) {
+                    let replacement = "[`\(rawFile)`](microcode-file://\(encoded))"
+                    working = (working as NSString).replacingCharacters(in: match.range, with: replacement)
+                }
+            }
         }
         return working
     }
@@ -9006,7 +9066,7 @@ final class MarkdownAttrCache {
         let parsed = (try? AttributedString(markdown: sanitized, options: .init(interpretedSyntax: .inlineOnlyPreservingWhitespace))) ?? AttributedString(sanitized)
         
         lock.lock()
-        if cache.count > 64 { cache.removeAll(keepingCapacity: false) }
+        if cache.count > 1024 { cache.removeAll(keepingCapacity: true) }
         cache[text] = parsed
         lock.unlock()
         return parsed
@@ -9040,11 +9100,13 @@ struct MarkdownTextView: View, Equatable {
             .frame(maxWidth: .infinity, alignment: .leading)
             .foregroundColor(.primary)
             .lineSpacing(5)
-            .textSelection(.enabled)
             .environment(\.openURL, OpenURLAction { url in
-                if url.isFileURL || url.scheme == "file" {
+                if url.isFileURL || url.scheme == "file" || url.scheme == "microcode-file" {
+                    if PreviewDockService.shared.openFileFromReference(url.absoluteString, workspacePath: appState.workspaceFolder?.path) {
+                        return .handled
+                    }
                     let cleanPath = url.path.isEmpty
-                        ? url.absoluteString.replacingOccurrences(of: "file://", with: "").removingPercentEncoding ?? ""
+                        ? url.absoluteString.replacingOccurrences(of: "file://", with: "").replacingOccurrences(of: "microcode-file://", with: "").removingPercentEncoding ?? ""
                         : url.path
                     if !cleanPath.isEmpty {
                         NotificationCenter.default.post(
@@ -9070,7 +9132,6 @@ struct HeadingView: View {
             .font(.system(size: fontSize, weight: .bold))
             .foregroundColor(.primary)
             .tint(.accentColor)
-            .textSelection(.enabled)
             .environment(\.openURL, OpenURLAction { url in
                 if url.scheme == "file" {
                     let path = url.path
@@ -9213,7 +9274,6 @@ struct BlockquoteView: View {
                 .foregroundColor(.secondary)
                 .tint(.accentColor)
                 .italic()
-                .textSelection(.enabled)
                 .environment(\.openURL, OpenURLAction { url in
                     if url.scheme == "file" {
                         let path = url.path
@@ -9234,19 +9294,79 @@ struct BlockquoteView: View {
     }
 }
 
-/// Renders LaTeX equation via MathJax WebView
+/// Renders LaTeX equation natively in SwiftUI without spawning heavy WKWebView child processes (~50MB RAM each)
 struct LaTeXBlockView: View {
     let expression: String
     let isBlock: Bool
+    @State private var copied = false
+    
+    private var formattedMath: String {
+        Self.prettyFormatLaTeX(expression)
+    }
     
     var body: some View {
-        VStack(alignment: isBlock ? .center : .leading, spacing: 0) {
-            LaTeXWebView(expression: expression, isBlock: isBlock)
-                .frame(height: isBlock ? 120 : 50)
-                .frame(maxWidth: .infinity)
+        HStack(alignment: .center, spacing: 10) {
+            if isBlock { Spacer(minLength: 8) }
+            Text(formattedMath)
+                .font(.system(size: isBlock ? 15 : 13.5, weight: .regular, design: .serif))
+                .foregroundColor(.primary.opacity(0.92))
+                .multilineTextAlignment(isBlock ? .center : .leading)
+                .textSelection(.enabled)
+                .padding(.vertical, isBlock ? 12 : 6)
+                .padding(.horizontal, 14)
+            if isBlock { Spacer(minLength: 8) }
         }
-        .background(Color(white: 0.12))
+        .frame(maxWidth: .infinity)
+        .background(Color.primary.opacity(0.04))
+        .overlay(
+            RoundedRectangle(cornerRadius: 8)
+                .stroke(Color.primary.opacity(0.1), lineWidth: 1)
+        )
+        .overlay(alignment: .topTrailing) {
+            Button(action: {
+                NSPasteboard.general.clearContents()
+                NSPasteboard.general.setString(expression, forType: .string)
+                copied = true
+                DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) { copied = false }
+            }) {
+                Image(systemName: copied ? "checkmark" : "doc.on.doc")
+                    .font(.system(size: 10, weight: .medium))
+                    .foregroundColor(.secondary)
+                    .padding(6)
+            }
+            .buttonStyle(.plain)
+            .help("Copy LaTeX")
+        }
         .cornerRadius(8)
+    }
+    
+    static func prettyFormatLaTeX(_ raw: String) -> String {
+        var s = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+        let replacements: [(String, String)] = [
+            ("\\alpha", "α"), ("\\beta", "β"), ("\\gamma", "γ"), ("\\delta", "δ"),
+            ("\\epsilon", "ε"), ("\\varepsilon", "ε"), ("\\zeta", "ζ"), ("\\eta", "η"),
+            ("\\theta", "θ"), ("\\iota", "ι"), ("\\kappa", "κ"), ("\\lambda", "λ"),
+            ("\\mu", "μ"), ("\\nu", "ν"), ("\\xi", "ξ"), ("\\pi", "π"),
+            ("\\rho", "ρ"), ("\\sigma", "σ"), ("\\tau", "τ"), ("\\phi", "φ"),
+            ("\\varphi", "φ"), ("\\chi", "χ"), ("\\psi", "ψ"), ("\\omega", "ω"),
+            ("\\Gamma", "Γ"), ("\\Delta", "Δ"), ("\\Theta", "Θ"), ("\\Lambda", "Λ"),
+            ("\\Xi", "Ξ"), ("\\Pi", "Π"), ("\\Sigma", "Σ"), ("\\Phi", "Φ"),
+            ("\\Psi", "Ψ"), ("\\Omega", "Ω"),
+            ("\\sum", "∑"), ("\\prod", "∏"), ("\\int", "∫"), ("\\partial", "∂"),
+            ("\\nabla", "∇"), ("\\infty", "∞"), ("\\approx", "≈"), ("\\neq", "≠"),
+            ("\\ne", "≠"), ("\\leq", "≤"), ("\\le", "≤"), ("\\geq", "≥"), ("\\ge", "≥"),
+            ("\\times", "×"), ("\\cdot", "·"), ("\\pm", "±"), ("\\mp", "∓"),
+            ("\\rightarrow", "→"), ("\\to", "→"), ("\\leftarrow", "←"),
+            ("\\Rightarrow", "⇒"), ("\\Leftarrow", "⇐"), ("\\leftrightarrow", "↔"),
+            ("\\Leftrightarrow", "⇔"), ("\\forall", "∀"), ("\\exists", "∃"),
+            ("\\in", "∈"), ("\\notin", "∉"), ("\\subset", "⊂"), ("\\subseteq", "⊆"),
+            ("\\cup", "∪"), ("\\cap", "∩"), ("\\emptyset", "∅"), ("\\sqrt", "√"),
+            ("\\left", ""), ("\\right", ""), ("\\,", " "), ("\\;", " "), ("\\quad", "  ")
+        ]
+        for (k, v) in replacements {
+            s = s.replacingOccurrences(of: k, with: v)
+        }
+        return s
     }
 }
 
@@ -9333,93 +9453,29 @@ struct TableBlockView: View {
     }
 }
 
-// MARK: - LaTeX WebView (MathJax)
+// MARK: - HTML WebView
 
-struct LaTeXWebView: NSViewRepresentable {
-    let expression: String
-    let isBlock: Bool
+struct HTMLWebView: NSViewRepresentable {
+    let content: String
+    
+    final class Coordinator {
+        var lastContent: String?
+    }
+    
+    func makeCoordinator() -> Coordinator {
+        Coordinator()
+    }
     
     func makeNSView(context: Context) -> WKWebView {
-        let config = WKWebViewConfiguration()
-        config.preferences.setValue(true, forKey: "allowFileAccessFromFileURLs")
+        let config = WebEngine.shared.createConfiguration(enableJavaScript: false)
         let webView = WKWebView(frame: .zero, configuration: config)
         webView.setValue(false, forKey: "drawsBackground")
         return webView
     }
     
     func updateNSView(_ webView: WKWebView, context: Context) {
-        // Escape backslashes for JavaScript
-        let escapedExpr = expression
-            .replacingOccurrences(of: "\\", with: "\\\\")
-            .replacingOccurrences(of: "\"", with: "\\\"")
-            .replacingOccurrences(of: "\n", with: " ")
-        
-        let html = """
-        <!DOCTYPE html>
-        <html>
-        <head>
-            <meta charset="UTF-8">
-            <script>
-                MathJax = {
-                    tex: {
-                        inlineMath: [['$', '$'], ['\\\\(', '\\\\)']],
-                        displayMath: [['$$', '$$'], ['\\\\[', '\\\\]']],
-                        processEscapes: true
-                    },
-                    svg: {
-                        fontCache: 'global'
-                    },
-                    startup: {
-                        ready: function() {
-                            MathJax.startup.defaultReady();
-                            MathJax.startup.promise.then(function() {
-                                document.body.style.opacity = '1';
-                            });
-                        }
-                    }
-                };
-            </script>
-            <script id="MathJax-script" async src="https://cdn.jsdelivr.net/npm/mathjax@3/es5/tex-svg.js"></script>
-            <style>
-                body {
-                    margin: 0;
-                    padding: \(isBlock ? "16px" : "8px");
-                    background: #1e1e1e;
-                    display: flex;
-                    align-items: center;
-                    justify-content: \(isBlock ? "center" : "flex-start");
-                    min-height: 100%;
-                    opacity: 0;
-                    transition: opacity 0.2s ease;
-                }
-                mjx-container {
-                    color: #e0e0e0 !important;
-                }
-                mjx-container svg {
-                    fill: #e0e0e0 !important;
-                }
-            </style>
-        </head>
-        <body>
-            \(isBlock ? "$$\(expression)$$" : "$\(expression)$")
-        </body>
-        </html>
-        """
-        webView.loadHTMLString(html, baseURL: nil)
-    }
-}
-
-// MARK: - HTML WebView
-
-struct HTMLWebView: NSViewRepresentable {
-    let content: String
-    
-    func makeNSView(context: Context) -> WKWebView {
-        let webView = WKWebView()
-        return webView
-    }
-    
-    func updateNSView(_ webView: WKWebView, context: Context) {
+        guard context.coordinator.lastContent != content else { return }
+        context.coordinator.lastContent = content
         let html = """
         <!DOCTYPE html>
         <html>
@@ -9811,8 +9867,8 @@ fileprivate final class AgentCodeAndDiffCache {
         )
         
         lock.lock()
-        if diffCache.count > 32 {
-            diffCache.removeAll(keepingCapacity: false)
+        if diffCache.count > 256 {
+            diffCache.removeAll(keepingCapacity: true)
         }
         diffCache[key] = parsed
         lock.unlock()
@@ -9864,9 +9920,11 @@ struct NativeCodeBlockView: View, Equatable {
     private func agentHeaderView(parsed: AgentParsedDiffBlock) -> some View {
         let isLong = parsed.totalLines > collapsedLineLimit || code.count > 1_600
         return HStack(spacing: 8) {
-            Image(systemName: parsed.isDiff ? "arrow.left.arrow.right.square.fill" : "chevron.left.forwardslash.chevron.right")
-                .font(.system(size: 11, weight: .semibold))
-                .foregroundColor(parsed.isDiff ? .accentColor : .secondary)
+            ProgrammingLanguageIconView(
+                fileName: parsed.title,
+                languageHint: language,
+                size: 15
+            )
             
             Text(parsed.title)
                 .font(.system(size: 11.5, weight: .semibold, design: .monospaced))
@@ -10231,76 +10289,44 @@ struct ChatListRow: View {
 struct AntigravityThoughtBlockView: View {
     let content: String
     let durationSeconds: Int?
+    var isActivelyStreaming: Bool = false
     
-    @State private var isExpanded: Bool = true
+    @State private var isExpanded: Bool = false
     @State private var userToggled: Bool = false
-    @State private var isPulsing: Bool = false
     @State private var liveElapsedSeconds: Int = 1
     @State private var liveTimer: Timer? = nil
     
     private var isStreaming: Bool {
-        durationSeconds == nil
+        isActivelyStreaming && durationSeconds == nil
     }
     
     private var durationText: String {
         if isStreaming {
-            return "Thinking in real-time • \(liveElapsedSeconds)s"
+            return "Thinking for \(liveElapsedSeconds)s"
         }
         if let d = durationSeconds, d > 0 {
-            return isExpanded ? "Thinking for \(d)s" : "Thought for \(d)s"
+            return "Thought for \(d)s"
         }
-        return isExpanded ? "Thinking" : "Thought process"
+        return "Thought for \(max(1, liveElapsedSeconds))s"
     }
     
     var body: some View {
         VStack(alignment: .leading, spacing: 6) {
-            // Collapsible Header
+            // AGY-Style Minimalist Collapsible Thought Header ("Thought for 5s ›")
             Button(action: {
                 userToggled = true
-                withAnimation(.easeInOut(duration: 0.18)) {
+                withAnimation(.easeInOut(duration: 0.16)) {
                     isExpanded.toggle()
                 }
             }) {
-                HStack(spacing: 6) {
-                    if isStreaming {
-                        // Pulsing sparkle icon during live streaming
-                        Image(systemName: "sparkles")
-                            .font(.system(size: 11, weight: .semibold))
-                            .foregroundColor(.accentColor)
-                            .opacity(isPulsing ? 1.0 : 0.4)
-                            .animation(.easeInOut(duration: 0.8).repeatForever(autoreverses: true), value: isPulsing)
-                    } else {
-                        Image(systemName: "brain.head.profile")
-                            .font(.system(size: 11, weight: .regular))
-                            .foregroundColor(.secondary)
-                    }
-                    
+                HStack(spacing: 5) {
                     Text(durationText)
-                        .font(.system(size: 11.5, weight: isStreaming ? .medium : .regular))
-                        .foregroundColor(isStreaming ? .primary : .secondary)
-                    
-                    if isStreaming {
-                        // LIVE badge
-                        HStack(spacing: 4) {
-                            Circle()
-                                .fill(Color.accentColor)
-                                .frame(width: 5, height: 5)
-                                .opacity(isPulsing ? 1.0 : 0.3)
-                                .animation(.easeInOut(duration: 0.6).repeatForever(autoreverses: true), value: isPulsing)
-                            
-                            Text("LIVE")
-                                .font(.system(size: 8.5, weight: .bold))
-                                .foregroundColor(.accentColor)
-                        }
-                        .padding(.horizontal, 5)
-                        .padding(.vertical, 2)
-                        .background(Color.accentColor.opacity(0.12))
-                        .clipShape(Capsule())
-                    }
+                        .font(.system(size: 12.5, weight: .regular))
+                        .foregroundColor(.secondary.opacity(isStreaming ? 0.88 : 0.78))
                     
                     Image(systemName: isExpanded ? "chevron.down" : "chevron.right")
                         .font(.system(size: 8.5, weight: .semibold))
-                        .foregroundColor(.secondary.opacity(0.7))
+                        .foregroundColor(.secondary.opacity(0.6))
                     
                     Spacer()
                 }
@@ -10313,14 +10339,10 @@ struct AntigravityThoughtBlockView: View {
                 VStack(alignment: .leading, spacing: 8) {
                     let cleanContent = content.trimmingCharacters(in: .whitespacesAndNewlines)
                     if cleanContent.isEmpty && isStreaming {
-                        HStack(spacing: 6) {
-                            ProgressView()
-                                .controlSize(.mini)
-                            Text("Formulating reasoning steps…")
-                                .font(.system(size: 11, design: .monospaced))
-                                .foregroundColor(.secondary)
-                        }
-                        .padding(.vertical, 4)
+                        Text("Formulating reasoning steps…")
+                            .font(.system(size: 12))
+                            .foregroundColor(.secondary.opacity(0.75))
+                            .padding(.vertical, 2)
                     } else {
                         let visibleContent: String = {
                             guard isStreaming, cleanContent.count > 2200 else { return cleanContent }
@@ -10335,50 +10357,51 @@ struct AntigravityThoughtBlockView: View {
                             VStack(alignment: .leading, spacing: 4) {
                                 if let title = sec.title, !title.isEmpty {
                                     Text(title)
-                                        .font(.system(size: 11.5, weight: .semibold))
-                                        .foregroundColor(.primary.opacity(0.9))
+                                        .font(.system(size: 12, weight: .semibold))
+                                        .foregroundColor(.primary.opacity(0.88))
                                 }
                                 
                                 Text(sec.body)
-                                    .font(.system(size: 11, design: .default))
-                                    .foregroundColor(.secondary.opacity(0.85))
+                                    .font(.system(size: 12, design: .default))
+                                    .foregroundColor(.secondary.opacity(0.82))
                                     .lineSpacing(3)
                                     .fixedSize(horizontal: false, vertical: true)
                             }
                         }
                     }
                 }
-                .padding(.horizontal, 10)
-                .padding(.vertical, 8)
-                .background(Color.white.opacity(0.04))
-                .clipShape(RoundedRectangle(cornerRadius: 6, style: .continuous))
+                .padding(.leading, 12)
+                .padding(.vertical, 4)
                 .overlay(
                     HStack {
                         Rectangle()
-                            .fill(Color.accentColor.opacity(0.35))
-                            .frame(width: 2.5)
+                            .fill(Color.primary.opacity(0.14))
+                            .frame(width: 1.5)
                         Spacer()
                     }
-                    .clipShape(RoundedRectangle(cornerRadius: 6, style: .continuous))
                 )
                 .transition(.opacity)
             }
         }
-        .padding(.vertical, 4)
+        .padding(.vertical, 2)
         .onAppear {
             if isStreaming {
-                isPulsing = true
-                if !userToggled { isExpanded = true }
                 startLiveTimer()
             } else {
                 if !userToggled { isExpanded = false }
             }
         }
-        .onChange(of: durationSeconds) { newDuration in
-            if newDuration != nil {
+        .onChange(of: isStreaming) { streaming in
+            if streaming {
+                startLiveTimer()
+            } else {
                 liveTimer?.invalidate()
                 liveTimer = nil
-                isPulsing = false
+                if !userToggled {
+                    withAnimation(.easeInOut(duration: 0.16)) {
+                        isExpanded = false
+                    }
+                }
             }
         }
         .onDisappear {
@@ -10551,149 +10574,168 @@ struct AgentThinkingView: View {
     }
 }
 
-// MARK: - Antigravity / Codex-Style Agent Action Timeline Card
+// MARK: - Antigravity (AGY) Minimalist Agent Action Timeline
 
 struct ToolExecutionStepsView: View {
     let results: [ToolResultModel]
     var isStreaming: Bool = false
-    @State private var isExpanded: Bool = false
-    @State private var userToggled: Bool = false
+    @State private var isExpandedOverride: Bool? = nil
     
-    private var readCount: Int {
-        results.filter {
-            ["file_read", "read_file", "view_file", "multi_file_read", "list_directory_tree", "list_dir", "grep_search", "file_search", "find_symbol"].contains($0.toolName)
-        }.count
-    }
-    
-    private var editCount: Int {
-        results.filter {
-            ["file_write", "replace_in_file", "multi_replace_in_file", "write_to_file", "patch_file", "apply_patch", "create_directory", "rename_file"].contains($0.toolName)
-        }.count
-    }
-    
-    private var runCount: Int {
-        results.filter {
-            ["shell", "run_command", "preview_control", "device_runtime", "playground_run", "cell_run", "ardium_run", "ardium_compile", "ardium_test"].contains($0.toolName)
-        }.count
-    }
-    
-    private var failureCount: Int {
-        results.filter { !$0.success }.count
+    private var isExpanded: Bool {
+        isExpandedOverride ?? (isStreaming || results.count <= 4)
     }
     
     private var headerTitle: String {
-        if isStreaming {
-            return "Running \(results.count) action\(results.count == 1 ? "" : "s")…"
+        if let last = results.last {
+            return ToolActivityItemRow.summaryHeadline(for: last)
         }
-        return "Completed \(results.count) action\(results.count == 1 ? "" : "s")"
+        return isStreaming ? "Working…" : "Completed \(results.count) step\(results.count == 1 ? "" : "s")"
     }
     
     var body: some View {
-        VStack(alignment: .leading, spacing: 0) {
+        VStack(alignment: .leading, spacing: 8) {
+            // AGY-Style Clean Borderless Collapsible Header
             Button(action: {
-                withAnimation(.easeInOut(duration: 0.18)) {
-                    userToggled = true
-                    isExpanded.toggle()
+                withAnimation(.easeInOut(duration: 0.16)) {
+                    isExpandedOverride = !isExpanded
                 }
             }) {
-                HStack(spacing: 8) {
-                    if isStreaming {
-                        ProgressView()
-                            .controlSize(.mini)
-                    } else if failureCount == 0 {
-                        Image(systemName: "checkmark.circle.fill")
-                            .font(.system(size: 11.5, weight: .semibold))
-                            .foregroundColor(.green)
-                    } else {
-                        Image(systemName: "exclamationmark.circle.fill")
-                            .font(.system(size: 11.5, weight: .semibold))
-                            .foregroundColor(.orange)
-                    }
-                    
+                HStack(spacing: 5) {
                     Text(headerTitle)
-                        .font(.system(size: 11.5, weight: .semibold))
-                        .foregroundColor(.primary.opacity(0.9))
-                    
-                    HStack(spacing: 4) {
-                        if readCount > 0 {
-                            summaryPill(icon: "doc.text", text: "\(readCount) read", color: .blue)
-                        }
-                        if editCount > 0 {
-                            summaryPill(icon: "pencil", text: "\(editCount) edited", color: .orange)
-                        }
-                        if runCount > 0 {
-                            summaryPill(icon: "terminal", text: "\(runCount) ran", color: .purple)
-                        }
-                    }
-                    
-                    Spacer()
+                        .font(.system(size: 12.5, weight: .regular))
+                        .foregroundColor(.secondary.opacity(0.88))
+                        .lineLimit(1)
+                        .truncationMode(.tail)
                     
                     Image(systemName: isExpanded ? "chevron.down" : "chevron.right")
-                        .font(.system(size: 9, weight: .semibold))
-                        .foregroundColor(.secondary.opacity(0.8))
+                        .font(.system(size: 8.5, weight: .semibold))
+                        .foregroundColor(.secondary.opacity(0.65))
+                    
+                    Spacer()
                 }
-                .padding(.horizontal, 10)
-                .padding(.vertical, 7)
                 .contentShape(Rectangle())
             }
             .buttonStyle(.plain)
             
             if isExpanded {
-                Divider()
-                    .opacity(0.4)
-                
-                VStack(alignment: .leading, spacing: 6) {
+                VStack(alignment: .leading, spacing: 9) {
                     ForEach(Array(results.enumerated()), id: \.element.toolCallId) { _, result in
                         ToolActivityItemRow(result: result)
                     }
+                    
+                    if isStreaming {
+                        Text("Working…")
+                            .font(.system(size: 12.5, weight: .regular))
+                            .foregroundColor(.secondary.opacity(0.75))
+                            .padding(.top, 2)
+                    }
                 }
-                .padding(.horizontal, 10)
-                .padding(.vertical, 8)
+                .padding(.leading, 12)
+                .padding(.vertical, 2)
             }
         }
-        .background(Color(nsColor: .controlBackgroundColor).opacity(0.45))
-        .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
-        .overlay(
-            RoundedRectangle(cornerRadius: 8, style: .continuous)
-                .stroke(Color.primary.opacity(0.09), lineWidth: 0.5)
-        )
-        .onAppear {
-            if isStreaming && !userToggled {
-                isExpanded = true
-            }
-        }
-        .onChange(of: isStreaming) { streaming in
-            if !userToggled {
-                withAnimation(.easeInOut(duration: 0.18)) {
-                    isExpanded = streaming
-                }
-            }
-        }
-    }
-    
-    @ViewBuilder
-    private func summaryPill(icon: String, text: String, color: Color) -> some View {
-        HStack(spacing: 3) {
-            Image(systemName: icon)
-                .font(.system(size: 8.5, weight: .semibold))
-            Text(text)
-                .font(.system(size: 9.5, weight: .medium))
-        }
-        .foregroundColor(color.opacity(0.9))
-        .padding(.horizontal, 6)
         .padding(.vertical, 2)
-        .background(color.opacity(0.1))
-        .clipShape(Capsule())
     }
 }
 
 struct ToolActivityItemRow: View {
     let result: ToolResultModel
     @State private var showDetails: Bool = false
+    @State private var isHoveringFilePill: Bool = false
     
-    private var displayItem: (icon: String, verb: String, detail: String, lineInfo: String?) {
+    enum RowStyle {
+        case fileAnalyze(fileName: String, lineRange: String?)
+        case fileEdit(verb: String, fileName: String, added: Int, removed: Int)
+        case commandRun(summary: String, exitNote: String?)
+        case generic(verb: String, detail: String)
+    }
+
+    @discardableResult
+    private func openTargetFileInPreviewDock(fallbackFileName: String? = nil, lineRangeString: String? = nil) -> Bool {
+        let params = AgentToolBox.normalizeToolParams(result.toolParams ?? [:])
+        var startLine = (params["StartLine"] as? Int) ?? (params["start_line"] as? Int) ?? (params["startLine"] as? Int)
+        var endLine = (params["EndLine"] as? Int) ?? (params["end_line"] as? Int) ?? (params["endLine"] as? Int)
+        if startLine == nil, let lr = lineRangeString, let parsed = PreviewDockService.parseLineFragment(lr) {
+            startLine = parsed.start
+            endLine = parsed.end
+        }
+
+        let explicitPath = (params["path"] as? String)
+            ?? (params["TargetFile"] as? String)
+            ?? (params["AbsolutePath"] as? String)
+            ?? (params["file_path"] as? String)
+            ?? (params["Path"] as? String)
+            ?? ((params["paths"] as? [String])?.first)
+
+        if let explicitPath, !explicitPath.isEmpty {
+            if PreviewDockService.shared.openFileFromReference(
+                explicitPath,
+                defaultStartLine: startLine,
+                defaultEndLine: endLine
+            ) {
+                return true
+            }
+        }
+
+        // Fallback: try extracting full path from output or resolving fallbackFileName in workspace
+        if let range = result.output.range(of: #"/[^\s\n:"']+\.[a-zA-Z0-9]+"#, options: .regularExpression) {
+            let candidate = String(result.output[range])
+            if PreviewDockService.shared.openFileFromReference(
+                candidate,
+                defaultStartLine: startLine,
+                defaultEndLine: endLine
+            ) {
+                return true
+            }
+        }
+
+        if let fallbackFileName, !fallbackFileName.isEmpty {
+            return PreviewDockService.shared.openFileFromReference(
+                fallbackFileName,
+                defaultStartLine: startLine,
+                defaultEndLine: endLine
+            )
+        }
+        return false
+    }
+    
+    static func summaryHeadline(for result: ToolResultModel) -> String {
+        let params = AgentToolBox.normalizeToolParams(result.toolParams ?? [:])
+        let targetFile = (params["path"] as? String) ?? (params["TargetFile"] as? String) ?? (params["AbsolutePath"] as? String) ?? (params["file_path"] as? String)
+        let fileName = targetFile.map {
+            URL(fileURLWithPath: $0).lastPathComponent.trimmingCharacters(in: CharacterSet(charactersIn: "{}\"'"))
+        }
+        
+        if let summary = (params["toolSummary"] as? String) ?? (params["description"] as? String), !summary.isEmpty {
+            return summary
+        }
+        switch result.toolName {
+        case "file_read", "read_file", "view_file", "multi_file_read":
+            return "Analyzed \(fileName ?? "source file")"
+        case "file_write", "replace_in_file", "multi_replace_in_file", "write_to_file", "patch_file", "apply_patch":
+            return "Edited \(fileName ?? "file")"
+        case "shell", "run_command":
+            if let cmd = (params["command"] as? String) ?? (params["CommandLine"] as? String) {
+                let firstLine = cmd.trimmingCharacters(in: .whitespacesAndNewlines).components(separatedBy: .newlines).first ?? cmd
+                return "Ran \(String(firstLine.prefix(64)))"
+            }
+            return "Ran terminal command"
+        case "grep_search", "file_search", "find_symbol":
+            let q = (params["query"] as? String) ?? (params["pattern"] as? String) ?? (params["symbol"] as? String) ?? "codebase"
+            return "Searched \(String(q.prefix(44)))"
+        case "list_directory_tree", "list_dir":
+            return "Listed \(fileName ?? "workspace")"
+        case "preview_control", "ide_browser":
+            let action = (params["action"] as? String) ?? "preview"
+            return "Previewed \(action)"
+        default:
+            return "Executed \(result.toolName.replacingOccurrences(of: "_", with: " "))"
+        }
+    }
+    
+    private var rowStyle: RowStyle {
         let output = result.output
-        let params = result.toolParams ?? [:]
+        let params = AgentToolBox.normalizeToolParams(result.toolParams ?? [:])
         var lineInfo: String? = nil
         
         if let startLine = params["StartLine"] as? Int, let endLine = params["EndLine"] as? Int {
@@ -10703,95 +10745,146 @@ struct ToolActivityItemRow: View {
         }
         
         let targetFile = (params["path"] as? String) ?? (params["TargetFile"] as? String) ?? (params["AbsolutePath"] as? String) ?? (params["file_path"] as? String)
-        let resolvedFileName = targetFile != nil ? URL(fileURLWithPath: targetFile!).lastPathComponent : extractFileName(output)
+        let resolvedFileName = (targetFile != nil ? URL(fileURLWithPath: targetFile!).lastPathComponent : extractFileName(output))?
+            .trimmingCharacters(in: CharacterSet(charactersIn: "{}\"'"))
         
         switch result.toolName {
         case "file_read", "read_file", "view_file":
             let name = resolvedFileName ?? "source file"
             let lines = lineInfo ?? (output.contains("\n") ? "#L1-\(min(350, output.components(separatedBy: .newlines).count))" : nil)
-            return ("doc.text", "Read", name, lines)
+            return .fileAnalyze(fileName: name, lineRange: lines)
             
         case "multi_file_read":
             if let paths = params["paths"] as? [String], let first = paths.first {
                 let name = URL(fileURLWithPath: first).lastPathComponent
                 let countStr = paths.count > 1 ? " (+\(paths.count - 1) more)" : ""
-                return ("doc.on.doc", "Read", "\(name)\(countStr)", nil)
+                return .fileAnalyze(fileName: "\(name)\(countStr)", lineRange: nil)
             }
-            return ("doc.on.doc", "Read", "project files", nil)
+            return .fileAnalyze(fileName: "project files", lineRange: nil)
             
         case "file_write", "replace_in_file", "multi_replace_in_file", "write_to_file", "patch_file", "apply_patch":
             let name = resolvedFileName ?? "file"
-            return ("pencil.line", "Edited", name, nil)
+            let stats = computeDiffLineStats(params: params, output: output)
+            return .fileEdit(verb: "Edited", fileName: name, added: stats.added, removed: stats.removed)
             
         case "shell", "run_command":
-            if let cmd = params["command"] as? String ?? params["CommandLine"] as? String {
-                let cleanCmd = cmd.trimmingCharacters(in: .whitespacesAndNewlines).components(separatedBy: .newlines).first ?? cmd
-                return ("terminal", "Ran", String(cleanCmd.prefix(56)), nil)
-            }
-            return ("terminal", "Ran", "terminal command", nil)
+            let summaryText: String = {
+                if let summary = (params["toolSummary"] as? String) ?? (params["description"] as? String), !summary.isEmpty {
+                    return summary.lowercased()
+                }
+                if let cmd = (params["command"] as? String) ?? (params["CommandLine"] as? String) {
+                    let cleanCmd = cmd.trimmingCharacters(in: .whitespacesAndNewlines).components(separatedBy: .newlines).first ?? cmd
+                    return String(cleanCmd.prefix(68))
+                }
+                return "terminal command"
+            }()
+            let exitNote: String? = result.success ? nil : "Exited with code 1"
+            return .commandRun(summary: summaryText, exitNote: exitNote)
             
-        case "preview_control":
+        case "preview_control", "ide_browser":
             let action = (params["action"] as? String) ?? "open"
-            let target = (params["url"] as? String) ?? (params["path"] as? String) ?? "Live Preview"
-            return ("globe", "Preview (\(action))", target, nil)
+            let target = (params["url"] as? String) ?? (params["path"] as? String) ?? "live preview"
+            return .generic(verb: "Previewed", detail: "\(target) (\(action))")
             
         case "device_runtime":
             let action = (params["action"] as? String) ?? "run"
-            return ("iphone", "Device", action, nil)
+            return .generic(verb: "Device", detail: action)
             
         case "grep_search", "file_search", "find_symbol":
             let query = (params["query"] as? String) ?? (params["pattern"] as? String) ?? (params["symbol"] as? String) ?? extractQuery(output)
-            return ("magnifyingglass", "Searched", "\"\(query.prefix(36))\"", nil)
+            return .generic(verb: "Searched", detail: String(query.prefix(48)))
             
         case "list_directory_tree", "list_dir":
             let dirName = resolvedFileName ?? "workspace"
-            return ("folder", "Listed", dirName, nil)
+            return .generic(verb: "Listed", detail: dirName)
             
         case "create_directory":
             let dirName = resolvedFileName ?? "directory"
-            return ("folder.badge.plus", "Created", dirName, nil)
+            return .generic(verb: "Created", detail: dirName)
             
         case "rename_file":
             let oldName = (params["old_path"] as? String).map { URL(fileURLWithPath: $0).lastPathComponent } ?? resolvedFileName ?? "file"
             let newName = (params["new_path"] as? String).map { URL(fileURLWithPath: $0).lastPathComponent }
             let detail = newName != nil ? "\(oldName) → \(newName!)" : oldName
-            return ("arrow.right.doc.on.clipboard", "Renamed", detail, nil)
+            return .generic(verb: "Renamed", detail: detail)
             
         case "delete_file":
             let name = resolvedFileName ?? "file"
-            return ("trash", "Deleted", name, nil)
+            return .generic(verb: "Deleted", detail: name)
             
         case "git_status":
-            return ("arrow.triangle.branch", "Inspected", "git status", nil)
+            return .generic(verb: "Inspected", detail: "git status")
             
         case "git_diff":
-            return ("arrow.triangle.branch", "Inspected", "git diff", nil)
-            
-        case "generate_image":
-            let promptText = (params["prompt"] as? String) ?? "AI Image"
-            return ("photo.artframe", "Generated Image", "\"\(promptText.prefix(40))\"", nil)
-            
-        case "generate_video":
-            let promptText = (params["prompt"] as? String) ?? "AI Video"
-            return ("film.stack", "Generated Video", "\"\(promptText.prefix(40))\"", nil)
-            
-        case "generate_music":
-            let promptText = (params["prompt"] as? String) ?? "AI Music Track"
-            return ("music.note.list", "Generated Music", "\"\(promptText.prefix(40))\"", nil)
+            return .generic(verb: "Inspected", detail: "git diff")
             
         default:
             let cleanName = result.toolName.replacingOccurrences(of: "_", with: " ")
-            return ("wrench.and.screwdriver", "Executed", cleanName, nil)
+            return .generic(verb: "Ran", detail: cleanName)
         }
     }
     
+    private func computeDiffLineStats(params: [String: Any], output: String) -> (added: Int, removed: Int) {
+        let oldStr = (params["old_str"] as? String)
+            ?? (params["Target"] as? String)
+            ?? (params["target"] as? String)
+            ?? (params["search"] as? String)
+            ?? (params["TargetContent"] as? String)
+        let newStr = (params["new_str"] as? String)
+            ?? (params["Replacement"] as? String)
+            ?? (params["replacement"] as? String)
+            ?? (params["replace"] as? String)
+            ?? (params["ReplacementContent"] as? String)
+        
+        if let oldStr = oldStr, let newStr = newStr {
+            let oldLines = oldStr.isEmpty ? [] : oldStr.components(separatedBy: .newlines)
+            let newLines = newStr.isEmpty ? [] : newStr.components(separatedBy: .newlines)
+            let oldSet = NSCountedSet(array: oldLines)
+            var added = 0
+            for line in newLines {
+                if oldSet.count(for: line) > 0 {
+                    oldSet.remove(line)
+                } else {
+                    added += 1
+                }
+            }
+            var removed = 0
+            for item in oldSet {
+                removed += oldSet.count(for: item)
+            }
+            if added == 0 && removed == 0 && oldStr != newStr {
+                return (max(1, newLines.count), max(1, oldLines.count))
+            }
+            return (added, removed)
+        }
+        
+        if let content = (params["content"] as? String) ?? (params["CodeContent"] as? String) ?? (params["Content"] as? String) {
+            let count = max(1, content.components(separatedBy: .newlines).count)
+            return (count, 0)
+        }
+        
+        if let match = output.range(of: #"\+(\d+)\s+-(\d+)"#, options: .regularExpression) {
+            let sub = String(output[match])
+            let nums = sub.components(separatedBy: CharacterSet.decimalDigits.inverted).compactMap { Int($0) }
+            if nums.count >= 2 {
+                return (nums[0], nums[1])
+            }
+        }
+        return (1, 1)
+    }
+    
+    @ViewBuilder
+    private func fileTypeBadge(for fileName: String) -> some View {
+        ProgrammingLanguageIconView(fileName: fileName, size: 14)
+    }
+    
     private func extractFileName(_ text: String) -> String? {
-        if let range = text.range(of: #"/[^\s\n:]+\.[a-zA-Z0-9]+"#, options: .regularExpression) {
-            let path = String(text[range])
+        if let range = text.range(of: #"/[^\s\n:{}"']+\.[a-zA-Z0-9]+"#, options: .regularExpression) {
+            let path = String(text[range]).trimmingCharacters(in: CharacterSet(charactersIn: ".,;)'\"{}"))
             return URL(fileURLWithPath: path).lastPathComponent
         }
-        if let range = text.range(of: #"/[^\s\n:]+"#, options: .regularExpression) {
-            let path = String(text[range]).trimmingCharacters(in: CharacterSet(charactersIn: ".,;)'\""))
+        if let range = text.range(of: #"/[^\s\n:{}"']+"#, options: .regularExpression) {
+            let path = String(text[range]).trimmingCharacters(in: CharacterSet(charactersIn: ".,;)'\"{}"))
             let last = URL(fileURLWithPath: path).lastPathComponent
             if !last.isEmpty && last != "/" {
                 return last
@@ -10807,104 +10900,260 @@ struct ToolActivityItemRow: View {
         return "codebase"
     }
     
-    var body: some View {
-        VStack(alignment: .leading, spacing: 4) {
-            Button(action: {
-                withAnimation(.easeInOut(duration: 0.15)) {
-                    showDetails.toggle()
-                }
-            }) {
-                HStack(spacing: 6) {
-                    Image(systemName: result.success ? "checkmark.circle.fill" : "xmark.circle.fill")
-                        .font(.system(size: 10))
-                        .foregroundColor(result.success ? .green.opacity(0.85) : .red.opacity(0.85))
-                    
-                    Image(systemName: displayItem.icon)
-                        .font(.system(size: 10.5))
-                        .foregroundColor(.secondary)
-                        .frame(width: 14)
-                    
-                    Text(displayItem.verb)
-                        .font(.system(size: 11.5, weight: .medium))
-                        .foregroundColor(.secondary)
-                    
-                    Text(displayItem.detail)
-                        .font(.system(size: 11.5, weight: .medium, design: .monospaced))
-                        .foregroundColor(.primary.opacity(0.9))
-                        .lineLimit(1)
-                        .truncationMode(.middle)
-                        .padding(.horizontal, 5)
-                        .padding(.vertical, 1.5)
-                        .background(Color.primary.opacity(0.05))
-                        .cornerRadius(4)
-                    
-                    if let lines = displayItem.lineInfo {
-                        Text(lines)
-                            .font(.system(size: 10.5, design: .monospaced))
-                            .foregroundColor(.secondary.opacity(0.75))
-                    }
-                    
-                    Spacer()
-                    
-                    if !result.success {
-                        Button(action: {
-                            let errText = (result.error ?? result.output).trimmingCharacters(in: .whitespacesAndNewlines)
-                            let snippet = String(errText.prefix(1500))
-                            AgentService.shared.enqueueMessage("Please diagnose and fix this error from `\(displayItem.detail)`:\n\n```\n\(snippet)\n```")
-                        }) {
-                            HStack(spacing: 3) {
-                                Image(systemName: "wrench.and.screwdriver.fill")
-                                    .font(.system(size: 8.5))
-                                Text("Fix in Agent")
-                                    .font(.system(size: 9.5, weight: .semibold))
-                            }
-                            .foregroundColor(.orange)
-                            .padding(.horizontal, 6)
-                            .padding(.vertical, 2)
-                            .background(Color.orange.opacity(0.12))
-                            .cornerRadius(4)
-                        }
-                        .buttonStyle(.plain)
-                    }
-                    
-                    Image(systemName: showDetails ? "chevron.down" : "chevron.right")
-                        .font(.system(size: 8, weight: .semibold))
-                        .foregroundColor(.secondary.opacity(0.5))
-                }
-                .contentShape(Rectangle())
+    static func extractedScreenshotPaths(from result: ToolResultModel) -> [String] {
+        var found: [String] = []
+        var seen = Set<String>()
+        let output = result.output
+        let params = result.toolParams ?? [:]
+        let wsRoot = AgentToolBox.shared.workspaceRoot ?? AppState.shared?.workspaceFolder?.path
+        
+        func recordIfValid(_ rawCandidate: String) {
+            var cleaned = rawCandidate.trimmingCharacters(in: CharacterSet(charactersIn: " \t\n\r\"'()[]<>.,;"))
+            if cleaned.hasPrefix("file://") {
+                cleaned = String(cleaned.dropFirst("file://".count))
+                cleaned = cleaned.removingPercentEncoding ?? cleaned
             }
-            .buttonStyle(.plain)
-            
-            if showDetails || (displayItem.detail.lowercased().hasSuffix(".md") && ["file_write", "write_to_file", "replace_in_file"].contains(result.toolName)) {
-                let rawOutput = result.success ? result.output : (result.error ?? result.output)
-                let mdParamContent = (result.toolParams?["content"] as? String) ?? (result.toolParams?["CodeContent"] as? String) ?? (result.toolParams?["ReplacementContent"] as? String) ?? ""
-                let trimmedOutput = rawOutput.trimmingCharacters(in: .whitespacesAndNewlines)
-                if displayItem.detail.lowercased().hasSuffix(".md") {
-                    let docText = !mdParamContent.isEmpty ? mdParamContent : trimmedOutput
-                    if !docText.isEmpty {
-                        RenderedMarkdownDocumentView(markdown: String(docText.prefix(6000)))
-                            .padding(12)
-                            .background(Color.primary.opacity(0.03))
-                            .cornerRadius(8)
-                            .overlay(
-                                RoundedRectangle(cornerRadius: 8)
-                                    .stroke(Color.primary.opacity(0.08), lineWidth: 0.5)
-                            )
-                            .padding(.leading, 20)
-                            .padding(.top, 4)
-                    }
-                } else {
-                    Text(trimmedOutput.isEmpty ? "(No output)" : String(trimmedOutput.prefix(1500)))
-                        .font(.system(size: 11, design: .monospaced))
-                        .foregroundColor(result.success ? .secondary : .red.opacity(0.85))
-                        .lineLimit(16)
-                        .textSelection(.enabled)
-                        .frame(maxWidth: .infinity, alignment: .leading)
-                        .padding(8)
-                        .background(Color.black.opacity(0.2))
-                        .cornerRadius(6)
-                        .padding(.leading, 20)
+            guard !cleaned.isEmpty else { return }
+            let lower = cleaned.lowercased()
+            guard lower.hasSuffix(".png") || lower.hasSuffix(".jpg") || lower.hasSuffix(".jpeg") || lower.hasSuffix(".webp") else { return }
+            let resolved: String
+            if cleaned.hasPrefix("/") {
+                resolved = cleaned
+            } else if cleaned.hasPrefix("~") {
+                resolved = (cleaned as NSString).expandingTildeInPath
+            } else if let ws = wsRoot, !ws.isEmpty {
+                resolved = (ws as NSString).appendingPathComponent(cleaned)
+            } else {
+                return
+            }
+            guard !seen.contains(resolved), FileManager.default.fileExists(atPath: resolved) else { return }
+            seen.insert(resolved)
+            found.append(resolved)
+        }
+        
+        // 1. Check explicit [SCREENSHOT_PATH: ...] marker
+        if let range = output.range(of: #"\[SCREENSHOT_PATH:\s*([^\]]+)\]"#, options: .regularExpression) {
+            let sub = String(output[range])
+                .replacingOccurrences(of: "[SCREENSHOT_PATH:", with: "")
+                .replacingOccurrences(of: "]", with: "")
+            recordIfValid(sub)
+        }
+        
+        // 2. Check snapshot saved to ...
+        if let range = output.range(of: #"saved to\s+(/[^\s\(\)\n]+\.(?:png|jpg|jpeg|webp))"#, options: .regularExpression) {
+            let sub = String(output[range]).replacingOccurrences(of: "saved to", with: "")
+            recordIfValid(sub)
+        }
+        
+        // 3. Check tool parameters (output_path / filePath / path for screenshot actions)
+        let actionStr = ((params["action"] as? String) ?? (params["operation"] as? String) ?? "").lowercased()
+        if actionStr == "screenshot" || actionStr == "snapshot" || result.toolName == "preview_control" || result.toolName == "ide_browser" {
+            if let outParam = (params["output_path"] as? String) ?? (params["filePath"] as? String) ?? (params["path"] as? String) {
+                recordIfValid(outParam)
+            }
+        }
+        
+        // 4. Check shell commands that generated preview_screenshot.png or similar
+        if result.toolName == "shell" || result.toolName == "run_command" {
+            let cmd = (params["command"] as? String) ?? (params["CommandLine"] as? String) ?? ""
+            let combined = cmd + "\n" + output
+            if let regex = try? NSRegularExpression(pattern: #"([/\w\-\._~]*(?:screenshot|snapshot|preview_cap|webapp_cap)[/\w\-\._]*\.(?:png|jpg|jpeg|webp))"#, options: [.caseInsensitive]) {
+                let ns = combined as NSString
+                for match in regex.matches(in: combined, options: [], range: NSRange(location: 0, length: ns.length)) {
+                    recordIfValid(ns.substring(with: match.range))
                 }
+            }
+        }
+        
+        return found
+    }
+    
+    var body: some View {
+        VStack(alignment: .leading, spacing: 5) {
+            HStack(spacing: 6) {
+                switch rowStyle {
+                case .fileAnalyze(let fileName, let lineRange):
+                    Text("Analyzed")
+                        .font(.system(size: 12.5, weight: .regular))
+                        .foregroundColor(.secondary.opacity(0.82))
+                    
+                    Button(action: {
+                        if !openTargetFileInPreviewDock(fallbackFileName: fileName, lineRangeString: lineRange) {
+                            withAnimation(.easeInOut(duration: 0.15)) {
+                                showDetails.toggle()
+                            }
+                        }
+                    }) {
+                        HStack(spacing: 5) {
+                            fileTypeBadge(for: fileName)
+                            
+                            Text(fileName)
+                                .font(.system(size: 12.5, weight: .medium))
+                                .foregroundColor(isHoveringFilePill ? .accentColor : .primary.opacity(0.95))
+                                .lineLimit(1)
+                                .truncationMode(.middle)
+                            
+                            if let lines = lineRange {
+                                Text(lines)
+                                    .font(.system(size: 12, weight: .regular))
+                                    .foregroundColor(.secondary.opacity(0.72))
+                            }
+                        }
+                        .padding(.horizontal, 6)
+                        .padding(.vertical, 2)
+                        .background(
+                            RoundedRectangle(cornerRadius: 5, style: .continuous)
+                                .fill(isHoveringFilePill ? Color.primary.opacity(0.09) : Color.primary.opacity(0.035))
+                        )
+                        .contentShape(Rectangle())
+                    }
+                    .buttonStyle(.plain)
+                    .onHover { hovering in
+                        isHoveringFilePill = hovering
+                    }
+                    .help("Click to preview \(fileName) in Right Split Pane")
+                    
+                    Button(action: {
+                        withAnimation(.easeInOut(duration: 0.15)) {
+                            showDetails.toggle()
+                        }
+                    }) {
+                        Image(systemName: showDetails ? "chevron.down" : "chevron.right")
+                            .font(.system(size: 8.5, weight: .semibold))
+                            .foregroundColor(.secondary.opacity(0.55))
+                            .frame(width: 16, height: 16)
+                            .contentShape(Rectangle())
+                    }
+                    .buttonStyle(.plain)
+                    .help(showDetails ? "Hide inline snippet" : "Show inline snippet")
+                    
+                case .fileEdit(let verb, let fileName, let added, let removed):
+                    Text(verb)
+                        .font(.system(size: 12.5, weight: .regular))
+                        .foregroundColor(.secondary.opacity(0.82))
+                    
+                    Button(action: {
+                        if !openTargetFileInPreviewDock(fallbackFileName: fileName, lineRangeString: nil) {
+                            withAnimation(.easeInOut(duration: 0.15)) {
+                                showDetails.toggle()
+                            }
+                        }
+                    }) {
+                        HStack(spacing: 5) {
+                            fileTypeBadge(for: fileName)
+                            
+                            Text(fileName)
+                                .font(.system(size: 12.5, weight: .medium))
+                                .foregroundColor(isHoveringFilePill ? .accentColor : .primary.opacity(0.95))
+                                .lineLimit(1)
+                                .truncationMode(.middle)
+                            
+                            HStack(spacing: 4) {
+                                if added > 0 || removed == 0 {
+                                    Text("+\(added)")
+                                        .font(.system(size: 12, weight: .medium))
+                                        .foregroundColor(Color(red: 0.25, green: 0.78, blue: 0.38))
+                                }
+                                if removed > 0 {
+                                    Text("-\(removed)")
+                                        .font(.system(size: 12, weight: .medium))
+                                        .foregroundColor(Color(red: 0.96, green: 0.33, blue: 0.31))
+                                }
+                            }
+                        }
+                        .padding(.horizontal, 6)
+                        .padding(.vertical, 2)
+                        .background(
+                            RoundedRectangle(cornerRadius: 5, style: .continuous)
+                                .fill(isHoveringFilePill ? Color.primary.opacity(0.09) : Color.primary.opacity(0.035))
+                        )
+                        .contentShape(Rectangle())
+                    }
+                    .buttonStyle(.plain)
+                    .onHover { hovering in
+                        isHoveringFilePill = hovering
+                    }
+                    .help("Click to preview \(fileName) in Right Split Pane")
+                    
+                    Button(action: {
+                        withAnimation(.easeInOut(duration: 0.15)) {
+                            showDetails.toggle()
+                        }
+                    }) {
+                        Image(systemName: showDetails ? "chevron.down" : "chevron.right")
+                            .font(.system(size: 8.5, weight: .semibold))
+                            .foregroundColor(.secondary.opacity(0.55))
+                            .frame(width: 16, height: 16)
+                            .contentShape(Rectangle())
+                    }
+                    .buttonStyle(.plain)
+                    .help(showDetails ? "Hide inline details" : "Show inline details")
+                    
+                case .commandRun(let summary, let exitNote):
+                    Button(action: {
+                        withAnimation(.easeInOut(duration: 0.15)) {
+                            showDetails.toggle()
+                        }
+                    }) {
+                        HStack(spacing: 6) {
+                            Text("Ran \(summary)")
+                                .font(.system(size: 12.5, weight: .regular))
+                                .foregroundColor(.secondary.opacity(0.82))
+                                .lineLimit(1)
+                                .truncationMode(.tail)
+                            
+                            if let exitNote = exitNote {
+                                Text("· \(exitNote)")
+                                    .font(.system(size: 12.5, weight: .regular))
+                                    .foregroundColor(.secondary.opacity(0.75))
+                            }
+                            
+                            Image(systemName: showDetails ? "chevron.down" : "chevron.right")
+                                .font(.system(size: 8.5, weight: .semibold))
+                                .foregroundColor(.secondary.opacity(0.6))
+                        }
+                        .contentShape(Rectangle())
+                    }
+                    .buttonStyle(.plain)
+                    
+                case .generic(let verb, let detail):
+                    Button(action: {
+                        withAnimation(.easeInOut(duration: 0.15)) {
+                            showDetails.toggle()
+                        }
+                    }) {
+                        HStack(spacing: 6) {
+                            Text("\(verb) \(detail)")
+                                .font(.system(size: 12.5, weight: .regular))
+                                .foregroundColor(.secondary.opacity(0.82))
+                                .lineLimit(1)
+                                .truncationMode(.tail)
+                            
+                            Image(systemName: showDetails ? "chevron.down" : "chevron.right")
+                                .font(.system(size: 8.5, weight: .semibold))
+                                .foregroundColor(.secondary.opacity(0.6))
+                        }
+                        .contentShape(Rectangle())
+                    }
+                    .buttonStyle(.plain)
+                }
+                
+                Spacer(minLength: 0)
+            }
+            
+            if showDetails {
+                let rawOutput = result.success ? result.output : (result.error ?? result.output)
+                let trimmedOutput = rawOutput.trimmingCharacters(in: .whitespacesAndNewlines)
+                Text(trimmedOutput.isEmpty ? "(Completed)" : String(trimmedOutput.prefix(1500)))
+                    .font(.system(size: 11, design: .monospaced))
+                    .foregroundColor(result.success ? .secondary : .red.opacity(0.85))
+                    .lineLimit(16)
+                    .textSelection(.enabled)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .padding(8)
+                    .background(Color.black.opacity(0.22))
+                    .cornerRadius(6)
+                    .padding(.leading, 12)
             }
         }
     }

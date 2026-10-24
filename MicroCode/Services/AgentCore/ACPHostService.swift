@@ -111,6 +111,11 @@ class ACPAgentSession: ObservableObject, Identifiable {
     func start(task: String, workspacePath: String, model: String? = nil) {
         self.activeWorkspacePath = workspacePath
         self.model = model
+        TelemetryService.shared.recordAIUsage(
+            provider: "ACP · \(config.type.displayName)",
+            model: model ?? "",
+            taskLabel: "ACP Agent (\(config.type.displayName))"
+        )
         
         // If already running a persistent JSON-RPC 2.0 ACP session with an established sessionId, send session/prompt directly!
         if isStandardACPProtocol,
@@ -786,7 +791,13 @@ class ACPAgentSession: ObservableObject, Identifiable {
             
         case .sessionInit(let init_):
             sessionId = init_.sessionId
-            if let reportedModel = init_.model { model = reportedModel }
+            if let reportedModel = init_.model {
+                model = reportedModel
+                TelemetryService.shared.recordAIConfiguration(
+                    provider: "ACP · \(config.type.displayName)",
+                    model: reportedModel
+                )
+            }
             state = .running(taskId: init_.sessionId)
             
         case .systemInfo, .progress:

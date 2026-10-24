@@ -30,9 +30,28 @@ public struct PreviewDockTabItem: Identifiable, Equatable {
     public var kind: PreviewDockTabKind
     public var isClosable: Bool
     public var url: URL?
+    public var highlightRange: ClosedRange<Int>?
+
+    public init(
+        id: String,
+        title: String,
+        icon: String,
+        kind: PreviewDockTabKind,
+        isClosable: Bool,
+        url: URL?,
+        highlightRange: ClosedRange<Int>? = nil
+    ) {
+        self.id = id
+        self.title = title
+        self.icon = icon
+        self.kind = kind
+        self.isClosable = isClosable
+        self.url = url
+        self.highlightRange = highlightRange
+    }
 
     public static func == (lhs: PreviewDockTabItem, rhs: PreviewDockTabItem) -> Bool {
-        lhs.id == rhs.id && lhs.title == rhs.title && lhs.kind == rhs.kind
+        lhs.id == rhs.id && lhs.title == rhs.title && lhs.kind == rhs.kind && lhs.highlightRange == rhs.highlightRange
     }
 }
 
@@ -46,16 +65,23 @@ public enum PreviewFileType {
     
     public static func detect(url: URL) -> PreviewFileType {
         let ext = url.pathExtension.lowercased()
-        let imageExts: Set<String> = ["png", "jpg", "jpeg", "gif", "webp", "svg", "heic", "tiff", "bmp", "icns"]
+        let fileName = url.lastPathComponent.lowercased()
+        let imageExts: Set<String> = ["png", "jpg", "jpeg", "gif", "webp", "svg", "heic", "tiff", "bmp", "icns", "ico"]
         let pdfExts: Set<String> = ["pdf"]
         let spreadsheetExts: Set<String> = ["xlsx", "xls", "csv", "tsv", "numbers"]
         let diffExts: Set<String> = ["diff", "patch"]
         let codeExts: Set<String> = [
-            "json", "md", "markdown", "txt", "swift", "kt", "ts", "js", "tsx", "jsx",
-            "rs", "py", "html", "css", "scss", "sass", "less", "yaml", "yml", "xml",
-            "sh", "bash", "zsh", "c", "cpp", "cc", "cxx", "h", "hpp", "go", "java",
-            "dart", "sql", "toml", "lock", "env", "plist", "properties", "gradle",
-            "cmake", "make", "dockerfile", "proto", "graphql", "ar", "zig", "v", "lua", "r", "sas"
+            "json", "jsonc", "jsonl", "md", "markdown", "mdx", "txt", "log",
+            "swift", "kt", "kts", "ts", "tsx", "js", "jsx", "mjs", "cjs",
+            "svelte", "vue", "astro", "rs", "py", "pyi", "ipynb",
+            "html", "htm", "css", "scss", "sass", "less", "yaml", "yml", "xml",
+            "sh", "bash", "zsh", "fish", "c", "cpp", "cc", "cxx", "h", "hpp", "m", "mm",
+            "go", "mod", "sum", "java", "dart", "sql", "prisma", "toml", "lock",
+            "env", "plist", "properties", "gradle", "cmake", "make", "dockerfile",
+            "proto", "graphql", "gql", "ar", "zig", "v", "lua", "r", "rmd", "sas",
+            "rb", "php", "pl", "ex", "exs", "erl", "hrl", "clj", "scala", "cs", "fs",
+            "sol", "metal", "glsl", "wgsl", "hlsl", "tex", "bib", "conf", "ini", "cfg",
+            "gitignore", "dockerignore", "editorconfig", "eslintrc", "prettierrc", "babelrc"
         ]
         
         if imageExts.contains(ext) { return .image }
@@ -63,6 +89,20 @@ public enum PreviewFileType {
         if spreadsheetExts.contains(ext) { return .spreadsheet }
         if diffExts.contains(ext) { return .diff }
         if codeExts.contains(ext) { return .codeOrText }
+        if fileName.hasPrefix(".") || ["dockerfile", "makefile", "podfile", "gemfile", "procfile", "cargo.lock", "package.resolved"].contains(fileName) {
+            return .codeOrText
+        }
+        // Fallback: if file is small (< 2MB) and valid UTF-8 text, preview as code/text
+        if let attr = try? FileManager.default.attributesOfItem(atPath: url.path),
+           let size = (attr[.size] as? NSNumber)?.intValue,
+           size >= 0 && size < 2_000_000,
+           let handle = try? FileHandle(forReadingFrom: url) {
+            defer { try? handle.close() }
+            let sample = handle.readData(ofLength: min(size, 4096))
+            if !sample.contains(0), String(data: sample, encoding: .utf8) != nil {
+                return .codeOrText
+            }
+        }
         return .quickLook
     }
 }
@@ -74,6 +114,7 @@ public final class PreviewDockService: ObservableObject {
     @Published public var openTabs: [PreviewDockTabItem] = []
     @Published public var activeTabId: String = "web"
     @Published public var isDockVisible: Bool = false
+    @Published public var isExpandedWidth: Bool = false
     
     // Quick comment dispatched from Image region selection into Agent Chat
     @Published public var pendingRegionComment: String? = nil
@@ -97,6 +138,7 @@ public final class PreviewDockService: ObservableObject {
         activeTabId = id
         isDockVisible = true
         DeviceRuntimeService.shared.showingEmbeddedDeviceDock = true
+        AppState.shared?.agenticContextVisible = false
     }
 
     private func ensureStandardTabExists(id: String) {
@@ -123,19 +165,49 @@ public final class PreviewDockService: ObservableObject {
         activeTabId = id
         isDockVisible = true
         DeviceRuntimeService.shared.showingEmbeddedDeviceDock = true
+        AppState.shared?.agenticContextVisible = false
         syncWithDeviceRuntime()
     }
     
-    public func openFile(url: URL, makeActive: Bool = true) {
-        let normalizedURL = url.standardizedFileURL
+    public func openFile(url: URL, startLine: Int? = nil, endLine: Int? = nil, makeActive: Bool = true) {
+        // Parse any #L10-L20 fragment or suffix in the URL string if startLine was not explicitly passed
+        var effectiveStart = startLine
+        var effectiveEnd = endLine
+        var cleanPath = url.path
+        if let frag = url.fragment, effectiveStart == nil {
+            let parsed = Self.parseLineFragment(frag)
+            effectiveStart = parsed?.start
+            effectiveEnd = parsed?.end
+        }
+        if cleanPath.contains("#L"), let hashIdx = cleanPath.range(of: "#L") {
+            let frag = String(cleanPath[hashIdx.lowerBound...]).dropFirst()
+            if effectiveStart == nil, let parsed = Self.parseLineFragment(String(frag)) {
+                effectiveStart = parsed.start
+                effectiveEnd = parsed.end
+            }
+            cleanPath = String(cleanPath[..<hashIdx.lowerBound])
+        }
+
+        let normalizedURL = URL(fileURLWithPath: cleanPath).standardizedFileURL
         let tabId = "file:\(normalizedURL.path)"
+        let range: ClosedRange<Int>? = {
+            guard let s = effectiveStart, s > 0 else { return nil }
+            let e = max(s, effectiveEnd ?? s)
+            return s...e
+        }()
         
-        if let existing = openTabs.first(where: { $0.id == tabId }) {
+        if let existingIdx = openTabs.firstIndex(where: { $0.id == tabId }) {
+            if let range {
+                openTabs[existingIdx].highlightRange = range
+            }
             if makeActive {
-                activeTabId = existing.id
+                activeTabId = openTabs[existingIdx].id
                 isDockVisible = true
                 DeviceRuntimeService.shared.showingEmbeddedDeviceDock = true
+                AppState.shared?.agenticContextVisible = false
+                syncWithDeviceRuntime()
             }
+            TelemetryService.shared.recordFeature("Code Preview (\(normalizedURL.lastPathComponent))")
             return
         }
         
@@ -156,7 +228,8 @@ public final class PreviewDockService: ObservableObject {
             icon: icon,
             kind: .file(normalizedURL),
             isClosable: true,
-            url: normalizedURL
+            url: normalizedURL,
+            highlightRange: range
         )
         
         openTabs.append(newTab)
@@ -164,7 +237,128 @@ public final class PreviewDockService: ObservableObject {
             activeTabId = newTab.id
             isDockVisible = true
             DeviceRuntimeService.shared.showingEmbeddedDeviceDock = true
+            AppState.shared?.agenticContextVisible = false
+            syncWithDeviceRuntime()
         }
+        TelemetryService.shared.recordFeature("Code Preview (\(normalizedURL.lastPathComponent))")
+    }
+
+    /// Resolves a file reference string (such as `file:///path/file.swift#L10-L20`, `+page.svelte #L1-256`, or relative workspace path)
+    /// and opens it in the Right-Hand Code Preview Split Pane. Returns `true` if the file was found and opened.
+    @discardableResult
+    public func openFileFromReference(_ rawReference: String, workspacePath: String? = nil, defaultStartLine: Int? = nil, defaultEndLine: Int? = nil) -> Bool {
+        var working = rawReference.trimmingCharacters(in: CharacterSet.whitespacesAndNewlines.union(CharacterSet(charactersIn: "`'\"<>()")))
+        guard !working.isEmpty else { return false }
+
+        var startLine = defaultStartLine
+        var endLine = defaultEndLine
+
+        if working.hasPrefix("file://") {
+            working = String(working.dropFirst("file://".count))
+            working = working.removingPercentEncoding ?? working
+        } else if working.hasPrefix("microcode-file://") {
+            working = String(working.dropFirst("microcode-file://".count))
+            working = working.removingPercentEncoding ?? working
+        }
+
+        // Extract #L10-L20 or #L10-20
+        if let rangeMatch = working.range(of: #"\s*#L(\d+)(?:-L?(\d+))?$"#, options: .regularExpression) {
+            let frag = String(working[rangeMatch]).trimmingCharacters(in: .whitespaces).dropFirst() // drop '#'
+            if let parsed = Self.parseLineFragment(String(frag)) {
+                startLine = parsed.start
+                endLine = parsed.end
+            }
+            working = String(working[..<rangeMatch.lowerBound]).trimmingCharacters(in: .whitespaces)
+        } else if let colonMatch = working.range(of: #":(\d+)(?::(\d+))?$"#, options: .regularExpression) {
+            let nums = String(working[colonMatch]).split(separator: ":").compactMap { Int($0) }
+            if let first = nums.first {
+                startLine = first
+                endLine = nums.count > 1 ? nums[1] : first
+            }
+            working = String(working[..<colonMatch.lowerBound])
+        }
+
+        // Strip trailing " (+N more)" if from multi_file_read
+        if let moreRange = working.range(of: #"\s*\(\+\d+\s+more\)$"#, options: .regularExpression) {
+            working = String(working[..<moreRange.lowerBound])
+        }
+
+        let wsRoot = workspacePath
+            ?? AgentService.shared.currentWorkspace
+            ?? AgentToolBox.shared.workspaceRoot
+            ?? AppState.shared?.workspaceFolder?.path
+
+        if let resolvedURL = Self.resolveFileURL(pathOrName: working, workspaceRoot: wsRoot) {
+            openFile(url: resolvedURL, startLine: startLine, endLine: endLine, makeActive: true)
+            return true
+        }
+        return false
+    }
+
+    public static func parseLineFragment(_ fragment: String) -> (start: Int, end: Int)? {
+        let cleaned = fragment.trimmingCharacters(in: CharacterSet(charactersIn: "# \t"))
+        guard cleaned.uppercased().hasPrefix("L") else { return nil }
+        let parts = cleaned.dropFirst().components(separatedBy: CharacterSet(charactersIn: "-:"))
+        let nums = parts.map { $0.trimmingCharacters(in: CharacterSet(charactersIn: "Ll ")) }.compactMap { Int($0) }
+        guard let first = nums.first, first > 0 else { return nil }
+        let second = nums.count > 1 ? max(first, nums[1]) : first
+        return (first, second)
+    }
+
+    public static func resolveFileURL(pathOrName: String, workspaceRoot: String?) -> URL? {
+        let fm = FileManager.default
+        let expanded = (pathOrName as NSString).expandingTildeInPath
+        var isDir: ObjCBool = false
+
+        if expanded.hasPrefix("/") {
+            if fm.fileExists(atPath: expanded, isDirectory: &isDir), !isDir.boolValue {
+                return URL(fileURLWithPath: expanded)
+            }
+        }
+
+        if let ws = workspaceRoot, !ws.isEmpty {
+            let candidate = (ws as NSString).appendingPathComponent(pathOrName)
+            if fm.fileExists(atPath: candidate, isDirectory: &isDir), !isDir.boolValue {
+                return URL(fileURLWithPath: candidate)
+            }
+
+            // If pathOrName is a filename or partial relative path (e.g. "+page.svelte" or "AIUsageTracker.swift"),
+            // search inside workspaceRoot (skipping heavy build/vendor directories).
+            let targetLast = (pathOrName as NSString).lastPathComponent
+            if !targetLast.isEmpty {
+                let wsURL = URL(fileURLWithPath: ws)
+                let skipDirs: Set<String> = [".git", "node_modules", ".build", "build", "target", "DerivedData", ".next", ".svelte-kit", "dist", "Pods", ".venv", "venv"]
+                if let enumerator = fm.enumerator(
+                    at: wsURL,
+                    includingPropertiesForKeys: [.isDirectoryKey],
+                    options: [.skipsHiddenFiles, .skipsPackageDescendants]
+                ) {
+                    var bestMatch: URL? = nil
+                    var scanned = 0
+                    while let itemURL = enumerator.nextObject() as? URL {
+                        scanned += 1
+                        if scanned > 6000 { break }
+                        let name = itemURL.lastPathComponent
+                        if skipDirs.contains(name) {
+                            enumerator.skipDescendants()
+                            continue
+                        }
+                        if name == targetLast {
+                            if itemURL.path.hasSuffix(pathOrName) {
+                                return itemURL
+                            }
+                            if bestMatch == nil {
+                                bestMatch = itemURL
+                            }
+                        }
+                    }
+                    if let bestMatch {
+                        return bestMatch
+                    }
+                }
+            }
+        }
+        return nil
     }
 
     public func openDiff(id: String? = nil, title: String, oldContent: String, newContent: String, makeActive: Bool = true) {
@@ -174,6 +368,7 @@ public final class PreviewDockService: ObservableObject {
                 activeTabId = existing.id
                 isDockVisible = true
                 DeviceRuntimeService.shared.showingEmbeddedDeviceDock = true
+                AppState.shared?.agenticContextVisible = false
             }
             return
         }
@@ -192,6 +387,7 @@ public final class PreviewDockService: ObservableObject {
             activeTabId = newTab.id
             isDockVisible = true
             DeviceRuntimeService.shared.showingEmbeddedDeviceDock = true
+            AppState.shared?.agenticContextVisible = false
         }
     }
     
@@ -293,9 +489,10 @@ public final class PreviewDockService: ObservableObject {
         panel.allowsMultipleSelection = false
         panel.canChooseDirectories = false
         panel.canChooseFiles = true
-        panel.title = "Preview File in Right Dock"
+        panel.directoryURL = AppState.shared?.workspaceFolder
+        panel.title = "Preview File in Right Split Pane"
         panel.prompt = "Preview"
-        panel.message = "Choose an image, PDF, Excel sheet, or document to preview"
+        panel.message = "Choose a code file, image, PDF, spreadsheet, or document to preview"
         
         if panel.runModal() == .OK, let url = panel.url {
             openFile(url: url, makeActive: true)

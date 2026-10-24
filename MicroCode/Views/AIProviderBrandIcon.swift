@@ -130,3 +130,373 @@ struct AIProviderBrandIcon: View {
         "zed": "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",
     ]
 }
+
+
+// MARK: - Authentic Programming Language & File-Type Icon View
+
+public struct ProgrammingLanguageIconView: View {
+    public let fileName: String
+    public var languageHint: String = ""
+    public var size: CGFloat = 15
+    
+    public init(fileName: String, languageHint: String = "", size: CGFloat = 15) {
+        self.fileName = fileName
+        self.languageHint = languageHint
+        self.size = size
+    }
+    
+    private var resolvedKey: String {
+        let lowerFile = URL(fileURLWithPath: fileName).lastPathComponent.lowercased()
+        let ext = URL(fileURLWithPath: lowerFile).pathExtension.lowercased()
+        if lowerFile == "dockerfile" || lowerFile.hasPrefix("dockerfile.") || lowerFile == "docker-compose.yml" || lowerFile == "docker-compose.yaml" {
+            return "docker"
+        }
+        if lowerFile == "cargo.toml" || lowerFile == "cargo.lock" {
+            return "rs"
+        }
+        if lowerFile == "package.json" || lowerFile == "package-lock.json" {
+            return "npm"
+        }
+        if lowerFile == "go.mod" || lowerFile == "go.sum" {
+            return "go"
+        }
+        if lowerFile.hasPrefix(".git") {
+            return "git"
+        }
+        if !ext.isEmpty {
+            return ext
+        }
+        return languageHint.lowercased().trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+    
+    public var body: some View {
+        if let themeIcon = ExtensionManager.shared.iconImage(for: URL(fileURLWithPath: fileName).lastPathComponent, isDirectory: false, isExpanded: false) {
+            Image(nsImage: themeIcon)
+                .resizable()
+                .interpolation(.high)
+                .aspectRatio(contentMode: .fit)
+                .frame(width: size, height: size)
+        } else {
+            authenticVectorBadge
+                .frame(width: size, height: size)
+        }
+    }
+    
+    @ViewBuilder
+    private var authenticVectorBadge: some View {
+        switch resolvedKey {
+        case "swift":
+            ZStack {
+                RoundedRectangle(cornerRadius: size * 0.22, style: .continuous)
+                    .fill(
+                        LinearGradient(
+                            colors: [Color(red: 0.98, green: 0.42, blue: 0.20), Color(red: 0.92, green: 0.25, blue: 0.14)],
+                            startPoint: .topLeading,
+                            endPoint: .bottomTrailing
+                        )
+                    )
+                Image(systemName: "swift")
+                    .font(.system(size: size * 0.64, weight: .bold))
+                    .foregroundColor(.white)
+            }
+            
+        case "html", "htm", "ejs", "hbs":
+            ZStack {
+                LanguageShieldShape()
+                    .fill(Color(red: 0.89, green: 0.31, blue: 0.15)) // Official HTML5 #E34F26
+                Text("5")
+                    .font(.system(size: size * 0.62, weight: .black, design: .rounded))
+                    .foregroundColor(.white)
+                    .offset(y: -size * 0.02)
+            }
+            
+        case "css":
+            ZStack {
+                LanguageShieldShape()
+                    .fill(Color(red: 0.08, green: 0.45, blue: 0.71)) // Official CSS3 #1572B6
+                Text("3")
+                    .font(.system(size: size * 0.62, weight: .black, design: .rounded))
+                    .foregroundColor(.white)
+                    .offset(y: -size * 0.02)
+            }
+            
+        case "scss", "sass", "less":
+            ZStack {
+                RoundedRectangle(cornerRadius: size * 0.22, style: .continuous)
+                    .fill(Color(red: 0.80, green: 0.40, blue: 0.60)) // Official Sass #CD6799
+                Text("S")
+                    .font(.system(size: size * 0.62, weight: .black, design: .serif))
+                    .italic()
+                    .foregroundColor(.white)
+            }
+            
+        case "ts", "mts", "cts", "typescript":
+            ZStack {
+                RoundedRectangle(cornerRadius: size * 0.18, style: .continuous)
+                    .fill(Color(red: 0.19, green: 0.47, blue: 0.78)) // Official TypeScript #3178C6
+                Text("TS")
+                    .font(.system(size: size * 0.50, weight: .heavy, design: .default))
+                    .foregroundColor(.white)
+                    .offset(x: size * 0.04, y: size * 0.06)
+            }
+            
+        case "js", "mjs", "cjs", "javascript":
+            ZStack {
+                RoundedRectangle(cornerRadius: size * 0.18, style: .continuous)
+                    .fill(Color(red: 0.97, green: 0.87, blue: 0.12)) // Official JavaScript #F7DF1E
+                Text("JS")
+                    .font(.system(size: size * 0.50, weight: .heavy, design: .default))
+                    .foregroundColor(Color(red: 0.12, green: 0.12, blue: 0.12))
+                    .offset(x: size * 0.04, y: size * 0.06)
+            }
+            
+        case "jsx", "tsx", "react":
+            ZStack {
+                Circle()
+                    .stroke(Color(red: 0.38, green: 0.85, blue: 0.98), lineWidth: max(1, size * 0.08))
+                    .scaleEffect(x: 1.0, y: 0.42)
+                    .rotationEffect(.degrees(30))
+                Circle()
+                    .stroke(Color(red: 0.38, green: 0.85, blue: 0.98), lineWidth: max(1, size * 0.08))
+                    .scaleEffect(x: 1.0, y: 0.42)
+                    .rotationEffect(.degrees(-30))
+                Circle()
+                    .stroke(Color(red: 0.38, green: 0.85, blue: 0.98), lineWidth: max(1, size * 0.08))
+                    .scaleEffect(x: 1.0, y: 0.42)
+                Circle()
+                    .fill(Color(red: 0.38, green: 0.85, blue: 0.98))
+                    .frame(width: size * 0.22, height: size * 0.22)
+            }
+            
+        case "svelte":
+            ZStack {
+                RoundedRectangle(cornerRadius: size * 0.24, style: .continuous)
+                    .fill(Color(red: 1.0, green: 0.24, blue: 0.0)) // Official Svelte #FF3E00
+                Text("S")
+                    .font(.system(size: size * 0.64, weight: .heavy, design: .rounded))
+                    .foregroundColor(.white)
+            }
+            
+        case "vue":
+            ZStack {
+                VueLogoShape()
+                    .fill(Color(red: 0.26, green: 0.72, blue: 0.51)) // Official Vue #42B883
+                VueLogoShape()
+                    .fill(Color(red: 0.21, green: 0.29, blue: 0.37)) // #35495E
+                    .scaleEffect(0.58, anchor: .top)
+            }
+            
+        case "rs", "rust":
+            ZStack {
+                Circle()
+                    .fill(Color(red: 0.85, green: 0.42, blue: 0.16))
+                Image(systemName: "gearshape.fill")
+                    .font(.system(size: size * 0.68, weight: .bold))
+                    .foregroundColor(.white)
+            }
+            
+        case "py", "pyw", "ipynb", "python":
+            ZStack {
+                RoundedRectangle(cornerRadius: size * 0.22, style: .continuous)
+                    .fill(
+                        LinearGradient(
+                            colors: [Color(red: 0.22, green: 0.46, blue: 0.67), Color(red: 1.0, green: 0.83, blue: 0.23)],
+                            startPoint: .topLeading,
+                            endPoint: .bottomTrailing
+                        )
+                    )
+                Text("Py")
+                    .font(.system(size: size * 0.48, weight: .heavy, design: .rounded))
+                    .foregroundColor(.white)
+            }
+            
+        case "go", "golang":
+            ZStack {
+                RoundedRectangle(cornerRadius: size * 0.22, style: .continuous)
+                    .fill(Color(red: 0.0, green: 0.68, blue: 0.85)) // Official Go #00ADD8
+                Text("GO")
+                    .font(.system(size: size * 0.46, weight: .black, design: .rounded))
+                    .foregroundColor(.white)
+            }
+            
+        case "c", "h":
+            ZStack {
+                RoundedRectangle(cornerRadius: size * 0.22, style: .continuous)
+                    .fill(Color(red: 0.33, green: 0.42, blue: 0.73))
+                Text("C")
+                    .font(.system(size: size * 0.60, weight: .heavy, design: .rounded))
+                    .foregroundColor(.white)
+            }
+            
+        case "cpp", "cc", "cxx", "hpp", "mm", "m":
+            ZStack {
+                RoundedRectangle(cornerRadius: size * 0.22, style: .continuous)
+                    .fill(Color(red: 0.0, green: 0.35, blue: 0.61)) // #00599C
+                Text(resolvedKey == "mm" || resolvedKey == "m" ? "M+" : "C+")
+                    .font(.system(size: size * 0.46, weight: .heavy, design: .rounded))
+                    .foregroundColor(.white)
+            }
+            
+        case "java", "jar", "gradle":
+            ZStack {
+                RoundedRectangle(cornerRadius: size * 0.22, style: .continuous)
+                    .fill(Color(red: 0.91, green: 0.44, blue: 0.0))
+                Text("Jv")
+                    .font(.system(size: size * 0.48, weight: .heavy, design: .rounded))
+                    .foregroundColor(.white)
+            }
+            
+        case "kt", "kts", "kotlin":
+            ZStack {
+                RoundedRectangle(cornerRadius: size * 0.22, style: .continuous)
+                    .fill(
+                        LinearGradient(
+                            colors: [Color(red: 0.50, green: 0.32, blue: 1.0), Color(red: 0.99, green: 0.48, blue: 0.14)],
+                            startPoint: .bottomLeading,
+                            endPoint: .topTrailing
+                        )
+                    )
+                Text("Kt")
+                    .font(.system(size: size * 0.48, weight: .heavy, design: .rounded))
+                    .foregroundColor(.white)
+            }
+            
+        case "dart":
+            ZStack {
+                RoundedRectangle(cornerRadius: size * 0.22, style: .continuous)
+                    .fill(Color(red: 0.01, green: 0.46, blue: 0.76)) // #0175C2
+                Text("Dt")
+                    .font(.system(size: size * 0.48, weight: .heavy, design: .rounded))
+                    .foregroundColor(.white)
+            }
+            
+        case "json", "jsonc", "jsonl":
+            ZStack {
+                RoundedRectangle(cornerRadius: size * 0.20, style: .continuous)
+                    .fill(Color(red: 0.96, green: 0.72, blue: 0.16).opacity(0.22))
+                Text("{}")
+                    .font(.system(size: size * 0.62, weight: .heavy, design: .monospaced))
+                    .foregroundColor(Color(red: 0.96, green: 0.76, blue: 0.20))
+            }
+            
+        case "npm":
+            ZStack {
+                RoundedRectangle(cornerRadius: size * 0.18, style: .continuous)
+                    .fill(Color(red: 0.80, green: 0.22, blue: 0.22)) // Official npm #CB3837
+                Text("n")
+                    .font(.system(size: size * 0.64, weight: .black, design: .monospaced))
+                    .foregroundColor(.white)
+            }
+            
+        case "md", "mdx", "markdown":
+            ZStack {
+                RoundedRectangle(cornerRadius: size * 0.18, style: .continuous)
+                    .fill(Color(red: 0.22, green: 0.58, blue: 0.96).opacity(0.22))
+                    .overlay(
+                        RoundedRectangle(cornerRadius: size * 0.18, style: .continuous)
+                            .stroke(Color(red: 0.35, green: 0.68, blue: 1.0), lineWidth: 1)
+                    )
+                Text("M↓")
+                    .font(.system(size: size * 0.46, weight: .heavy, design: .monospaced))
+                    .foregroundColor(Color(red: 0.40, green: 0.72, blue: 1.0))
+            }
+            
+        case "yml", "yaml", "toml", "ini", "conf", "plist", "xml":
+            ZStack {
+                RoundedRectangle(cornerRadius: size * 0.20, style: .continuous)
+                    .fill(Color(red: 0.62, green: 0.42, blue: 0.92).opacity(0.22))
+                Image(systemName: "slider.horizontal.3")
+                    .font(.system(size: size * 0.58, weight: .bold))
+                    .foregroundColor(Color(red: 0.72, green: 0.54, blue: 0.98))
+            }
+            
+        case "sh", "zsh", "bash", "fish", "env":
+            ZStack {
+                RoundedRectangle(cornerRadius: size * 0.20, style: .continuous)
+                    .fill(Color(red: 0.16, green: 0.78, blue: 0.44).opacity(0.20))
+                Text("$_")
+                    .font(.system(size: size * 0.50, weight: .heavy, design: .monospaced))
+                    .foregroundColor(Color(red: 0.24, green: 0.86, blue: 0.52))
+            }
+            
+        case "sql", "db", "sqlite", "prisma":
+            ZStack {
+                RoundedRectangle(cornerRadius: size * 0.20, style: .continuous)
+                    .fill(Color(red: 0.20, green: 0.64, blue: 0.92).opacity(0.22))
+                Image(systemName: "cylinder.split.1x2.fill")
+                    .font(.system(size: size * 0.60, weight: .semibold))
+                    .foregroundColor(Color(red: 0.30, green: 0.72, blue: 0.98))
+            }
+            
+        case "docker":
+            ZStack {
+                RoundedRectangle(cornerRadius: size * 0.20, style: .continuous)
+                    .fill(Color(red: 0.14, green: 0.59, blue: 0.93)) // #2496ED
+                Image(systemName: "shippingbox.fill")
+                    .font(.system(size: size * 0.58, weight: .bold))
+                    .foregroundColor(.white)
+            }
+            
+        case "git":
+            ZStack {
+                RoundedRectangle(cornerRadius: size * 0.20, style: .continuous)
+                    .fill(Color(red: 0.94, green: 0.31, blue: 0.20)) // #F05032
+                Image(systemName: "arrow.triangle.branch")
+                    .font(.system(size: size * 0.58, weight: .bold))
+                    .foregroundColor(.white)
+            }
+            
+        case "ar", "ardium":
+            ZStack {
+                RoundedRectangle(cornerRadius: size * 0.22, style: .continuous)
+                    .fill(
+                        LinearGradient(
+                            colors: [Color(red: 0.38, green: 0.32, blue: 0.98), Color(red: 0.16, green: 0.72, blue: 0.96)],
+                            startPoint: .topLeading,
+                            endPoint: .bottomTrailing
+                        )
+                    )
+                Text("Ar")
+                    .font(.system(size: size * 0.48, weight: .heavy, design: .rounded))
+                    .foregroundColor(.white)
+            }
+            
+        default:
+            ZStack {
+                RoundedRectangle(cornerRadius: size * 0.20, style: .continuous)
+                    .fill(Color.secondary.opacity(0.16))
+                Image(systemName: "chevron.left.forwardslash.chevron.right")
+                    .font(.system(size: size * 0.54, weight: .bold))
+                    .foregroundColor(.secondary)
+            }
+        }
+    }
+}
+
+private struct LanguageShieldShape: Shape {
+    func path(in rect: CGRect) -> Path {
+        var p = Path()
+        let w = rect.width
+        let h = rect.height
+        p.move(to: CGPoint(x: w * 0.10, y: h * 0.06))
+        p.addLine(to: CGPoint(x: w * 0.90, y: h * 0.06))
+        p.addLine(to: CGPoint(x: w * 0.82, y: h * 0.78))
+        p.addLine(to: CGPoint(x: w * 0.50, y: h * 0.95))
+        p.addLine(to: CGPoint(x: w * 0.18, y: h * 0.78))
+        p.closeSubpath()
+        return p
+    }
+}
+
+private struct VueLogoShape: Shape {
+    func path(in rect: CGRect) -> Path {
+        var p = Path()
+        let w = rect.width
+        let h = rect.height
+        p.move(to: CGPoint(x: w * 0.06, y: h * 0.12))
+        p.addLine(to: CGPoint(x: w * 0.94, y: h * 0.12))
+        p.addLine(to: CGPoint(x: w * 0.50, y: h * 0.90))
+        p.closeSubpath()
+        return p
+    }
+}

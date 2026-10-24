@@ -69,7 +69,12 @@ struct DiffToolbar: View {
     }
     
     var body: some View {
-        HStack(spacing: 16) {
+        HStack(spacing: 12) {
+            ProgrammingLanguageIconView(
+                fileName: URL(fileURLWithPath: filePath).lastPathComponent,
+                size: 16
+            )
+            
             VStack(alignment: .leading, spacing: 2) {
                 Text(filePath)
                     .font(.headline)

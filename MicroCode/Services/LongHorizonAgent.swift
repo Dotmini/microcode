@@ -905,19 +905,31 @@ public class LongHorizonAgent: ObservableObject {
         return calls
     }
 
-    /// Parses key-value pairs from tool call argument string
+    /// Parses key-value pairs or JSON object from tool call argument string
     private func parseToolArguments(_ argString: String) -> [String: Any] {
+        let trimmed = argString.trimmingCharacters(in: .whitespacesAndNewlines)
+        if let firstBrace = trimmed.firstIndex(of: "{"),
+           let lastBrace = trimmed.lastIndex(of: "}"),
+           firstBrace < lastBrace {
+            let jsonSlice = String(trimmed[firstBrace...lastBrace])
+            if let data = jsonSlice.data(using: .utf8),
+               let jsonObj = try? JSONSerialization.jsonObject(with: data) as? [String: Any] {
+                return AgentToolBox.normalizeToolParams(jsonObj)
+            }
+        }
         var result: [String: Any] = [:]
         let parts = argString.components(separatedBy: ",")
         for part in parts {
             let pair = part.components(separatedBy: ":")
             if pair.count >= 2 {
-                let key = pair[0].trimmingCharacters(in: .whitespacesAndNewlines).replacingOccurrences(of: "\"", with: "")
-                let val = pair.dropFirst().joined(separator: ":").trimmingCharacters(in: .whitespacesAndNewlines).replacingOccurrences(of: "\"", with: "")
+                let key = pair[0].trimmingCharacters(in: .whitespacesAndNewlines)
+                    .trimmingCharacters(in: CharacterSet(charactersIn: "{}\"'"))
+                let val = pair.dropFirst().joined(separator: ":").trimmingCharacters(in: .whitespacesAndNewlines)
+                    .trimmingCharacters(in: CharacterSet(charactersIn: "{}\"'"))
                 result[key] = val
             }
         }
-        return result
+        return AgentToolBox.normalizeToolParams(result)
     }
 
     // MARK: - Checkpoint Disk Storage

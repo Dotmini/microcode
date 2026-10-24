@@ -653,6 +653,7 @@ final class NotebookViewModel: ObservableObject {
     
     func runCell(_ cell: NotebookCellModel, computeTarget: ComputeTarget? = nil) {
         guard cell.type == .code || cell.type == .procedure || cell.type == .agent else { return }
+        TelemetryService.shared.recordFeature("Notebook Cell (\(cell.language.rawValue))")
 
         let effectiveTarget: ComputeTarget = cell.computeTargetOverride ?? computeTarget ?? AppState.shared?.currentComputeTarget ?? .localCPU
 

@@ -2676,6 +2676,7 @@ struct PlaygroundView: View {
     
     @MainActor
     private func runCode() async {
+        TelemetryService.shared.recordFeature("Playground (\(language))")
         // Document languages are previewed live, never executed by the backend
         // runner (which would report "Language 'markdown' not supported yet").
         if language == "markdown" || language == "latex" {
@@ -3453,6 +3454,7 @@ struct PlaygroundView: View {
     }
 
     func runCell(_ cell: PlaygroundCellModel) {
+        TelemetryService.shared.recordFeature("Playground Cell (\(language))")
         cell.isExecuting = true
         cell.output = ""
         let startTime = Date()

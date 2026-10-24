@@ -19,6 +19,9 @@ struct MicroCodeLicenseSettingsView: View {
     @State private var platformKeyInput = ""
     @State private var showServiceAccountEditor = false
     @State private var selectedTelemetryTab = 0
+    @State private var isCheckingOut = false
+    @State private var checkoutStatus = ""
+    @State private var checkoutVerified = false
 
     var body: some View {
         ScrollView {
@@ -167,12 +170,13 @@ struct MicroCodeLicenseSettingsView: View {
     }
 
     private var entitlementCard: some View {
-        VStack(alignment: .leading, spacing: 10) {
+        let activePlan = auth.entitlement.plan.lowercased()
+        return VStack(alignment: .leading, spacing: 12) {
             HStack {
                 VStack(alignment: .leading, spacing: 3) {
-                    Text("Cloud entitlement")
+                    Text("Cloud Subscription & Entitlement")
                         .font(.system(size: 13, weight: .semibold))
-                    Text("Read from your Supabase profile; the desktop app cannot mint or alter it.")
+                    Text("Verified live from Dotmini Supabase & Beam Payment Gateway (Thai QR PromptPay & Credit/Debit Card).")
                         .font(.system(size: 11))
                         .foregroundColor(.secondary)
                 }
@@ -184,7 +188,7 @@ struct MicroCodeLicenseSettingsView: View {
                         .background(Capsule().fill(Color.orange.opacity(0.18)))
                 }
                 Text(auth.entitlement.isLoaded
-                     ? (auth.entitlement.plan.isEmpty ? "UNKNOWN" : auth.entitlement.plan.uppercased())
+                     ? (auth.entitlement.plan.isEmpty ? "FREE" : auth.entitlement.plan.uppercased())
                      : "UNAVAILABLE")
                     .font(.system(size: 10, weight: .bold))
                     .padding(.horizontal, 8).padding(.vertical, 4)
@@ -193,24 +197,133 @@ struct MicroCodeLicenseSettingsView: View {
             Divider()
             if auth.entitlement.isLoaded {
                 HStack {
-                    metric("AI tokens remaining", "\(auth.entitlement.tokensRemaining)")
+                    metric("AI requests remaining", "\(auth.entitlement.tokensRemaining)")
                     Spacer()
-                    metric("AI tokens used", "\(auth.entitlement.tokensUsed)")
+                    metric("AI requests used", "\(auth.entitlement.tokensUsed)")
                 }
             } else {
-                Text(auth.session == nil ? "Sign in to load your entitlement." : "Could not load your cloud entitlement. Try Refresh.")
+                Text(auth.session == nil ? "Sign in to load your entitlement and purchase a subscription." : "Could not load your cloud entitlement. Try Refresh.")
                     .font(.caption)
                     .foregroundColor(.secondary)
             }
-            HStack {
-                Button("Manage plan") {
-                    NSWorkspace.shared.open(URL(string: "https://microcode.dotmini.net/account")!)
+
+            Divider()
+            Text("Upgrade or Subscribe (Instant QR PromptPay / Visa / Mastercard)")
+                .font(.system(size: 11.5, weight: .semibold))
+
+            HStack(spacing: 10) {
+                subscriptionTierTile(
+                    title: "Lite",
+                    price: "฿179/mo",
+                    quota: "1,000 reqs/mo",
+                    planKey: "microai_lite",
+                    isCurrent: activePlan == "lite" || activePlan == "microai_lite"
+                )
+                subscriptionTierTile(
+                    title: "Pro",
+                    price: "฿529/mo",
+                    quota: "5,000 reqs/mo",
+                    planKey: "microai_pro",
+                    isCurrent: activePlan == "pro" || activePlan == "microai_pro"
+                )
+                subscriptionTierTile(
+                    title: "Advanced",
+                    price: "฿990/mo",
+                    quota: "12,000 reqs/mo",
+                    planKey: "microai_advanced",
+                    isCurrent: activePlan == "advanced" || activePlan == "microai_advanced"
+                )
+                subscriptionTierTile(
+                    title: "Bundle Pro",
+                    price: "฿1,365/mo",
+                    quota: "15,000 reqs + IDE",
+                    planKey: "bundle_pro",
+                    isCurrent: activePlan == "bundle_pro" || activePlan == "bundle"
+                )
+            }
+
+            if !checkoutStatus.isEmpty {
+                Text(checkoutStatus)
+                    .font(.system(size: 11, weight: .medium))
+                    .foregroundColor(checkoutVerified ? .green : .secondary)
+            }
+
+            HStack(spacing: 10) {
+                Button {
+                    Task {
+                        isCheckingOut = true
+                        let res = await auth.verifyLatestPayment()
+                        checkoutVerified = res.verified
+                        checkoutStatus = res.message
+                        isCheckingOut = false
+                    }
+                } label: {
+                    Label(isCheckingOut ? "Verifying…" : "Verify Payment & Sync Plan", systemImage: "checkmark.seal.fill")
+                }
+                .buttonStyle(.borderedProminent)
+                .disabled(isCheckingOut || auth.session == nil)
+
+                Button {
+                    NSWorkspace.shared.open(URL(string: "https://microcode.dotmini.net/subscription")!)
+                } label: {
+                    Label("Open Subscription Portal", systemImage: "safari")
                 }
                 .buttonStyle(.bordered)
                 Spacer()
             }
         }
         .cardStyle()
+    }
+
+    private func subscriptionTierTile(
+        title: String,
+        price: String,
+        quota: String,
+        planKey: String,
+        isCurrent: Bool
+    ) -> some View {
+        VStack(alignment: .leading, spacing: 6) {
+            HStack {
+                Text(title)
+                    .font(.system(size: 12, weight: .bold))
+                Spacer()
+                if isCurrent {
+                    Text("ACTIVE")
+                        .font(.system(size: 8.5, weight: .heavy))
+                        .padding(.horizontal, 5).padding(.vertical, 2)
+                        .background(Capsule().fill(Color.green.opacity(0.2)))
+                        .foregroundStyle(.green)
+                }
+            }
+            Text(price)
+                .font(.system(size: 14, weight: .bold, design: .rounded))
+            Text(quota)
+                .font(.system(size: 10))
+                .foregroundColor(.secondary)
+                .lineLimit(1)
+            Button(isCurrent ? "Current Plan" : "Subscribe") {
+                Task {
+                    isCheckingOut = true
+                    checkoutVerified = false
+                    checkoutStatus = "กำลังสร้างลิงก์ชำระเงินจริงผ่าน Beam Checkout (\(title))…"
+                    do {
+                        let session = try await auth.createSubscriptionCheckout(plan: planKey)
+                        checkoutStatus = "เปิดหน้าชำระเงิน Beam Checkout (฿\(Int(session.amountTHB))) แล้ว กรุณาสแกน QR PromptPay หรือชำระผ่านบัตร แล้วกด Verify Payment & Sync Plan"
+                        NSWorkspace.shared.open(session.checkoutURL)
+                    } catch {
+                        checkoutStatus = error.localizedDescription
+                    }
+                    isCheckingOut = false
+                }
+            }
+            .buttonStyle(.bordered)
+            .controlSize(.small)
+            .disabled(isCurrent || isCheckingOut || auth.session == nil)
+        }
+        .padding(10)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(RoundedRectangle(cornerRadius: 9).fill(Color.secondary.opacity(0.08)))
+        .overlay(RoundedRectangle(cornerRadius: 9).stroke(isCurrent ? Color.green.opacity(0.45) : Color.primary.opacity(0.08), lineWidth: 1))
     }
 
     private var installRegistryCard: some View {
@@ -314,6 +427,30 @@ struct MicroCodeLicenseSettingsView: View {
                                 }
                                 .font(.system(size: 10.5, design: .monospaced))
                                 .foregroundColor(.secondary)
+                                if !lead.activeFeature.isEmpty || !lead.aiProvider.isEmpty || !lead.aiModel.isEmpty {
+                                    HStack(spacing: 8) {
+                                        if !lead.activeFeature.isEmpty {
+                                            Label(lead.activeFeature, systemImage: "sparkles.rectangle.stack")
+                                                .font(.system(size: 10, weight: .semibold))
+                                                .padding(.horizontal, 7).padding(.vertical, 2)
+                                                .background(Capsule().fill(Color.cyan.opacity(0.16)))
+                                                .foregroundStyle(.cyan)
+                                        }
+                                        if !lead.aiProvider.isEmpty || !lead.aiModel.isEmpty {
+                                            Label("\(lead.aiProvider.isEmpty ? "AI" : lead.aiProvider) · \(lead.aiModel.isEmpty ? "default" : lead.aiModel)", systemImage: "cpu.fill")
+                                                .font(.system(size: 10, weight: .semibold, design: .monospaced))
+                                                .padding(.horizontal, 7).padding(.vertical, 2)
+                                                .background(Capsule().fill(Color.purple.opacity(0.16)))
+                                                .foregroundStyle(.purple)
+                                        }
+                                        if lead.aiRequests > 0 {
+                                            Text("\(lead.aiRequests) reqs")
+                                                .font(.system(size: 9.5, design: .monospaced))
+                                                .foregroundColor(.secondary)
+                                        }
+                                        Spacer()
+                                    }
+                                }
                                 Text(lead.machineInfo.isEmpty ? lead.userAgent : "\(lead.machineInfo) — \(lead.userAgent)")
                                     .font(.system(size: 10))
                                     .foregroundColor(.secondary)
@@ -437,6 +574,30 @@ struct MicroCodeLicenseSettingsView: View {
                                 }
                                 .font(.system(size: 10, design: .monospaced))
                                 .foregroundColor(.secondary)
+                                if !dev.activeFeature.isEmpty || !dev.aiProvider.isEmpty || !dev.aiModel.isEmpty {
+                                    HStack(spacing: 8) {
+                                        if !dev.activeFeature.isEmpty {
+                                            Label("Feature: \(dev.activeFeature)", systemImage: "sparkles.rectangle.stack")
+                                                .font(.system(size: 10, weight: .semibold))
+                                                .padding(.horizontal, 7).padding(.vertical, 2)
+                                                .background(Capsule().fill(Color.cyan.opacity(0.16)))
+                                                .foregroundStyle(.cyan)
+                                        }
+                                        if !dev.aiProvider.isEmpty || !dev.aiModel.isEmpty {
+                                            Label("\(dev.aiProvider.isEmpty ? "AI" : dev.aiProvider) · \(dev.aiModel.isEmpty ? "default" : dev.aiModel)", systemImage: "cpu.fill")
+                                                .font(.system(size: 10, weight: .semibold, design: .monospaced))
+                                                .padding(.horizontal, 7).padding(.vertical, 2)
+                                                .background(Capsule().fill(Color.purple.opacity(0.16)))
+                                                .foregroundStyle(.purple)
+                                        }
+                                        if dev.aiRequests > 0 {
+                                            Text("\(dev.aiRequests) AI reqs · \(dev.aiTokens) tokens")
+                                                .font(.system(size: 9.5, design: .monospaced))
+                                                .foregroundColor(.secondary)
+                                        }
+                                        Spacer()
+                                    }
+                                }
                                 if !dev.installedAgents.isEmpty {
                                     HStack(spacing: 6) {
                                         Text("CLI Agents:")

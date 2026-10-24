@@ -139,6 +139,54 @@ class AgentToolBox: ObservableObject {
         tools[tool.name] = tool
     }
     
+    nonisolated static func normalizeToolParams(_ params: [String: Any]) -> [String: Any] {
+        var normalized = params
+        for (key, rawVal) in params {
+            guard let strVal = rawVal as? String else { continue }
+            let trimmed = strVal.trimmingCharacters(in: .whitespacesAndNewlines)
+            if trimmed.hasPrefix("{") && trimmed.hasSuffix("}") {
+                if let data = trimmed.data(using: .utf8),
+                   let jsonObj = try? JSONSerialization.jsonObject(with: data) as? [String: Any] {
+                    for (innerK, innerV) in jsonObj {
+                        normalized[innerK] = innerV
+                    }
+                    if let sameKeyVal = jsonObj[key] {
+                        normalized[key] = sameKeyVal
+                    }
+                    continue
+                }
+                // Fallback for JSON strings with unescaped inner quotes, e.g. {"command":"ls -la || echo "no""}
+                if let regex = try? NSRegularExpression(pattern: #"^\{\s*"([a-zA-Z0-9_]+)"\s*:\s*"([\s\S]*)"\s*\}$"#),
+                   let match = regex.firstMatch(in: trimmed, range: NSRange(trimmed.startIndex..., in: trimmed)),
+                   let kRange = Range(match.range(at: 1), in: trimmed),
+                   let vRange = Range(match.range(at: 2), in: trimmed) {
+                    let innerKey = String(trimmed[kRange])
+                    let innerVal = String(trimmed[vRange])
+                        .replacingOccurrences(of: #"\""#, with: "\"")
+                        .replacingOccurrences(of: #"\\"#, with: "\\")
+                    normalized[innerKey] = innerVal
+                    if innerKey == key {
+                        normalized[key] = innerVal
+                    }
+                    continue
+                }
+            }
+            if ["path", "directory", "TargetFile", "AbsolutePath", "file_path", "old_path", "new_path", "cwd"].contains(key) {
+                var cleanPath = trimmed
+                if cleanPath.hasSuffix("\"}") {
+                    cleanPath = String(cleanPath.dropLast(2))
+                } else if cleanPath.hasSuffix("'}") {
+                    cleanPath = String(cleanPath.dropLast(2))
+                }
+                if let r = cleanPath.range(of: #"^\{\s*"[a-zA-Z0-9_]+"\s*:\s*""#, options: .regularExpression) {
+                    cleanPath = String(cleanPath[r.upperBound...])
+                }
+                normalized[key] = cleanPath
+            }
+        }
+        return normalized
+    }
+
     func execute(_ toolName: String, params: [String: Any]) async throws -> String {
         var targetTool = tools[toolName]
         if targetTool == nil {
@@ -155,7 +203,7 @@ class AgentToolBox: ObservableObject {
         }
         
         let executionWorkspace = workspaceRoot
-        var resolvedParams = params
+        var resolvedParams = Self.normalizeToolParams(params)
         let isRemoteTarget: Bool = {
             if case .remote = executionTarget { return true }
             return false
@@ -171,9 +219,9 @@ class AgentToolBox: ObservableObject {
                 }
                 
                 for key in ["path", "directory", "old_path", "new_path", "cwd"] {
-                    if let path = params[key] as? String { resolvedParams[key] = resolvePath(path) }
+                    if let path = resolvedParams[key] as? String { resolvedParams[key] = resolvePath(path) }
                 }
-                if let pathsStr = params["paths"] as? String {
+                if let pathsStr = resolvedParams["paths"] as? String {
                     let paths = pathsStr.components(separatedBy: ",").map { $0.trimmingCharacters(in: .whitespaces) }
                     resolvedParams["paths"] = paths.map { resolvePath($0) }.joined(separator: ",")
                 }

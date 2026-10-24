@@ -879,8 +879,8 @@ public final class SyntaxHighlightingEngine: @unchecked Sendable {
         let nsAttr = sharedQuickEngine.highlightedAttributedString(fontSize: fontSize)
         sharedQuickEngine.clearCache()
         let swiftAttr = (try? AttributedString(nsAttr, including: \.appKit)) ?? AttributedString(code)
-        if swiftUIAttributedCache.count > 32 {
-            swiftUIAttributedCache.removeAll(keepingCapacity: false)
+        if swiftUIAttributedCache.count > 256 {
+            swiftUIAttributedCache.removeAll(keepingCapacity: true)
         }
         swiftUIAttributedCache[key] = swiftAttr
         quickHighlightLock.unlock()

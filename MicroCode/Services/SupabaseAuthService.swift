@@ -443,6 +443,31 @@ final class SupabaseAuthService: ObservableObject {
             }
         }
 
+        if profile == nil, let jwt = session?.accessToken, !jwt.isEmpty {
+            let emailParam = (session?.email ?? "").addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) ?? ""
+            let uidParam = userID.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) ?? ""
+            let statusURL = "https://microcode.dotmini.net/api/subscription/status?uid=\(uidParam)&email=\(emailParam)"
+            let statusData = await Task.detached(priority: .userInitiated) {
+                Self.curlIPv4JSON(arguments: [
+                    statusURL,
+                    "-H", "Authorization: Bearer \(jwt)"
+                ])
+            }.value
+            if let statusData,
+               let statusObj = try? JSONSerialization.jsonObject(with: statusData) as? [String: Any],
+               let statusPlan = statusObj["plan"] as? String {
+                let statusRole = (statusObj["role"] as? String) ?? "user"
+                let statusQuota = (statusObj["ai_quota"] as? Int) ?? (statusObj["ai_quota"] as? NSNumber)?.intValue ?? 0
+                let statusUsed = (statusObj["ai_used"] as? Int) ?? (statusObj["ai_used"] as? NSNumber)?.intValue ?? 0
+                profile = [
+                    "role": statusRole,
+                    "plan": statusPlan,
+                    "ai_quota": statusQuota,
+                    "ai_used": statusUsed
+                ]
+            }
+        }
+
         if profile == nil, let jwt = session?.accessToken, !jwt.isEmpty,
            let bodyData = try? JSONSerialization.data(withJSONObject: ["token": jwt]),
            let bodyStr = String(data: bodyData, encoding: .utf8) {
@@ -458,11 +483,14 @@ final class SupabaseAuthService: ObservableObject {
                (obj["status"] as? String) == "success",
                let dataObj = obj["data"] as? [String: Any],
                let verifiedRole = dataObj["role"] as? String {
+                let syncedPlan = (dataObj["plan"] as? String) ?? (verifiedRole == "admin" ? "advanced" : "free")
+                let syncedQuota = (dataObj["ai_quota"] as? Int) ?? (dataObj["ai_quota"] as? NSNumber)?.intValue ?? (verifiedRole == "admin" ? 12000 : 50)
+                let syncedUsed = (dataObj["ai_used"] as? Int) ?? (dataObj["ai_used"] as? NSNumber)?.intValue ?? 0
                 profile = [
                     "role": verifiedRole,
-                    "plan": verifiedRole == "admin" ? "advanced" : "free",
-                    "ai_quota": verifiedRole == "admin" ? 12000 : 0,
-                    "ai_used": 0
+                    "plan": syncedPlan,
+                    "ai_quota": syncedQuota,
+                    "ai_used": syncedUsed
                 ]
             }
         }
@@ -474,8 +502,8 @@ final class SupabaseAuthService: ObservableObject {
             return
         }
         guard session?.userID == userID, session != nil else { return }
-        let quota = max(0, profile["ai_quota"] as? Int ?? 0)
-        let used = max(0, profile["ai_used"] as? Int ?? 0)
+        let quota = max(0, (profile["ai_quota"] as? Int) ?? (profile["ai_quota"] as? NSNumber)?.intValue ?? 0)
+        let used = max(0, (profile["ai_used"] as? Int) ?? (profile["ai_used"] as? NSNumber)?.intValue ?? 0)
         let newEntitlement = Entitlement(
             plan: profile["plan"] as? String ?? "",
             role: profile["role"] as? String ?? "",
@@ -497,6 +525,116 @@ final class SupabaseAuthService: ObservableObject {
         }
         if !isAdminProvider {
             TelemetryService.shared.clearAdminCache()
+        }
+    }
+
+    struct CheckoutSessionResult {
+        let checkoutURL: URL
+        let orderRef: String
+        let paymentLinkID: String
+        let amountTHB: Double
+    }
+
+    func createSubscriptionCheckout(
+        plan: String,
+        billingInterval: String = "monthly",
+        paymentMethod: String = "promptpay"
+    ) async throws -> CheckoutSessionResult {
+        guard let currentSession = session else {
+            throw AuthError.rejected("กรุณาเข้าสู่ระบบบัญชี MicroCode ก่อนทำการสมัครแพ็กเกจ")
+        }
+        let jwt = await refreshAccessTokenIfNeeded() ?? currentSession.accessToken
+        let payload: [String: Any] = [
+            "plan": plan,
+            "uid": currentSession.userID,
+            "email": currentSession.email,
+            "fullName": currentSession.email.components(separatedBy: "@").first ?? "MicroCode User",
+            "billingInterval": billingInterval,
+            "paymentMethod": paymentMethod,
+            "seats": 1
+        ]
+        let bodyData = try JSONSerialization.data(withJSONObject: payload)
+        let bodyStr = String(data: bodyData, encoding: .utf8) ?? "{}"
+
+        let responseData = await Task.detached(priority: .userInitiated) {
+            Self.curlIPv4JSON(arguments: [
+                "-X", "POST", "https://microcode.dotmini.net/api/payment/beam-checkout",
+                "-H", "Content-Type: application/json",
+                "-H", "Authorization: Bearer \(jwt)",
+                "-d", bodyStr
+            ])
+        }.value
+
+        guard let responseData,
+              let json = try? JSONSerialization.jsonObject(with: responseData) as? [String: Any] else {
+            throw AuthError.rejected("ไม่สามารถติดต่อเซิร์ฟเวอร์ชำระเงินได้ กรุณาลองใหม่อีกครั้ง")
+        }
+        if let errMsg = json["message"] as? String ?? json["error"] as? String, json["url"] == nil {
+            throw AuthError.rejected(errMsg)
+        }
+        guard let urlStr = json["url"] as? String, let checkoutURL = URL(string: urlStr) else {
+            throw AuthError.rejected("ไม่ได้รับลิงก์ชำระเงินจาก Beam Gateway")
+        }
+        let orderRef = (json["orderRef"] as? String) ?? ""
+        let paymentLinkID = (json["paymentLinkId"] as? String) ?? (json["sessionId"] as? String) ?? ""
+        let amountTHB = (json["amountTHB"] as? Double) ?? (json["amountTHB"] as? NSNumber)?.doubleValue ?? 0
+
+        if !orderRef.isEmpty {
+            defaults.set(orderRef, forKey: "microcode.lastOrderRef")
+        }
+        if !paymentLinkID.isEmpty {
+            defaults.set(paymentLinkID, forKey: "microcode.lastPaymentLinkID")
+        }
+        return CheckoutSessionResult(
+            checkoutURL: checkoutURL,
+            orderRef: orderRef,
+            paymentLinkID: paymentLinkID,
+            amountTHB: amountTHB
+        )
+    }
+
+    func verifyLatestPayment() async -> (verified: Bool, message: String, checkoutURL: URL?) {
+        let orderRef = defaults.string(forKey: "microcode.lastOrderRef") ?? ""
+        let paymentLinkID = defaults.string(forKey: "microcode.lastPaymentLinkID") ?? ""
+        if orderRef.isEmpty && paymentLinkID.isEmpty {
+            await refreshEntitlement()
+            return (false, "ซิงค์สิทธิ์แพ็กเกจจากเซิร์ฟเวอร์เรียบร้อยแล้ว (Plan: \(entitlement.plan.isEmpty ? "free" : entitlement.plan.uppercased()))", nil)
+        }
+        let jwt = await refreshAccessTokenIfNeeded() ?? session?.accessToken ?? ""
+        let payload: [String: Any] = [
+            "orderRef": orderRef,
+            "paymentLinkId": paymentLinkID,
+            "uid": session?.userID ?? "",
+            "email": session?.email ?? ""
+        ]
+        guard let bodyData = try? JSONSerialization.data(withJSONObject: payload),
+              let bodyStr = String(data: bodyData, encoding: .utf8) else {
+            return (false, "ไม่สามารถสร้างคำขอตรวจสอบการชำระเงินได้", nil)
+        }
+        let responseData = await Task.detached(priority: .userInitiated) {
+            Self.curlIPv4JSON(arguments: [
+                "-X", "POST", "https://microcode.dotmini.net/api/payment/verify",
+                "-H", "Content-Type: application/json",
+                "-H", "Authorization: Bearer \(jwt)",
+                "-d", bodyStr
+            ])
+        }.value
+
+        guard let responseData,
+              let json = try? JSONSerialization.jsonObject(with: responseData) as? [String: Any] else {
+            await refreshEntitlement()
+            return (false, "ไม่สามารถตรวจสอบสถานะการชำระเงินได้ในขณะนี้", nil)
+        }
+        let isVerified = (json["verified"] as? Bool) ?? false
+        if isVerified {
+            await refreshEntitlement()
+            let planName = (json["displayName"] as? String) ?? (json["plan"] as? String) ?? entitlement.plan
+            return (true, "ชำระเงินสำเร็จ! เปิดใช้งานแพ็กเกจ \(planName.uppercased()) เรียบร้อยแล้ว", nil)
+        } else {
+            let msg = (json["message"] as? String) ?? "รายการชำระเงินยังรอดำเนินการ (สถานะ: \((json["status"] as? String) ?? "PENDING"))"
+            let resumeURL = (json["checkoutUrl"] as? String).flatMap { URL(string: $0) }
+            await refreshEntitlement()
+            return (false, msg, resumeURL)
         }
     }
 

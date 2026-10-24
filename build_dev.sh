@@ -134,9 +134,9 @@ cat > "$BUNDLE_NAME/Contents/Info.plist" <<EOF
     <key>CFBundleDisplayName</key>
     <string>MicroCode</string>
     <key>CFBundleShortVersionString</key>
-    <string>2.5.28</string>
+    <string>2.5.30</string>
     <key>CFBundleVersion</key>
-    <string>28</string>
+    <string>30</string>
     <key>CFBundlePackageType</key>
     <string>APPL</string>
     <key>CFBundleIconFile</key>
@@ -240,16 +240,17 @@ rm -rf "MicroCode.app"
 ln -sfn "$BUNDLE_NAME" "MicroCode.app"
 echo "🔗 Workspace symlink updated: MicroCode.app -> $BUNDLE_NAME"
 
-# Sync to system /Applications folder (symlink when building on External SSD to save 360MB on internal drive)
+# Install real bundle into /Applications/MicroCode.app and register with LaunchServices
 if [ -w "/Applications" ]; then
     rm -rf "/Applications/MicroCode.app"
-    ln -sfn "$BUNDLE_NAME" "/Applications/MicroCode.app"
-    echo "📱 System Applications updated: /Applications/MicroCode.app -> $BUNDLE_NAME"
+    ditto "$BUNDLE_NAME" "/Applications/MicroCode.app"
+    /System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister -f "/Applications/MicroCode.app" 2>/dev/null || true
+    echo "📱 System Applications updated (real bundle): /Applications/MicroCode.app"
 fi
 
 # Also sync to ~/Applications folder so Dock/Spotlight shortcuts pointing there never run a stale build
 if [ -d "$HOME/Applications" ]; then
     rm -rf "$HOME/Applications/MicroCode.app"
-    ln -sfn "$BUNDLE_NAME" "$HOME/Applications/MicroCode.app"
-    echo "📱 User Applications updated: $HOME/Applications/MicroCode.app -> $BUNDLE_NAME"
+    ln -sfn "/Applications/MicroCode.app" "$HOME/Applications/MicroCode.app"
+    echo "📱 User Applications updated: $HOME/Applications/MicroCode.app -> /Applications/MicroCode.app"
 fi

@@ -3,11 +3,12 @@
 //  MicroCode
 //
 //  Privacy-preserving, opt-in product telemetry.  No source code, prompts,
-//  project names, file paths, account email, serial number, or hardware UUID
+//  project names, file paths, serial number, or hardware UUID
 //  is collected by this service.
 //
 
 import Foundation
+import AppKit
 import Combine
 import Metal
 import Darwin
@@ -19,6 +20,9 @@ struct InstallHistoryEntry: Codable, Identifiable, Equatable {
     let appVersion: String
     let mode: String?
     let email: String?
+    var feature: String? = nil
+    var aiProvider: String? = nil
+    var aiModel: String? = nil
 }
 
 struct InstallRecord: Codable, Identifiable, Equatable {
@@ -33,9 +37,87 @@ struct InstallRecord: Codable, Identifiable, Equatable {
     var lastSeenAt: String
     var launchCount: Int
     var lastMode: String
+    var activeFeature: String
+    var featuresUsed: [String]
+    var aiProvider: String
+    var aiModel: String
+    var aiRequests: Int
+    var aiTokens: Int
     var device: TelemetryDeviceSnapshot
     var installedAgents: [String]
     var history: [InstallHistoryEntry]
+
+    init(
+        installID: String,
+        userID: String,
+        email: String,
+        displayName: String,
+        hostname: String,
+        appVersion: String,
+        firstInstalledAt: String,
+        lastSeenAt: String,
+        launchCount: Int,
+        lastMode: String,
+        activeFeature: String = "",
+        featuresUsed: [String] = [],
+        aiProvider: String = "",
+        aiModel: String = "",
+        aiRequests: Int = 0,
+        aiTokens: Int = 0,
+        device: TelemetryDeviceSnapshot,
+        installedAgents: [String],
+        history: [InstallHistoryEntry]
+    ) {
+        self.installID = installID
+        self.userID = userID
+        self.email = email
+        self.displayName = displayName
+        self.hostname = hostname
+        self.appVersion = appVersion
+        self.firstInstalledAt = firstInstalledAt
+        self.lastSeenAt = lastSeenAt
+        self.launchCount = launchCount
+        self.lastMode = lastMode
+        self.activeFeature = activeFeature
+        self.featuresUsed = featuresUsed
+        self.aiProvider = aiProvider
+        self.aiModel = aiModel
+        self.aiRequests = aiRequests
+        self.aiTokens = aiTokens
+        self.device = device
+        self.installedAgents = installedAgents
+        self.history = history
+    }
+
+    enum CodingKeys: String, CodingKey {
+        case installID, userID, email, displayName, hostname, appVersion
+        case firstInstalledAt, lastSeenAt, launchCount, lastMode
+        case activeFeature, featuresUsed, aiProvider, aiModel, aiRequests, aiTokens
+        case device, installedAgents, history
+    }
+
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        installID = try c.decode(String.self, forKey: .installID)
+        userID = (try? c.decode(String.self, forKey: .userID)) ?? "anonymous"
+        email = (try? c.decode(String.self, forKey: .email)) ?? ""
+        displayName = (try? c.decode(String.self, forKey: .displayName)) ?? ""
+        hostname = (try? c.decode(String.self, forKey: .hostname)) ?? ""
+        appVersion = (try? c.decode(String.self, forKey: .appVersion)) ?? ""
+        firstInstalledAt = (try? c.decode(String.self, forKey: .firstInstalledAt)) ?? ""
+        lastSeenAt = (try? c.decode(String.self, forKey: .lastSeenAt)) ?? ""
+        launchCount = (try? c.decode(Int.self, forKey: .launchCount)) ?? 1
+        lastMode = (try? c.decode(String.self, forKey: .lastMode)) ?? "code"
+        activeFeature = (try? c.decode(String.self, forKey: .activeFeature)) ?? ""
+        featuresUsed = (try? c.decode([String].self, forKey: .featuresUsed)) ?? []
+        aiProvider = (try? c.decode(String.self, forKey: .aiProvider)) ?? ""
+        aiModel = (try? c.decode(String.self, forKey: .aiModel)) ?? ""
+        aiRequests = (try? c.decode(Int.self, forKey: .aiRequests)) ?? 0
+        aiTokens = (try? c.decode(Int.self, forKey: .aiTokens)) ?? 0
+        device = (try? c.decode(TelemetryDeviceSnapshot.self, forKey: .device)) ?? .current
+        installedAgents = (try? c.decode([String].self, forKey: .installedAgents)) ?? []
+        history = (try? c.decode([InstallHistoryEntry].self, forKey: .history)) ?? []
+    }
 }
 
 struct DownloadLeadRecord: Codable, Identifiable, Equatable {
@@ -50,7 +132,98 @@ struct DownloadLeadRecord: Codable, Identifiable, Equatable {
     let eventType: String
     let sourceLabel: String
     let machineInfo: String
+    let installID: String
+    let hostname: String
+    let activeFeature: String
+    let featuresUsed: [String]
+    let aiProvider: String
+    let aiModel: String
+    let aiRequests: Int
+    let aiTokens: Int
+    let launchCount: Int
+    let installedAgents: [String]
     let downloadedAt: String
+
+    init(
+        id: Int,
+        email: String,
+        name: String,
+        version: String,
+        platform: String,
+        arch: String,
+        ipAddress: String,
+        userAgent: String,
+        eventType: String,
+        sourceLabel: String,
+        machineInfo: String,
+        installID: String = "",
+        hostname: String = "",
+        activeFeature: String = "",
+        featuresUsed: [String] = [],
+        aiProvider: String = "",
+        aiModel: String = "",
+        aiRequests: Int = 0,
+        aiTokens: Int = 0,
+        launchCount: Int = 1,
+        installedAgents: [String] = [],
+        downloadedAt: String
+    ) {
+        self.id = id
+        self.email = email
+        self.name = name
+        self.version = version
+        self.platform = platform
+        self.arch = arch
+        self.ipAddress = ipAddress
+        self.userAgent = userAgent
+        self.eventType = eventType
+        self.sourceLabel = sourceLabel
+        self.machineInfo = machineInfo
+        self.installID = installID
+        self.hostname = hostname
+        self.activeFeature = activeFeature
+        self.featuresUsed = featuresUsed
+        self.aiProvider = aiProvider
+        self.aiModel = aiModel
+        self.aiRequests = aiRequests
+        self.aiTokens = aiTokens
+        self.launchCount = launchCount
+        self.installedAgents = installedAgents
+        self.downloadedAt = downloadedAt
+    }
+
+    enum CodingKeys: String, CodingKey {
+        case id, email, name, version, platform, arch, ipAddress, userAgent
+        case eventType, sourceLabel, machineInfo, installID, hostname
+        case activeFeature, featuresUsed, aiProvider, aiModel, aiRequests, aiTokens
+        case launchCount, installedAgents, downloadedAt
+    }
+
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        id = (try? c.decode(Int.self, forKey: .id)) ?? 0
+        email = (try? c.decode(String.self, forKey: .email)) ?? ""
+        name = (try? c.decode(String.self, forKey: .name)) ?? ""
+        version = (try? c.decode(String.self, forKey: .version)) ?? ""
+        platform = (try? c.decode(String.self, forKey: .platform)) ?? "macOS"
+        arch = (try? c.decode(String.self, forKey: .arch)) ?? "universal"
+        ipAddress = (try? c.decode(String.self, forKey: .ipAddress)) ?? ""
+        userAgent = (try? c.decode(String.self, forKey: .userAgent)) ?? ""
+        eventType = (try? c.decode(String.self, forKey: .eventType)) ?? "web_download"
+        sourceLabel = (try? c.decode(String.self, forKey: .sourceLabel)) ?? ""
+        machineInfo = (try? c.decode(String.self, forKey: .machineInfo)) ?? ""
+        installID = (try? c.decode(String.self, forKey: .installID)) ?? ""
+        hostname = (try? c.decode(String.self, forKey: .hostname)) ?? ""
+        activeFeature = (try? c.decode(String.self, forKey: .activeFeature)) ?? ""
+        featuresUsed = (try? c.decode([String].self, forKey: .featuresUsed)) ?? []
+        aiProvider = (try? c.decode(String.self, forKey: .aiProvider)) ?? ""
+        aiModel = (try? c.decode(String.self, forKey: .aiModel)) ?? ""
+        aiRequests = (try? c.decode(Int.self, forKey: .aiRequests)) ?? 0
+        aiTokens = (try? c.decode(Int.self, forKey: .aiTokens)) ?? 0
+        launchCount = (try? c.decode(Int.self, forKey: .launchCount)) ?? 1
+        installedAgents = (try? c.decode([String].self, forKey: .installedAgents)) ?? []
+        downloadedAt = (try? c.decode(String.self, forKey: .downloadedAt)) ?? ""
+    }
 }
 
 struct CloudUserActivitySummary: Codable, Identifiable, Equatable {
@@ -141,6 +314,13 @@ final class TelemetryService: ObservableObject {
         static let history = "telemetryInstallHistoryV1"
         static let queue = "telemetryEventQueueV1"
         static let lastMode = "telemetryLastMode"
+        static let activeFeature = "telemetryActiveFeatureV1"
+        static let featuresUsed = "telemetryFeaturesUsedV1"
+        static let lastAIProvider = "telemetryLastAIProviderV1"
+        static let lastAIModel = "telemetryLastAIModelV1"
+        static let totalAIRequests = "telemetryTotalAIRequestsV1"
+        static let totalAITokens = "telemetryTotalAITokensV1"
+        static let cachedGitEmail = "telemetryCachedGitEmailV1"
         static let cachedUsers = "telemetryCachedPortalUsersV2"
         static let cachedLeads = "telemetryCachedDownloadLeadsV2"
         static let cachedInstalls = "telemetryCachedInstallsV1"
@@ -158,6 +338,9 @@ final class TelemetryService: ObservableObject {
     private let portalBaseURL = URL(string: "https://microcode.dotmini.net")!
     private var hasStarted = false
     private var flushing = false
+    private var portalReportTask: Task<Void, Never>?
+    private var heartbeatTimer: Timer?
+    private var lastReportedPortalEventType: String = "macapp_active"
 
     private init() {
         if UserDefaults.standard.object(forKey: Key.enabled) == nil {
@@ -220,9 +403,12 @@ final class TelemetryService: ObservableObject {
         objectWillChange.send()
         guard enabled else {
             UserDefaults.standard.removeObject(forKey: Key.queue)
+            heartbeatTimer?.invalidate()
+            heartbeatTimer = nil
             return
         }
         record(name: "telemetry_consent_granted")
+        startHeartbeatTimerIfNeeded()
         flush()
     }
 
@@ -231,29 +417,140 @@ final class TelemetryService: ObservableObject {
         hasStarted = true
         let nextCount = UserDefaults.standard.integer(forKey: Key.launchCount) + 1
         UserDefaults.standard.set(nextCount, forKey: Key.launchCount)
+        warmGitEmailCacheIfNeeded()
         guard isEnabled else { return }
-        record(name: "app_launch", mode: UserDefaults.standard.string(forKey: Key.lastMode) ?? "code")
-        flush()
+
+        let currentMode = UserDefaults.standard.string(forKey: Key.lastMode) ?? "code"
+        let modeFeature = Self.displayFeatureName(forModeRaw: currentMode)
+        markFeatureUsed(modeFeature)
+        lastReportedPortalEventType = "macapp_launch"
+        record(name: "app_launch", mode: currentMode, feature: modeFeature)
+        startHeartbeatTimerIfNeeded()
+        flush(immediatePortalSync: true)
+    }
+
+    private func startHeartbeatTimerIfNeeded() {
+        heartbeatTimer?.invalidate()
+        guard isEnabled else { return }
+        // Send a live activity heartbeat every 2 minutes while the user is actively using MicroCode
+        heartbeatTimer = Timer.scheduledTimer(withTimeInterval: 120.0, repeats: true) { [weak self] _ in
+            Task { @MainActor in
+                guard let self, self.isEnabled else { return }
+                self.lastReportedPortalEventType = "macapp_heartbeat"
+                await self.syncInstallRecordToSupabase()
+                await self.reportActiveMacAppToPortal(eventType: "macapp_heartbeat")
+            }
+        }
     }
 
     func recordMode(_ mode: EditorMode) {
         guard isEnabled else { return }
-        guard UserDefaults.standard.string(forKey: Key.lastMode) != mode.rawValue else { return }
+        let featureLabel = mode == .notebook ? "Notebook (Cell Mode)" : mode.displayName
+        markFeatureUsed(featureLabel)
+        let previousMode = UserDefaults.standard.string(forKey: Key.lastMode)
         UserDefaults.standard.set(mode.rawValue, forKey: Key.lastMode)
-        record(name: "mode_opened", mode: mode.rawValue)
+        lastReportedPortalEventType = "macapp_mode_change"
+        if previousMode != mode.rawValue {
+            record(name: "mode_opened", mode: mode.rawValue, feature: featureLabel)
+        }
+        scheduleDebouncedPortalSync(eventType: "macapp_mode_change")
         flush()
     }
 
-    func record(name: String, mode: String? = nil) {
+    /// Records a specific feature or function used inside MicroCode (e.g. "Run Code (swift)", "Git Source Control", "Smart Refactor", "AI Agent").
+    func recordFeature(_ feature: String) {
+        guard isEnabled else { return }
+        let trimmed = feature.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return }
+        let prevFeature = UserDefaults.standard.string(forKey: Key.activeFeature)
+        markFeatureUsed(trimmed)
+        lastReportedPortalEventType = "macapp_feature_used"
+        if prevFeature != trimmed {
+            record(
+                name: "feature_used",
+                mode: UserDefaults.standard.string(forKey: Key.lastMode) ?? "code",
+                feature: trimmed
+            )
+        }
+        scheduleDebouncedPortalSync(eventType: "macapp_feature_used")
+        flush()
+    }
+
+    /// Records when the user switches AI provider or AI model in the UI selector.
+    func recordAIConfiguration(provider: String, model: String) {
+        guard isEnabled else { return }
+        let resolved = resolveCurrentAIState(overrideProvider: provider, overrideModel: model)
+        let prevProv = UserDefaults.standard.string(forKey: Key.lastAIProvider) ?? ""
+        let prevModel = UserDefaults.standard.string(forKey: Key.lastAIModel) ?? ""
+        guard resolved.provider != prevProv || resolved.model != prevModel else { return }
+        UserDefaults.standard.set(resolved.provider, forKey: Key.lastAIProvider)
+        UserDefaults.standard.set(resolved.model, forKey: Key.lastAIModel)
+        lastReportedPortalEventType = "macapp_ai_used"
+        scheduleDebouncedPortalSync(eventType: "macapp_ai_used")
+    }
+
+    /// Records an active AI request (Agent Chat, ACP CLI Agent, Inline Edit, Refactor, Autocomplete, etc.) along with provider, model, and tokens.
+    func recordAIUsage(provider: String, model: String, taskLabel: String = "AI Agent", tokens: Int = 0) {
+        guard isEnabled else { return }
+        let resolved = resolveCurrentAIState(overrideProvider: provider, overrideModel: model)
+        UserDefaults.standard.set(resolved.provider, forKey: Key.lastAIProvider)
+        UserDefaults.standard.set(resolved.model, forKey: Key.lastAIModel)
+
+        let nextRequests = UserDefaults.standard.integer(forKey: Key.totalAIRequests) + 1
+        UserDefaults.standard.set(nextRequests, forKey: Key.totalAIRequests)
+        if tokens > 0 {
+            let nextTokens = UserDefaults.standard.integer(forKey: Key.totalAITokens) + tokens
+            UserDefaults.standard.set(nextTokens, forKey: Key.totalAITokens)
+        }
+
+        let cleanTask = taskLabel.trimmingCharacters(in: .whitespacesAndNewlines)
+        let featureLabel = cleanTask.isEmpty ? "AI Agent" : cleanTask
+        markFeatureUsed(featureLabel)
+        lastReportedPortalEventType = "macapp_ai_used"
+        record(
+            name: "ai_request",
+            mode: UserDefaults.standard.string(forKey: Key.lastMode) ?? "code",
+            feature: featureLabel,
+            aiProvider: resolved.provider,
+            aiModel: resolved.model
+        )
+        scheduleDebouncedPortalSync(eventType: "macapp_ai_used")
+        flush()
+    }
+
+    func record(
+        name: String,
+        mode: String? = nil,
+        feature: String? = nil,
+        aiProvider: String? = nil,
+        aiModel: String? = nil
+    ) {
         guard isEnabled else { return }
         let now = ISO8601DateFormatter().string(from: Date())
+        let aiState = resolveCurrentAIState(overrideProvider: aiProvider, overrideModel: aiModel)
+        let activeFeat = feature ?? currentActiveFeature
+        let effectiveEmail = resolvedUserEmail
+        let fullName = NSFullUserName().isEmpty ? NSUserName() : NSFullUserName()
+        let host = Host.current().localizedName ?? ProcessInfo.processInfo.hostName
+
         var queue = queuedEvents()
         queue.append(TelemetryEvent(
             eventID: UUID().uuidString,
             installID: installID,
             timestamp: now,
             name: name,
-            mode: mode,
+            mode: mode ?? (UserDefaults.standard.string(forKey: Key.lastMode) ?? "code"),
+            feature: activeFeat,
+            featuresUsed: currentFeaturesUsed,
+            aiProvider: aiState.provider,
+            aiModel: aiState.model,
+            aiRequests: currentAIRequests,
+            aiTokens: currentAITokens,
+            email: effectiveEmail,
+            displayName: fullName,
+            hostname: host,
+            launchCount: currentLaunchCount,
+            installedAgents: LocalEcosystemDiscovery.shared.engines.filter(\.isInstalled).map(\.id),
             appVersion: appVersion,
             device: TelemetryDeviceSnapshot.current
         ))
@@ -261,32 +558,205 @@ final class TelemetryService: ObservableObject {
         save(queue)
 
         var hist = localHistory()
-        let email = SupabaseAuthService.shared.currentEmail
         hist.insert(InstallHistoryEntry(
             timestamp: now,
             event: name,
             appVersion: appVersion,
             mode: mode ?? UserDefaults.standard.string(forKey: Key.lastMode),
-            email: email.isEmpty ? nil : email
+            email: effectiveEmail.isEmpty ? nil : effectiveEmail,
+            feature: activeFeat,
+            aiProvider: aiState.provider,
+            aiModel: aiState.model
         ), at: 0)
-        if hist.count > 30 { hist = Array(hist.prefix(30)) }
+        if hist.count > 40 { hist = Array(hist.prefix(40)) }
         saveLocalHistory(hist)
+    }
+
+    /// Resolves the active AI Execution Mode + Provider and Model currently selected or in use.
+    func resolveCurrentAIState(overrideProvider: String? = nil, overrideModel: String? = nil) -> (provider: String, model: String) {
+        let keyMode = UserDefaults.standard.string(forKey: "aiKeyMode") ?? "acp"
+        let rawAppProvider = AppState.shared?.aiProvider ?? UserDefaults.standard.string(forKey: "aiProvider") ?? "gemini"
+        let rawAppModel = AppState.shared?.aiModel ?? UserDefaults.standard.string(forKey: "aiModel") ?? "gemini-2.5-flash"
+
+        let chosenModel: String = {
+            if let m = overrideModel?.trimmingCharacters(in: .whitespacesAndNewlines), !m.isEmpty {
+                return m
+            }
+            if keyMode == "acp" {
+                if let activeId = ACPHostService.shared.activeAgentId,
+                   let session = ACPHostService.shared.sessions[activeId],
+                   let sModel = session.model, !sModel.isEmpty {
+                    return sModel
+                }
+                if let savedModel = UserDefaults.standard.string(forKey: Key.lastAIModel), !savedModel.isEmpty {
+                    return savedModel
+                }
+                if let activeId = ACPHostService.shared.activeAgentId,
+                   let cfg = ACPHostService.shared.registeredConfigs.first(where: { $0.id == activeId }) {
+                    switch cfg.type {
+                    case .claudeCode: return "claude-sonnet-4-6"
+                    case .agy: return "gemini-3.8-pro"
+                    case .codexEngine: return "gpt-5.4"
+                    case .openCode: return rawAppModel
+                    case .zedEngine: return "claude-sonnet-4-6"
+                    default: return rawAppModel
+                    }
+                }
+            }
+            return rawAppModel
+        }()
+
+        let chosenProvider: String = {
+            if let p = overrideProvider?.trimmingCharacters(in: .whitespacesAndNewlines),
+               !p.isEmpty,
+               p.contains("·") || p.lowercased().hasPrefix("acp") || p.lowercased().hasPrefix("subscription") {
+                return p
+            }
+            if EnterpriseAIAuthService.shared.isEnterpriseActive {
+                return "Enterprise · \(EnterpriseAIAuthService.shared.mode.title)"
+            }
+            switch keyMode {
+            case "acp":
+                if let activeId = ACPHostService.shared.activeAgentId,
+                   let cfg = ACPHostService.shared.registeredConfigs.first(where: { $0.id == activeId }) {
+                    return "ACP · \(cfg.type.displayName)"
+                }
+                if let firstDetected = ACPHostService.shared.detectedAgents.keys.first {
+                    return "ACP · \(firstDetected.displayName)"
+                }
+                return "ACP · External Agent"
+            case "subscription":
+                let sub = SubscriptionAuthManager.shared.activeProvider
+                return "Subscription · \(sub.rawValue.capitalized)"
+            case "cloud":
+                let prov = (overrideProvider?.isEmpty == false ? overrideProvider! : rawAppProvider)
+                return "Dotmini Cloud · \(Self.prettyProviderName(prov))"
+            case "local":
+                let prov = (overrideProvider?.isEmpty == false ? overrideProvider! : rawAppProvider)
+                return "Local LLM · \(Self.prettyProviderName(prov))"
+            default:
+                let prov = (overrideProvider?.isEmpty == false ? overrideProvider! : rawAppProvider)
+                return "BYOK · \(Self.prettyProviderName(prov))"
+            }
+        }()
+
+        return (chosenProvider, chosenModel)
+    }
+
+    private static func prettyProviderName(_ raw: String) -> String {
+        switch raw.lowercased() {
+        case "gemini", "google": return "Google Gemini"
+        case "anthropic", "claude": return "Anthropic Claude"
+        case "openai", "gpt": return "OpenAI"
+        case "deepseek": return "DeepSeek"
+        case "qwen": return "Alibaba Qwen"
+        case "grok", "xai": return "xAI Grok"
+        case "glm", "zhipu": return "Zhipu GLM"
+        case "omni", "dotmini": return "Dotmini Omni AI"
+        case "ollama": return "Ollama"
+        case "mlx": return "Apple MLX"
+        case "lmstudio": return "LM Studio"
+        default: return raw.capitalized
+        }
+    }
+
+    private static func displayFeatureName(forModeRaw raw: String) -> String {
+        if let mode = EditorMode(rawValue: raw) {
+            return mode == .notebook ? "Notebook (Cell Mode)" : mode.displayName
+        }
+        switch raw.lowercased() {
+        case "code": return "Code Editor"
+        case "notebook": return "Notebook (Cell Mode)"
+        case "playground": return "Playground"
+        case "science": return "Science Mode"
+        case "ai agent", "aiagent": return "AI Agent"
+        case "apiclient": return "API Studio"
+        default: return raw
+        }
+    }
+
+    private func markFeatureUsed(_ feature: String) {
+        let trimmed = feature.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return }
+        UserDefaults.standard.set(trimmed, forKey: Key.activeFeature)
+        var list = currentFeaturesUsed
+        list.removeAll { $0.caseInsensitiveCompare(trimmed) == .orderedSame }
+        list.insert(trimmed, at: 0)
+        if list.count > 20 {
+            list = Array(list.prefix(20))
+        }
+        UserDefaults.standard.set(list, forKey: Key.featuresUsed)
+    }
+
+    var currentActiveFeature: String {
+        if let saved = UserDefaults.standard.string(forKey: Key.activeFeature), !saved.isEmpty {
+            return saved
+        }
+        let modeRaw = UserDefaults.standard.string(forKey: Key.lastMode) ?? "code"
+        return Self.displayFeatureName(forModeRaw: modeRaw)
+    }
+
+    var currentFeaturesUsed: [String] {
+        if let saved = UserDefaults.standard.stringArray(forKey: Key.featuresUsed), !saved.isEmpty {
+            return saved
+        }
+        return [currentActiveFeature]
+    }
+
+    var currentAIRequests: Int {
+        max(UserDefaults.standard.integer(forKey: Key.totalAIRequests), AIUsageTracker.shared.sessionRequests)
+    }
+
+    var currentAITokens: Int {
+        max(UserDefaults.standard.integer(forKey: Key.totalAITokens), AIUsageTracker.shared.sessionTokens)
+    }
+
+    private var resolvedUserEmail: String {
+        let supa = SupabaseAuthService.shared.currentEmail.trimmingCharacters(in: .whitespacesAndNewlines)
+        if !supa.isEmpty { return supa }
+        if let persisted = UserDefaults.standard.string(forKey: "microcode_account_email")?.trimmingCharacters(in: .whitespacesAndNewlines),
+           !persisted.isEmpty {
+            return persisted
+        }
+        if let gitEmail = UserDefaults.standard.string(forKey: Key.cachedGitEmail)?.trimmingCharacters(in: .whitespacesAndNewlines),
+           !gitEmail.isEmpty {
+            return gitEmail
+        }
+        let user = NSUserName().trimmingCharacters(in: .whitespacesAndNewlines)
+        let host = (Host.current().localizedName ?? ProcessInfo.processInfo.hostName)
+            .lowercased()
+            .replacingOccurrences(of: " ", with: "-")
+        return "\(user.isEmpty ? "macuser" : user)@\(host.isEmpty ? "mac" : host).local"
+    }
+
+    private func warmGitEmailCacheIfNeeded() {
+        if let cached = UserDefaults.standard.string(forKey: Key.cachedGitEmail), !cached.isEmpty {
+            return
+        }
+        Task.detached(priority: .utility) {
+            guard let data = Self.runProcessOutput(executable: "/usr/bin/git", arguments: ["config", "--global", "user.email"]),
+                  let email = String(data: data, encoding: .utf8)?.trimmingCharacters(in: .whitespacesAndNewlines),
+                  email.contains("@") else {
+                return
+            }
+            UserDefaults.standard.set(email, forKey: Key.cachedGitEmail)
+        }
     }
 
     func buildCurrentInstallRecord() -> InstallRecord {
         let now = ISO8601DateFormatter().string(from: Date())
         let session = SupabaseAuthService.shared.session
-        let email = SupabaseAuthService.shared.currentEmail
         let installedTools = LocalEcosystemDiscovery.shared.engines
             .filter(\.isInstalled)
             .map(\.id)
         let host = Host.current().localizedName ?? ProcessInfo.processInfo.hostName
         let fullName = NSFullUserName().isEmpty ? NSUserName() : NSFullUserName()
+        let aiState = resolveCurrentAIState()
 
         return InstallRecord(
             installID: installID,
             userID: session?.userID ?? "anonymous",
-            email: email.isEmpty ? "anonymous@local" : email,
+            email: resolvedUserEmail,
             displayName: fullName,
             hostname: host,
             appVersion: appVersion,
@@ -294,20 +764,38 @@ final class TelemetryService: ObservableObject {
             lastSeenAt: now,
             launchCount: currentLaunchCount,
             lastMode: UserDefaults.standard.string(forKey: Key.lastMode) ?? "code",
+            activeFeature: currentActiveFeature,
+            featuresUsed: currentFeaturesUsed,
+            aiProvider: aiState.provider,
+            aiModel: aiState.model,
+            aiRequests: currentAIRequests,
+            aiTokens: currentAITokens,
             device: TelemetryDeviceSnapshot.current,
             installedAgents: installedTools,
             history: localHistory()
         )
     }
 
-    func flush() {
+    private func scheduleDebouncedPortalSync(eventType: String) {
+        lastReportedPortalEventType = eventType
+        portalReportTask?.cancel()
+        portalReportTask = Task { @MainActor in
+            try? await Task.sleep(nanoseconds: 2_500_000_000)
+            guard !Task.isCancelled else { return }
+            await self.reportActiveMacAppToPortal(eventType: self.lastReportedPortalEventType)
+        }
+    }
+
+    func flush(immediatePortalSync: Bool = false) {
         guard isEnabled, !flushing else { return }
         flushing = true
 
         Task {
             defer { flushing = false }
             await syncInstallRecordToSupabase()
-            await reportActiveMacAppToPortalIfNeeded()
+            if immediatePortalSync {
+                await reportActiveMacAppToPortal(eventType: lastReportedPortalEventType)
+            }
 
             let events = queuedEvents()
             guard !events.isEmpty else { return }
@@ -332,27 +820,34 @@ final class TelemetryService: ObservableObject {
         }
     }
 
-    /// Reports `event_type: "macapp_active"` to `https://microcode.dotmini.net/api/telemetry/install`
-    /// once per installed app version, matching `Dotmini/microcode-web/main.go`.
-    private func reportActiveMacAppToPortalIfNeeded() async {
-        let alreadyReported = UserDefaults.standard.string(forKey: Key.reportedPortalVersion)
-        guard alreadyReported != appVersion else { return }
+    /// Reports live Mac telemetry (`macapp_launch`, `macapp_active`, `macapp_mode_change`, `macapp_feature_used`, `macapp_ai_used`, `macapp_heartbeat`)
+    /// to `https://microcode.dotmini.net/api/telemetry/install`, matching `Dotmini/microcode-web/main.go`.
+    private func reportActiveMacAppToPortal(eventType: String = "macapp_active") async {
         let record = buildCurrentInstallRecord()
-        guard record.email != "anonymous@local" else { return }
 
         let url = portalBaseURL.appending(path: "api/telemetry/install")
         var req = URLRequest(url: url)
         req.httpMethod = "POST"
         req.timeoutInterval = 12
         req.setValue("application/json", forHTTPHeaderField: "Content-Type")
-        let payload: [String: String] = [
+        let payload: [String: Any] = [
             "email": record.email,
             "name": record.displayName,
             "version": record.appVersion,
             "platform": "macOS",
             "arch": record.device.architecture,
-            "event_type": "macapp_active",
-            "machine_info": "\(record.device.hardwareModel) · \(record.device.cpu) · \(record.device.memoryGB)GB RAM · \(record.device.operatingSystem)"
+            "event_type": eventType,
+            "machine_info": "\(record.device.hardwareModel) · \(record.device.cpu) · \(record.device.memoryGB)GB RAM · \(record.device.operatingSystem)",
+            "install_id": record.installID,
+            "hostname": record.hostname,
+            "active_feature": record.activeFeature,
+            "features_used": record.featuresUsed,
+            "ai_provider": record.aiProvider,
+            "ai_model": record.aiModel,
+            "ai_requests": record.aiRequests,
+            "ai_tokens": record.aiTokens,
+            "launch_count": record.launchCount,
+            "installed_agents": record.installedAgents
         ]
         req.httpBody = try? JSONSerialization.data(withJSONObject: payload)
         if let (_, resp) = try? await URLSession.shared.data(for: req),
@@ -501,6 +996,7 @@ final class TelemetryService: ObservableObject {
 
         Task {
             await syncInstallRecordToSupabase()
+            await reportActiveMacAppToPortal(eventType: lastReportedPortalEventType)
         }
 
         // Fetch microcode_installs/* from Supabase
@@ -562,10 +1058,6 @@ final class TelemetryService: ObservableObject {
                 }
             }
         }
-        installedDevices = discoveredInstalls.sorted { $0.lastSeenAt > $1.lastSeenAt }
-        if let encodedInstalls = try? JSONEncoder().encode(installedDevices) {
-            UserDefaults.standard.set(encodedInstalls, forKey: Key.cachedInstalls)
-        }
 
         // Parse /api/admin/downloads (`microcode_downloads`)
         var parsedLeads: [DownloadLeadRecord] = []
@@ -582,8 +1074,18 @@ final class TelemetryService: ObservableObject {
                 let ip = item["ip_address"] as? String ?? ""
                 let ua = item["user_agent"] as? String ?? ""
                 let eventType = item["event_type"] as? String ?? "web_download"
-                let sourceLabel = item["source_label"] as? String ?? (eventType == "macapp_active" ? "MicroCode.app (macOS Active)" : "Web Portal Download")
+                let sourceLabel = item["source_label"] as? String ?? (eventType.hasPrefix("macapp_") ? "MicroCode.app (macOS Active)" : "Web Portal Download")
                 let machineInfo = item["machine_info"] as? String ?? ""
+                let leadInstallID = item["install_id"] as? String ?? ""
+                let leadHostname = item["hostname"] as? String ?? ""
+                let activeFeature = item["active_feature"] as? String ?? ""
+                let featuresUsed = item["features_used"] as? [String] ?? []
+                let aiProvider = item["ai_provider"] as? String ?? ""
+                let aiModel = item["ai_model"] as? String ?? ""
+                let aiRequests = item["ai_requests"] as? Int ?? 0
+                let aiTokens = item["ai_tokens"] as? Int ?? 0
+                let launchCount = item["launch_count"] as? Int ?? 1
+                let installedAgents = item["installed_agents"] as? [String] ?? []
                 let downloadedAt = item["downloaded_at"] as? String ?? ""
                 parsedLeads.append(DownloadLeadRecord(
                     id: id,
@@ -597,6 +1099,16 @@ final class TelemetryService: ObservableObject {
                     eventType: eventType,
                     sourceLabel: sourceLabel,
                     machineInfo: machineInfo,
+                    installID: leadInstallID,
+                    hostname: leadHostname,
+                    activeFeature: activeFeature,
+                    featuresUsed: featuresUsed,
+                    aiProvider: aiProvider,
+                    aiModel: aiModel,
+                    aiRequests: aiRequests,
+                    aiTokens: aiTokens,
+                    launchCount: launchCount,
+                    installedAgents: installedAgents,
                     downloadedAt: downloadedAt
                 ))
             }
@@ -606,6 +1118,49 @@ final class TelemetryService: ObservableObject {
             if let encodedLeads = try? JSONEncoder().encode(downloadLeads) {
                 UserDefaults.standard.set(encodedLeads, forKey: Key.cachedLeads)
             }
+        }
+
+        // Also enrich discoveredInstalls from portal leads that have installID or macapp_* eventType
+        for lead in downloadLeads where lead.eventType.hasPrefix("macapp_") || !lead.installID.isEmpty {
+            let synthID = lead.installID.isEmpty ? "portal-\(lead.ipAddress)-\(lead.hostname)" : lead.installID
+            if let idx = discoveredInstalls.firstIndex(where: { $0.installID == synthID }) {
+                if lead.downloadedAt > discoveredInstalls[idx].lastSeenAt {
+                    discoveredInstalls[idx].lastSeenAt = lead.downloadedAt
+                }
+                if !lead.activeFeature.isEmpty { discoveredInstalls[idx].activeFeature = lead.activeFeature }
+                if !lead.featuresUsed.isEmpty { discoveredInstalls[idx].featuresUsed = lead.featuresUsed }
+                if !lead.aiProvider.isEmpty { discoveredInstalls[idx].aiProvider = lead.aiProvider }
+                if !lead.aiModel.isEmpty { discoveredInstalls[idx].aiModel = lead.aiModel }
+                if lead.aiRequests > discoveredInstalls[idx].aiRequests { discoveredInstalls[idx].aiRequests = lead.aiRequests }
+                if lead.aiTokens > discoveredInstalls[idx].aiTokens { discoveredInstalls[idx].aiTokens = lead.aiTokens }
+            } else {
+                discoveredInstalls.append(InstallRecord(
+                    installID: synthID,
+                    userID: lead.email,
+                    email: lead.email,
+                    displayName: lead.name.isEmpty ? "MicroCode User" : lead.name,
+                    hostname: lead.hostname.isEmpty ? lead.ipAddress : lead.hostname,
+                    appVersion: lead.version,
+                    firstInstalledAt: lead.downloadedAt,
+                    lastSeenAt: lead.downloadedAt,
+                    launchCount: max(1, lead.launchCount),
+                    lastMode: lead.activeFeature.isEmpty ? "code" : lead.activeFeature,
+                    activeFeature: lead.activeFeature,
+                    featuresUsed: lead.featuresUsed,
+                    aiProvider: lead.aiProvider,
+                    aiModel: lead.aiModel,
+                    aiRequests: lead.aiRequests,
+                    aiTokens: lead.aiTokens,
+                    device: .current,
+                    installedAgents: lead.installedAgents,
+                    history: []
+                ))
+            }
+        }
+
+        installedDevices = discoveredInstalls.sorted { $0.lastSeenAt > $1.lastSeenAt }
+        if let encodedInstalls = try? JSONEncoder().encode(installedDevices) {
+            UserDefaults.standard.set(encodedInstalls, forKey: Key.cachedInstalls)
         }
 
         // Parse /api/admin/users (`users` table on microcode.dotmini.net) and enrich with download stats
@@ -634,7 +1189,9 @@ final class TelemetryService: ObservableObject {
                 let lastActive = activeMac?.lastSeenAt ?? latestLead?.downloadedAt ?? ""
                 let latestActivity: String = {
                     if let activeMac {
-                        return "Active on \(activeMac.hostname) (\(activeMac.device.hardwareModel), \(activeMac.launchCount) launches)"
+                        let featInfo = activeMac.activeFeature.isEmpty ? "" : " · Feature: \(activeMac.activeFeature)"
+                        let aiInfo = activeMac.aiModel.isEmpty ? "" : " · AI: \(activeMac.aiProvider) (\(activeMac.aiModel))"
+                        return "Active on \(activeMac.hostname) (\(activeMac.launchCount) launches)\(featInfo)\(aiInfo)"
                     } else if let latestLead {
                         return "Downloaded \(latestLead.version) (\(latestLead.platform)/\(latestLead.arch)) from IP \(latestLead.ipAddress)"
                     } else {
@@ -756,13 +1313,26 @@ private struct TelemetryEvent: Codable {
     let timestamp: String
     let name: String
     let mode: String?
+    var feature: String? = nil
+    var featuresUsed: [String]? = nil
+    var aiProvider: String? = nil
+    var aiModel: String? = nil
+    var aiRequests: Int? = nil
+    var aiTokens: Int? = nil
+    var email: String? = nil
+    var displayName: String? = nil
+    var hostname: String? = nil
+    var launchCount: Int? = nil
+    var installedAgents: [String]? = nil
     let appVersion: String
     let device: TelemetryDeviceSnapshot
 
     enum CodingKeys: String, CodingKey {
         case eventID = "eventId"
         case installID = "installId"
-        case timestamp, name, mode, appVersion, device
+        case timestamp, name, mode, feature, featuresUsed
+        case aiProvider, aiModel, aiRequests, aiTokens
+        case email, displayName, hostname, launchCount, installedAgents
+        case appVersion, device
     }
 }
-

@@ -147,6 +147,7 @@ class AgentService: ObservableObject {
     /// Tracks file modification timestamps (`mtime`) of files read or written by the agent
     /// so resumed or continued sessions detect files modified externally underneath them.
     private var trackedFileSnapshots: [String: TimeInterval] = [:]
+    private var hasDirtyFileSnapshots: Bool = false
 
     private func recordWorkspaceFileSnapshot(_ rawPath: String?) {
         guard let rawPath = rawPath, !rawPath.isEmpty else { return }
@@ -161,7 +162,17 @@ class AgentService: ObservableObject {
         guard let attrs = try? FileManager.default.attributesOfItem(atPath: resolved),
               let mtime = attrs[.modificationDate] as? Date else { return }
         trackedFileSnapshots[resolved] = mtime.timeIntervalSince1970
-        UserDefaults.standard.set(trackedFileSnapshots, forKey: fileSnapshotsStorageKey)
+        hasDirtyFileSnapshots = true
+    }
+
+    private func flushFileSnapshotsIfNeeded() {
+        guard hasDirtyFileSnapshots else { return }
+        hasDirtyFileSnapshots = false
+        let snapshots = trackedFileSnapshots
+        let key = fileSnapshotsStorageKey
+        DispatchQueue.global(qos: .utility).async {
+            UserDefaults.standard.set(snapshots, forKey: key)
+        }
     }
 
     private func detectExternalFileDrift() -> [String] {
@@ -197,8 +208,8 @@ class AgentService: ObservableObject {
     }
     private let maxHistoryChars = 8_000_000
     private let maxMessageHistoryChars = 4_000_000
-    private let maxResidentMessages = 80
-    private let transcriptPageSize = 36
+    private let maxResidentMessages = 28
+    private let transcriptPageSize = 16
     private let transcriptStore = AgentTranscriptStore.shared
     private var cachedSemanticContext: (workspace: String, value: String, date: Date)?
     private let semanticContextTTL: TimeInterval = 120
@@ -539,12 +550,13 @@ class AgentService: ObservableObject {
                 - `screenshot`: Capture high-resolution visual screenshots for verification with `inspect_image`.
                 - `launch_app` & `install_app`: Manage app lifecycle on device.
                 - `adb_shell`: Run raw ADB shell inspection commands (e.g. dumpsys, logcat, pm) on physical/emulator targets.
-            16. LIVE EMBEDDED PREVIEW & WEBAPP CONTROL: ONLY when the user explicitly requests to open, launch, or view the live preview dock (e.g. "open preview", "run preview", "เปิด preview"), call `preview_control`. Do NOT automatically call `preview_control` or start background dev servers on normal code/UI editing requests.
-                - `open`: Opens preview dock (e.g. `preview_control(action: "open", mode: "web", url: "http://localhost:3000")`).
+            16. LIVE EMBEDDED PREVIEW & WEBAPP CONTROL:
+                - `open`: Opens preview dock (`preview_control(action: "open", mode: "web", url: "http://localhost:3000")`) when the user requests to open/view the live preview.
                 - `reload`: Triggers an immediate refresh of the rendered page.
                 - `set_url`: Navigates to a specific localhost or web address.
                 - `set_viewport`: Switches layout viewport (`responsive`, `desktop`, `tablet`, `mobile`) to verify UI responsiveness.
                 - `switch_mode`: Switches dock between `web`, `ios`, and `android`.
+                - Do NOT automatically take or inject WebApp screenshots unless the user explicitly asks you to take a screenshot.
             17. MODEL CONTEXT PROTOCOL (MCP) TOOL HARNESS:
                 - MicroCode provides an active local MCP Server containing 35+ tools under the `mcp__local__*` namespace.
                 - Tools include `web_fetch`, `cell_create`, `cell_run`, `playground_run`, `ardium_*`, `computer_use_*`, `device_*`, `adb_execute`, and more.
@@ -1485,6 +1497,11 @@ class AgentService: ObservableObject {
         currentToolExecution = "Analyzing request & planning..."
         filesModified = []
         suggestedAction = nil
+        TelemetryService.shared.recordAIUsage(
+            provider: provider,
+            model: model,
+            taskLabel: domain == .science ? "Science AI Agent" : "AI Agent"
+        )
         
         let userMessage = prepareUserTurn(content, createStreamingPlaceholder: true)
         let id = UUID()
@@ -1529,6 +1546,11 @@ class AgentService: ObservableObject {
         currentToolExecution = "Analyzing request & planning..."
         filesModified = []
         suggestedAction = nil
+        TelemetryService.shared.recordAIUsage(
+            provider: provider,
+            model: model,
+            taskLabel: domain == .science ? "Science AI Agent" : "AI Agent"
+        )
         
         let userMessage = prepareUserTurn(content, createStreamingPlaceholder: true)
         let id = UUID()
@@ -1873,6 +1895,16 @@ class AgentService: ObservableObject {
                     streamedText = universalParsed.cleanedText
                 }
                 
+                if receivedToolCalls.isEmpty || streamedText.contains("[Tool Call:") {
+                    let parsedCalls = parseTextBasedToolCalls(streamedText)
+                    if !parsedCalls.isEmpty {
+                        receivedToolCalls.append(contentsOf: parsedCalls)
+                        logActivity(.info, "Parsed \(parsedCalls.count) tool call(s) from text output")
+                    }
+                }
+                streamedText = AIStructuredTurnCodec.stripToolCallArtifacts(streamedText)
+                    .trimmingCharacters(in: .whitespacesAndNewlines)
+                
                 if !streamedText.isEmpty {
                     if finalText.isEmpty {
                         finalText = streamedText
@@ -1880,6 +1912,7 @@ class AgentService: ObservableObject {
                         finalText += "\n\n" + streamedText
                     }
                 }
+                flushStreamingToken(finalText, toolResults: allToolResults)
             } catch {
                 if isCancelled || Task.isCancelled { break }
                 let errStr = error.localizedDescription
@@ -2306,6 +2339,7 @@ class AgentService: ObservableObject {
                         allToolResults.append(ToolResultModel(
                             toolCallId: toolCall.id,
                             toolName: toolCall.name,
+                            toolParams: toolCall.arguments,
                             success: completed.success,
                             output: completed.output,
                             error: completed.success ? nil : completed.output
@@ -2847,7 +2881,9 @@ class AgentService: ObservableObject {
     private var streamThrottleTimer: Timer? = nil
     
     private func detectStreamingRepetition(_ fullText: String) -> Bool {
-        let lines = fullText.components(separatedBy: .newlines)
+        // Inspect only the tail window so repetition detection stays O(1) instead of O(N^2) during long streams
+        let tail = fullText.count > 900 ? String(fullText.suffix(900)) : fullText
+        let lines = tail.components(separatedBy: .newlines)
             .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
             .filter { $0.count >= 8 }
         
@@ -2875,24 +2911,27 @@ class AgentService: ObservableObject {
         currentFullText += token
         pendingStreamFullText = currentFullText
         
-        // Real-time Circuit Breaker: detect repetitive stream output as it arrives
-        if detectStreamingRepetition(currentFullText) {
-            logActivity(.info, "Real-time streaming repetition loop detected. Aborting token stream.")
-            aiClient.cancelStream()
-            return
-        }
-        
         let now = ProcessInfo.processInfo.systemUptime
-        // 60ms throttle (~16fps): keeps streaming silky-smooth while cutting main-thread Markdown layout CPU by >50%
-        if now - lastStreamUpdateUptime >= 0.060 {
+        // 75ms throttle (~13.3fps): keeps streaming silky-smooth while preventing main-thread layout/scroll saturation
+        if now - lastStreamUpdateUptime >= 0.075 {
             lastStreamUpdateUptime = now
+            if detectStreamingRepetition(currentFullText) {
+                logActivity(.info, "Real-time streaming repetition loop detected. Aborting token stream.")
+                aiClient.cancelStream()
+                return
+            }
             updateStreamingMessage(currentFullText, toolResults: toolResults)
         } else if streamThrottleTimer == nil {
-            streamThrottleTimer = Timer.scheduledTimer(withTimeInterval: 0.064, repeats: false) { [weak self] _ in
+            streamThrottleTimer = Timer.scheduledTimer(withTimeInterval: 0.080, repeats: false) { [weak self] _ in
                 Task { @MainActor in
                     guard let self = self else { return }
                     self.streamThrottleTimer = nil
                     self.lastStreamUpdateUptime = ProcessInfo.processInfo.systemUptime
+                    if self.detectStreamingRepetition(self.pendingStreamFullText) {
+                        self.logActivity(.info, "Real-time streaming repetition loop detected. Aborting token stream.")
+                        self.aiClient.cancelStream()
+                        return
+                    }
                     self.updateStreamingMessage(self.pendingStreamFullText, toolResults: toolResults)
                 }
             }
@@ -3747,6 +3786,7 @@ class AgentService: ObservableObject {
     }
     
     func saveChats() {
+        flushFileSnapshotsIfNeeded()
         if let activeId = activeChatId,
            let idx = chatSessions.firstIndex(where: { $0.id == activeId }) {
             // Persist before evicting old UI rows. The cap is now a RAM policy,
@@ -3919,6 +3959,26 @@ class AgentService: ObservableObject {
             registeredToolNames.contains(name) || name.hasPrefix("mcp__")
         }
         
+        // Pattern 0: [Tool Call: tool_name({...})]
+        if text.contains("[Tool Call:") {
+            let bracketPattern = #"\[Tool Call:\s*([a-zA-Z0-9_]+)\s*\(([^\n]*?)\)\]"#
+            if let regex = try? NSRegularExpression(pattern: bracketPattern, options: []) {
+                let nsText = text as NSString
+                let matches = regex.matches(in: text, range: NSRange(location: 0, length: nsText.length))
+                for match in matches {
+                    guard match.numberOfRanges > 2 else { continue }
+                    let toolName = nsText.substring(with: match.range(at: 1)).trimmingCharacters(in: .whitespacesAndNewlines)
+                    let argsStr = nsText.substring(with: match.range(at: 2)).trimmingCharacters(in: .whitespacesAndNewlines)
+                    guard isKnownTool(toolName) else { continue }
+                    let args = parseToolArgs(argsStr, toolName: toolName)
+                    if !args.isEmpty {
+                        calls.append(AIToolCall(id: UUID().uuidString, name: toolName, arguments: args))
+                    }
+                }
+            }
+            if !calls.isEmpty { return calls }
+        }
+        
         // Pattern 1: <tool_call> JSON </tool_call> or <function_call> JSON </function_call>
         let xmlPattern = "<(?:tool_call|function_call)>\\s*([\\s\\S]*?)\\s*</(?:tool_call|function_call)>"
         if let regex = try? NSRegularExpression(pattern: xmlPattern, options: []) {
@@ -3936,7 +3996,7 @@ class AgentService: ObservableObject {
                             ?? (json["parameters"] as? [String: Any])
                             ?? (json["args"] as? [String: Any])
                             ?? [:]
-                        calls.append(AIToolCall(id: UUID().uuidString, name: name, arguments: args))
+                        calls.append(AIToolCall(id: UUID().uuidString, name: name, arguments: AgentToolBox.normalizeToolParams(args)))
                     } else if let arr = parsed as? [[String: Any]] {
                         for json in arr {
                             if let name = (json["name"] as? String) ?? (json["tool"] as? String),
@@ -3945,7 +4005,7 @@ class AgentService: ObservableObject {
                                     ?? (json["parameters"] as? [String: Any])
                                     ?? (json["args"] as? [String: Any])
                                     ?? [:]
-                                calls.append(AIToolCall(id: UUID().uuidString, name: name, arguments: args))
+                                calls.append(AIToolCall(id: UUID().uuidString, name: name, arguments: AgentToolBox.normalizeToolParams(args)))
                             }
                         }
                     }
@@ -3969,16 +4029,35 @@ class AgentService: ObservableObject {
                     let args = (json["arguments"] as? [String: Any])
                         ?? (json["parameters"] as? [String: Any])
                         ?? [:]
-                    calls.append(AIToolCall(id: UUID().uuidString, name: name, arguments: args))
+                    calls.append(AIToolCall(id: UUID().uuidString, name: name, arguments: AgentToolBox.normalizeToolParams(args)))
                 }
             }
         }
         if !calls.isEmpty { return calls }
         
-        // Pattern 3: tool_name(key:"value", key2:"value2")
+        // Pattern 3: tool_name({...}) or tool_name(key:"value", key2:"value2")
         for tool in registeredToolNames {
             guard text.contains("\(tool)(") else { continue }
-            let pattern = "\(NSRegularExpression.escapedPattern(for: tool))\\s*\\(([^)]+)\\)"
+            let escapedTool = NSRegularExpression.escapedPattern(for: tool)
+            // First match JSON-argument style tool_name({...}) which may contain parentheses inside strings
+            let jsonCallPattern = "\(escapedTool)\\s*\\(\\s*(\\{[^\\n]*\\})\\s*\\)"
+            if let jsonRegex = try? NSRegularExpression(pattern: jsonCallPattern, options: []) {
+                let nsText = text as NSString
+                let jsonMatches = jsonRegex.matches(in: text, range: NSRange(location: 0, length: nsText.length))
+                if !jsonMatches.isEmpty {
+                    for match in jsonMatches {
+                        guard match.numberOfRanges > 1 else { continue }
+                        let argsString = nsText.substring(with: match.range(at: 1))
+                        let args = parseToolArgs(argsString, toolName: tool)
+                        if !args.isEmpty {
+                            calls.append(AIToolCall(id: UUID().uuidString, name: tool, arguments: args))
+                        }
+                    }
+                    continue
+                }
+            }
+            
+            let pattern = "\(escapedTool)\\s*\\(([^)]+)\\)"
             guard let regex = try? NSRegularExpression(pattern: pattern, options: []) else { continue }
             let nsText = text as NSString
             let matches = regex.matches(in: text, range: NSRange(location: 0, length: nsText.length))
@@ -4007,44 +4086,79 @@ class AgentService: ObservableObject {
             .replacingOccurrences(of: "'|>", with: "")
             .replacingOccurrences(of: "<|", with: "")
             .replacingOccurrences(of: "|>", with: "")
+            .trimmingCharacters(in: .whitespacesAndNewlines)
         
-        // Parse key:value or key="value" or key:'value' pairs
-        let kvPattern = "(\\w+)\\s*[:=]\\s*(?:\"([^\"]*)\"|'([^']*)'|([^,)]+))"
-        guard let regex = try? NSRegularExpression(pattern: kvPattern, options: []) else { return args }
-        let nsStr = cleaned as NSString
-        let matches = regex.matches(in: cleaned, range: NSRange(location: 0, length: nsStr.length))
-        
-        for match in matches {
-            guard match.numberOfRanges > 1 else { continue }
-            let key = nsStr.substring(with: match.range(at: 1)).trimmingCharacters(in: .whitespaces)
-            var value = ""
-            for i in 2...min(4, match.numberOfRanges - 1) {
-                let range = match.range(at: i)
-                if range.location != NSNotFound {
-                    value = nsStr.substring(with: range).trimmingCharacters(in: .whitespaces)
-                    break
-                }
+        // Step 1: If the argument string is a JSON object {...}, decode it directly!
+        if let firstBrace = cleaned.firstIndex(of: "{"),
+           let lastBrace = cleaned.lastIndex(of: "}"),
+           firstBrace < lastBrace {
+            let jsonSlice = String(cleaned[firstBrace...lastBrace])
+            if let data = jsonSlice.data(using: .utf8),
+               let jsonObj = try? JSONSerialization.jsonObject(with: data) as? [String: Any] {
+                let inner = (jsonObj["arguments"] as? [String: Any])
+                    ?? (jsonObj["parameters"] as? [String: Any])
+                    ?? (jsonObj["args"] as? [String: Any])
+                    ?? jsonObj
+                return AgentToolBox.normalizeToolParams(inner)
             }
-            if !key.isEmpty && !value.isEmpty {
-                args[key] = value
+            // Fallback for single-key JSON object with unescaped quotes inside the value (e.g. {"command":"ls || echo "no""})
+            if let regex = try? NSRegularExpression(pattern: #"^\{\s*"([a-zA-Z0-9_]+)"\s*:\s*"([\s\S]*)"\s*\}$"#),
+               let match = regex.firstMatch(in: jsonSlice, range: NSRange(jsonSlice.startIndex..., in: jsonSlice)),
+               let kRange = Range(match.range(at: 1), in: jsonSlice),
+               let vRange = Range(match.range(at: 2), in: jsonSlice) {
+                let k = String(jsonSlice[kRange])
+                let v = String(jsonSlice[vRange])
+                    .replacingOccurrences(of: #"\""#, with: "\"")
+                    .replacingOccurrences(of: #"\\"#, with: "\\")
+                return [k: v]
             }
         }
         
-        // For simple single-arg tools, infer the key
+        // Step 2: Parse "key":"value", 'key':'value', or key:value pairs
+        let kvPattern = "(?:\"([a-zA-Z0-9_]+)\"|'([a-zA-Z0-9_]+)'|([a-zA-Z0-9_]+))\\s*[:=]\\s*(?:\"((?:\\\\.|[^\"\\\\])*)\"|'((?:\\\\.|[^'\\\\])*)'|([^,})]+))"
+        if let regex = try? NSRegularExpression(pattern: kvPattern, options: []) {
+            let nsStr = cleaned as NSString
+            let matches = regex.matches(in: cleaned, range: NSRange(location: 0, length: nsStr.length))
+            
+            for match in matches {
+                var key = ""
+                for i in 1...min(3, match.numberOfRanges - 1) {
+                    let r = match.range(at: i)
+                    if r.location != NSNotFound {
+                        key = nsStr.substring(with: r).trimmingCharacters(in: .whitespaces)
+                        break
+                    }
+                }
+                var value = ""
+                for i in 4...min(6, match.numberOfRanges - 1) {
+                    let r = match.range(at: i)
+                    if r.location != NSNotFound {
+                        value = nsStr.substring(with: r).trimmingCharacters(in: .whitespaces)
+                            .replacingOccurrences(of: #"\""#, with: "\"")
+                        break
+                    }
+                }
+                if !key.isEmpty && !value.isEmpty {
+                    args[key] = value
+                }
+            }
+        }
+        
+        // Step 3: For simple single-arg tools, infer the key (never pass raw {...} JSON as a literal path/command)
         if args.isEmpty {
             let trimmed = cleaned.trimmingCharacters(in: .whitespacesAndNewlines)
                 .trimmingCharacters(in: CharacterSet(charactersIn: "\"'"))
-            if !trimmed.isEmpty {
+            if !trimmed.isEmpty && !trimmed.hasPrefix("{") {
                 switch toolName {
                 case "file_read", "list_directory_tree": args["path"] = trimmed
-                case "grep_search": args["pattern"] = trimmed
+                case "grep_search", "file_search": args["pattern"] = trimmed
                 case "shell": args["command"] = trimmed
                 default: break
                 }
             }
         }
         
-        return args
+        return AgentToolBox.normalizeToolParams(args)
     }
 
     // MARK: - Feature #3: Zero-Drop Auto-Failover & Cross-Provider Handoff
@@ -4555,7 +4669,7 @@ struct PersistedToolResult: Codable {
     func toModel() -> ToolResultModel {
         var anyParams: [String: Any]? = nil
         if let sp = stringParams {
-            anyParams = sp
+            anyParams = AgentToolBox.normalizeToolParams(sp)
         }
         return ToolResultModel(
             toolCallId: toolCallId,
@@ -4580,7 +4694,7 @@ struct AgentMessageData: Codable, Identifiable {
         return AgentMessageData(
             id: model.id,
             role: model.role.rawValue,
-            content: model.content,
+            content: AIStructuredTurnCodec.stripToolCallArtifacts(model.content),
             timestamp: model.timestamp,
             toolResults: persistedTools
         )
@@ -4590,7 +4704,7 @@ struct AgentMessageData: Codable, Identifiable {
         AgentMessageModel(
             id: id,
             role: AgentMessageModel.MessageRole(rawValue: role) ?? .assistant,
-            content: content,
+            content: AIStructuredTurnCodec.stripToolCallArtifacts(content),
             toolResults: (toolResults ?? []).map { $0.toModel() },
             pendingChanges: [],
             timestamp: timestamp

@@ -292,6 +292,14 @@ final class AIUsageTracker: ObservableObject {
         // Persist to disk (append JSONL)
         persistRecord(record)
         
+        // Report live AI model & feature telemetry
+        TelemetryService.shared.recordAIUsage(
+            provider: provider,
+            model: model,
+            taskLabel: taskLabel,
+            tokens: record.totalTokens
+        )
+        
         // Memory cap
         if records.count > maxRecordsInMemory {
             records.removeFirst(records.count - maxRecordsInMemory)

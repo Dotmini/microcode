@@ -79,30 +79,17 @@ class AutoCommitService: ObservableObject {
         let description = targetPath.map { URL(fileURLWithPath: $0).lastPathComponent } ?? toolName
         let commitMessage = "[microcode-checkpoint] \(checkpointId) before \(toolName): \(description)"
         
-        // Strategy: Create a checkpoint commit on a detached marker
-        // 1. Stage all current changes
-        // 2. Create a stash with a recognizable message
-        // This preserves user's staging area and working tree
+        // Strategy: Create a checkpoint commit object without modifying the working tree or index on disk.
+        // Using `git stash create` + `git update-ref` avoids temporarily reverting files on disk
+        // (which previously triggered file-watcher storms and dev-server hot-reload loops).
+        let stashSha = await runGit(["stash", "create", commitMessage], in: root)
+            .trimmingCharacters(in: .whitespacesAndNewlines)
         
-        let stashResult = await runGitExec(
-            ["stash", "push", "--include-untracked", "-m", commitMessage],
-            in: root
-        )
-        
-        if stashResult.exitCode == 0 && !stashResult.output.contains("No local changes") {
-            // Capture the stash commit SHA into a persistent ref BEFORE popping,
-            // because `git stash pop` drops `stash@{0}` from `git stash list`.
-            let stashSha = await runGit(["rev-parse", "stash@{0}"], in: root)
-                .trimmingCharacters(in: .whitespacesAndNewlines)
+        if !stashSha.isEmpty {
             let refName = "refs/microcode-checkpoints/\(checkpointId)"
-            if !stashSha.isEmpty {
-                _ = await runGitExec(["update-ref", refName, stashSha], in: root)
-            }
-
-            // Immediately pop the stash to restore the user's working tree
-            let popResult = await runGitExec(["stash", "pop"], in: root)
+            let refResult = await runGitExec(["update-ref", "-m", commitMessage, refName, stashSha], in: root)
             
-            if popResult.exitCode == 0 {
+            if refResult.exitCode == 0 {
                 let checkpoint = AgentCheckpoint(
                     id: String(checkpointId),
                     timestamp: now,
@@ -111,7 +98,7 @@ class AutoCommitService: ObservableObject {
                     stashMessage: commitMessage,
                     filesSummary: parseStatusSummary(status),
                     isTagBased: false,
-                    tagName: stashSha.isEmpty ? nil : refName
+                    tagName: refName
                 )
                 
                 checkpoints.append(checkpoint)

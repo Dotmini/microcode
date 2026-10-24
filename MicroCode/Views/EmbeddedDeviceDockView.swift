@@ -12,6 +12,7 @@ struct EmbeddedDeviceDockView: View {
     @EnvironmentObject var appState: AppState
     @ObservedObject private var deviceRuntime = DeviceRuntimeService.shared
     @ObservedObject private var dockService = PreviewDockService.shared
+    var showsCloseButton: Bool = true
     @State private var textToSend = ""
     @State private var showingTextInput = false
     @State private var isDropTargeted = false
@@ -26,17 +27,21 @@ struct EmbeddedDeviceDockView: View {
                     HStack(spacing: 4) {
                         ForEach(dockService.openTabs) { tab in
                             let isActive = (dockService.activeTabId == tab.id)
-                            HStack(spacing: 4) {
+                            HStack(spacing: 5) {
                                 Button {
                                     withAnimation(.easeInOut(duration: 0.15)) {
                                         dockService.selectTab(id: tab.id)
                                     }
                                 } label: {
-                                    HStack(spacing: 4) {
-                                        Image(systemName: tab.icon)
-                                            .font(.system(size: 10))
+                                    HStack(spacing: 5) {
+                                        if case .file(let fileURL) = tab.kind {
+                                            ProgrammingLanguageIconView(fileName: fileURL.lastPathComponent, size: 13)
+                                        } else {
+                                            Image(systemName: tab.icon)
+                                                .font(.system(size: 10))
+                                        }
                                         Text(tab.title)
-                                            .font(.system(size: 11, weight: isActive ? .semibold : .medium))
+                                            .font(.system(size: 11.5, weight: isActive ? .semibold : .medium))
                                             .lineLimit(1)
                                             .fixedSize()
                                     }
@@ -60,14 +65,31 @@ struct EmbeddedDeviceDockView: View {
                                     .help("Close tab")
                                 }
                             }
-                            .padding(.horizontal, 7)
+                            .padding(.horizontal, 8)
                             .padding(.vertical, 4)
                             .background(
-                                RoundedRectangle(cornerRadius: 5, style: .continuous)
-                                    .fill(isActive ? Color.primary.opacity(0.12) : Color.clear)
+                                RoundedRectangle(cornerRadius: 6, style: .continuous)
+                                    .fill(isActive ? Color.primary.opacity(0.11) : Color.clear)
+                            )
+                            .overlay(
+                                RoundedRectangle(cornerRadius: 6, style: .continuous)
+                                    .stroke(isActive ? Color.primary.opacity(0.12) : Color.clear, lineWidth: 0.8)
                             )
                             .foregroundColor(isActive ? .primary : .secondary)
                         }
+
+                        // "+" Open File Tab button (matching Antigravity right split pane)
+                        Button {
+                            dockService.pickAndOpenFile()
+                        } label: {
+                            Image(systemName: "plus")
+                                .font(.system(size: 10.5, weight: .medium))
+                                .foregroundColor(.secondary)
+                                .frame(width: 22, height: 22)
+                                .contentShape(Rectangle())
+                        }
+                        .buttonStyle(.plain)
+                        .help("Open file in Preview Split Pane")
                         
                     }
                     .padding(.horizontal, 4)
@@ -224,28 +246,47 @@ struct EmbeddedDeviceDockView: View {
                     }
                 }
 
-                Divider()
-                    .frame(height: 14)
-                    .padding(.horizontal, 2)
+                if showsCloseButton {
+                    Divider()
+                        .frame(height: 14)
+                        .padding(.horizontal, 2)
 
-                // Standard macOS Human Interface Close Button [✕] at top-right
-                Button {
-                    withAnimation(.easeInOut(duration: 0.16)) {
-                        appState.hidePreviewInspector()
-                        dockService.hideDock()
+                    // Expand / Restore Split Pane Width Button (matching Antigravity top-right controls)
+                    Button {
+                        withAnimation(.easeInOut(duration: 0.18)) {
+                            dockService.isExpandedWidth.toggle()
+                        }
+                    } label: {
+                        Image(systemName: dockService.isExpandedWidth ? "arrow.down.right.and.arrow.up.left" : "arrow.up.left.and.arrow.down.right")
+                            .font(.system(size: 10, weight: .semibold))
+                            .foregroundColor(dockService.isExpandedWidth ? .accentColor : .secondary)
+                            .frame(width: 22, height: 22)
+                            .background(Color.primary.opacity(0.06))
+                            .clipShape(RoundedRectangle(cornerRadius: 5, style: .continuous))
+                            .contentShape(Rectangle())
                     }
-                } label: {
-                    Image(systemName: "xmark")
-                        .font(.system(size: 10, weight: .bold))
-                        .foregroundColor(.secondary)
-                        .frame(width: 22, height: 22)
-                        .background(Color.primary.opacity(0.08))
-                        .clipShape(RoundedRectangle(cornerRadius: 5, style: .continuous))
-                        .contentShape(Rectangle())
+                    .buttonStyle(.plain)
+                    .help(dockService.isExpandedWidth ? "Restore Split Width" : "Expand Preview Split Width")
+
+                    // Standard macOS Human Interface Close Button [✕] at top-right
+                    Button {
+                        withAnimation(.easeInOut(duration: 0.16)) {
+                            appState.hidePreviewInspector()
+                            dockService.hideDock()
+                        }
+                    } label: {
+                        Image(systemName: "sidebar.right")
+                            .font(.system(size: 11, weight: .medium))
+                            .foregroundColor(.secondary)
+                            .frame(width: 22, height: 22)
+                            .background(Color.primary.opacity(0.06))
+                            .clipShape(RoundedRectangle(cornerRadius: 5, style: .continuous))
+                            .contentShape(Rectangle())
+                    }
+                    .buttonStyle(.plain)
+                    .help("Close Preview Split Pane (⌘I)")
+                    .layoutPriority(10)
                 }
-                .buttonStyle(.plain)
-                .help("Close Preview Dock (⌘I)")
-                .layoutPriority(10)
             }
             .padding(.horizontal, 8)
             .padding(.vertical, 5)
@@ -349,7 +390,7 @@ struct EmbeddedDeviceDockView: View {
         case .diff:
             InteractiveDiffFilePreviewView(url: url)
         case .codeOrText:
-            InteractiveCodePreviewView(url: url)
+            InteractiveCodePreviewView(url: url, highlightRange: dockService.activeTab?.highlightRange)
         case .quickLook:
             QuickLookDocumentHost(url: url)
         }

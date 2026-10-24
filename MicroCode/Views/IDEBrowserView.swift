@@ -32,6 +32,12 @@ struct BrowserPickedElement: Identifiable, Codable, Equatable {
     let outerHTML: String
     let styles: String
     let rect: String
+    var boundsX: Double = 0
+    var boundsY: Double = 0
+    var boundsWidth: Double = 0
+    var boundsHeight: Double = 0
+    var viewportWidth: Double = 800
+    var viewportHeight: Double = 600
     let timestamp: Date
 }
 
@@ -43,6 +49,18 @@ struct ActiveLocalPortProcess: Identifiable, Equatable {
     let pid: Int
     let processName: String
     let commandLine: String
+}
+
+// MARK: - Promoted Live WebApp Screenshot Model
+
+struct PromotedWebAppCapture: Identifiable, Equatable {
+    let id: String
+    let filePath: String
+    let pageURL: String
+    let pageTitle: String
+    let resolutionText: String
+    let timestamp: Date
+    let byteCount: Int
 }
 
 private final class WeakScriptMessageTrampoline: NSObject, WKScriptMessageHandler {
@@ -70,6 +88,8 @@ final class IDEBrowserAutomationService: NSObject, ObservableObject, WKScriptMes
     @Published var lastPickedElement: BrowserPickedElement? = nil
     @Published var activePortProcesses: [ActiveLocalPortProcess] = []
     @Published var isScanningPorts: Bool = false
+    @Published var lastPromotedCapture: PromotedWebAppCapture? = nil
+    @Published var isCapturingScreenshot: Bool = false
     
     static let telemetryScriptSource: String = """
     (function() {
@@ -227,7 +247,13 @@ final class IDEBrowserAutomationService: NSObject, ObservableObject, WKScriptMes
                 text: rawText,
                 outerHTML: (el.outerHTML || '').slice(0, 700),
                 styles: stylesSummary,
-                rect: Math.round(r.left) + ',' + Math.round(r.top) + ' (' + Math.round(r.width) + 'x' + Math.round(r.height) + ')'
+                rect: Math.round(r.left) + ',' + Math.round(r.top) + ' (' + Math.round(r.width) + 'x' + Math.round(r.height) + ')',
+                boundsX: r.left,
+                boundsY: r.top,
+                boundsWidth: r.width,
+                boundsHeight: r.height,
+                viewportWidth: window.innerWidth || document.documentElement.clientWidth || 800,
+                viewportHeight: window.innerHeight || document.documentElement.clientHeight || 600
             });
         }
 
@@ -377,6 +403,12 @@ final class IDEBrowserAutomationService: NSObject, ObservableObject, WKScriptMes
             let outerHTML = body["outerHTML"] as? String ?? ""
             let styles = body["styles"] as? String ?? ""
             let rect = body["rect"] as? String ?? ""
+            let boundsX = (body["boundsX"] as? NSNumber)?.doubleValue ?? 0
+            let boundsY = (body["boundsY"] as? NSNumber)?.doubleValue ?? 0
+            let boundsW = (body["boundsWidth"] as? NSNumber)?.doubleValue ?? 0
+            let boundsH = (body["boundsHeight"] as? NSNumber)?.doubleValue ?? 0
+            let vpW = (body["viewportWidth"] as? NSNumber)?.doubleValue ?? 800
+            let vpH = (body["viewportHeight"] as? NSNumber)?.doubleValue ?? 600
             Task { @MainActor in
                 self.isInspectMode = false
                 self.lastPickedElement = BrowserPickedElement(
@@ -386,6 +418,12 @@ final class IDEBrowserAutomationService: NSObject, ObservableObject, WKScriptMes
                     outerHTML: outerHTML,
                     styles: styles,
                     rect: rect,
+                    boundsX: boundsX,
+                    boundsY: boundsY,
+                    boundsWidth: boundsW,
+                    boundsHeight: boundsH,
+                    viewportWidth: vpW,
+                    viewportHeight: vpH,
                     timestamp: Date()
                 )
             }
@@ -455,7 +493,14 @@ final class IDEBrowserAutomationService: NSObject, ObservableObject, WKScriptMes
     // MARK: - Feature #2: Live DOM & Console Auto-Healer Helpers
 
     var runtimeErrorEntries: [BrowserConsoleEntry] {
-        consoleLogs.filter { $0.level == "error" }
+        consoleLogs.filter { entry in
+            guard entry.level == "error" else { return false }
+            let lower = entry.message.lowercased()
+            if lower.contains("[vite] failed to connect to websocket") || lower.contains("[vite] server connection lost") {
+                return false
+            }
+            return true
+        }
     }
 
     var failedNetworkEntries: [BrowserNetworkEntry] {
@@ -619,6 +664,160 @@ final class IDEBrowserAutomationService: NSObject, ObservableObject, WKScriptMes
         }
     }
     
+    func resolveBestWebAppURL(preferredURL: String? = nil) -> URL? {
+        if let raw = preferredURL?.trimmingCharacters(in: .whitespacesAndNewlines), !raw.isEmpty {
+            if raw.hasPrefix("/") { return URL(fileURLWithPath: raw) }
+            if raw.contains("://") { return URL(string: raw) }
+            return URL(string: "http://\(raw)")
+        }
+        if let pvURL = activePreviewWebView?.url, pvURL.absoluteString != "about:blank" {
+            return pvURL
+        }
+        if let targetURL = DeviceRuntimeService.shared.targetWebURL, targetURL.absoluteString != "about:blank" {
+            return targetURL
+        }
+        if let port = DeviceRuntimeService.shared.lastDetectedDevServerPort {
+            return URL(string: "http://localhost:\(port)")
+        }
+        if !activePortProcesses.isEmpty {
+            let preferredPorts = [5173, 5174, 3000, 8080, 4200, 4321, 8000]
+            let openPorts = Set(activePortProcesses.map(\.port))
+            let chosen = preferredPorts.first(where: { openPorts.contains($0) }) ?? activePortProcesses[0].port
+            return URL(string: "http://localhost:\(chosen)")
+        }
+        if let ws = AgentToolBox.shared.workspaceRoot ?? AppState.shared?.workspaceFolder?.path {
+            let wsURL = URL(fileURLWithPath: ws)
+            for rel in ["index.html", "public/index.html", "dist/index.html", "src/index.html"] {
+                let candidate = wsURL.appendingPathComponent(rel)
+                if FileManager.default.fileExists(atPath: candidate.path) {
+                    return candidate
+                }
+            }
+        }
+        return nil
+    }
+
+    func captureLiveWebAppScreenshot(
+        target: String = "preview",
+        outputPath: String? = nil,
+        preferredURL: String? = nil
+    ) async throws -> PromotedWebAppCapture {
+        isCapturingScreenshot = true
+        defer { isCapturingScreenshot = false }
+
+        let wv = resolveWebView(target: target)
+        if wv.bounds.width < 240 || wv.bounds.height < 180 {
+            wv.frame = NSRect(x: 0, y: 0, width: 1280, height: 800)
+        }
+
+        // Auto-load active WebApp URL if the WebView hasn't loaded a real page yet
+        let currentURLStr = wv.url?.absoluteString ?? ""
+        let needsLoad = currentURLStr.isEmpty
+            || currentURLStr == "about:blank"
+            || (preferredURL != nil && !preferredURL!.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+            || (currentURLStr == "http://localhost:3000" && DeviceRuntimeService.shared.lastDetectedDevServerPort != nil && DeviceRuntimeService.shared.lastDetectedDevServerPort != 3000)
+
+        if needsLoad, let bestURL = resolveBestWebAppURL(preferredURL: preferredURL) {
+            if bestURL.isFileURL {
+                wv.loadFileURL(bestURL, allowingReadAccessTo: URL(fileURLWithPath: "/"))
+            } else if wv.url?.absoluteString != bestURL.absoluteString {
+                wv.load(URLRequest(url: bestURL))
+            }
+            for _ in 0..<28 {
+                try? await Task.sleep(nanoseconds: 100_000_000)
+                if !wv.isLoading && wv.url != nil { break }
+            }
+            // Brief settle for client-side Hydration (SvelteKit / React / Vue / Vite)
+            try? await Task.sleep(nanoseconds: 250_000_000)
+        }
+
+        // Hide temporary inspector highlight box before taking the screenshot
+        _ = try? await evalJS("if (window.__mcClearInspectorHighlight) window.__mcClearInspectorHighlight();", target: target)
+
+        let wsRoot = AgentToolBox.shared.workspaceRoot ?? AppState.shared?.workspaceFolder?.path
+        let resolvedPath: String = {
+            if let raw = outputPath?.trimmingCharacters(in: .whitespacesAndNewlines), !raw.isEmpty {
+                if raw.hasPrefix("/") { return raw }
+                if raw.hasPrefix("~") { return (raw as NSString).expandingTildeInPath }
+                if let ws = wsRoot, !ws.isEmpty {
+                    return (ws as NSString).appendingPathComponent(raw)
+                }
+                return (NSTemporaryDirectory() as NSString).appendingPathComponent(raw)
+            }
+            if let ws = wsRoot, !ws.isEmpty, FileManager.default.isWritableFile(atPath: ws) {
+                return (ws as NSString).appendingPathComponent("preview_screenshot.png")
+            }
+            return "/tmp/microcode_webapp_snapshot_\(Int(Date().timeIntervalSince1970)).png"
+        }()
+
+        let config = WKSnapshotConfiguration()
+        let (pngData, imgSize): (Data, NSSize) = try await withCheckedThrowingContinuation { continuation in
+            wv.takeSnapshot(with: config) { image, error in
+                if let error = error {
+                    continuation.resume(throwing: error)
+                    return
+                }
+                guard let image = image,
+                      let tiff = image.tiffRepresentation,
+                      let rep = NSBitmapImageRep(data: tiff),
+                      let png = rep.representation(using: .png, properties: [:]) else {
+                    continuation.resume(throwing: NSError(
+                        domain: "IDEBrowser",
+                        code: -6,
+                        userInfo: [NSLocalizedDescriptionKey: "Failed to encode PNG snapshot"]
+                    ))
+                    return
+                }
+                continuation.resume(returning: (png, NSSize(width: rep.pixelsWide, height: rep.pixelsHigh)))
+            }
+        }
+
+        let fileURL = URL(fileURLWithPath: resolvedPath)
+        try? FileManager.default.createDirectory(at: fileURL.deletingLastPathComponent(), withIntermediateDirectories: true)
+        try pngData.write(to: fileURL, options: .atomic)
+
+        // Also write a timestamped copy in /tmp so historical chat messages remain distinct if preview_screenshot.png is overwritten later
+        let timestampedCopyPath = "/tmp/microcode_webapp_cap_\(Int(Date().timeIntervalSince1970 * 1000)).png"
+        try? pngData.write(to: URL(fileURLWithPath: timestampedCopyPath), options: .atomic)
+
+        let pageURL = wv.url?.absoluteString ?? resolveBestWebAppURL(preferredURL: preferredURL)?.absoluteString ?? "http://localhost"
+        let pageTitle = (wv.title ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+        let resText = "\(Int(max(1, imgSize.width))) × \(Int(max(1, imgSize.height))) px"
+
+        let capture = PromotedWebAppCapture(
+            id: UUID().uuidString,
+            filePath: resolvedPath,
+            pageURL: pageURL,
+            pageTitle: pageTitle.isEmpty ? "Live WebApp Preview" : pageTitle,
+            resolutionText: resText,
+            timestamp: Date(),
+            byteCount: pngData.count
+        )
+        self.lastPromotedCapture = capture
+        return capture
+    }
+
+    func promoteCaptureToAgentChat(_ capture: PromotedWebAppCapture, promptText: String? = nil, autoSend: Bool = false) {
+        let userInstruction = (promptText ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+        let defaultMessage = userInstruction.isEmpty
+            ? "นี่คือภาพ Screenshot จากการทดสอบใช้งานจริงบน WebApp Preview (`\(capture.pageURL)` — \(capture.resolutionText)) ช่วยตรวจสอบ UI/การทำงานจากภาพนี้:"
+            : userInstruction
+        let payload = """
+        \(defaultMessage)
+
+        ![Live WebApp Screenshot — \(capture.pageTitle)](file://\(capture.filePath))
+        """
+        AppState.shared?.aiChatVisible = true
+        NotificationCenter.default.post(
+            name: NSNotification.Name("MicroCodeInsertAgentPrompt"),
+            object: nil,
+            userInfo: [
+                "prompt": payload,
+                "autoSend": autoSend
+            ]
+        )
+    }
+
     func executeAction(params: [String: Any]) async throws -> String {
         let action = (params["action"] as? String ?? "status").lowercased()
         let target = (params["target"] as? String ?? "auto").lowercased()
@@ -768,29 +967,14 @@ final class IDEBrowserAutomationService: NSObject, ObservableObject, WKScriptMes
             return snapshot.suffix(100).map { "[\($0.method)] \($0.status) (\($0.durationMs)ms) \($0.url)" }.joined(separator: "\n")
             
         case "screenshot", "snapshot":
-            let outPath = (params["output_path"] as? String) ?? "/tmp/microcode_browser_snapshot_\(Int(Date().timeIntervalSince1970)).png"
-            let config = WKSnapshotConfiguration()
-            return try await withCheckedThrowingContinuation { continuation in
-                wv.takeSnapshot(with: config) { image, error in
-                    if let error = error {
-                        continuation.resume(throwing: error)
-                        return
-                    }
-                    guard let image = image,
-                          let tiff = image.tiffRepresentation,
-                          let rep = NSBitmapImageRep(data: tiff),
-                          let png = rep.representation(using: .png, properties: [:]) else {
-                        continuation.resume(throwing: NSError(domain: "IDEBrowser", code: -6, userInfo: [NSLocalizedDescriptionKey: "Failed to encode PNG snapshot"]))
-                        return
-                    }
-                    do {
-                        try png.write(to: URL(fileURLWithPath: outPath))
-                        continuation.resume(returning: "✅ Browser snapshot saved to \(outPath) (\(png.count) bytes)")
-                    } catch {
-                        continuation.resume(throwing: error)
-                    }
-                }
-            }
+            let rawOutPath = (params["output_path"] as? String) ?? (params["path"] as? String)
+            let preferredURL = params["url"] as? String
+            let capture = try await captureLiveWebAppScreenshot(
+                target: target,
+                outputPath: rawOutPath,
+                preferredURL: preferredURL
+            )
+            return "✅ Live WebApp snapshot saved to \(capture.filePath) (\(capture.resolutionText), \(capture.byteCount) bytes)"
             
         case "status", "info":
             let url = wv.url?.absoluteString ?? (AppState.shared?.browserURL ?? "about:blank")
@@ -885,8 +1069,6 @@ final class IDEBrowserAutomationService: NSObject, ObservableObject, WKScriptMes
             let consoleErrors = consoleLogs.filter { $0.level == "error" }
             let consoleWarnings = consoleLogs.filter { $0.level == "warn" }
             let failedNetwork = networkLogs.filter { $0.status >= 400 || $0.status == 0 }
-            let snapPath = (params["output_path"] as? String) ?? "/tmp/microcode_verify_ui_snapshot.png"
-            let snapMsg = (try? await executeAction(params: ["action": "screenshot", "output_path": snapPath, "target": target])) ?? "Snapshot skipped"
             
             let passed = consoleErrors.isEmpty && failedNetwork.isEmpty && !domHealthRaw.contains("\"hasFrameworkErrorOverlay\":true") && !domHealthRaw.contains("\"hasVisualContent\":false")
             let verdict = passed ? "✅ PASS (UI Healthy)" : "❌ FAIL (UI Issues Detected)"
@@ -901,7 +1083,6 @@ final class IDEBrowserAutomationService: NSObject, ObservableObject, WKScriptMes
             Console Warnings (\(consoleWarnings.count))
             Failed Network Requests (\(failedNetwork.count)):
             \(netLines.isEmpty ? "  (None)" : netLines)
-            Snapshot: \(snapMsg)
             """
             
         default:

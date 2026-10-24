@@ -1297,7 +1297,7 @@ public class SubscriptionAuthManager: ObservableObject {
                 }
             }
         }
-        if aipassCookie == nil {
+        if aipassCookie == nil && !self.isConnected(.aipass) {
             let wkCookies: [HTTPCookie] = await withCheckedContinuation { continuation in
                 DispatchQueue.main.async {
                     WKWebsiteDataStore.default().httpCookieStore.getAllCookies { cookies in

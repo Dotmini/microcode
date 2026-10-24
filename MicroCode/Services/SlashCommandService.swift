@@ -103,16 +103,22 @@ class SlashCommandService: ObservableObject {
     }
     
     func updateSuggestions(for text: String) {
-        if text.starts(with: "/") {
-            let spaceIndex = text.firstIndex(of: " ")
-            if spaceIndex == nil {
-                suggestions = getSuggestions(for: text)
-                isShowingSuggestions = !suggestions.isEmpty
-            } else {
-                isShowingSuggestions = false
+        if text.starts(with: "/") && !text.contains(" ") {
+            let newSuggestions = getSuggestions(for: text)
+            if suggestions != newSuggestions {
+                suggestions = newSuggestions
+            }
+            let shouldShow = !newSuggestions.isEmpty
+            if isShowingSuggestions != shouldShow {
+                isShowingSuggestions = shouldShow
             }
         } else {
-            isShowingSuggestions = false
+            if isShowingSuggestions {
+                isShowingSuggestions = false
+            }
+            if !suggestions.isEmpty {
+                suggestions = []
+            }
         }
     }
     

@@ -372,10 +372,14 @@ struct AgenticEditorWorkspace: View {
                         if isDir.boolValue {
                             await appState.openWorkspace(url: url)
                             AgentService.shared.setWorkspace(url.path)
+                        } else if surface == .agent || appState.editorMode == .aiAgent {
+                            PreviewDockService.shared.openFile(url: url, makeActive: true)
                         } else {
                             await appState.loadFile(url: url)
                             surface = .editor
                         }
+                    } else if surface == .agent || appState.editorMode == .aiAgent {
+                        PreviewDockService.shared.openFileFromReference(url.absoluteString, workspacePath: appState.workspaceFolder?.path)
                     }
                 }
             }
@@ -521,45 +525,35 @@ struct AgenticEditorWorkspace: View {
                     .help("Build Project (⌘⇧B)")
 
                     // Preview Menu (Real Device & Simulator Preview)
+                    let isPreviewActive = appState.agenticContextVisible && appState.selectedInspectorTab == .preview
                     Menu {
                         Button("WebApp Preview (Localhost)") {
-                            PreviewDockService.shared.selectTab(id: "web")
                             DeviceRuntimeService.shared.embeddedDockMode = .web
-                            DeviceRuntimeService.shared.showingEmbeddedDeviceDock = true
-                            appState.showingPreviewView = true
+                            appState.showPreviewInspector(tab: "web")
                         }
                         Button("iOS Simulator") {
-                            PreviewDockService.shared.selectTab(id: "ios")
                             DeviceRuntimeService.shared.embeddedDockMode = .ios
                             DeviceRuntimeService.shared.showingEmbeddedAppleDock = true
-                            DeviceRuntimeService.shared.showingEmbeddedDeviceDock = true
-                            appState.showingPreviewView = true
+                            appState.showPreviewInspector(tab: "ios")
                         }
                         Button("Android Emulator") {
-                            PreviewDockService.shared.selectTab(id: "android")
                             DeviceRuntimeService.shared.embeddedDockMode = .android
                             DeviceRuntimeService.shared.showingEmbeddedAppleDock = false
-                            DeviceRuntimeService.shared.showingEmbeddedDeviceDock = true
-                            appState.showingPreviewView = true
+                            appState.showPreviewInspector(tab: "android")
                         }
                         Button("iPhone USB (Hardware)") {
-                            PreviewDockService.shared.selectTab(id: "ios-physical")
-                            DeviceRuntimeService.shared.showingEmbeddedDeviceDock = true
-                            appState.showingPreviewView = true
+                            appState.showPreviewInspector(tab: "ios-physical")
                         }
                         Button("Android USB (Hardware)") {
-                            PreviewDockService.shared.selectTab(id: "android-physical")
-                            DeviceRuntimeService.shared.showingEmbeddedDeviceDock = true
-                            appState.showingPreviewView = true
+                            appState.showPreviewInspector(tab: "android-physical")
                         }
                         Divider()
                         Button("Choose Device & Run…") {
                             DeviceRuntimeService.shared.showingDeviceRuntimeSheet = true
                         }
-                        Button(appState.showingPreviewView ? "Hide Preview Dock (⌥⌘P)" : "Show Preview Dock (⌥⌘P)") {
-                            withAnimation {
-                                appState.showingPreviewView.toggle()
-                                DeviceRuntimeService.shared.showingEmbeddedDeviceDock = appState.showingPreviewView
+                        Button(isPreviewActive ? "Hide Preview Dock (⌥⌘P)" : "Show Preview Dock (⌥⌘P)") {
+                            withAnimation(.easeInOut(duration: 0.16)) {
+                                appState.togglePreviewInspector()
                             }
                         }
                         Button("Open Full Web Browser") {
@@ -570,18 +564,18 @@ struct AgenticEditorWorkspace: View {
                             Image(systemName: DeviceRuntimeService.shared.showingEmbeddedAppleDock ? "iphone" : "apps.iphone")
                                 .font(.system(size: 9))
                             Text("Preview")
-                                .font(.system(size: 11, weight: appState.showingPreviewView ? .semibold : .medium))
+                                .font(.system(size: 11, weight: isPreviewActive ? .semibold : .medium))
                                 .lineLimit(1)
                             Image(systemName: "chevron.down")
                                 .font(.system(size: 7, weight: .semibold))
                         }
-                        .foregroundColor(appState.showingPreviewView ? .white : .primary.opacity(0.85))
+                        .foregroundColor(isPreviewActive ? .white : .primary.opacity(0.85))
                         .padding(.horizontal, 7)
                         .padding(.vertical, 4)
-                        .background(appState.showingPreviewView ? Color.white.opacity(0.16) : Color.primary.opacity(0.06))
+                        .background(isPreviewActive ? Color.white.opacity(0.16) : Color.primary.opacity(0.06))
                         .overlay(
                             RoundedRectangle(cornerRadius: 6)
-                                .stroke(appState.showingPreviewView ? Color.white.opacity(0.22) : Color.clear, lineWidth: 1)
+                                .stroke(isPreviewActive ? Color.white.opacity(0.22) : Color.clear, lineWidth: 1)
                         )
                         .cornerRadius(6)
                     }
@@ -827,7 +821,7 @@ struct AgenticWorkspaceSidebar: View {
                 .padding(.bottom, 2)
             
             ScrollView {
-                VStack(alignment: .leading, spacing: 14) {
+                LazyVStack(alignment: .leading, spacing: 14) {
                     projectsSection
                     Rectangle()
                         .fill(Color.primary.opacity(0.08))
@@ -2694,7 +2688,7 @@ struct AgenticContextInspector: View {
     // MARK: - Live Preview Tab View
     private var previewTabView: some View {
         VStack(spacing: 0) {
-            EmbeddedDeviceDockView()
+            EmbeddedDeviceDockView(showsCloseButton: false)
                 .environmentObject(appState)
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
@@ -3392,10 +3386,9 @@ struct MainToolbar: View {
                 }
                 .help("Toggle Console (⌘J)")
                 
-                ToolbarButton(icon: "sidebar.right", isActive: appState.showingPreviewView) {
-                    withAnimation {
-                        appState.showingPreviewView.toggle()
-                        DeviceRuntimeService.shared.showingEmbeddedDeviceDock = appState.showingPreviewView
+                ToolbarButton(icon: "sidebar.right", isActive: appState.agenticContextVisible && appState.selectedInspectorTab == .preview) {
+                    withAnimation(.easeInOut(duration: 0.16)) {
+                        appState.togglePreviewInspector()
                     }
                 }
                 .help("Toggle Device Preview (⌥⌘P)")
@@ -4048,8 +4041,8 @@ struct EditorArea: View {
                         }
                     )
                     
-                    // Live iPhone preview canvas on the right (collapsible)
-                    if appState.showingPreviewView {
+                    // Live preview canvas on the right (only when AgenticContextInspector is not already visible, preventing duplicate side-by-side Preview docks)
+                    if appState.showingPreviewView && !appState.agenticContextVisible {
                         RightPreviewPanel()
                     }
                 }
@@ -7516,14 +7509,13 @@ struct ChatMessageView: View {
 // AgentBrainDashboard and DashboardTabBtn removed — Task Windows deprecated
 
 struct ThinkingIndicatorView: View {
-    @State private var pulseAlpha: Double = 0.4
     @EnvironmentObject var appState: AppState
     
     var body: some View {
         HStack(spacing: 6) {
             Text("Working.")
                 .font(.system(size: 11.5, weight: .regular))
-                .foregroundColor(.secondary.opacity(pulseAlpha))
+                .foregroundColor(.secondary.opacity(0.75))
         }
         .padding(.horizontal, 10)
         .padding(.vertical, 6)
@@ -7532,11 +7524,6 @@ struct ThinkingIndicatorView: View {
                 .fill(Color(nsColor: .controlBackgroundColor).opacity(0.8))
                 .overlay(Capsule().stroke(Color.primary.opacity(0.06), lineWidth: 1))
         )
-        .onAppear {
-            withAnimation(.easeInOut(duration: 1.0).repeatForever(autoreverses: true)) {
-                pulseAlpha = 0.95
-            }
-        }
     }
 }
 

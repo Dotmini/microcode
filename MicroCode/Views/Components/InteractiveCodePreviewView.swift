@@ -3,8 +3,8 @@
 //  MicroCode
 //
 //  High-performance code viewer and diff inspector for the Universal Preview Dock.
-//  Provides syntax-styled code view, line numbers, git diff comparison,
-//  and unified diff rendering for code files and patches.
+//  Provides AGY-style breadcrumb navigation, syntax-highlighted code view, line numbers,
+//  scroll-to-line (#L10-L20) highlighting, git diff comparison, and unified diff rendering.
 //
 
 import SwiftUI
@@ -14,9 +14,11 @@ import AppKit
 
 struct InteractiveCodePreviewView: View {
     let url: URL
+    var highlightRange: ClosedRange<Int>? = nil
     @EnvironmentObject var appState: AppState
     
     @State private var codeContent: String = ""
+    @State private var highlightedLines: [AttributedString] = []
     @State private var isLoading: Bool = true
     @State private var errorMessage: String? = nil
     @State private var isCopied: Bool = false
@@ -24,6 +26,7 @@ struct InteractiveCodePreviewView: View {
     @State private var showGitDiff: Bool = false
     @State private var gitDiffContent: (old: String, new: String)? = nil
     @State private var hasGitDiff: Bool = false
+    @State private var activeHighlightRange: ClosedRange<Int>? = nil
     
     private var fileExtension: String {
         url.pathExtension.lowercased()
@@ -33,31 +36,59 @@ struct InteractiveCodePreviewView: View {
         switch fileExtension {
         case "swift": return "swift"
         case "rs": return "rust"
-        case "py": return "python"
-        case "js", "jsx": return "javascript"
+        case "py", "pyi": return "python"
+        case "js", "jsx", "mjs", "cjs": return "javascript"
         case "ts", "tsx": return "typescript"
+        case "svelte": return "svelte"
+        case "vue": return "vue"
+        case "astro": return "astro"
         case "kt", "kts": return "kotlin"
         case "java": return "java"
         case "c", "h": return "c"
-        case "cpp", "cc", "cxx", "hpp": return "cpp"
+        case "cpp", "cc", "cxx", "hpp", "mm": return "cpp"
+        case "m": return "objective-c"
         case "go": return "go"
         case "dart": return "dart"
-        case "json": return "json"
+        case "json", "jsonc", "jsonl": return "json"
         case "html", "htm": return "html"
-        case "css", "scss", "sass": return "css"
+        case "css", "scss", "sass", "less": return "css"
         case "yaml", "yml": return "yaml"
-        case "xml", "plist": return "xml"
-        case "sh", "bash", "zsh": return "bash"
-        case "sql": return "sql"
+        case "xml", "plist", "svg": return "xml"
+        case "sh", "bash", "zsh", "fish": return "bash"
+        case "sql", "prisma": return "sql"
         case "toml": return "toml"
-        case "md", "markdown": return "markdown"
+        case "md", "markdown", "mdx": return "markdown"
+        case "rb": return "ruby"
+        case "php": return "php"
+        case "cs": return "csharp"
+        case "ar": return "ardium"
         default: return "text"
         }
+    }
+
+    /// Breadcrumb segments relative to workspace root (matching AGY breadcrumb bar)
+    private var breadcrumbSegments: [String] {
+        let fullPath = url.standardizedFileURL.path
+        if let wsPath = (AgentService.shared.currentWorkspace ?? appState.workspaceFolder?.path),
+           !wsPath.isEmpty {
+            let normWS = URL(fileURLWithPath: wsPath).standardizedFileURL.path
+            let wsName = URL(fileURLWithPath: normWS).lastPathComponent
+            if fullPath.hasPrefix(normWS + "/") {
+                let rel = String(fullPath.dropFirst(normWS.count + 1))
+                let parts = rel.split(separator: "/").map(String.init)
+                return [wsName] + parts.dropLast()
+            }
+        }
+        let comps = url.standardizedFileURL.pathComponents.filter { $0 != "/" }
+        if comps.count > 1 {
+            return Array(comps.dropLast().suffix(3))
+        }
+        return []
     }
     
     var body: some View {
         VStack(spacing: 0) {
-            // Header Bar
+            // AGY-Style Breadcrumb & Action Bar
             headerBar
             
             Divider()
@@ -93,67 +124,76 @@ struct InteractiveCodePreviewView: View {
                     newContent: diff.new
                 )
             } else {
-                // Code View with Gutter
+                // Syntax-Highlighted Code View with Gutter & ScrollViewReader
                 codeViewer
             }
         }
-        .background(Color(nsColor: .textBackgroundColor).opacity(0.85))
+        .background(Color(nsColor: .textBackgroundColor))
         .onAppear {
+            activeHighlightRange = highlightRange
             loadFileContent()
             checkGitDiff()
         }
         .onChange(of: url) { _ in
+            activeHighlightRange = highlightRange
             loadFileContent()
             checkGitDiff()
         }
+        .onChange(of: highlightRange) { newRange in
+            activeHighlightRange = newRange
+        }
     }
     
-    // MARK: - Header Bar
+    // MARK: - AGY-Style Breadcrumb Header Bar
     
     private var headerBar: some View {
-        HStack(spacing: 8) {
-            // File icon & language badge
-            HStack(spacing: 5) {
-                Image(systemName: "chevron.left.forwardslash.chevron.right")
-                    .font(.system(size: 10, weight: .semibold))
-                    .foregroundColor(.accentColor)
-                
-                Text(url.lastPathComponent)
-                    .font(.system(size: 11, weight: .semibold))
-                    .lineLimit(1)
-                
-                Text(detectedLanguage.uppercased())
-                    .font(.system(size: 9, weight: .bold, design: .monospaced))
-                    .padding(.horizontal, 4)
-                    .padding(.vertical, 1.5)
-                    .background(Color.accentColor.opacity(0.12))
-                    .foregroundColor(.accentColor)
-                    .cornerRadius(3)
+        HStack(spacing: 6) {
+            // Breadcrumb path + file icon & name
+            ScrollView(.horizontal, showsIndicators: false) {
+                HStack(spacing: 5) {
+                    ForEach(Array(breadcrumbSegments.enumerated()), id: \.offset) { _, seg in
+                        Text(seg)
+                            .font(.system(size: 11.5))
+                            .foregroundColor(.secondary.opacity(0.85))
+                            .lineLimit(1)
+                        Image(systemName: "chevron.right")
+                            .font(.system(size: 8.5, weight: .semibold))
+                            .foregroundColor(.secondary.opacity(0.5))
+                    }
+                    
+                    HStack(spacing: 5) {
+                        ProgrammingLanguageIconView(fileName: url.lastPathComponent, size: 13)
+                        Text(url.lastPathComponent)
+                            .font(.system(size: 11.5, weight: .semibold))
+                            .foregroundColor(.primary)
+                            .lineLimit(1)
+                    }
+
+                    if let range = activeHighlightRange {
+                        Button {
+                            withAnimation(.easeInOut(duration: 0.15)) {
+                                activeHighlightRange = nil
+                            }
+                        } label: {
+                            HStack(spacing: 3) {
+                                Text(range.lowerBound == range.upperBound ? "#L\(range.lowerBound)" : "#L\(range.lowerBound)-\(range.upperBound)")
+                                    .font(.system(size: 10, weight: .semibold, design: .monospaced))
+                                Image(systemName: "xmark")
+                                    .font(.system(size: 7.5, weight: .bold))
+                            }
+                            .padding(.horizontal, 6)
+                            .padding(.vertical, 2)
+                            .background(Color.accentColor.opacity(0.14))
+                            .foregroundColor(.accentColor)
+                            .cornerRadius(4)
+                        }
+                        .buttonStyle(.plain)
+                        .help("Clear line highlight")
+                    }
+                }
             }
             
-            Spacer()
-            
-            // Stats (lines & size)
-            if !isLoading && errorMessage == nil {
-                let lineCount = codeContent.components(separatedBy: "\n").count
-                let fileSize = (try? url.resourceValues(forKeys: [.fileSizeKey]).fileSize) ?? codeContent.utf8.count
-                let formattedSize = ByteCountFormatter.string(fromByteCount: Int64(fileSize), countStyle: .file)
-                
-                Text("\(lineCount) lines · \(formattedSize)")
-                    .font(.system(size: 10, design: .monospaced))
-                    .foregroundColor(.secondary)
-            }
-            
-            // Toggle Line Numbers
-            Button {
-                showLineNumbers.toggle()
-            } label: {
-                Image(systemName: showLineNumbers ? "list.number" : "text.alignleft")
-                    .font(.system(size: 10))
-                    .foregroundColor(showLineNumbers ? .accentColor : .secondary)
-            }
-            .buttonStyle(.plain)
-            .help(showLineNumbers ? "Hide Line Numbers" : "Show Line Numbers")
+            Spacer(minLength: 6)
             
             // Toggle Git Diff (if modified)
             if hasGitDiff {
@@ -165,11 +205,11 @@ struct InteractiveCodePreviewView: View {
                     HStack(spacing: 3) {
                         Image(systemName: "arrow.triangle.swap")
                             .font(.system(size: 9))
-                        Text(showGitDiff ? "Show Code" : "Diff")
+                        Text(showGitDiff ? "Code" : "Diff")
                             .font(.system(size: 10, weight: .medium))
                     }
-                    .padding(.horizontal, 5)
-                    .padding(.vertical, 2)
+                    .padding(.horizontal, 6)
+                    .padding(.vertical, 2.5)
                     .background(showGitDiff ? Color.orange.opacity(0.15) : Color.primary.opacity(0.06))
                     .foregroundColor(showGitDiff ? .orange : .secondary)
                     .cornerRadius(4)
@@ -188,112 +228,141 @@ struct InteractiveCodePreviewView: View {
                 }
             } label: {
                 Image(systemName: isCopied ? "checkmark" : "doc.on.doc")
-                    .font(.system(size: 10))
+                    .font(.system(size: 11))
                     .foregroundColor(isCopied ? .green : .secondary)
+                    .frame(width: 22, height: 22)
+                    .contentShape(Rectangle())
             }
             .buttonStyle(.plain)
-            .help("Copy code to clipboard")
+            .help("Copy file content")
             
-            // Open in Main Editor
+            // Open in Main Code Editor
             Button {
                 Task { @MainActor in
                     await appState.loadFile(url: url)
+                    appState.editorMode = .code
+                    NotificationCenter.default.post(name: NSNotification.Name("MicroCodeEditorModeChanged"), object: EditorMode.code)
                 }
             } label: {
-                Image(systemName: "arrow.up.forward.square")
-                    .font(.system(size: 10))
+                Image(systemName: "square.and.pencil")
+                    .font(.system(size: 11))
                     .foregroundColor(.secondary)
+                    .frame(width: 22, height: 22)
+                    .contentShape(Rectangle())
             }
             .buttonStyle(.plain)
-            .help("Open in main editor tab")
+            .help("Open in full Code Editor")
         }
         .padding(.horizontal, 10)
-        .padding(.vertical, 5)
-        .background(Color(nsColor: .windowBackgroundColor).opacity(0.5))
+        .padding(.vertical, 6)
+        .background(Color(nsColor: .windowBackgroundColor).opacity(0.55))
     }
     
-    // MARK: - Code Viewer
+    // MARK: - Syntax-Highlighted Code Viewer
     
     private var codeViewer: some View {
-        let lines = codeContent.components(separatedBy: "\n")
-        let totalLines = lines.count
-        let gutterWidth: CGFloat = totalLines > 999 ? 42 : (totalLines > 99 ? 34 : 26)
+        let totalLines = max(1, highlightedLines.count)
+        let gutterWidth: CGFloat = totalLines > 9999 ? 48 : (totalLines > 999 ? 40 : (totalLines > 99 ? 32 : 26))
         
-        return ScrollView([.horizontal, .vertical], showsIndicators: true) {
-            HStack(alignment: .top, spacing: 0) {
-                // Line Numbers Gutter
-                if showLineNumbers {
-                    VStack(alignment: .trailing, spacing: 0) {
-                        ForEach(0..<lines.count, id: \.self) { index in
-                            Text("\(index + 1)")
-                                .font(.system(size: 11, design: .monospaced))
-                                .foregroundColor(.secondary.opacity(0.45))
-                                .frame(width: gutterWidth, height: 18, alignment: .trailing)
-                                .padding(.trailing, 6)
+        return ScrollViewReader { scrollProxy in
+            ScrollView([.horizontal, .vertical], showsIndicators: true) {
+                LazyVStack(alignment: .leading, spacing: 0) {
+                    ForEach(0..<highlightedLines.count, id: \.self) { index in
+                        let lineNumber = index + 1
+                        let isHighlighted = activeHighlightRange?.contains(lineNumber) ?? false
+                        
+                        HStack(alignment: .firstTextBaseline, spacing: 0) {
+                            if showLineNumbers {
+                                Rectangle()
+                                    .fill(isHighlighted ? Color.accentColor : Color.clear)
+                                    .frame(width: 2.5, height: 19)
+                                
+                                Text("\(lineNumber)")
+                                    .font(.system(size: 11.5, design: .monospaced))
+                                    .foregroundColor(isHighlighted ? .accentColor : .secondary.opacity(0.45))
+                                    .frame(width: gutterWidth, alignment: .trailing)
+                                    .padding(.trailing, 10)
+                                    .padding(.leading, 4)
+                            }
+                            
+                            Text(highlightedLines[index])
+                                .font(.system(size: 12, design: .monospaced))
+                                .lineLimit(1)
+                                .fixedSize(horizontal: true, vertical: false)
+                                .padding(.leading, 6)
+                                .padding(.trailing, 24)
+                            
+                            Spacer(minLength: 0)
                         }
-                    }
-                    .padding(.vertical, 6)
-                    .background(Color.primary.opacity(0.025))
-                    
-                    // Gutter Separator
-                    Rectangle()
-                        .fill(Color.primary.opacity(0.08))
-                        .frame(width: 1)
-                }
-                
-                // Code Lines
-                VStack(alignment: .leading, spacing: 0) {
-                    ForEach(0..<lines.count, id: \.self) { index in
-                        Text(lines[index].isEmpty ? " " : lines[index])
-                            .font(.system(size: 11, design: .monospaced))
-                            .foregroundColor(.primary.opacity(0.92))
-                            .frame(height: 18, alignment: .leading)
-                            .padding(.leading, 8)
+                        .frame(height: 19, alignment: .leading)
+                        .background(isHighlighted ? Color.accentColor.opacity(0.11) : Color.clear)
+                        .id(lineNumber)
                     }
                 }
-                .padding(.vertical, 6)
+                .padding(.vertical, 8)
                 .textSelection(.enabled)
-                
-                Spacer(minLength: 20)
             }
-            .frame(maxWidth: .infinity, alignment: .leading)
+            .onAppear {
+                scrollToHighlightedLine(using: scrollProxy)
+            }
+            .onChange(of: activeHighlightRange) { _ in
+                scrollToHighlightedLine(using: scrollProxy)
+            }
+            .onChange(of: highlightedLines.count) { _ in
+                scrollToHighlightedLine(using: scrollProxy)
+            }
+        }
+    }
+
+    private func scrollToHighlightedLine(using proxy: ScrollViewProxy) {
+        guard let targetLine = activeHighlightRange?.lowerBound,
+              targetLine > 0,
+              targetLine <= highlightedLines.count else { return }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) {
+            withAnimation(.easeInOut(duration: 0.2)) {
+                proxy.scrollTo(max(1, targetLine - 3), anchor: .top)
+            }
         }
     }
     
-    // MARK: - Helpers
+    // MARK: - Helpers & Fast Syntax Highlighter
     
     private func loadFileContent() {
         isLoading = true
         errorMessage = nil
+        let targetURL = url
+        let lang = detectedLanguage
         
         DispatchQueue.global(qos: .userInitiated).async {
             do {
-                let attr = try? FileManager.default.attributesOfItem(atPath: url.path)
+                let attr = try? FileManager.default.attributesOfItem(atPath: targetURL.path)
                 let fileSize = (attr?[.size] as? NSNumber)?.int64Value ?? 0
                 let isGiant = fileSize > 10 * 1024 * 1024 // > 10MB
                 
                 let data: Data
                 if isGiant {
-                    // Safe chunked preview: Read only first 1MB to prevent macOS beachball freeze
-                    let handle = try FileHandle(forReadingFrom: url)
+                    let handle = try FileHandle(forReadingFrom: targetURL)
                     defer { try? handle.close() }
                     data = handle.readData(ofLength: 1024 * 1024)
                 } else {
-                    data = try Data(contentsOf: url)
+                    data = try Data(contentsOf: targetURL)
                 }
                 
-                // Try UTF-8 first, fallback to ASCII/Latin-1
                 var string = String(data: data, encoding: .utf8)
                     ?? String(data: data, encoding: .isoLatin1)
                     ?? String(decoding: data, as: UTF8.self)
                 
                 if isGiant {
                     let formatted = ByteCountFormatter.string(fromByteCount: fileSize, countStyle: .file)
-                    string = "⚠️ [LARGE FILE WARNING: File size is \(formatted). Previewing the first 1 MB in read-only mode to prevent system memory freeze.]\n\n" + string
+                    string = "⚠️ [LARGE FILE WARNING: File size is \(formatted). Previewing the first 1 MB in read-only mode.]\n\n" + string
                 }
+                
+                let rawLines = string.components(separatedBy: "\n")
+                let styled = Self.highlightLines(rawLines, language: lang)
                 
                 DispatchQueue.main.async {
                     self.codeContent = string
+                    self.highlightedLines = styled
                     self.isLoading = false
                 }
             } catch {
@@ -303,6 +372,207 @@ struct InteractiveCodePreviewView: View {
                 }
             }
         }
+    }
+
+    private static let keywordsSet: Set<String> = [
+        "import", "from", "export", "default", "package", "module", "use", "mod", "crate",
+        "struct", "class", "enum", "protocol", "interface", "trait", "impl", "type", "typealias", "extension",
+        "func", "fn", "def", "function", "sub", "proc", "init", "deinit", "subscript",
+        "let", "var", "const", "mut", "static", "final", "lazy", "weak", "unowned",
+        "public", "private", "internal", "fileprivate", "open", "protected", "pub",
+        "if", "else", "elif", "guard", "switch", "case", "match", "for", "in", "while", "repeat", "loop", "do",
+        "return", "yield", "break", "continue", "fallthrough", "defer",
+        "try", "catch", "throw", "throws", "rethrows", "async", "await", "actor", "nonisolated", "some", "any",
+        "where", "as", "is", "in", "inout", "Self", "self", "super", "true", "false", "nil", "null", "None", "True", "False",
+        "and", "or", "not", "with", "lambda", "pass", "del", "global", "nonlocal", " script", "style", "template"
+    ]
+
+    private static func highlightLines(_ lines: [String], language: String) -> [AttributedString] {
+        let keywordColor = Color(red: 0.72, green: 0.20, blue: 0.66)     // Xcode/AGY Magenta-Purple
+        let typeColor = Color(red: 0.16, green: 0.52, blue: 0.68)        // Teal-Blue for Types & Attributes
+        let stringColor = Color(red: 0.78, green: 0.22, blue: 0.18)      // Warm Red-Orange for Strings
+        let commentColor = Color.secondary.opacity(0.68)                 // Muted Gray-Green for Comments
+        let numberColor = Color(red: 0.15, green: 0.44, blue: 0.82)      // Royal Blue for Numbers
+        let baseColor = Color.primary.opacity(0.90)
+
+        var result: [AttributedString] = []
+        result.reserveCapacity(lines.count)
+
+        let highlightCap = 3000 // Highlight up to 3000 lines for instant zero-lag rendering
+        for (idx, line) in lines.enumerated() {
+            if line.isEmpty {
+                result.append(AttributedString(" "))
+                continue
+            }
+            if idx >= highlightCap {
+                var plain = AttributedString(line)
+                plain.foregroundColor = baseColor
+                result.append(plain)
+                continue
+            }
+
+            let trimmed = line.trimmingCharacters(in: .whitespaces)
+            if trimmed.hasPrefix("//") || (trimmed.hasPrefix("#") && !trimmed.hasPrefix("#include") && !trimmed.hasPrefix("#import") && !trimmed.hasPrefix("#if") && !trimmed.hasPrefix("#endif") && !trimmed.hasPrefix("#pragma")) || trimmed.hasPrefix("<!--") || trimmed.hasPrefix("/*") || trimmed.hasPrefix("*") {
+                var commentAttr = AttributedString(line)
+                commentAttr.foregroundColor = commentColor
+                result.append(commentAttr)
+                continue
+            }
+
+            // Check if there is a trailing `//` comment outside quotes
+            var codePart = line
+            var trailingComment: String? = nil
+            if let commentRange = findTrailingLineComment(in: line) {
+                codePart = String(line[..<commentRange.lowerBound])
+                trailingComment = String(line[commentRange.lowerBound...])
+            }
+
+            var lineAttr = highlightCodeSegment(
+                codePart,
+                baseColor: baseColor,
+                keywordColor: keywordColor,
+                typeColor: typeColor,
+                stringColor: stringColor,
+                numberColor: numberColor
+            )
+            if let comment = trailingComment {
+                var cAttr = AttributedString(comment)
+                cAttr.foregroundColor = commentColor
+                lineAttr.append(cAttr)
+            }
+            result.append(lineAttr)
+        }
+        return result
+    }
+
+    private static func findTrailingLineComment(in line: String) -> Range<String.Index>? {
+        var inDoubleQuote = false
+        var inSingleQuote = false
+        var prevChar: Character = "\0"
+        var idx = line.startIndex
+        while idx < line.endIndex {
+            let ch = line[idx]
+            if ch == "\"" && !inSingleQuote && prevChar != "\\" {
+                inDoubleQuote.toggle()
+            } else if ch == "'" && !inDoubleQuote && prevChar != "\\" {
+                inSingleQuote.toggle()
+            } else if !inDoubleQuote && !inSingleQuote && ch == "/" {
+                let nextIdx = line.index(after: idx)
+                if nextIdx < line.endIndex && line[nextIdx] == "/" {
+                    // Ignore `://` in URLs
+                    if prevChar != ":" {
+                        return idx..<line.endIndex
+                    }
+                }
+            }
+            prevChar = ch
+            idx = line.index(after: idx)
+        }
+        return nil
+    }
+
+    private static func highlightCodeSegment(
+        _ text: String,
+        baseColor: Color,
+        keywordColor: Color,
+        typeColor: Color,
+        stringColor: Color,
+        numberColor: Color
+    ) -> AttributedString {
+        var output = AttributedString()
+        var i = text.startIndex
+
+        while i < text.endIndex {
+            let ch = text[i]
+
+            // 1. String literal ("..." or '...')
+            if ch == "\"" || ch == "'" {
+                let quote = ch
+                var end = text.index(after: i)
+                var escaped = false
+                while end < text.endIndex {
+                    let c = text[end]
+                    if escaped {
+                        escaped = false
+                    } else if c == "\\" {
+                        escaped = true
+                    } else if c == quote {
+                        end = text.index(after: end)
+                        break
+                    }
+                    end = text.index(after: end)
+                }
+                var seg = AttributedString(String(text[i..<end]))
+                seg.foregroundColor = stringColor
+                output.append(seg)
+                i = end
+                continue
+            }
+
+            // 2. Decorator / Attribute (@MainActor, @Published, etc.)
+            if ch == "@" {
+                var end = text.index(after: i)
+                while end < text.endIndex && (text[end].isLetter || text[end].isNumber || text[end] == "_") {
+                    end = text.index(after: end)
+                }
+                if end > text.index(after: i) {
+                    var seg = AttributedString(String(text[i..<end]))
+                    seg.foregroundColor = keywordColor
+                    output.append(seg)
+                    i = end
+                    continue
+                }
+            }
+
+            // 3. Identifier / Keyword / Type
+            if ch.isLetter || ch == "_" {
+                var end = text.index(after: i)
+                while end < text.endIndex && (text[end].isLetter || text[end].isNumber || text[end] == "_") {
+                    end = text.index(after: end)
+                }
+                let word = String(text[i..<end])
+                var seg = AttributedString(word)
+                if keywordsSet.contains(word) {
+                    seg.foregroundColor = keywordColor
+                } else if let first = word.first, first.isUppercase {
+                    seg.foregroundColor = typeColor
+                } else {
+                    seg.foregroundColor = baseColor
+                }
+                output.append(seg)
+                i = end
+                continue
+            }
+
+            // 4. Numbers
+            if ch.isNumber {
+                var end = text.index(after: i)
+                while end < text.endIndex && (text[end].isNumber || text[end] == "." || text[end] == "_" || text[end] == "x" || text[end] == "X") {
+                    end = text.index(after: end)
+                }
+                var seg = AttributedString(String(text[i..<end]))
+                seg.foregroundColor = numberColor
+                output.append(seg)
+                i = end
+                continue
+            }
+
+            // 5. Punctuation / Whitespace
+            var end = text.index(after: i)
+            while end < text.endIndex {
+                let c = text[end]
+                if c == "\"" || c == "'" || c == "@" || c.isLetter || c == "_" || c.isNumber {
+                    break
+                }
+                end = text.index(after: end)
+            }
+            var seg = AttributedString(String(text[i..<end]))
+            seg.foregroundColor = baseColor
+            output.append(seg)
+            i = end
+        }
+
+        return output
     }
     
     private func checkGitDiff() {
@@ -323,7 +593,6 @@ struct InteractiveCodePreviewView: View {
             let status = String(data: data, encoding: .utf8)?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
             
             if !status.isEmpty {
-                // Fetch HEAD version
                 let showProcess = Process()
                 let showPipe = Pipe()
                 showProcess.executableURL = URL(fileURLWithPath: "/usr/bin/git")
@@ -392,10 +661,8 @@ struct InteractiveDiffPreviewView: View {
         VStack(spacing: 0) {
             // Diff Stats Header
             HStack(spacing: 8) {
-                HStack(spacing: 4) {
-                    Image(systemName: "arrow.left.and.right.square")
-                        .font(.system(size: 10))
-                        .foregroundColor(.cyan)
+                HStack(spacing: 6) {
+                    ProgrammingLanguageIconView(fileName: title, size: 14)
                     Text("Diff: \(title)")
                         .font(.system(size: 11, weight: .semibold))
                         .lineLimit(1)

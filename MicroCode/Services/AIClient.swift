@@ -240,13 +240,34 @@ enum AIStructuredTurn {
 enum AIStructuredTurnCodec {
     static let markerKey = "_mc_structured_turn"
 
+    static func stripToolCallArtifacts(_ text: String) -> String {
+        var result = text
+        if result.contains("[Tool Call:") {
+            result = result.replacingOccurrences(
+                of: #"(?m)^[ \t]*\[Tool Call:\s*[a-zA-Z0-9_]+\s*\([^\n]*\)\][ \t]*\r?\n?"#,
+                with: "",
+                options: .regularExpression
+            )
+        }
+        if result.contains("<tool_call>") || result.contains("<function_call>") {
+            result = result.replacingOccurrences(
+                of: #"<(?:tool_call|function_call)>[\s\S]*?</(?:tool_call|function_call)>"#,
+                with: "",
+                options: .regularExpression
+            )
+        }
+        return result
+    }
+
     static func stripThoughtTags(_ text: String) -> String {
-        guard text.contains("<thought>") else { return text.trimmingCharacters(in: .whitespacesAndNewlines) }
-        let cleaned = text.replacingOccurrences(
-            of: "<thought>[\\s\\S]*?</thought>",
-            with: "",
-            options: .regularExpression
-        )
+        var cleaned = stripToolCallArtifacts(text)
+        if cleaned.contains("<thought>") {
+            cleaned = cleaned.replacingOccurrences(
+                of: "<thought>[\\s\\S]*?</thought>",
+                with: "",
+                options: .regularExpression
+            )
+        }
         return cleaned.trimmingCharacters(in: .whitespacesAndNewlines)
     }
 
@@ -1987,16 +2008,14 @@ final class AIClient: ObservableObject {
                     if !cleanText.isEmpty {
                         parts.append(["text": cleanText])
                     }
-                    let allHaveThoughtSig = toolCalls.allSatisfy { !($0.thoughtSignature ?? "").isEmpty }
-                    if isGeminiTarget && !allHaveThoughtSig {
+                    // Gemini only attaches thoughtSignature to the first functionCall part in a parallel tool batch.
+                    // Checking anyHaveThoughtSig preserves native functionCall parts across multi-tool turns,
+                    // and avoids injecting "[Tool Call: ...]" text into model history which causes the model to mimic text tool calls.
+                    let anyHaveThoughtSig = toolCalls.contains { !($0.thoughtSignature ?? "").isEmpty }
+                    if isGeminiTarget && !anyHaveThoughtSig {
                         lastTurnUsedStructuredFunctionCall = false
-                        let summary = toolCalls.map { tc -> String in
-                            let argsData = (try? JSONSerialization.data(withJSONObject: tc.arguments)) ?? Data("{}".utf8)
-                            let argsStr = String(data: argsData, encoding: .utf8) ?? "{}"
-                            return "[Tool Call: \(tc.name)(\(argsStr))]"
-                        }.joined(separator: "\n")
-                        if !summary.isEmpty {
-                            parts.append(["text": summary])
+                        if parts.isEmpty {
+                            parts.append(["text": "Checked workspace state."])
                         }
                     } else {
                         lastTurnUsedStructuredFunctionCall = true

@@ -1120,6 +1120,15 @@ class AppState: ObservableObject {
                 self.currentFile = self.openFiles[index]
             }
             .store(in: &cancellables)
+
+        // Sync AI Provider & Model changes to live telemetry
+        Publishers.CombineLatest($aiProvider, $aiModel)
+            .dropFirst()
+            .receive(on: RunLoop.main)
+            .sink { provider, model in
+                TelemetryService.shared.recordAIConfiguration(provider: provider, model: model)
+            }
+            .store(in: &cancellables)
             
         // Theme & Presentation Mode Auto-Scaling
         $appTheme
@@ -2219,6 +2228,7 @@ class AppState: ObservableObject {
             consoleVisible = true
             return
         }
+        TelemetryService.shared.recordFeature("Build Project")
         
         consoleVisible = true
         consoleOutput = "🚀 Starting Build...\n"
@@ -2298,6 +2308,7 @@ class AppState: ObservableObject {
     
     func testProject() {
         guard let folder = workspaceFolder else { return }
+        TelemetryService.shared.recordFeature("Test Runner")
         
         consoleVisible = true
         consoleOutput = "🧪 Running Tests...\n"
@@ -2677,6 +2688,7 @@ class AppState: ObservableObject {
 
     func runCode() {
         guard let file = currentFile else { return }
+        TelemetryService.shared.recordFeature("Run Code (\(file.language))")
 
         isExecuting = true
         consoleOutput = "Running \(file.name)...\n"
@@ -3569,6 +3581,7 @@ class AppState: ObservableObject {
 
     func formatCode() {
         guard let file = currentFile else { return }
+        TelemetryService.shared.recordFeature("Format Code")
 
         Task {
             do {
@@ -3582,6 +3595,7 @@ class AppState: ObservableObject {
 
     func expandCode() {
         guard let file = currentFile else { return }
+        TelemetryService.shared.recordAIUsage(provider: aiProvider, model: aiModel, taskLabel: "AI Expand Code")
         
         isLoading = true
         Task {
@@ -3608,6 +3622,7 @@ class AppState: ObservableObject {
 
     func refactorCode(instructions: String) async {
         guard let file = currentFile else { return }
+        TelemetryService.shared.recordAIUsage(provider: aiProvider, model: aiModel, taskLabel: "Smart Refactor")
 
         isLoading = true
         defer { isLoading = false }
@@ -3628,6 +3643,7 @@ class AppState: ObservableObject {
 
     func explainCode() {
         guard let file = currentFile else { return }
+        TelemetryService.shared.recordAIUsage(provider: aiProvider, model: aiModel, taskLabel: "AI Explain Code")
 
         Task {
             isLoading = true
@@ -4693,6 +4709,9 @@ class AppState: ObservableObject {
 
     func toggleGitPanel() {
         gitPanelVisible.toggle()
+        if gitPanelVisible {
+            TelemetryService.shared.recordFeature("Git Source Control")
+        }
     }
 
     func toggleAgenticContext() {

@@ -178,6 +178,7 @@ struct WebBrowserView: NSViewRepresentable {
         func webView(_ webView: WKWebView, didStartProvisionalNavigation navigation: WKNavigation!) {
             DispatchQueue.main.async {
                 self.parent.isLoading = true
+                IDEBrowserAutomationService.shared.clearRuntimeIssues()
             }
         }
         

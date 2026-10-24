@@ -228,6 +228,12 @@ struct EmbeddedWebAppPreviewView: View {
     @ObservedObject private var browserAutomation = IDEBrowserAutomationService.shared
     @State private var inspectInstructionText: String = ""
     @State private var showPortRadarPopover: Bool = false
+    @State private var inspectPopupDragOffset: CGSize = .zero
+    @State private var inspectPopupAccumulatedOffset: CGSize = .zero
+    @FocusState private var isInspectInputFocused: Bool
+    @State private var showPromotedCaptureCard: Bool = false
+    @State private var captureCopiedFeedback: Bool = false
+    @State private var captureSentFeedback: Bool = false
     
     var body: some View {
         VStack(spacing: 0) {
@@ -729,146 +735,6 @@ struct EmbeddedWebAppPreviewView: View {
             .padding(.horizontal, 10)
             .padding(.vertical, 5)
             .background(canvasColor)
-            
-            // Feature #1: Picked DOM Element Action Bar (Direct Agent Edit)
-            if let picked = browserAutomation.lastPickedElement {
-                Divider()
-                VStack(alignment: .leading, spacing: 6) {
-                    HStack(spacing: 6) {
-                        Image(systemName: "viewfinder.circle.fill")
-                            .font(.system(size: 12, weight: .semibold))
-                            .foregroundColor(.cyan)
-                        Text("Direct Agent Edit:")
-                            .font(.system(size: 10.5, weight: .bold))
-                            .foregroundColor(.cyan)
-                        Text(picked.selector)
-                            .font(.system(size: 10, weight: .semibold, design: .monospaced))
-                            .padding(.horizontal, 6)
-                            .padding(.vertical, 2)
-                            .background(Color.cyan.opacity(0.14))
-                            .foregroundColor(.cyan)
-                            .cornerRadius(4)
-                            .lineLimit(1)
-                        if !picked.text.isEmpty {
-                            Text(picked.text)
-                                .font(.system(size: 10))
-                                .foregroundColor(.secondary)
-                                .lineLimit(1)
-                                .truncationMode(.tail)
-                        }
-                        Spacer()
-                        Button {
-                            browserAutomation.clearPickedElement(target: "preview")
-                        } label: {
-                            Image(systemName: "xmark.circle.fill")
-                                .font(.system(size: 11))
-                                .foregroundColor(.secondary)
-                        }
-                        .buttonStyle(.plain)
-                        .help("Cancel selection")
-                    }
-
-                    // Quick Action Preset Chips
-                    ScrollView(.horizontal, showsIndicators: false) {
-                        HStack(spacing: 5) {
-                            ForEach([
-                                ("🎨 เปลี่ยนสี/ดีไซน์", "ปรับดีไซน์และสีของส่วนนี้ให้สวยงามทันสมัยขึ้น"),
-                                ("✏️ แก้ข้อความ", "แก้ไขข้อความในส่วนนี้ให้เป็น: "),
-                                ("📐 ปรับขนาด/Layout", "จัด Layout และระยะห่าง (padding/alignment) ของส่วนนี้ให้สมดุล"),
-                                ("✨ เพิ่ม Animation", "เพิ่ม transition/hover animation ให้ส่วนนี้ดูลื่นไหล"),
-                                ("🐛 แก้บั๊กส่วนนี้", "ตรวจสอบและแก้ไขบั๊กการทำงานของปุ่ม/ส่วนนี้")
-                            ], id: \.0) { label, preset in
-                                Button {
-                                    if label.contains("แก้ข้อความ") {
-                                        inspectInstructionText = preset
-                                    } else {
-                                        browserAutomation.sendPickedElementToAgent(
-                                            picked,
-                                            instruction: preset,
-                                            pageURL: urlString,
-                                            autoSend: true
-                                        )
-                                        inspectInstructionText = ""
-                                    }
-                                } label: {
-                                    Text(label)
-                                        .font(.system(size: 9.5, weight: .medium))
-                                        .padding(.horizontal, 7)
-                                        .padding(.vertical, 2.5)
-                                        .background(Color.primary.opacity(0.06))
-                                        .foregroundColor(.primary.opacity(0.85))
-                                        .cornerRadius(4)
-                                }
-                                .buttonStyle(.plain)
-                            }
-                        }
-                    }
-
-                    HStack(spacing: 6) {
-                        TextField("สั่ง AI แก้ส่วนที่เลือก... (กด Enter เพื่อส่งให้ AI แก้ทันที)", text: $inspectInstructionText)
-                            .textFieldStyle(.plain)
-                            .font(.system(size: 11))
-                            .padding(.horizontal, 8)
-                            .padding(.vertical, 5)
-                            .background(Color.primary.opacity(0.07))
-                            .cornerRadius(5)
-                            .onSubmit {
-                                browserAutomation.sendPickedElementToAgent(
-                                    picked,
-                                    instruction: inspectInstructionText,
-                                    pageURL: urlString,
-                                    autoSend: true
-                                )
-                                inspectInstructionText = ""
-                            }
-
-                        Button("Attach to Chat") {
-                            browserAutomation.sendPickedElementToAgent(
-                                picked,
-                                instruction: inspectInstructionText,
-                                pageURL: urlString,
-                                autoSend: false
-                            )
-                            inspectInstructionText = ""
-                        }
-                        .font(.system(size: 9.5, weight: .medium))
-                        .padding(.horizontal, 7)
-                        .padding(.vertical, 5)
-                        .background(Color.primary.opacity(0.08))
-                        .foregroundColor(.secondary)
-                        .cornerRadius(5)
-                        .buttonStyle(.plain)
-                        .help("Insert element context into the chat input box without sending yet")
-
-                        Button {
-                            browserAutomation.sendPickedElementToAgent(
-                                picked,
-                                instruction: inspectInstructionText.isEmpty ? "ช่วยปรับปรุงและแก้ไขส่วนนี้" : inspectInstructionText,
-                                pageURL: urlString,
-                                autoSend: true
-                            )
-                            inspectInstructionText = ""
-                        } label: {
-                            HStack(spacing: 3) {
-                                Image(systemName: "paperplane.fill")
-                                    .font(.system(size: 9))
-                                Text("Send to Agent")
-                                    .font(.system(size: 10, weight: .semibold))
-                            }
-                            .padding(.horizontal, 9)
-                            .padding(.vertical, 5)
-                            .background(Color.cyan.opacity(0.22))
-                            .foregroundColor(.cyan)
-                            .cornerRadius(5)
-                        }
-                        .buttonStyle(.plain)
-                        .help("Send directly to AI Agent and start editing code immediately")
-                    }
-                }
-                .padding(.horizontal, 10)
-                .padding(.vertical, 7)
-                .background(Color.cyan.opacity(0.07))
-            }
 
             // Feature #2: Live DOM & Console Error Auto-Healer Banner
             if browserAutomation.totalRuntimeIssueCount > 0 {
@@ -1222,13 +1088,228 @@ struct EmbeddedWebAppPreviewView: View {
                             )
                         }
                     }
+                    
+                    // MARK: - Floating Contextual Inspect Popover (Anchored Near Picked Element)
+                    if let picked = browserAutomation.lastPickedElement {
+                        let vpW = max(1, CGFloat(picked.viewportWidth))
+                        let vpH = max(1, CGFloat(picked.viewportHeight))
+                        let elCenterX = ((CGFloat(picked.boundsX) + CGFloat(picked.boundsWidth) * 0.5) / vpW) * availW
+                        let elTopY = (CGFloat(picked.boundsY) / vpH) * availH
+                        let elBottomY = ((CGFloat(picked.boundsY) + CGFloat(picked.boundsHeight)) / vpH) * availH
+                        
+                        let cardW = min(max(290, availW - 24), 390)
+                        let cardH: CGFloat = 116
+                        let minX = cardW / 2 + 12
+                        let maxX = max(minX, availW - cardW / 2 - 12)
+                        let baseX = min(max(minX, elCenterX), maxX)
+                        
+                        let prefersBelow = (elBottomY + cardH + 18) <= availH
+                        let rawY = prefersBelow ? (elBottomY + cardH / 2 + 10) : (elTopY - cardH / 2 - 10)
+                        let minY = cardH / 2 + 12
+                        let maxY = max(minY, availH - cardH / 2 - 12)
+                        let baseY = min(max(minY, rawY), maxY)
+                        
+                        let finalX = min(max(minX, baseX + inspectPopupAccumulatedOffset.width + inspectPopupDragOffset.width), maxX)
+                        let finalY = min(max(minY, baseY + inspectPopupAccumulatedOffset.height + inspectPopupDragOffset.height), maxY)
+                        
+                        VStack(alignment: .leading, spacing: 7) {
+                            // Draggable Popover Header
+                            HStack(spacing: 6) {
+                                Image(systemName: "scope")
+                                    .font(.system(size: 11, weight: .bold))
+                                    .foregroundColor(.cyan)
+                                
+                                Text(picked.selector)
+                                    .font(.system(size: 10.5, weight: .semibold, design: .monospaced))
+                                    .padding(.horizontal, 6)
+                                    .padding(.vertical, 2)
+                                    .background(Color.cyan.opacity(0.16))
+                                    .foregroundColor(.cyan)
+                                    .cornerRadius(4)
+                                    .lineLimit(1)
+                                    .truncationMode(.middle)
+                                
+                                if !picked.text.isEmpty {
+                                    Text(picked.text)
+                                        .font(.system(size: 10))
+                                        .foregroundColor(.secondary)
+                                        .lineLimit(1)
+                                        .truncationMode(.tail)
+                                }
+                                
+                                Spacer(minLength: 4)
+                                
+                                Button {
+                                    browserAutomation.clearPickedElement(target: "preview")
+                                } label: {
+                                    Image(systemName: "xmark.circle.fill")
+                                        .font(.system(size: 12))
+                                        .foregroundColor(.secondary.opacity(0.85))
+                                }
+                                .buttonStyle(.plain)
+                                .help("Close inspect popup (Esc)")
+                            }
+                            .contentShape(Rectangle())
+                            .gesture(
+                                DragGesture(minimumDistance: 2)
+                                    .onChanged { val in
+                                        inspectPopupDragOffset = val.translation
+                                    }
+                                    .onEnded { val in
+                                        inspectPopupAccumulatedOffset.width += val.translation.width
+                                        inspectPopupAccumulatedOffset.height += val.translation.height
+                                        inspectPopupDragOffset = .zero
+                                    }
+                            )
+                            
+                            // Quick Action Preset Chips
+                            ScrollView(.horizontal, showsIndicators: false) {
+                                HStack(spacing: 5) {
+                                    ForEach([
+                                        ("🎨 เปลี่ยนสี/ดีไซน์", "ปรับดีไซน์และสีของส่วนนี้ให้สวยงามทันสมัยขึ้น"),
+                                        ("✏️ แก้ข้อความ", "แก้ไขข้อความในส่วนนี้ให้เป็น: "),
+                                        ("📐 ปรับขนาด/Layout", "จัด Layout และระยะห่าง (padding/alignment) ของส่วนนี้ให้สมดุล"),
+                                        ("✨ เพิ่ม Animation", "เพิ่ม transition/hover animation ให้ส่วนนี้ดูลื่นไหล"),
+                                        ("🐛 แก้บั๊กส่วนนี้", "ตรวจสอบและแก้ไขบั๊กการทำงานของปุ่ม/ส่วนนี้")
+                                    ], id: \.0) { label, preset in
+                                        Button {
+                                            if label.contains("แก้ข้อความ") {
+                                                inspectInstructionText = preset
+                                                isInspectInputFocused = true
+                                            } else {
+                                                browserAutomation.sendPickedElementToAgent(
+                                                    picked,
+                                                    instruction: preset,
+                                                    pageURL: urlString,
+                                                    autoSend: true
+                                                )
+                                                inspectInstructionText = ""
+                                            }
+                                        } label: {
+                                            Text(label)
+                                                .font(.system(size: 9.5, weight: .medium))
+                                                .padding(.horizontal, 7)
+                                                .padding(.vertical, 3)
+                                                .background(Color.primary.opacity(0.08))
+                                                .foregroundColor(.primary.opacity(0.9))
+                                                .cornerRadius(5)
+                                        }
+                                        .buttonStyle(.plain)
+                                    }
+                                }
+                            }
+                            
+                            // Inline Prompt Input & Actions
+                            HStack(spacing: 6) {
+                                TextField("สั่ง AI แก้ส่วนนี้... (กด Enter ส่งทันที)", text: $inspectInstructionText)
+                                    .textFieldStyle(.plain)
+                                    .font(.system(size: 11.5))
+                                    .focused($isInspectInputFocused)
+                                    .padding(.horizontal, 8)
+                                    .padding(.vertical, 5.5)
+                                    .background(Color.primary.opacity(0.08))
+                                    .cornerRadius(6)
+                                    .overlay(
+                                        RoundedRectangle(cornerRadius: 6)
+                                            .stroke(Color.cyan.opacity(isInspectInputFocused ? 0.55 : 0.2), lineWidth: 1)
+                                    )
+                                    .onSubmit {
+                                        browserAutomation.sendPickedElementToAgent(
+                                            picked,
+                                            instruction: inspectInstructionText.isEmpty ? "ช่วยปรับปรุงและแก้ไขส่วนนี้" : inspectInstructionText,
+                                            pageURL: urlString,
+                                            autoSend: true
+                                        )
+                                        inspectInstructionText = ""
+                                    }
+                                
+                                Button {
+                                    browserAutomation.sendPickedElementToAgent(
+                                        picked,
+                                        instruction: inspectInstructionText,
+                                        pageURL: urlString,
+                                        autoSend: false
+                                    )
+                                    inspectInstructionText = ""
+                                } label: {
+                                    Image(systemName: "plus.bubble")
+                                        .font(.system(size: 11, weight: .semibold))
+                                        .padding(.horizontal, 7)
+                                        .padding(.vertical, 6)
+                                        .background(Color.primary.opacity(0.09))
+                                        .foregroundColor(.secondary)
+                                        .cornerRadius(6)
+                                }
+                                .buttonStyle(.plain)
+                                .help("Attach to Chat input without sending immediately")
+                                
+                                Button {
+                                    browserAutomation.sendPickedElementToAgent(
+                                        picked,
+                                        instruction: inspectInstructionText.isEmpty ? "ช่วยปรับปรุงและแก้ไขส่วนนี้" : inspectInstructionText,
+                                        pageURL: urlString,
+                                        autoSend: true
+                                    )
+                                    inspectInstructionText = ""
+                                } label: {
+                                    HStack(spacing: 4) {
+                                        Image(systemName: "paperplane.fill")
+                                            .font(.system(size: 9.5))
+                                        Text("Send")
+                                            .font(.system(size: 10.5, weight: .semibold))
+                                    }
+                                    .padding(.horizontal, 10)
+                                    .padding(.vertical, 6)
+                                    .background(Color.cyan)
+                                    .foregroundColor(.black)
+                                    .cornerRadius(6)
+                                }
+                                .buttonStyle(.plain)
+                                .help("Send directly to AI Agent and edit code immediately")
+                            }
+                        }
+                        .padding(10)
+                        .frame(width: cardW)
+                        .background(
+                            RoundedRectangle(cornerRadius: 11, style: .continuous)
+                                .fill(Color(nsColor: .windowBackgroundColor).opacity(0.96))
+                        )
+                        .overlay(
+                            RoundedRectangle(cornerRadius: 11, style: .continuous)
+                                .stroke(Color.cyan.opacity(0.65), lineWidth: 1.2)
+                        )
+                        .shadow(color: Color.black.opacity(0.45), radius: 18, x: 0, y: 8)
+                        .position(x: finalX, y: finalY)
+                        .transition(.scale(scale: 0.94).combined(with: .opacity))
+                        .zIndex(999)
+                    }
                 }
             }
         }
         .background(canvasColor)
+        .onChange(of: browserAutomation.lastPickedElement?.id) { newId in
+            inspectPopupDragOffset = .zero
+            inspectPopupAccumulatedOffset = .zero
+            if newId != nil {
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) {
+                    isInspectInputFocused = true
+                }
+            }
+        }
         .onAppear {
             detectLocalWorkspaceIndex()
             resolveInitialURL()
+            browserAutomation.scanActivePorts()
+        }
+        .onChange(of: browserAutomation.activePortProcesses) { processes in
+            guard !processes.isEmpty else { return }
+            let preferredPorts = [5173, 5174, 3000, 8080, 4200, 4321, 8000]
+            let activePorts = Set(processes.map(\.port))
+            if urlString == "http://localhost:3000" && !activePorts.contains(3000) {
+                if let match = preferredPorts.first(where: { activePorts.contains($0) }) ?? processes.first?.port {
+                    sanitizeAndSetURL("http://localhost:\(match)")
+                }
+            }
         }
         .onChange(of: runtime.targetWebURL) { newURL in
             if let newURL = newURL {
@@ -1316,6 +1397,11 @@ struct EmbeddedWebAppPreviewView: View {
             sanitizeAndSetURL(target.absoluteString)
         } else if let detectedPort = runtime.lastDetectedDevServerPort {
             sanitizeAndSetURL("http://localhost:\(detectedPort)")
+        } else if !browserAutomation.activePortProcesses.isEmpty {
+            let preferredPorts = [5173, 5174, 3000, 8080, 4200, 4321, 8000]
+            let activePorts = Set(browserAutomation.activePortProcesses.map(\.port))
+            let chosen = preferredPorts.first(where: { activePorts.contains($0) }) ?? browserAutomation.activePortProcesses[0].port
+            sanitizeAndSetURL("http://localhost:\(chosen)")
         } else if let localIndex = localWorkspaceIndexURL {
             sanitizeAndSetURL(localIndex.absoluteString)
         } else {
@@ -1338,12 +1424,18 @@ struct EmbeddedWebAppPreviewView: View {
         if str.hasPrefix("file://") {
             urlString = str
             currentURL = URL(string: str)
+            if runtime.targetWebURL != currentURL {
+                runtime.targetWebURL = currentURL
+            }
             return
         }
         if str.hasPrefix("/") {
             let fileURL = URL(fileURLWithPath: str)
             urlString = fileURL.absoluteString
             currentURL = fileURL
+            if runtime.targetWebURL != currentURL {
+                runtime.targetWebURL = currentURL
+            }
             return
         }
         if !str.hasPrefix("http://") && !str.hasPrefix("https://") {
@@ -1351,5 +1443,8 @@ struct EmbeddedWebAppPreviewView: View {
         }
         urlString = str
         currentURL = URL(string: str)
+        if runtime.targetWebURL != currentURL {
+            runtime.targetWebURL = currentURL
+        }
     }
 }
