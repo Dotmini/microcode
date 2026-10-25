@@ -35,7 +35,7 @@ permissions:
 
 env:
   APP_NAME: MicroCode
-  BUNDLE_ID: com.dotmini.codetunner
+  BUNDLE_ID: com.dotmini.microcode
   MACOSX_DEPLOYMENT_TARGET: "13.0"
   RUST_BACKTRACE: 1
   CARGO_TERM_COLOR: always
@@ -487,12 +487,12 @@ jobs:
       - name: Generate release checksums
         run: |
           VERSION="${{ needs.build-arch.outputs.version }}"
-          echo "# CodeTunner v${VERSION} — SHA256 Checksums" > SHA256SUMS.txt
+          echo "# MicroCode v${VERSION} — SHA256 Checksums" > SHA256SUMS.txt
           echo "# Generated: $(date -u +%Y-%m-%dT%H:%M:%SZ)" >> SHA256SUMS.txt
           echo "" >> SHA256SUMS.txt
-          # Match all CodeTunner/Dotmini release artifacts
+          # Match all MicroCode/Dotmini release artifacts
           find artifacts/ -maxdepth 2 -type f \
-            \( -name "*CodeTunner*" -o -name "*codetunner*" -o -name "*MicroCode_*" -o -name "*microcode_*" \) \
+            \( -name "*MicroCode_*" -o -name "*microcode_*" -o -name "*Dotmini_*" \) \
             \( -name "*.dmg" -o -name "*.pkg" \) | sort | while read f; do
             sha256sum "$f" >> SHA256SUMS.txt
           done
@@ -502,9 +502,9 @@ jobs:
       - name: Collect release assets
         run: |
           mkdir -p release-assets
-          # Collect all CodeTunner/Dotmini DMG and PKG artifacts
+          # Collect all MicroCode/Dotmini DMG and PKG artifacts
           find artifacts/ -maxdepth 2 -type f \
-            \( -name "*CodeTunner*" -o -name "*codetunner*" -o -name "*MicroCode_*" -o -name "*microcode_*" \) \
+            \( -name "*MicroCode_*" -o -name "*microcode_*" -o -name "*Dotmini_*" \) \
             \( -name "*.dmg" -o -name "*.pkg" \) -exec cp {} release-assets/ \;
           cp SHA256SUMS.txt release-assets/ 2>/dev/null || true
           echo "📦 Release assets:"
@@ -527,7 +527,7 @@ jobs:
           fi
 
           cat > release-body.md << 'HEREDOC'
-          ## CodeTunner v${{ needs.build-arch.outputs.version }}
+          ## MicroCode v${{ needs.build-arch.outputs.version }}
 
           **Build:** ${{ needs.build-arch.outputs.build_number }} | **License:** MPL v1.0
 
@@ -602,7 +602,7 @@ jobs:
           gh release create "${{ github.ref_name }}" \
             release-assets/* \
             --repo ${{ github.repository }} \
-            --title "CodeTunner ${VERSION}" \
+            --title "MicroCode v${VERSION}" \
             --notes-file release-body.md \
             --prerelease="$IS_PRE" \
             --verify-tag
