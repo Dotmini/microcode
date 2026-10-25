@@ -21,6 +21,7 @@ class KeychainManager: ObservableObject {
     
     private let service = "com.dotmini.microcode.api-keys"
     private let integrationService = "com.dotmini.microcode.integrations"
+    private static let missingSentinel = "__KEYCHAIN_MISSING__"
     private var memoryCache: [String: String] = [:]
     
     /// Hardware-bound AES-256-GCM key used to seal cached secrets on disk so plaintext is NEVER written to UserDefaults
@@ -142,8 +143,10 @@ class KeychainManager: ObservableObject {
     
     /// Read an API key from Keychain / Sealed Store
     func read(for provider: ProviderKey) -> String? {
-        if let mem = memoryCache["api:\(provider.rawValue)"], !mem.isEmpty {
-            return mem
+        let cacheKey = "api:\(provider.rawValue)"
+        if let mem = memoryCache[cacheKey] {
+            if mem == Self.missingSentinel { return nil }
+            if !mem.isEmpty { return mem }
         }
         
         // Migrate legacy plaintext cache if present
@@ -152,13 +155,13 @@ class KeychainManager: ObservableObject {
             if let sealed = encryptSecret(legacy) {
                 UserDefaults.standard.set(sealed, forKey: "km_sealed_\(provider.rawValue)")
             }
-            memoryCache["api:\(provider.rawValue)"] = legacy
+            memoryCache[cacheKey] = legacy
             return legacy
         }
         
         if let sealed = UserDefaults.standard.data(forKey: "km_sealed_\(provider.rawValue)"),
            let str = decryptSecret(sealed), !str.isEmpty {
-            memoryCache["api:\(provider.rawValue)"] = str
+            memoryCache[cacheKey] = str
             return str
         }
         
@@ -173,14 +176,15 @@ class KeychainManager: ObservableObject {
         var result: AnyObject?
         let status = SecItemCopyMatching(query as CFDictionary, &result)
         
-        if status == errSecSuccess, let data = result as? Data, let str = String(data: data, encoding: .utf8) {
-            memoryCache["api:\(provider.rawValue)"] = str
+        if status == errSecSuccess, let data = result as? Data, let str = String(data: data, encoding: .utf8), !str.isEmpty {
+            memoryCache[cacheKey] = str
             if let sealed = encryptSecret(str) {
                 UserDefaults.standard.set(sealed, forKey: "km_sealed_\(provider.rawValue)")
             }
             return str
         }
         
+        memoryCache[cacheKey] = Self.missingSentinel
         return nil
     }
     
@@ -192,7 +196,7 @@ class KeychainManager: ObservableObject {
     /// Delete an API key from Keychain
     @discardableResult
     func delete(for provider: ProviderKey) -> Bool {
-        memoryCache.removeValue(forKey: "api:\(provider.rawValue)")
+        memoryCache["api:\(provider.rawValue)"] = Self.missingSentinel
         UserDefaults.standard.removeObject(forKey: "km_cached_\(provider.rawValue)")
         UserDefaults.standard.removeObject(forKey: "km_sealed_\(provider.rawValue)")
         let query: [String: Any] = [
@@ -253,8 +257,10 @@ class KeychainManager: ObservableObject {
     }
 
     func readIntegrationSecret(account: String) -> String? {
-        if let mem = memoryCache["sec:\(account)"], !mem.isEmpty {
-            return mem
+        let cacheKey = "sec:\(account)"
+        if let mem = memoryCache[cacheKey] {
+            if mem == Self.missingSentinel { return nil }
+            if !mem.isEmpty { return mem }
         }
         // Automatically migrate legacy plaintext UserDefaults secret if found
         if let legacy = UserDefaults.standard.string(forKey: "km_secret_\(account)"), !legacy.isEmpty {
@@ -264,7 +270,7 @@ class KeychainManager: ObservableObject {
         }
         if let sealed = UserDefaults.standard.data(forKey: "km_sealed_sec_\(account)"),
            let decrypted = decryptSecret(sealed), !decrypted.isEmpty {
-            memoryCache["sec:\(account)"] = decrypted
+            memoryCache[cacheKey] = decrypted
             return decrypted
         }
         let query: [String: Any] = [
@@ -278,18 +284,19 @@ class KeychainManager: ObservableObject {
         if SecItemCopyMatching(query as CFDictionary, &result) == errSecSuccess,
            let data = result as? Data,
            let str = String(data: data, encoding: .utf8), !str.isEmpty {
-            memoryCache["sec:\(account)"] = str
+            memoryCache[cacheKey] = str
             if let sealed = encryptSecret(str) {
                 UserDefaults.standard.set(sealed, forKey: "km_sealed_sec_\(account)")
             }
             return str
         }
+        memoryCache[cacheKey] = Self.missingSentinel
         return nil
     }
 
     @discardableResult
     func deleteIntegrationSecret(account: String) -> Bool {
-        memoryCache.removeValue(forKey: "sec:\(account)")
+        memoryCache["sec:\(account)"] = Self.missingSentinel
         UserDefaults.standard.removeObject(forKey: "km_secret_\(account)")
         UserDefaults.standard.removeObject(forKey: "km_sealed_sec_\(account)")
         let query: [String: Any] = [

@@ -12,6 +12,7 @@ struct EmbeddedDeviceDockView: View {
     @EnvironmentObject var appState: AppState
     @ObservedObject private var deviceRuntime = DeviceRuntimeService.shared
     @ObservedObject private var dockService = PreviewDockService.shared
+    @ObservedObject private var hotReloadEngine = PreviewHotReloadEngine.shared
     var showsCloseButton: Bool = true
     @State private var textToSend = ""
     @State private var showingTextInput = false
@@ -96,6 +97,9 @@ struct EmbeddedDeviceDockView: View {
                 }
                 
                 Spacer()
+
+                // Universal Playground-style Hot Reload Control Group
+                hotReloadControlsBar
 
                 // Quick action tools (clean, non-overlapping)
                 if dockService.activeTab?.kind == .iOSPhysical {
@@ -374,6 +378,97 @@ struct EmbeddedDeviceDockView: View {
                 }
             }
             return true
+        }
+        .onAppear {
+            hotReloadEngine.scanWorkspaceForRecentChanges(source: "Startup")
+        }
+        .onChange(of: appState.workspaceFolder) { _ in
+            hotReloadEngine.scanWorkspaceForRecentChanges(source: "Workspace")
+        }
+    }
+
+    @ViewBuilder
+    private var hotReloadControlsBar: some View {
+        HStack(spacing: 4) {
+            Menu {
+                Toggle("Auto Hot Reload on Save / Agent Edit", isOn: $hotReloadEngine.isAutoHotReloadEnabled)
+                Toggle("Live Typing (Playground Mode)", isOn: $hotReloadEngine.isLiveTypingEnabled)
+                Divider()
+                Button {
+                    triggerActiveTabHotReload()
+                } label: {
+                    Label("Hot Reload Now (⌘R)", systemImage: "bolt.clockwise")
+                }
+            } label: {
+                HStack(spacing: 3) {
+                    Image(systemName: hotReloadEngine.isAutoHotReloadEnabled ? "bolt.fill" : "bolt.slash")
+                        .font(.system(size: 9, weight: .bold))
+                        .foregroundColor(hotReloadEngine.isAutoHotReloadEnabled ? .green : .secondary)
+                    if deviceRuntime.isHotReloading {
+                        ProgressView()
+                            .controlSize(.mini)
+                            .scaleEffect(0.65)
+                    } else if hotReloadEngine.reloadCount > 0 {
+                        Text("\(hotReloadEngine.lastReloadDurationMs)ms")
+                            .font(.system(size: 9.5, weight: .semibold, design: .monospaced))
+                            .foregroundColor(.secondary)
+                    } else {
+                        Text("Hot")
+                            .font(.system(size: 9.5, weight: .semibold))
+                            .foregroundColor(hotReloadEngine.isAutoHotReloadEnabled ? .primary : .secondary)
+                    }
+                }
+                .padding(.horizontal, 6)
+                .padding(.vertical, 3)
+                .background(
+                    Capsule()
+                        .fill(hotReloadEngine.isAutoHotReloadEnabled ? Color.green.opacity(0.12) : Color.primary.opacity(0.06))
+                )
+            }
+            .menuStyle(.borderlessButton)
+            .help("Hot Reload Settings (Auto Reload on Save, Agent Edit & Live Typing)")
+
+            Button {
+                triggerActiveTabHotReload()
+            } label: {
+                Image(systemName: "arrow.clockwise")
+                    .font(.system(size: 10.5, weight: .semibold))
+                    .foregroundColor(deviceRuntime.isHotReloading ? .accentColor : .secondary)
+                    .frame(width: 22, height: 22)
+                    .background(Color.primary.opacity(0.06))
+                    .clipShape(RoundedRectangle(cornerRadius: 5, style: .continuous))
+            }
+            .buttonStyle(.plain)
+            .help("Instant Hot Reload Active Preview")
+        }
+    }
+
+    private func triggerActiveTabHotReload() {
+        let start = CFAbsoluteTimeGetCurrent()
+        guard let active = dockService.activeTab else {
+            dockService.reloadWeb()
+            return
+        }
+        switch active.kind {
+        case .web:
+            dockService.reloadWeb()
+            hotReloadEngine.reloadCount += 1
+            hotReloadEngine.lastReloadDurationMs = max(1, Int((CFAbsoluteTimeGetCurrent() - start) * 1000))
+            hotReloadEngine.lastReloadSource = "Manual Web"
+        case .ios, .android, .iOSPhysical, .androidPhysical:
+            deviceRuntime.performHotReload(reason: "Manual")
+            hotReloadEngine.reloadCount += 1
+        case .file(let url):
+            NotificationCenter.default.post(
+                name: NSNotification.Name("MicroCodeFileSaved"),
+                object: nil,
+                userInfo: ["path": url.path, "source": "Manual"]
+            )
+            hotReloadEngine.reloadCount += 1
+            hotReloadEngine.lastReloadDurationMs = max(1, Int((CFAbsoluteTimeGetCurrent() - start) * 1000))
+            hotReloadEngine.lastReloadSource = "Manual File"
+        case .diff:
+            break
         }
     }
 

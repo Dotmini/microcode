@@ -165,9 +165,13 @@ public final class EmbeddedEnvManager: ObservableObject {
         let docs = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask).first ?? URL(fileURLWithPath: NSHomeDirectory())
         self.userLibrariesDir = docs.appendingPathComponent("Arduino/libraries")
         
-        detectEspIdf()
-        detectAllToolchains()
-        refreshInstalledLibraries()
+        DispatchQueue.global(qos: .utility).async { [weak self] in
+            DispatchQueue.main.async {
+                self?.detectEspIdf()
+                self?.detectAllToolchains()
+                self?.refreshInstalledLibraries()
+            }
+        }
     }
     
     // MARK: - Toolchain Detection

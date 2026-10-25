@@ -253,12 +253,21 @@ final class DeviceRuntimeService: ObservableObject {
     @Published var showingDeviceRuntimeSheet = false
     @Published var showingMobileDevTools = false
 
+    /// Universal App Hot Reload state (Xcode, Android Gradle, Flutter, React Native, Expo)
+    @Published var isAutoHotReloadEnabled: Bool = true
+    @Published var isHotReloading: Bool = false
+    @Published var lastHotReloadTimeMs: Int = 0
+    @Published var hotReloadVersion: Int = 0
+
     /// Agent launch/deploy remains off until the owner enables it in Device & Run.
     @Published var allowAgentDeviceControl: Bool {
         didSet { UserDefaults.standard.set(allowAgentDeviceControl, forKey: Self.agentControlDefaultsKey) }
     }
 
     private static let agentControlDefaultsKey = "microcode.device-runtime.agent-control"
+    private var autoHotReloadTask: Task<Void, Never>?
+    private var cachedXcodeBuildSettings: [String: [String: String]] = [:]
+    private var cachedXcodeScheme: [String: String] = [:]
     /// Device boot (Android Emulator) and the app/dev-server are independent
     /// processes. Keeping them separate is essential: launching Flutter must
     /// never terminate the AVD that is rendering beside Chat.
@@ -278,20 +287,34 @@ final class DeviceRuntimeService: ObservableObject {
     private var androidInputHandle: FileHandle?
     private var androidInputSerial: String?
     private var lastAndroidScrollEvent = Date.distantPast
+    private var lastRefreshedWorkspacePath: String?
+    private var lastRefreshDate: Date = .distantPast
 
     private init() {
         allowAgentDeviceControl = UserDefaults.standard.bool(forKey: Self.agentControlDefaultsKey)
         updateActiveAndroidSkin()
     }
 
-    func refresh(workspace: URL?) async {
+    func refresh(workspace: URL?, force: Bool = false) async {
+        let workspaceKey = workspace?.standardizedFileURL.path ?? ""
+        if !force,
+           lastRefreshedWorkspacePath == workspaceKey,
+           Date().timeIntervalSince(lastRefreshDate) < 120.0,
+           !devices.isEmpty {
+            return
+        }
+        lastRefreshedWorkspacePath = workspaceKey
+        lastRefreshDate = Date()
+
         // Device Preview is a local capability, not a property of the opened
         // project.  A user must be able to open an already-installed iOS
         // Simulator or Android AVD beside Chat while working in a non-GUI
         // repository (or before opening any repository at all).  Project
         // detection remains important for Build & Run, but must never hide
         // real devices from the Preview menu.
-        let descriptor = workspace.map(GUIProjectDescriptor.detect(at:))
+        let descriptor = await Task.detached(priority: .utility) {
+            workspace.map(GUIProjectDescriptor.detect(at:))
+        }.value
         project = descriptor
         isWorking = true
         defer { isWorking = false }
@@ -913,17 +936,169 @@ final class DeviceRuntimeService: ObservableObject {
         await task.value
     }
 
+    /// Schedules an automatic debounced Hot Reload when a workspace source file is saved by the Editor or AI Agent.
+    func scheduleAutoHotReload(changedFilePath: String, source: String) {
+        guard isAutoHotReloadEnabled else { return }
+        let dock = PreviewDockService.shared
+        guard dock.isVisible else { return }
+
+        // Only auto-trigger native device hot reload when a device tab or active app runtime is open
+        let isDeviceTabActive: Bool = {
+            switch dock.selectedTab {
+            case .ios, .android, .iOSPhysical, .androidPhysical:
+                return true
+            default:
+                return applicationProcess?.isRunning == true || isEmbeddedAndroidActive || ServeSimService.shared.isActive
+            }
+        }()
+        guard isDeviceTabActive, let project = project else { return }
+
+        let ext = (changedFilePath as NSString).pathExtension.lowercased()
+        let relevantExtensions: Set<String>
+        switch project.runtime {
+        case .flutter:
+            relevantExtensions = ["dart", "yaml", "arb", "json", "glsl", "frag"]
+        case .reactNative, .expo:
+            relevantExtensions = ["js", "jsx", "ts", "tsx", "json", "css"]
+        case .xcode:
+            relevantExtensions = ["swift", "m", "mm", "h", "c", "cpp", "metal", "plist", "strings", "xcassets", "storyboard", "xib"]
+        case .android:
+            relevantExtensions = ["kt", "kts", "java", "xml", "gradle", "pro", "json"]
+        case .unknown:
+            return
+        }
+        guard relevantExtensions.contains(ext) else { return }
+
+        autoHotReloadTask?.cancel()
+        let debounceNs: UInt64 = (project.runtime == .flutter || project.runtime == .reactNative || project.runtime == .expo)
+            ? 250_000_000
+            : 650_000_000
+
+        let fileName = (changedFilePath as NSString).lastPathComponent
+        autoHotReloadTask = Task { @MainActor [weak self] in
+            try? await Task.sleep(nanoseconds: debounceNs)
+            guard !Task.isCancelled, let self = self else { return }
+            self.performHotReload(reason: "\(source): \(fileName)")
+        }
+    }
+
     func hotReloadCurrentProject() {
-        guard project?.runtime == .flutter else {
-            statusMessage = "Hot Reload is available for the active Flutter run only."
+        performHotReload(reason: "Manual")
+    }
+
+    /// Universal App Hot Reload across Flutter, React Native, Expo, Xcode (iOS/macOS), and Android Gradle.
+    func performHotReload(reason: String = "Manual") {
+        let start = CFAbsoluteTimeGetCurrent()
+
+        // 1. If Web tab is active and no native project is running, reload WebApp
+        if PreviewDockService.shared.selectedTab == .web && project == nil {
+            PreviewDockService.shared.reloadWeb()
+            let ms = max(1, Int((CFAbsoluteTimeGetCurrent() - start) * 1000))
+            lastHotReloadTimeMs = ms
+            hotReloadVersion += 1
+            statusMessage = "⚡ WebApp Hot Reloaded (\(reason)) in \(ms)ms."
             return
         }
-        guard applicationProcess?.isRunning == true, let input = applicationInputHandle else {
-            statusMessage = "Start Flutter with Build & Run first, then use Hot Reload."
+
+        guard let project = project else {
+            // Fallback: if viewing a Swift file in Editor, trigger SwiftUI Live Preview compilation
+            PreviewDockService.shared.reloadWeb()
+            statusMessage = "Triggered Preview reload (\(reason))."
             return
         }
-        try? input.write(contentsOf: Data("r\n".utf8))
-        statusMessage = "Sent Flutter Hot Reload to the active runtime."
+
+        switch project.runtime {
+        case .flutter:
+            if applicationProcess?.isRunning == true, let input = applicationInputHandle {
+                try? input.write(contentsOf: Data("r\n".utf8))
+                let ms = max(1, Int((CFAbsoluteTimeGetCurrent() - start) * 1000))
+                lastHotReloadTimeMs = ms
+                hotReloadVersion += 1
+                statusMessage = "⚡ Flutter Hot Reload (\(reason)) in \(ms)ms · v\(hotReloadVersion)"
+            } else {
+                statusMessage = "Starting Flutter runtime for Hot Reload..."
+                Task { await runSelectedProject() }
+            }
+
+        case .reactNative, .expo:
+            let label = project.runtime == .expo ? "Expo" : "React Native"
+            var triggered = false
+            if applicationProcess?.isRunning == true, let input = applicationInputHandle {
+                try? input.write(contentsOf: Data("r\n".utf8))
+                triggered = true
+            }
+            if let serial = embeddedAndroidSerial, let adb = try? androidTool("adb") {
+                Task.detached(priority: .userInitiated) {
+                    let proc = Process()
+                    proc.executableURL = URL(fileURLWithPath: adb)
+                    proc.arguments = ["-s", serial, "shell", "input", "text", "rr"]
+                    proc.standardOutput = FileHandle.nullDevice
+                    proc.standardError = FileHandle.nullDevice
+                    try? proc.run()
+                }
+                triggered = true
+            }
+            if triggered {
+                let ms = max(1, Int((CFAbsoluteTimeGetCurrent() - start) * 1000))
+                lastHotReloadTimeMs = ms
+                hotReloadVersion += 1
+                statusMessage = "⚡ \(label) Fast Refresh (\(reason)) in \(ms)ms · v\(hotReloadVersion)"
+            } else {
+                statusMessage = "Starting \(label) runtime for Hot Reload..."
+                Task { await runSelectedProject() }
+            }
+
+        case .xcode, .android:
+            guard !isHotReloading && !isWorking else { return }
+            guard let targetDevice = resolveActiveDeviceForHotReload(for: project) else {
+                statusMessage = "Select an active Simulator/Emulator target to Hot Reload \(project.runtime.rawValue)."
+                return
+            }
+            isHotReloading = true
+            let runtimeName = project.runtime == .xcode ? "Xcode" : "Android"
+            statusMessage = "⚡ Incremental Hot Reloading \(runtimeName) (\(reason))..."
+
+            Task { @MainActor in
+                defer { self.isHotReloading = false }
+                do {
+                    try await self.run(project: project, on: targetDevice)
+                    let ms = max(1, Int((CFAbsoluteTimeGetCurrent() - start) * 1000))
+                    self.lastHotReloadTimeMs = ms
+                    self.hotReloadVersion += 1
+                    self.statusMessage = "⚡ \(runtimeName) Hot Reloaded on \(targetDevice.name) in \(ms)ms · v\(self.hotReloadVersion)"
+                } catch {
+                    self.statusMessage = "Hot Reload failed: \(error.localizedDescription)"
+                    self.appendOutput("Hot Reload error: \(error.localizedDescription)")
+                }
+            }
+
+        case .unknown:
+            PreviewDockService.shared.reloadWeb()
+            statusMessage = "Reloaded active preview (\(reason))."
+        }
+    }
+
+    private func resolveActiveDeviceForHotReload(for project: GUIProjectDescriptor) -> RuntimeDevice? {
+        if let id = selectedDeviceID, let match = devices.first(where: { $0.id == id }) {
+            return match
+        }
+        if project.runtime == .xcode {
+            if let bootedSim = devices.first(where: { $0.platform == .ios && $0.isBooted }) {
+                return bootedSim
+            }
+            if let mac = devices.first(where: { $0.platform == .macOS }) {
+                return mac
+            }
+        }
+        if project.runtime == .android {
+            if let serial = embeddedAndroidSerial {
+                return RuntimeDevice(id: serial, name: selectedDevice?.name ?? "Android Device", platform: .android, state: "Device", runtime: "ADB")
+            }
+            if let androidDev = devices.first(where: { $0.platform == .android }) {
+                return androidDev
+            }
+        }
+        return devices.first
     }
 
     func stopEmbeddedAndroid(shutdownEmulator: Bool = false) {
@@ -1409,7 +1584,18 @@ final class DeviceRuntimeService: ObservableObject {
 
     private func runXcode(_ project: GUIProjectDescriptor, device: RuntimeDevice) async throws {
         guard let container = project.xcodeContainer else { throw ToolBoxError.executionFailed("No Xcode project or workspace found.") }
-        let scheme = try await xcodeScheme(project)
+        let projectKey = project.root.standardizedFileURL.path
+        let scheme: String
+        if let selected = selectedScheme, !selected.isEmpty {
+            scheme = selected
+        } else if let cached = cachedXcodeScheme[projectKey] {
+            scheme = cached
+        } else {
+            let resolved = try await xcodeScheme(project)
+            cachedXcodeScheme[projectKey] = resolved
+            scheme = resolved
+        }
+
         var base = container.pathExtension == "xcworkspace" ? ["-workspace", container.path] : ["-project", container.path]
         base += ["-scheme", scheme]
         if device.platform == .ios { base += ["-destination", "id=\(device.id)"] }
@@ -1417,7 +1603,20 @@ final class DeviceRuntimeService: ObservableObject {
         base += ["build"]
         let result = try await command("/usr/bin/xcodebuild", base, directory: project.root)
         appendOutput(result.output)
-        let settings = try await xcodeBuildSettings(project, scheme: scheme, device: device)
+
+        let settingsKey = "\(projectKey)::\(scheme)::\(device.id)"
+        let settings: [String: String]
+        if let cached = cachedXcodeBuildSettings[settingsKey],
+           let targetDir = cached["TARGET_BUILD_DIR"],
+           let wrapper = cached["WRAPPER_NAME"],
+           FileManager.default.fileExists(atPath: URL(fileURLWithPath: targetDir).appendingPathComponent(wrapper).path) {
+            settings = cached
+        } else {
+            let fetched = try await xcodeBuildSettings(project, scheme: scheme, device: device)
+            cachedXcodeBuildSettings[settingsKey] = fetched
+            settings = fetched
+        }
+
         guard let targetDir = settings["TARGET_BUILD_DIR"], let wrapper = settings["WRAPPER_NAME"] else {
             throw ToolBoxError.executionFailed("Xcode built successfully but MicroCode could not determine the app bundle path.")
         }
@@ -1436,12 +1635,12 @@ final class DeviceRuntimeService: ObservableObject {
                 launched = try await command("/usr/bin/xcrun", ["devicectl", "device", "process", "launch", "--device", device.id, "--terminate-existing", bundleID], directory: project.root)
             } else {
                 _ = try await command("/usr/bin/xcrun", ["simctl", "install", device.id, appURL.path], directory: project.root)
-                launched = try await command("/usr/bin/xcrun", ["simctl", "launch", device.id, bundleID], directory: project.root)
+                launched = try await command("/usr/bin/xcrun", ["simctl", "launch", "--terminate-running-process", device.id, bundleID], directory: project.root)
             }
             appendOutput(launched.output)
             statusMessage = "Installed and launched \(scheme) on \(device.isPhysicalAppleDevice ? "physical device" : device.previewTitle): \(device.name)."
         } else {
-            _ = try await command("/usr/bin/open", [appURL.path], directory: project.root)
+            _ = try await command("/usr/bin/open", ["-n", appURL.path], directory: project.root)
             statusMessage = "Launched \(scheme) on My Mac."
         }
     }
@@ -1457,7 +1656,8 @@ final class DeviceRuntimeService: ObservableObject {
             return
         }
         let adb = try androidTool("adb")
-        let launched = try await command(adb, ["-s", serial, "shell", "monkey", "-p", applicationID, "1"], directory: project.root)
+        _ = try? await command(adb, ["-s", serial, "shell", "am", "force-stop", applicationID], directory: project.root)
+        let launched = try await command(adb, ["-s", serial, "shell", "monkey", "-p", applicationID, "-c", "android.intent.category.LAUNCHER", "1"], directory: project.root)
         appendOutput(launched.output)
         statusMessage = "Installed and launched \(applicationID) on \(device.name)."
     }

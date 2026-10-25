@@ -436,7 +436,7 @@ class RuntimeManager: ObservableObject {
     // MARK: - Detection (Zero-Storm Batched Scanner)
     
     func detectAll(force: Bool = false) {
-        if !force, let last = lastDetectionDate, Date().timeIntervalSince(last) < 3.0 {
+        if !force, let last = lastDetectionDate, Date().timeIntervalSince(last) < 300.0 {
             return
         }
         
@@ -444,8 +444,10 @@ class RuntimeManager: ObservableObject {
             guard let self = self else { return }
             if !force, self.isDetecting { return }
             
-            DispatchQueue.main.async {
-                self.isDetecting = true
+            if self.lastDetectionDate == nil || force {
+                DispatchQueue.main.async {
+                    self.isDetecting = true
+                }
             }
             
             var results: [(RuntimeStatus, Bool, String?, String?)] = []

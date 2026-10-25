@@ -277,7 +277,7 @@ public struct AgentEcosystemConfigView: View {
                             RoundedRectangle(cornerRadius: 6, style: .continuous)
                                 .stroke(cardBorder, lineWidth: 1)
                         )
-                    AIProviderBrandIcon(provider: type.rawValue, size: 20)
+                    AIProviderBrandIcon(provider: type.brandIconKey, size: 20)
                 }
 
                 // Title & Subtitle
@@ -1172,16 +1172,7 @@ public struct AgentEcosystemConfigView: View {
         acpHost.activeAgentId = config.id
         
         // Sync appState provider and model
-        let engineId: String
-        switch type {
-        case .agy: engineId = "agy"
-        case .codexEngine: engineId = "codex"
-        case .claudeCode: engineId = "claude_code"
-        case .openCode: engineId = "opencode"
-        case .zedEngine: engineId = "zed"
-        case .aider: engineId = "aider"
-        case .custom: engineId = "custom"
-        }
+        let engineId = type.engineId
         appState.aiProvider = engineId
         let engineModels = LocalEcosystemDiscovery.shared.models(for: engineId)
         if let firstModel = engineModels.first?.id {

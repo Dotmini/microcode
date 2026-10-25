@@ -32,7 +32,7 @@ public final class IdleStateCompactor: ObservableObject {
     private var lastUserActivity: Date = .distantPast
     private var eventMonitor: Any?
     private var memoryPressureSource: DispatchSourceMemoryPressure?
-    private let defaultIdleThreshold: TimeInterval = 30.0 // Inactivity threshold
+    private let defaultIdleThreshold: TimeInterval = 8.0 // Inactivity threshold for aggressive RAM return
     private var isMonitoringStarted: Bool = false
     
     private init() {}
@@ -41,9 +41,19 @@ public final class IdleStateCompactor: ObservableObject {
     public func startMonitoring() {
         guard !isMonitoringStarted else { return }
         isMonitoringStarted = true
+        URLCache.shared.memoryCapacity = 512 * 1024
+        URLCache.shared.removeAllCachedResponses()
         setupEventMonitors()
         setupKernelMemoryPressureMonitor()
         resetIdleTimer(delay: defaultIdleThreshold)
+        
+        // Immediately return startup allocator fragmentation (~50MB) back to the macOS kernel
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1.2) { [weak self] in
+            self?.performAIWorkloadCompaction()
+        }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 3.2) { [weak self] in
+            self?.performIdleCompaction()
+        }
     }
     
     private func setupKernelMemoryPressureMonitor() {
@@ -169,6 +179,7 @@ public final class IdleStateCompactor: ObservableObject {
     /// Relieves memory pressure across all active Darwin malloc zones and purgeable memory.
     public nonisolated static func relieveAllMallocZones() {
         #if os(macOS)
+        malloc_zone_pressure_relief(nil, 0)
         var count: UInt32 = 0
         var zonesList: UnsafeMutablePointer<vm_address_t>?
         if malloc_get_all_zones(mach_task_self_, nil, &zonesList, &count) == KERN_SUCCESS, let zonesList = zonesList {

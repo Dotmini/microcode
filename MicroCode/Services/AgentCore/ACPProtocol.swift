@@ -12,13 +12,19 @@ import Foundation
 
 /// Supported external coding agent types
 enum ACPAgentType: String, Codable, CaseIterable, Identifiable {
-    case claudeCode   // Anthropic Claude Code CLI
-    case agy          // Google Antigravity CLI
-    case openCode     // OpenCode CLI & ACP Server
-    case aider        // Aider CLI
-    case codexEngine  // OpenAI Codex / inference engines
-    case zedEngine    // Zed / ZCode Assistant
-    case custom       // Custom agent binary
+    case claudeCode     // Anthropic Claude Code CLI
+    case agy            // Google Antigravity CLI
+    case openCode       // OpenCode CLI & ACP Server
+    case codexEngine    // OpenAI Codex CLI
+    case geminiCLI      // Google Gemini CLI (@google/gemini-cli)
+    case cursorAgent    // Cursor Background / CLI Agent
+    case githubCopilot  // GitHub Copilot CLI (@github/copilot-cli)
+    case goose          // Block Goose ACP Agent (goose acp)
+    case cline          // Cline CLI Agent
+    case qwenCode       // Alibaba Qwen Code CLI (@qwen-code/qwen-code)
+    case aider          // Aider CLI
+    case zedEngine      // Zed / ZCode Assistant
+    case custom         // Custom agent binary
     
     var id: String { rawValue }
     
@@ -27,11 +33,41 @@ enum ACPAgentType: String, Codable, CaseIterable, Identifiable {
         case .claudeCode: return "Claude Code"
         case .agy: return "Antigravity (AGY)"
         case .openCode: return "OpenCode"
-        case .aider: return "Aider"
         case .codexEngine: return "OpenAI Codex"
+        case .geminiCLI: return "Google Gemini CLI"
+        case .cursorAgent: return "Cursor Agent"
+        case .githubCopilot: return "GitHub Copilot CLI"
+        case .goose: return "Block Goose"
+        case .cline: return "Cline CLI"
+        case .qwenCode: return "Qwen Code"
+        case .aider: return "Aider"
         case .zedEngine: return "Zed / ZCode"
         case .custom: return "Custom Agent"
         }
+    }
+    
+    /// Canonical engine ID used in LocalEcosystemDiscovery and AIModelCatalog
+    var engineId: String {
+        switch self {
+        case .claudeCode: return "claude_code"
+        case .agy: return "agy"
+        case .openCode: return "opencode"
+        case .codexEngine: return "codex"
+        case .geminiCLI: return "gemini_cli"
+        case .cursorAgent: return "cursor"
+        case .githubCopilot: return "copilot"
+        case .goose: return "goose"
+        case .cline: return "cline"
+        case .qwenCode: return "qwen"
+        case .aider: return "aider"
+        case .zedEngine: return "zed"
+        case .custom: return "custom"
+        }
+    }
+    
+    /// Key for AIProviderBrandIcon (100% official brand logo)
+    var brandIconKey: String {
+        return engineId
     }
     
     var iconName: String {
@@ -39,8 +75,14 @@ enum ACPAgentType: String, Codable, CaseIterable, Identifiable {
         case .claudeCode: return "brain.head.profile"
         case .agy: return "sparkles"
         case .openCode: return "laptopcomputer"
-        case .aider: return "terminal"
         case .codexEngine: return "cpu"
+        case .geminiCLI: return "terminal.fill"
+        case .cursorAgent: return "cube.fill"
+        case .githubCopilot: return "chevron.left.forwardslash.chevron.right"
+        case .goose: return "bird.fill"
+        case .cline: return "bolt.horizontal.fill"
+        case .qwenCode: return "sparkles.rectangle.stack"
+        case .aider: return "terminal"
         case .zedEngine: return "chevron.left.forwardslash.chevron.right"
         case .custom: return "plus.circle"
         }
@@ -51,8 +93,14 @@ enum ACPAgentType: String, Codable, CaseIterable, Identifiable {
         case .claudeCode: return "claude"
         case .agy: return "agy"
         case .openCode: return "opencode"
-        case .aider: return "aider"
         case .codexEngine: return "codex"
+        case .geminiCLI: return "gemini"
+        case .cursorAgent: return "cursor-agent"
+        case .githubCopilot: return "copilot"
+        case .goose: return "goose"
+        case .cline: return "cline"
+        case .qwenCode: return "qwen"
+        case .aider: return "aider"
         case .zedEngine: return "zed"
         case .custom: return ""
         }
@@ -63,8 +111,14 @@ enum ACPAgentType: String, Codable, CaseIterable, Identifiable {
         case .claudeCode: return "#D97757"
         case .agy: return "#4285F4"
         case .openCode: return "#E05A47"
-        case .aider: return "#00D084"
         case .codexEngine: return "#10A37F"
+        case .geminiCLI: return "#4796E3"
+        case .cursorAgent: return "#F5F5F7"
+        case .githubCopilot: return "#6E40C9"
+        case .goose: return "#FF6B00"
+        case .cline: return "#9B72CB"
+        case .qwenCode: return "#615CED"
+        case .aider: return "#00D084"
         case .zedEngine: return "#007ACC"
         case .custom: return "#8E8E93"
         }

@@ -27,9 +27,33 @@ struct InteractiveCodePreviewView: View {
     @State private var gitDiffContent: (old: String, new: String)? = nil
     @State private var hasGitDiff: Bool = false
     @State private var activeHighlightRange: ClosedRange<Int>? = nil
+
+    // Playground-Style Live Render state (.swift SwiftUI, .html/.svg Web, .md Markdown)
+    @State private var showLiveRender: Bool = false
+    @State private var liveSwiftUIDylibPath: String? = nil
+    @State private var liveSwiftUIDylibTrigger: UUID = UUID()
+    @State private var isCompilingSwiftUI: Bool = false
+    @State private var swiftUICompileError: String? = nil
+    @State private var lastCompileMs: Int = 0
+    @State private var liveWebRefreshTrigger: Bool = false
+    @State private var liveWebIsLoading: Bool = false
+    @State private var liveWebTitle: String = ""
+    @State private var liveWebCanGoBack: Bool = false
+    @State private var liveWebCanGoForward: Bool = false
+    @State private var liveWebGoBack: Bool = false
+    @State private var liveWebGoForward: Bool = false
     
     private var fileExtension: String {
         url.pathExtension.lowercased()
+    }
+
+    private var supportsLiveRender: Bool {
+        switch fileExtension {
+        case "swift", "html", "htm", "svg", "md", "markdown", "mdx":
+            return true
+        default:
+            return false
+        }
     }
     
     private var detectedLanguage: String {
@@ -123,6 +147,9 @@ struct InteractiveCodePreviewView: View {
                     oldContent: diff.old,
                     newContent: diff.new
                 )
+            } else if showLiveRender && supportsLiveRender {
+                // Playground-Style Live Render View (SwiftUI / HTML / SVG / Markdown)
+                liveRenderView
             } else {
                 // Syntax-Highlighted Code View with Gutter & ScrollViewReader
                 codeViewer
@@ -136,11 +163,51 @@ struct InteractiveCodePreviewView: View {
         }
         .onChange(of: url) { _ in
             activeHighlightRange = highlightRange
+            liveSwiftUIDylibPath = nil
+            swiftUICompileError = nil
             loadFileContent()
             checkGitDiff()
         }
         .onChange(of: highlightRange) { newRange in
             activeHighlightRange = newRange
+        }
+        .onReceive(NotificationCenter.default.publisher(for: NSNotification.Name("MicroCodeFileSaved"))) { note in
+            guard PreviewHotReloadEngine.shared.isAutoHotReloadEnabled else { return }
+            if let savedPath = note.userInfo?["path"] as? String,
+               URL(fileURLWithPath: savedPath).standardizedFileURL.path == url.standardizedFileURL.path {
+                loadFileContent(silent: true)
+                checkGitDiff()
+                if showLiveRender {
+                    if fileExtension == "swift" {
+                        compileSwiftUIIfNeeded(overrideCode: note.userInfo?["content"] as? String)
+                    } else {
+                        liveWebRefreshTrigger = true
+                    }
+                }
+            }
+        }
+        .onReceive(NotificationCenter.default.publisher(for: NSNotification.Name("MicroCodeWorkspaceFileDidChange"))) { note in
+            guard PreviewHotReloadEngine.shared.isAutoHotReloadEnabled else { return }
+            if let changedPath = note.userInfo?["path"] as? String,
+               URL(fileURLWithPath: changedPath).standardizedFileURL.path == url.standardizedFileURL.path {
+                loadFileContent(silent: true)
+                checkGitDiff()
+                if showLiveRender && fileExtension != "swift" {
+                    liveWebRefreshTrigger = true
+                }
+            }
+        }
+        .onReceive(NotificationCenter.default.publisher(for: NSNotification.Name("MicroCodeLiveBufferUpdated"))) { note in
+            guard PreviewHotReloadEngine.shared.isAutoHotReloadEnabled,
+                  PreviewHotReloadEngine.shared.isLiveTypingEnabled else { return }
+            if let editedPath = note.userInfo?["path"] as? String,
+               let content = note.userInfo?["content"] as? String,
+               URL(fileURLWithPath: editedPath).standardizedFileURL.path == url.standardizedFileURL.path {
+                applyLiveBufferContent(content)
+                if showLiveRender && fileExtension == "swift" {
+                    compileSwiftUIIfNeeded(overrideCode: content)
+                }
+            }
         }
     }
     
@@ -194,6 +261,35 @@ struct InteractiveCodePreviewView: View {
             }
             
             Spacer(minLength: 6)
+
+            // Playground-Style Live Render Toggle (.swift SwiftUI, .html/.svg Web, .md Markdown)
+            if supportsLiveRender {
+                Button {
+                    withAnimation(.easeInOut(duration: 0.15)) {
+                        showLiveRender.toggle()
+                        if showLiveRender {
+                            showGitDiff = false
+                            if fileExtension == "swift" {
+                                compileSwiftUIIfNeeded()
+                            }
+                        }
+                    }
+                } label: {
+                    HStack(spacing: 3) {
+                        Image(systemName: showLiveRender ? "bolt.fill" : "play.tv")
+                            .font(.system(size: 9, weight: .bold))
+                        Text(showLiveRender ? (lastCompileMs > 0 ? "Live · \(lastCompileMs)ms" : "Live") : "Live Preview")
+                            .font(.system(size: 10, weight: .semibold))
+                    }
+                    .padding(.horizontal, 7)
+                    .padding(.vertical, 2.5)
+                    .background(showLiveRender ? Color.green.opacity(0.16) : Color.primary.opacity(0.06))
+                    .foregroundColor(showLiveRender ? .green : .secondary)
+                    .cornerRadius(4)
+                }
+                .buttonStyle(.plain)
+                .help("Toggle Playground-Style Live Hot Reload Preview")
+            }
             
             // Toggle Git Diff (if modified)
             if hasGitDiff {
@@ -325,10 +421,158 @@ struct InteractiveCodePreviewView: View {
         }
     }
     
+    // MARK: - Playground-Style Live Render View (SwiftUI / HTML / SVG / Markdown)
+
+    @ViewBuilder
+    private var liveRenderView: some View {
+        switch fileExtension {
+        case "swift":
+            ZStack {
+                if let dylibPath = liveSwiftUIDylibPath {
+                    DynamicSwiftUIView(dylibPath: dylibPath, reloadTrigger: liveSwiftUIDylibTrigger)
+                        .frame(maxWidth: .infinity, maxHeight: .infinity)
+                } else if isCompilingSwiftUI {
+                    VStack(spacing: 10) {
+                        ProgressView()
+                        Text("Compiling SwiftUI Live Preview…")
+                            .font(.system(size: 11, weight: .medium))
+                            .foregroundColor(.secondary)
+                    }
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+                } else if let err = swiftUICompileError {
+                    ScrollView {
+                        VStack(alignment: .leading, spacing: 8) {
+                            HStack(spacing: 6) {
+                                Image(systemName: "exclamationmark.triangle.fill")
+                                    .foregroundColor(.orange)
+                                Text("SwiftUI Live Preview Compilation Error")
+                                    .font(.system(size: 12, weight: .semibold))
+                            }
+                            Text(err)
+                                .font(.system(size: 11, design: .monospaced))
+                                .foregroundColor(.secondary)
+                                .textSelection(.enabled)
+                        }
+                        .padding(14)
+                    }
+                } else {
+                    VStack(spacing: 10) {
+                        Image(systemName: "swift")
+                            .font(.system(size: 32))
+                            .foregroundColor(.orange)
+                        Text("Ready for Live SwiftUI Preview")
+                            .font(.system(size: 12, weight: .medium))
+                    }
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+                    .onAppear { compileSwiftUIIfNeeded() }
+                }
+
+                if isCompilingSwiftUI && liveSwiftUIDylibPath != nil {
+                    VStack {
+                        HStack {
+                            Spacer()
+                            HStack(spacing: 5) {
+                                ProgressView().controlSize(.mini)
+                                Text("Hot Reloading…")
+                                    .font(.system(size: 10, weight: .semibold))
+                            }
+                            .padding(.horizontal, 8)
+                            .padding(.vertical, 4)
+                            .background(.ultraThinMaterial)
+                            .clipShape(Capsule())
+                            .padding(10)
+                        }
+                        Spacer()
+                    }
+                }
+            }
+
+        case "html", "htm", "svg":
+            WebBrowserView(
+                url: url,
+                htmlContent: nil,
+                title: $liveWebTitle,
+                isLoading: $liveWebIsLoading,
+                canGoBack: $liveWebCanGoBack,
+                canGoForward: $liveWebCanGoForward,
+                refreshTrigger: $liveWebRefreshTrigger,
+                goBackTrigger: $liveWebGoBack,
+                goForwardTrigger: $liveWebGoForward
+            )
+
+        case "md", "markdown", "mdx":
+            ScrollView {
+                VStack(alignment: .leading, spacing: 10) {
+                    if let attr = try? AttributedString(
+                        markdown: codeContent,
+                        options: AttributedString.MarkdownParsingOptions(interpretedSyntax: .inlineOnlyPreservingWhitespace)
+                    ) {
+                        Text(attr)
+                            .font(.system(size: 13))
+                            .textSelection(.enabled)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                    } else {
+                        Text(codeContent)
+                            .font(.system(size: 13))
+                            .textSelection(.enabled)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                    }
+                }
+                .padding(16)
+            }
+
+        default:
+            codeViewer
+        }
+    }
+
+    private func applyLiveBufferContent(_ newContent: String) {
+        let lang = detectedLanguage
+        self.codeContent = newContent
+        DispatchQueue.global(qos: .userInteractive).async {
+            let rawLines = newContent.components(separatedBy: "\n")
+            let styled = Self.highlightLines(rawLines, language: lang)
+            DispatchQueue.main.async {
+                self.highlightedLines = styled
+            }
+        }
+    }
+
+    private func compileSwiftUIIfNeeded(overrideCode: String? = nil) {
+        let source = overrideCode ?? codeContent
+        guard !source.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return }
+        isCompilingSwiftUI = true
+        swiftUICompileError = nil
+        let start = CFAbsoluteTimeGetCurrent()
+        Task {
+            do {
+                let dylib = try await SwiftUILivePreviewCompiler.compileDylib(
+                    code: source,
+                    width: 420,
+                    height: 760,
+                    isDark: appState.appTheme.isDark
+                )
+                await MainActor.run {
+                    self.liveSwiftUIDylibPath = dylib
+                    self.liveSwiftUIDylibTrigger = UUID()
+                    self.lastCompileMs = max(1, Int((CFAbsoluteTimeGetCurrent() - start) * 1000))
+                    self.isCompilingSwiftUI = false
+                }
+            } catch {
+                await MainActor.run {
+                    self.swiftUICompileError = error.localizedDescription
+                    self.isCompilingSwiftUI = false
+                }
+            }
+        }
+    }
+
     // MARK: - Helpers & Fast Syntax Highlighter
     
-    private func loadFileContent() {
-        isLoading = true
+    private func loadFileContent(silent: Bool = false) {
+        if !silent {
+            isLoading = true
+        }
         errorMessage = nil
         let targetURL = url
         let lang = detectedLanguage

@@ -4108,6 +4108,31 @@ struct DynamicSwiftUIView: NSViewRepresentable {
     let trigger: UUID
     let coordinator: SwiftUIPreviewCoordinator
     let onError: (String) -> Void
+
+    private static let sharedFallbackCoordinator = SwiftUIPreviewCoordinator()
+
+    init(
+        dylibPath: String?,
+        trigger: UUID,
+        coordinator: SwiftUIPreviewCoordinator,
+        onError: @escaping (String) -> Void
+    ) {
+        self.dylibPath = dylibPath
+        self.trigger = trigger
+        self.coordinator = coordinator
+        self.onError = onError
+    }
+
+    init(
+        dylibPath: String?,
+        reloadTrigger: UUID,
+        onError: @escaping (String) -> Void = { _ in }
+    ) {
+        self.dylibPath = dylibPath
+        self.trigger = reloadTrigger
+        self.coordinator = Self.sharedFallbackCoordinator
+        self.onError = onError
+    }
     
     func makeNSView(context: Context) -> NSView {
         let container = NSView()
@@ -4136,7 +4161,7 @@ struct DynamicSwiftUIView: NSViewRepresentable {
             return
         }
         
-        guard let sym = dlsym(handle, "microcode_create_preview") else {
+        guard let sym = dlsym(handle, "microcode_create_preview") ?? dlsym(handle, "createPreviewView") else {
             dlclose(handle)
             let err = dlerror().map { String(cString: $0) } ?? "Symbol microcode_create_preview not found"
             DispatchQueue.main.async {

@@ -1304,9 +1304,9 @@ struct IDEBrowserTool: AgentTool {
 
 struct EditorControlTool: AgentTool {
     let name = "editor_control"
-    let description = "Inspect and control the active MicroCode IDE Editor tabs, active file, cursor state, and workspace navigation."
+    let description = "Inspect and control the active MicroCode IDE Editor tabs, active file, cursor state, first-launch onboarding, and workspace navigation."
     let parameters = [
-        ToolParameter(name: "action", type: "string", description: "Action: 'status', 'open_file', 'list_tabs', 'switch_mode'", required: true),
+        ToolParameter(name: "action", type: "string", description: "Action: 'status', 'open_file', 'list_tabs', 'switch_mode', 'simulate_first_launch', 'dismiss_welcome', 'open_connections', 'close_connections', 'restore_normal_state'", required: true),
         ToolParameter(name: "path", type: "string", description: "File path to open in editor (for 'open_file')", required: false),
         ToolParameter(name: "mode", type: "string", description: "IDE mode: 'editor', 'browser', 'notebook', 'playground', 'agent', 'science' (for 'switch_mode')", required: false)
     ]
@@ -1322,7 +1322,7 @@ struct EditorControlTool: AgentTool {
                 let activeTab = appState.currentFile?.name ?? "None"
                 let activePath = appState.currentFile?.path ?? "None"
                 let openTabs = appState.openFiles.map { "\($0.name) (\($0.path))" }.joined(separator: ", ")
-                return "Mode: \(appState.editorMode.displayName) | Active File: \(activeTab) (\(activePath)) | Open Files (\(appState.openFiles.count)): [\(openTabs)] | Workspace: \(appState.workspaceFolder?.path ?? "None")"
+                return "Mode: \(appState.editorMode.displayName) | Active File: \(activeTab) (\(activePath)) | Open Files (\(appState.openFiles.count)): [\(openTabs)] | Workspace: \(appState.workspaceFolder?.path ?? "None") | AI Connected: \(appState.isCurrentAIConnected) | Welcome Overlay: \(appState.showingFirstLaunchWelcome)"
             case "list_tabs":
                 if appState.openFiles.isEmpty { return "No open editor files." }
                 return appState.openFiles.enumerated().map { idx, t in
@@ -1334,35 +1334,87 @@ struct EditorControlTool: AgentTool {
                 }
                 let ws = appState.activeTerminalDirectory
                 let fullPath = path.hasPrefix("/") ? path : (ws as NSString).appendingPathComponent(path)
+                appState.showingWelcomeHome = false
+                appState.switchToMode(.code)
                 Task { @MainActor in
                     await appState.loadFile(url: URL(fileURLWithPath: fullPath))
                 }
                 return "✅ Opened file in MicroCode Editor: \(fullPath)"
             case "switch_mode":
                 let mode = (params["mode"] as? String ?? "").lowercased()
+                if mode == "welcome" || mode == "home" {
+                    appState.switchToMode(.code)
+                    appState.showingWelcomeHome = true
+                    return "✅ Switched IDE to Welcome Home Screen."
+                }
+                appState.showingWelcomeHome = false
                 if mode == "browser" {
-                    appState.editorMode = .browser
+                    appState.switchToMode(.browser)
                     return "✅ Switched IDE to Browser Mode."
                 } else if mode == "editor" || mode == "code" {
-                    appState.editorMode = .code
+                    appState.switchToMode(.code)
                     return "✅ Switched IDE to Code Editor Mode."
                 } else if mode == "notebook" || mode == "cells" {
-                    appState.editorMode = .notebook
+                    appState.switchToMode(.notebook)
                     return "✅ Switched IDE to Notebook Mode."
                 } else if mode == "playground" {
-                    appState.editorMode = .playground
+                    appState.switchToMode(.playground)
                     return "✅ Switched IDE to Playground Mode."
                 } else if mode == "agent" || mode == "ai" {
-                    appState.editorMode = .aiAgent
+                    appState.switchToMode(.aiAgent)
                     return "✅ Switched IDE to AI Agent Mode."
                 } else if mode == "science" {
-                    appState.editorMode = .science
+                    appState.switchToMode(.science)
                     return "✅ Switched IDE to Science Mode."
                 } else if mode == "api" || mode == "apistudio" || mode == "api_studio" {
-                    appState.editorMode = .apiClient
+                    appState.switchToMode(.apiClient)
                     return "✅ Switched IDE to API Studio Mode."
                 }
                 return "Unknown mode '\(mode)'."
+            case "simulate_first_launch":
+                if appState.savedChatIdBeforeSimulation == nil {
+                    appState.savedChatIdBeforeSimulation = AgentService.shared.activeChatId
+                }
+                appState.simulateUnconnectedAI = true
+                let newChat = AgentService.shared.createNewChat(projectPath: appState.workspaceFolder?.path)
+                appState.tempSimulationChatId = newChat.id
+                appState.hidePreviewInspector()
+                PreviewDockService.shared.hideDock()
+                DeviceRuntimeService.shared.showingEmbeddedDeviceDock = false
+                appState.switchToMode(.code)
+                appState.showingWelcomeHome = true
+                appState.showingFirstLaunchWelcome = true
+                return "✅ Simulated First-Launch Welcome with No AI Connected."
+            case "dismiss_welcome":
+                appState.showingFirstLaunchWelcome = false
+                return "✅ Dismissed First-Launch Welcome ('Continue without signing in')."
+            case "open_connections":
+                if appState.editorMode != .aiAgent {
+                    appState.showingWelcomeHome = false
+                    appState.switchToMode(.aiAgent)
+                }
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.15) {
+                    NotificationCenter.default.post(name: NSNotification.Name("MicroCode.OpenAgentConnections"), object: nil)
+                }
+                return "✅ Opened Agent Connections Hub."
+            case "close_connections":
+                NotificationCenter.default.post(name: NSNotification.Name("MicroCode.CloseAgentConnections"), object: nil)
+                return "✅ Closed Agent Connections Hub."
+            case "restore_normal_state":
+                appState.simulateUnconnectedAI = false
+                appState.showingFirstLaunchWelcome = false
+                appState.showingWelcomeHome = false
+                NotificationCenter.default.post(name: NSNotification.Name("MicroCode.CloseAgentConnections"), object: nil)
+                if let tempId = appState.tempSimulationChatId {
+                    AgentService.shared.deleteChat(tempId)
+                    appState.tempSimulationChatId = nil
+                }
+                if let prevId = appState.savedChatIdBeforeSimulation {
+                    AgentService.shared.switchChat(to: prevId)
+                    appState.savedChatIdBeforeSimulation = nil
+                }
+                appState.switchToMode(.aiAgent)
+                return "✅ Restored normal connected AI state and chat session."
             default:
                 return "Unknown editor_control action '\(action)'."
             }
@@ -1818,6 +1870,9 @@ struct FileWriteTool: AgentTool {
         // Create parent directories if needed
         try FileManager.default.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
         try content.write(to: url, atomically: true, encoding: .utf8)
+        await MainActor.run {
+            PreviewHotReloadEngine.shared.notifyFileSaved(path: url.path, content: content, source: "Agent")
+        }
         return "✅ Written \(content.count) chars to \(url.lastPathComponent)"
     }
 }
@@ -1942,6 +1997,9 @@ struct ReplaceInFileTool: AgentTool {
         switch smartReplaceInContent(content, oldText: oldText, newText: newText) {
         case .updated(let updatedContent):
             try updatedContent.write(to: url, atomically: true, encoding: .utf8)
+            await MainActor.run {
+                PreviewHotReloadEngine.shared.notifyFileSaved(path: url.path, content: updatedContent, source: "Agent")
+            }
             return "✅ Replaced text in \(url.lastPathComponent)"
         case .notFound:
             let totalLines = content.components(separatedBy: "\n").count
@@ -3137,6 +3195,10 @@ struct PatchFileTool: AgentTool {
         }
         
         try workingContent.write(to: url, atomically: true, encoding: .utf8)
+        let savedPatchContent = workingContent
+        await MainActor.run {
+            PreviewHotReloadEngine.shared.notifyFileSaved(path: url.path, content: savedPatchContent, source: "Agent")
+        }
         return "✅ Applied all \(appliedCount) edit(s) atomically to \(url.lastPathComponent)"
     }
 }
@@ -3222,6 +3284,10 @@ struct MultiReplaceInFileTool: AgentTool {
         }
 
         try workingContent.write(to: url, atomically: true, encoding: .utf8)
+        let savedMultiContent = workingContent
+        await MainActor.run {
+            PreviewHotReloadEngine.shared.notifyFileSaved(path: url.path, content: savedMultiContent, source: "Agent")
+        }
         return "✅ Applied \(appliedCount) chunk(s) atomically to \(url.lastPathComponent)"
     }
 }
@@ -3280,7 +3346,11 @@ struct ApplyPatchTool: AgentTool {
                 }
                 let fileURL = URL(fileURLWithPath: fullPath)
                 try FileManager.default.createDirectory(at: fileURL.deletingLastPathComponent(), withIntermediateDirectories: true)
-                try newLines.joined(separator: "\n").write(to: fileURL, atomically: true, encoding: .utf8)
+                let joinedNew = newLines.joined(separator: "\n")
+                try joinedNew.write(to: fileURL, atomically: true, encoding: .utf8)
+                Task { @MainActor in
+                    PreviewHotReloadEngine.shared.notifyFileSaved(path: fileURL.path, content: joinedNew, source: "Agent")
+                }
                 addedFiles.append((fullPath as NSString).lastPathComponent)
             } else if line.hasPrefix("*** Delete File:") {
                 let relPath = String(line.dropFirst("*** Delete File:".count)).trimmingCharacters(in: .whitespaces)
@@ -3337,6 +3407,10 @@ struct ApplyPatchTool: AgentTool {
                 }
                 try flushHunk()
                 try content.write(to: fileURL, atomically: true, encoding: .utf8)
+                let savedSnapshot = content
+                Task { @MainActor in
+                    PreviewHotReloadEngine.shared.notifyFileSaved(path: fileURL.path, content: savedSnapshot, source: "Agent")
+                }
                 updatedFiles.append((fullPath as NSString).lastPathComponent)
             } else {
                 idx += 1

@@ -800,8 +800,15 @@ class AppState: ObservableObject {
     @Published var consensusThreshold: Int = 2
 
     @Published var workspaceFolder: URL?
-    @Published var showingFirstLaunchWelcome: Bool = true
+    @Published var showingFirstLaunchWelcome: Bool = {
+        let flag = FileManager.default.homeDirectoryForCurrentUser
+            .appendingPathComponent("Library/Application Support/MicroCode/.welcome_done")
+        return !FileManager.default.fileExists(atPath: flag.path)
+    }()
     @Published var showingWelcomeHome: Bool = false
+    @Published var simulateUnconnectedAI: Bool = false
+    var savedChatIdBeforeSimulation: String? = nil
+    var tempSimulationChatId: String? = nil
 
     func closeWorkspace() {
         workspaceFolder = nil
@@ -1046,11 +1053,39 @@ class AppState: ObservableObject {
     }
     
     func resolveApiKey(for provider: String? = nil) -> String {
+        if simulateUnconnectedAI {
+            return ""
+        }
         let p = provider ?? aiProvider
         if let key = apiKeys[p], !key.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
             return key.trimmingCharacters(in: .whitespacesAndNewlines)
         }
         return AIModelCatalog.resolveKey(p)
+    }
+
+    /// Returns true if an AI provider, subscription, ACP CLI harness, or local LLM is currently configured and ready.
+    var isCurrentAIConnected: Bool {
+        if simulateUnconnectedAI {
+            return false
+        }
+        if ACPHostService.shared.activeAgentId != nil {
+            return true
+        }
+        let keyMode = UserDefaults.standard.string(forKey: "aiKeyMode") ?? "cloud"
+        if keyMode == "acp" {
+            return ACPHostService.shared.activeAgentId != nil
+                || LocalEcosystemDiscovery.shared.engines.contains(where: { $0.id == aiProvider && $0.isInstalled })
+        }
+        if keyMode == "subscription" {
+            return SubscriptionAuthManager.shared.hasAnyConnected
+        }
+        if keyMode == "local" || aiProvider == "local" {
+            return LocalLLMService.shared.activeServer?.isOnline == true
+        }
+        if keyMode == "cloud" || aiProvider == "omni" {
+            return AuthService.shared.currentUser != nil || !resolveApiKey(for: "omni").isEmpty
+        }
+        return !resolveApiKey(for: aiProvider).isEmpty
     }
 
     var aiConfig: AIConfig {
@@ -1690,7 +1725,15 @@ class AppState: ObservableObject {
         editorMode = .code
     }
 
+    private static var cachedRecentWorkspaces: [URL]?
+    private static var lastRecentWorkspacesFetch: Date = .distantPast
+    private static var hasMergedSystemRecentDocs: Bool = false
+    private static var cachedRecentFiles: [URL]?
+    private static var lastRecentFilesFetch: Date = .distantPast
+
     static func recordRecentWorkspace(url: URL) {
+        cachedRecentWorkspaces = nil
+        lastRecentWorkspacesFetch = .distantPast
         NSDocumentController.shared.noteNewRecentDocumentURL(url)
         var paths = UserDefaults.standard.stringArray(forKey: "microcode_recent_workspaces") ?? []
         paths.removeAll { $0 == url.path }
@@ -1700,6 +1743,8 @@ class AppState: ObservableObject {
     }
 
     static func recordRecentFile(url: URL) {
+        cachedRecentFiles = nil
+        lastRecentFilesFetch = .distantPast
         NSDocumentController.shared.noteNewRecentDocumentURL(url)
         var paths = UserDefaults.standard.stringArray(forKey: "microcode_recent_files") ?? []
         paths.removeAll { $0 == url.path }
@@ -1709,17 +1754,26 @@ class AppState: ObservableObject {
     }
 
     static func getRecentWorkspaces() -> [URL] {
+        if let cached = cachedRecentWorkspaces,
+           Date().timeIntervalSince(lastRecentWorkspacesFetch) < 60.0 {
+            return cached
+        }
+
         var paths = UserDefaults.standard.stringArray(forKey: "microcode_recent_workspaces") ?? []
         if let last = UserDefaults.standard.string(forKey: "lastWorkspacePath"), !last.isEmpty, !paths.contains(last) {
             paths.insert(last, at: 0)
         }
         
-        // Also merge any directory URLs from system recent documents
-        for docURL in NSDocumentController.shared.recentDocumentURLs {
-            var isDir: ObjCBool = false
-            if FileManager.default.fileExists(atPath: docURL.path, isDirectory: &isDir), isDir.boolValue {
-                if !paths.contains(docURL.path) {
-                    paths.append(docURL.path)
+        // Only merge NSDocumentController recent documents once per launch to avoid
+        // repeated LaunchServices security-scoped bookmark resolution on the Main Thread.
+        if !hasMergedSystemRecentDocs {
+            hasMergedSystemRecentDocs = true
+            for docURL in NSDocumentController.shared.recentDocumentURLs {
+                var isDir: ObjCBool = false
+                if FileManager.default.fileExists(atPath: docURL.path, isDirectory: &isDir), isDir.boolValue {
+                    if !paths.contains(docURL.path) {
+                        paths.append(docURL.path)
+                    }
                 }
             }
         }
@@ -1745,21 +1799,32 @@ class AppState: ObservableObject {
             return nil
         }
         
-        // Update back to UserDefaults
+        // Update back to UserDefaults only if changed
         let validPaths = validURLs.map { $0.path }
-        UserDefaults.standard.set(validPaths, forKey: "microcode_recent_workspaces")
+        if validPaths != (UserDefaults.standard.stringArray(forKey: "microcode_recent_workspaces") ?? []) {
+            UserDefaults.standard.set(validPaths, forKey: "microcode_recent_workspaces")
+        }
+        cachedRecentWorkspaces = validURLs
+        lastRecentWorkspacesFetch = Date()
         return validURLs
     }
 
     static func getRecentFiles() -> [URL] {
+        if let cached = cachedRecentFiles,
+           Date().timeIntervalSince(lastRecentFilesFetch) < 60.0 {
+            return cached
+        }
         let paths = UserDefaults.standard.stringArray(forKey: "microcode_recent_files") ?? []
-        return paths.compactMap { path in
+        let valid = paths.compactMap { path -> URL? in
             var isDir: ObjCBool = false
             if FileManager.default.fileExists(atPath: path, isDirectory: &isDir), !isDir.boolValue {
                 return URL(fileURLWithPath: path)
             }
             return nil
         }
+        cachedRecentFiles = valid
+        lastRecentFilesFetch = Date()
+        return valid
     }
 
     func openFile() {
@@ -2438,6 +2503,13 @@ class AppState: ObservableObject {
 
             hasUnsavedChanges = openFiles.contains { $0.isUnsaved }
             
+            // Notify Universal Preview Hot Reload Engine (WebApp, Simulators, Emulators, File Previews)
+            PreviewHotReloadEngine.shared.notifyFileSaved(
+                path: url.path,
+                content: fileContentToSave,
+                source: "Editor"
+            )
+
             // Remote sync if enabled
             if remoteSyncEnabled, let syncServer = activeRemoteSync {
                 Task {
@@ -2611,6 +2683,16 @@ class AppState: ObservableObject {
             if currentFile?.id == fileId {
                 currentFile?.content = content
                 currentFile?.isUnsaved = true
+            }
+            
+            // Notify Universal Preview Hot Reload Engine for Playground-style live typing
+            let editedFile = openFiles[index]
+            if !editedFile.path.isEmpty {
+                PreviewHotReloadEngine.shared.notifyLiveBufferEdited(
+                    path: editedFile.path,
+                    content: content,
+                    language: editedFile.language
+                )
             }
         }
     }
@@ -4766,39 +4848,67 @@ class AppState: ObservableObject {
     // MARK: - Editor Mode
     
     func setEditorMode(_ mode: EditorMode) {
-        // Mutual exclusion: Close inline agent panel when entering full agent mode
-        if mode == .aiAgent {
-            aiChatVisible = false
+        var tx = Transaction()
+        tx.disablesAnimations = true
+        withTransaction(tx) {
+            // Mutual exclusion: Close inline agent panel when entering full agent mode
+            if mode == .aiAgent && aiChatVisible {
+                aiChatVisible = false
+            }
+            if editorMode != mode {
+                editorMode = mode
+            }
         }
-        
-        // Update published property
-        editorMode = mode
         TelemetryService.shared.recordMode(mode)
         NotificationCenter.default.post(name: NSNotification.Name("MicroCodeEditorModeChanged"), object: mode)
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.35) {
+            IdleStateCompactor.shared.performAIWorkloadCompaction()
+        }
     }
     
     func toggleEditorMode(_ mode: EditorMode) {
-        if editorMode == mode {
-            setEditorMode(.code)
+        if editorMode == mode && !showingWelcomeHome {
+            switchToMode(.code)
         } else {
-            setEditorMode(mode)
+            switchToMode(mode)
         }
     }
 
     func switchToMode(_ mode: EditorMode) {
-        showingWelcomeHome = false
-        setEditorMode(mode)
+        var tx = Transaction()
+        tx.disablesAnimations = true
+        withTransaction(tx) {
+            if showingWelcomeHome {
+                showingWelcomeHome = false
+            }
+            if mode == .aiAgent && aiChatVisible {
+                aiChatVisible = false
+            }
+            if editorMode != mode {
+                editorMode = mode
+            }
+        }
+        TelemetryService.shared.recordMode(mode)
+        NotificationCenter.default.post(name: NSNotification.Name("MicroCodeEditorModeChanged"), object: mode)
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.35) {
+            IdleStateCompactor.shared.performAIWorkloadCompaction()
+        }
     }
     
     func openAPIStudio() {
-        showingWelcomeHome = false
-        showingAPIClient = false
-        setEditorMode(.apiClient)
+        var tx = Transaction()
+        tx.disablesAnimations = true
+        withTransaction(tx) {
+            if showingWelcomeHome { showingWelcomeHome = false }
+            if showingAPIClient { showingAPIClient = false }
+            if editorMode != .apiClient { editorMode = .apiClient }
+        }
+        TelemetryService.shared.recordMode(.apiClient)
+        NotificationCenter.default.post(name: NSNotification.Name("MicroCodeEditorModeChanged"), object: EditorMode.apiClient)
     }
     
     func openExtensionStudio() {
-        showingWelcomeHome = false
-        setEditorMode(.extensions)
+        switchToMode(.extensions)
     }
     
     // MARK: - File Watcher

@@ -273,9 +273,20 @@ class ImplementationPlanManager: ObservableObject {
     func approve() {
         guard var plan = currentPlan else { return }
         plan.approvalState = .approved
+        // Mark the first pending step as in-progress immediately upon approval
+        outer: for sIdx in plan.sections.indices {
+            for stIdx in plan.sections[sIdx].steps.indices {
+                if plan.sections[sIdx].steps[stIdx].status == .pending {
+                    plan.sections[sIdx].steps[stIdx].status = .inProgress
+                    break outer
+                }
+            }
+        }
         currentPlan = plan
+        isPlanVisible = false
         planHistory.append(plan)
         NotificationCenter.default.post(name: NSNotification.Name("MicroCodePlanUpdated"), object: plan)
+        NotificationCenter.default.post(name: NSNotification.Name("MicroCodePlanApprovedReturnToChat"), object: plan)
         approvalContinuation?.resume(returning: true)
         approvalContinuation = nil
     }
@@ -284,10 +295,43 @@ class ImplementationPlanManager: ObservableObject {
         guard var plan = currentPlan else { return }
         plan.approvalState = .rejected
         currentPlan = plan
+        isPlanVisible = false
         planHistory.append(plan)
         NotificationCenter.default.post(name: NSNotification.Name("MicroCodePlanUpdated"), object: plan)
+        NotificationCenter.default.post(name: NSNotification.Name("MicroCodePlanApprovedReturnToChat"), object: plan)
         approvalContinuation?.resume(returning: false)
         approvalContinuation = nil
+    }
+    
+    func advanceNextPendingStep() {
+        guard var plan = currentPlan, plan.approvalState == .approved else { return }
+        var completedOne = false
+        for sIdx in plan.sections.indices {
+            for stIdx in plan.sections[sIdx].steps.indices {
+                let st = plan.sections[sIdx].steps[stIdx].status
+                if !completedOne && (st == .inProgress || st == .pending) {
+                    plan.sections[sIdx].steps[stIdx].status = .completed
+                    completedOne = true
+                } else if completedOne && st == .pending {
+                    plan.sections[sIdx].steps[stIdx].status = .inProgress
+                    currentPlan = plan
+                    return
+                }
+            }
+        }
+        currentPlan = plan
+    }
+    
+    func markAllStepsCompleted() {
+        guard var plan = currentPlan, plan.approvalState == .approved else { return }
+        for sIdx in plan.sections.indices {
+            for stIdx in plan.sections[sIdx].steps.indices {
+                if plan.sections[sIdx].steps[stIdx].status == .pending || plan.sections[sIdx].steps[stIdx].status == .inProgress {
+                    plan.sections[sIdx].steps[stIdx].status = .completed
+                }
+            }
+        }
+        currentPlan = plan
     }
     
     func clearPlan() {
@@ -318,12 +362,42 @@ class ImplementationPlanManager: ObservableObject {
         currentPlan = plan
     }
     
+    private static func cleanInlineMarkdown(_ text: String) -> String {
+        var s = text
+        // Convert markdown links [label](url) -> label
+        if let regex = try? NSRegularExpression(pattern: #"\[([^\]]+)\]\([^)]+\)"#) {
+            s = regex.stringByReplacingMatches(in: s, range: NSRange(s.startIndex..., in: s), withTemplate: "$1")
+        }
+        for tag in ["[NEW]", "[MODIFY]", "[DELETE]"] {
+            s = s.replacingOccurrences(of: tag, with: "")
+        }
+        s = s.replacingOccurrences(of: "**", with: "")
+            .replacingOccurrences(of: "__", with: "")
+            .replacingOccurrences(of: "`", with: "")
+        if let italicRegex = try? NSRegularExpression(pattern: #"(?:^|\s)\*([^*]+)\*(?=\s|$|:)"#) {
+            s = italicRegex.stringByReplacingMatches(in: s, range: NSRange(s.startIndex..., in: s), withTemplate: " $1")
+        }
+        return s.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+    
+    private static func splitStepTitleAndDetail(_ raw: String) -> (title: String, detail: String?) {
+        let cleaned = cleanInlineMarkdown(raw)
+        if let colonRange = cleaned.range(of: ": ") {
+            let head = String(cleaned[..<colonRange.lowerBound]).trimmingCharacters(in: .whitespacesAndNewlines)
+            let tail = String(cleaned[colonRange.upperBound...]).trimmingCharacters(in: .whitespacesAndNewlines)
+            if !head.isEmpty && head.count <= 70 && !tail.isEmpty {
+                return (head, tail)
+            }
+        }
+        return (cleaned.isEmpty ? raw : cleaned, nil)
+    }
+
     // MARK: - Markdown Parser
     
     func parseMarkdownPlan(_ markdown: String, title: String = "Implementation Plan") -> ImplementationPlan {
         let lines = markdown.components(separatedBy: "\n")
         
-        var planTitle = title
+        var planTitle = Self.cleanInlineMarkdown(title)
         var summary = ""
         var sections: [PlanSection] = []
         var openQuestions: [String] = []
@@ -341,7 +415,7 @@ class ImplementationPlanManager: ObservableObject {
             
             // Parse title from # heading
             if trimmed.hasPrefix("# ") && !trimmed.hasPrefix("## ") {
-                planTitle = String(trimmed.dropFirst(2))
+                planTitle = Self.cleanInlineMarkdown(String(trimmed.dropFirst(2)))
                 inSummary = true
                 continue
             }
@@ -354,7 +428,7 @@ class ImplementationPlanManager: ObservableObject {
                     sections.append(s)
                 }
                 
-                let sectionTitle = String(trimmed.dropFirst(4))
+                let sectionTitle = Self.cleanInlineMarkdown(String(trimmed.dropFirst(4)))
                 currentSection = PlanSection(title: sectionTitle)
                 currentSteps = []
                 inOpenQuestions = false
@@ -434,9 +508,9 @@ class ImplementationPlanManager: ObservableObject {
                 }
                 
                 if inOpenQuestions {
-                    openQuestions.append(content)
+                    openQuestions.append(Self.cleanInlineMarkdown(content))
                 } else if inVerification {
-                    verificationSteps.append(content)
+                    verificationSteps.append(Self.cleanInlineMarkdown(content))
                 } else {
                     if currentSection == nil {
                         currentSection = PlanSection(title: "Tasks")
@@ -456,10 +530,12 @@ class ImplementationPlanManager: ObservableObject {
                         fileLink = String(content[linkStart.lowerBound..<linkEnd])
                     }
                     
+                    let parsedStep = Self.splitStepTitleAndDetail(content)
                     currentSteps.append(PlanStep(
-                        description: content,
+                        description: parsedStep.title,
                         status: stepStatus,
                         fileLink: fileLink,
+                        detail: parsedStep.detail,
                         action: action
                     ))
                 }
@@ -468,7 +544,7 @@ class ImplementationPlanManager: ObservableObject {
             
             // Parse #### file entries as steps
             if trimmed.hasPrefix("#### ") {
-                var content = String(trimmed.dropFirst(5))
+                let content = String(trimmed.dropFirst(5))
                 var action: String? = nil
                 if content.contains("[NEW]") { action = "NEW" }
                 else if content.contains("[MODIFY]") { action = "MODIFY" }
@@ -485,9 +561,11 @@ class ImplementationPlanManager: ObservableObject {
                     currentSteps = []
                 }
                 
+                let parsedStep = Self.splitStepTitleAndDetail(content)
                 currentSteps.append(PlanStep(
-                    description: content,
+                    description: parsedStep.title,
                     fileLink: fileLink,
+                    detail: parsedStep.detail,
                     action: action
                 ))
             }

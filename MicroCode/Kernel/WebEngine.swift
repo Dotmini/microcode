@@ -110,7 +110,7 @@ struct WebBrowserView: NSViewRepresentable {
     func updateNSView(_ webView: WKWebView, context: Context) {
         // Handle trigger updates
         if refreshTrigger {
-            webView.reload()
+            PreviewHotReloadEngine.shared.reloadWebViewPreservingScroll(webView)
             DispatchQueue.main.async { refreshTrigger = false }
         }
         
@@ -184,6 +184,22 @@ struct WebBrowserView: NSViewRepresentable {
         
         // Navigation Finished
         func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
+            // Restore scroll position after hot reload if preserved in sessionStorage
+            let restoreScrollJS = """
+            (function() {
+                try {
+                    var sx = sessionStorage.getItem('__mc_scroll_x');
+                    var sy = sessionStorage.getItem('__mc_scroll_y');
+                    if (sy !== null) {
+                        window.scrollTo(parseInt(sx || '0', 10), parseInt(sy, 10));
+                        sessionStorage.removeItem('__mc_scroll_x');
+                        sessionStorage.removeItem('__mc_scroll_y');
+                    }
+                } catch (e) {}
+            })();
+            """
+            webView.evaluateJavaScript(restoreScrollJS, completionHandler: nil)
+
             DispatchQueue.main.async {
                 self.parent.isLoading = false
                 self.parent.title = webView.title ?? "Untitled"

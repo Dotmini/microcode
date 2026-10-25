@@ -1343,13 +1343,29 @@ struct EmbeddedWebAppPreviewView: View {
                 sanitizeAndSetURL("http://localhost:\(port)")
             }
         }
-        .onReceive(NotificationCenter.default.publisher(for: NSNotification.Name("MicroCodeFileSaved"))) { _ in
-            if isLiveReloadEnabled {
-                refreshTrigger = true
-            }
+        .onReceive(NotificationCenter.default.publisher(for: NSNotification.Name("MicroCodeFileSaved"))) { note in
+            handleFileSavedNotification(note)
         }
         .onReceive(NotificationCenter.default.publisher(for: NSNotification.Name("MicroCodeEditorFolderOpened"))) { _ in
             detectLocalWorkspaceIndex()
+        }
+    }
+
+    private func handleFileSavedNotification(_ note: Notification) {
+        let savedPath = (note.userInfo?["path"] as? String) ?? ""
+        let ext = (savedPath as NSString).pathExtension.lowercased()
+        if currentURL == nil && (ext == "html" || ext == "htm") {
+            detectLocalWorkspaceIndex()
+            if currentURL == nil && !savedPath.isEmpty {
+                sanitizeAndSetURL(savedPath)
+            }
+            return
+        }
+        if ext == "css" || ext == "scss" || ext == "less" {
+            return
+        }
+        if isLiveReloadEnabled && PreviewHotReloadEngine.shared.isAutoHotReloadEnabled {
+            refreshTrigger = true
         }
     }
     

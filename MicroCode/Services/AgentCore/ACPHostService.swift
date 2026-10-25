@@ -47,6 +47,9 @@ class ACPAgentSession: ObservableObject, Identifiable {
     
     /// Returns true if this agent configuration uses standard JSON-RPC 2.0 Agent Client Protocol (ACP v1)
     var isStandardACPProtocol: Bool {
+        if config.type == .goose {
+            return true // `goose acp` natively speaks ACP v1 JSON-RPC 2.0 over stdio
+        }
         let cmdLower = config.command.lowercased()
         let argsLower = config.arguments.map { $0.lowercased() }
         return cmdLower.contains("-acp")
@@ -444,6 +447,24 @@ class ACPAgentSession: ObservableObject, Identifiable {
         env["MICROCODE_WORKSPACE"] = workspacePath
         env["MICROCODE_ACP"] = "1"
         
+        // 9Router Smart Gateway proxy injection for external CLI harnesses when enabled
+        let routeHarnessesVia9Router = UserDefaults.standard.bool(forKey: "use9RouterForHarnesses")
+        if routeHarnessesVia9Router {
+            let routerBase = (UserDefaults.standard.string(forKey: "9router_base_url") ?? "http://127.0.0.1:20128/v1")
+                .trimmingCharacters(in: CharacterSet(charactersIn: "/"))
+            let routerRoot = routerBase.hasSuffix("/v1") ? String(routerBase.dropLast(3)) : routerBase
+            let routerKey = UserDefaults.standard.string(forKey: "9router_api_key")?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+            let effectiveKey = routerKey.isEmpty ? "sk-9router-local" : routerKey
+            env["OPENAI_BASE_URL"] = routerBase
+            env["ANTHROPIC_BASE_URL"] = routerRoot
+            if env["OPENAI_API_KEY"] == nil || !routerKey.isEmpty {
+                env["OPENAI_API_KEY"] = effectiveKey
+            }
+            if env["ANTHROPIC_API_KEY"] == nil || !routerKey.isEmpty {
+                env["ANTHROPIC_API_KEY"] = effectiveKey
+            }
+        }
+        
         // If continuing an ongoing AGY session within MicroCode, inject our dedicated conversation ID
         if config.type == .agy, let sid = self.sessionId {
             env["ANTIGRAVITY_CONVERSATION_ID"] = sid
@@ -456,7 +477,11 @@ class ACPAgentSession: ObservableObject, Identifiable {
         
         // If launched in standard ACP 1.0 JSON-RPC mode, pass only the ACP flags (prompt is sent over JSON-RPC stdio)
         if isStandardACPProtocol {
-            process.arguments = config.arguments
+            if config.type == .goose && !config.arguments.contains("acp") {
+                process.arguments = ["acp"] + config.arguments
+            } else {
+                process.arguments = config.arguments
+            }
             return
         }
         
@@ -468,15 +493,45 @@ class ACPAgentSession: ObservableObject, Identifiable {
             process.arguments = buildAGYArgs(task: task, model: self.model)
         case .openCode:
             process.arguments = buildOpenCodeArgs(task: task, model: self.model)
-        case .aider:
-            process.arguments = buildAiderArgs(task: task)
-        case .custom:
-            process.arguments = config.arguments + [task]
         case .codexEngine:
             process.arguments = CodexProcessArguments.build(
                 task: task, model: self.model, sessionID: sessionId,
                 permissionMode: config.permissionMode, extra: config.arguments
             )
+        case .geminiCLI, .qwenCode:
+            var args = ["-p", task, "--output-format", "stream-json", "--yolo"]
+            if let model = self.model, !model.isEmpty {
+                args += ["-m", model]
+            }
+            args += config.arguments
+            process.arguments = args
+        case .cursorAgent:
+            var args = ["-p", task, "--output-format", "stream-json", "--force"]
+            if let model = self.model, !model.isEmpty {
+                args += ["--model", model]
+            }
+            args += config.arguments
+            process.arguments = args
+        case .githubCopilot:
+            var args = ["-p", task, "--allow-all-tools"]
+            if let model = self.model, !model.isEmpty {
+                args += ["--model", model]
+            }
+            args += config.arguments
+            process.arguments = args
+        case .goose:
+            process.arguments = ["acp"] + config.arguments
+        case .cline:
+            var args = [task]
+            if config.permissionMode == .fullAuto {
+                args.append("--auto-approve")
+            }
+            args += config.arguments
+            process.arguments = args
+        case .aider:
+            process.arguments = buildAiderArgs(task: task)
+        case .custom:
+            process.arguments = config.arguments + [task]
         case .zedEngine:
             var args = config.arguments
             if let model = self.model, !model.isEmpty {
@@ -867,7 +922,11 @@ class ACPHostService: ObservableObject {
     
     /// Scan PATH and standard user locations for known agent binaries
     func detectInstalledAgents() {
-        let agentTypes: [ACPAgentType] = [.claudeCode, .agy, .openCode, .aider, .codexEngine, .zedEngine]
+        let agentTypes: [ACPAgentType] = [
+            .claudeCode, .agy, .openCode, .codexEngine,
+            .geminiCLI, .cursorAgent, .githubCopilot,
+            .goose, .cline, .qwenCode, .aider, .zedEngine
+        ]
         
         for type in agentTypes {
             detectAgent(type)

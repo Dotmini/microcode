@@ -18,6 +18,7 @@ struct InteractivePDFPreviewView: View {
     @State private var currentPageIndex: Int = 1
     @State private var isContinuous: Bool = true
     @State private var zoomScale: CGFloat = 1.0
+    @State private var reloadToken: UUID = UUID()
     
     var body: some View {
         VStack(spacing: 0) {
@@ -93,7 +94,7 @@ struct InteractivePDFPreviewView: View {
             Divider()
             
             // PDF Canvas
-            PDFKitContainerView(url: url, isContinuous: isContinuous)
+            PDFKitContainerView(url: url, isContinuous: isContinuous, reloadToken: reloadToken)
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
         }
         .onAppear {
@@ -101,6 +102,22 @@ struct InteractivePDFPreviewView: View {
         }
         .onChange(of: url) { _ in
             loadPDF()
+        }
+        .onReceive(NotificationCenter.default.publisher(for: NSNotification.Name("MicroCodeFileSaved"))) { note in
+            guard PreviewHotReloadEngine.shared.isAutoHotReloadEnabled else { return }
+            if let savedPath = note.userInfo?["path"] as? String,
+               URL(fileURLWithPath: savedPath).standardizedFileURL.path == url.standardizedFileURL.path {
+                loadPDF()
+                reloadToken = UUID()
+            }
+        }
+        .onReceive(NotificationCenter.default.publisher(for: NSNotification.Name("MicroCodeWorkspaceFileDidChange"))) { note in
+            guard PreviewHotReloadEngine.shared.isAutoHotReloadEnabled else { return }
+            if let changedPath = note.userInfo?["path"] as? String,
+               URL(fileURLWithPath: changedPath).standardizedFileURL.path == url.standardizedFileURL.path {
+                loadPDF()
+                reloadToken = UUID()
+            }
         }
     }
     
@@ -116,6 +133,7 @@ struct InteractivePDFPreviewView: View {
 struct PDFKitContainerView: NSViewRepresentable {
     let url: URL
     let isContinuous: Bool
+    var reloadToken: UUID = UUID()
     
     func makeNSView(context: Context) -> PDFView {
         let pdfView = PDFView()
@@ -129,11 +147,23 @@ struct PDFKitContainerView: NSViewRepresentable {
     }
     
     func updateNSView(_ nsView: PDFView, context: Context) {
-        if nsView.document?.documentURL != url {
+        if nsView.document?.documentURL != url || context.coordinator.lastReloadToken != reloadToken {
+            context.coordinator.lastReloadToken = reloadToken
             if let doc = PDFDocument(url: url) {
                 nsView.document = doc
             }
         }
         nsView.displayMode = isContinuous ? .singlePageContinuous : .singlePage
+    }
+
+    func makeCoordinator() -> Coordinator {
+        Coordinator(reloadToken: reloadToken)
+    }
+
+    final class Coordinator {
+        var lastReloadToken: UUID
+        init(reloadToken: UUID) {
+            self.lastReloadToken = reloadToken
+        }
     }
 }

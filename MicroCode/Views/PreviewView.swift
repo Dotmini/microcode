@@ -49,6 +49,34 @@ struct PreviewView: View {
         }
         .frame(width: 950, height: 700)
         .background(Color(white: 0.12))
+        .onAppear {
+            if previewService.liveDylibPath == nil && previewService.previewImage == nil {
+                runPreview()
+            }
+        }
+        .onChange(of: isDarkMode) { _ in
+            runPreview()
+        }
+        .onChange(of: selectedDevice) { _ in
+            runPreview()
+        }
+        .onReceive(NotificationCenter.default.publisher(for: NSNotification.Name("MicroCodeFileSaved"))) { note in
+            guard PreviewHotReloadEngine.shared.isAutoHotReloadEnabled else { return }
+            if let savedPath = note.userInfo?["path"] as? String,
+               let currentPath = appState.currentFile?.path,
+               URL(fileURLWithPath: savedPath).standardizedFileURL.path == URL(fileURLWithPath: currentPath).standardizedFileURL.path {
+                runPreview()
+            }
+        }
+        .onReceive(NotificationCenter.default.publisher(for: NSNotification.Name("MicroCodeLiveBufferUpdated"))) { note in
+            guard PreviewHotReloadEngine.shared.isAutoHotReloadEnabled,
+                  PreviewHotReloadEngine.shared.isLiveTypingEnabled else { return }
+            if let editedPath = note.userInfo?["path"] as? String,
+               let currentPath = appState.currentFile?.path,
+               URL(fileURLWithPath: editedPath).standardizedFileURL.path == URL(fileURLWithPath: currentPath).standardizedFileURL.path {
+                runPreview()
+            }
+        }
     }
     
     // MARK: - Top Bar
@@ -346,20 +374,25 @@ struct PreviewView: View {
     // MARK: - Screen Content
     
     private var screenContent: some View {
-        Group {
-            if previewService.isPreviewLoading || isRunning {
-                VStack(spacing: 16) {
-                    ProgressView()
-                        .scaleEffect(1.5)
-                        .tint(isDarkMode ? .white : .black)
-                    Text("Building...")
-                        .font(.caption)
-                        .foregroundColor(.secondary)
-                }
+        ZStack {
+            if let dylibPath = previewService.liveDylibPath {
+                DynamicSwiftUIView(dylibPath: dylibPath, reloadTrigger: previewService.liveDylibTrigger)
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+                    .padding(.top, selectedDevice.hasDynamicIsland ? 54 : 24)
+                    .padding(.bottom, selectedDevice.hasHomeIndicator ? 20 : 0)
             } else if let image = previewService.previewImage {
                 Image(nsImage: image)
                     .resizable()
                     .aspectRatio(contentMode: .fit)
+            } else if previewService.isPreviewLoading || isRunning {
+                VStack(spacing: 16) {
+                    ProgressView()
+                        .scaleEffect(1.5)
+                        .tint(isDarkMode ? .white : .black)
+                    Text("Compiling Live SwiftUI...")
+                        .font(.caption)
+                        .foregroundColor(.secondary)
+                }
             } else if let error = previewService.previewError {
                 VStack(spacing: 12) {
                     Image(systemName: "exclamationmark.triangle.fill")
@@ -377,14 +410,34 @@ struct PreviewView: View {
                         .font(.system(size: 60))
                         .foregroundColor(.orange)
                     
-                    Text("Swift Preview")
+                    Text("Swift Live Preview")
                         .font(.title2)
                         .fontWeight(.bold)
                         .foregroundColor(isDarkMode ? .white : .black)
                     
-                    Text("Click Run to preview")
+                    Text("Click Run or edit code to hot reload")
                         .font(.caption)
                         .foregroundColor(.secondary)
+                }
+            }
+
+            if previewService.isPreviewLoading && previewService.liveDylibPath != nil {
+                VStack {
+                    HStack {
+                        Spacer()
+                        HStack(spacing: 6) {
+                            ProgressView().controlSize(.small)
+                            Text("Hot Reloading...")
+                                .font(.system(size: 10, weight: .semibold))
+                        }
+                        .padding(.horizontal, 8)
+                        .padding(.vertical, 4)
+                        .background(.ultraThinMaterial)
+                        .clipShape(Capsule())
+                        .padding(.top, selectedDevice.hasDynamicIsland ? 58 : 28)
+                        .padding(.trailing, 14)
+                    }
+                    Spacer()
                 }
             }
         }

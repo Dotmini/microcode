@@ -16,6 +16,8 @@ import Combine
 // MARK: - Local LLM Server Type
 
 enum LocalLLMServerType: String, CaseIterable, Identifiable {
+    case nineRouter = "9Router"
+    case liteLLM = "LiteLLM"
     case mlx = "Apple MLX"
     case lmStudio = "LM Studio"
     case ollama = "Ollama"
@@ -27,6 +29,8 @@ enum LocalLLMServerType: String, CaseIterable, Identifiable {
     
     var defaultPorts: [Int] {
         switch self {
+        case .nineRouter: return [20128]
+        case .liteLLM: return [4000]
         case .mlx: return [8080, 8081]
         case .lmStudio: return [1234, 8080, 1235]
         case .ollama: return [11434, 11435]
@@ -47,8 +51,21 @@ enum LocalLLMServerType: String, CaseIterable, Identifiable {
         }
     }
     
+    var brandKey: String {
+        switch self {
+        case .nineRouter: return "9router"
+        case .liteLLM: return "litellm"
+        case .lmStudio: return "lmstudio"
+        case .ollama: return "local"
+        case .mlx: return "local"
+        case .textGenWebUI, .localAI, .custom: return "vllm"
+        }
+    }
+    
     var icon: String {
         switch self {
+        case .nineRouter: return "point.3.connected.trianglepath.dotted"
+        case .liteLLM: return "network"
         case .mlx: return "applelogo"
         case .lmStudio: return "desktopcomputer"
         case .ollama: return "terminal"
@@ -60,6 +77,8 @@ enum LocalLLMServerType: String, CaseIterable, Identifiable {
     
     var color: String {
         switch self {
+        case .nineRouter: return "orange"
+        case .liteLLM: return "indigo"
         case .mlx: return "gray"
         case .lmStudio: return "blue"
         case .ollama: return "green"

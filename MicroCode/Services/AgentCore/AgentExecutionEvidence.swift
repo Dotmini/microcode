@@ -56,18 +56,23 @@ struct AgentExecutionEvidence {
     }
 
     static func taskRequiresMutation(_ task: String) -> Bool {
-        let value = task.lowercased().trimmingCharacters(in: .whitespacesAndNewlines)
+        var value = task.lowercased().trimmingCharacters(in: .whitespacesAndNewlines)
+        // Strip [PLAN MODE] boilerplate ("do not edit or modify any files until the user explicitly clicks Approve")
+        // so we evaluate the actual user objective rather than the pre-approval safety rule.
+        value = value.replacingOccurrences(of: "strictly do not edit or modify any files until the user explicitly clicks approve", with: "")
+        value = value.replacingOccurrences(of: "do not edit or modify any files until the user explicitly clicks approve", with: "")
         let readOnly = ["read-only", "read only", "do not modify", "don't modify", "do not edit", "don't edit",
-                        "do not change", "don't change", "plan only", "ห้ามแก้", "อย่าแก้", "ไม่ต้องแก้", "ยังไม่แก้", "ตรวจอย่างเดียว", "วางแผนอย่างเดียว"]
+                        "do not change", "don't change", "plan only", "ห้ามแก้", "อย่าแก้", "ไม่ต้องแก้", "ตรวจอย่างเดียว", "วางแผนอย่างเดียว"]
         if readOnly.contains(where: value.contains) { return false }
         let pureQuestionOrReview = ["ทำไม", "เพราะอะไร", "คืออะไร", "อธิบาย", "เล่าให้ฟัง", "วิเคราะห์", "รีวิว", "explain", "why ", "what is", "what does", "how does"]
-        let explicitAction = ["ช่วยแก้", "เริ่มปรับ", "แก้ไข", "สร้างไฟล์", "เขียนโค้ด", "implement", "refactor", "fix ", "patch "]
+        let explicitAction = ["ช่วยแก้", "เริ่มปรับ", "เริ่มเปลี่ยน", "แก้ไข", "สร้างไฟล์", "เขียนโค้ด", "implement", "refactor", "fix ", "patch "]
         if pureQuestionOrReview.contains(where: value.contains) && !explicitAction.contains(where: value.contains) {
             return false
         }
         return ["fix", "implement", "add", "create", "edit", "modify", "change", "redesign", "refactor",
-                "rewrite", "patch", "remove", "delete", "write", "update", "แก้", "ทำให้", "เพิ่ม", "สร้าง",
-                "เขียน", "เปลี่ยน", "ออกแบบใหม่", "ลบ", "อัปเดต", "ปรับปรุง", "พัฒนา"].contains(where: value.contains)
+                "rewrite", "patch", "remove", "delete", "write", "update", "convert", "transform",
+                "แก้", "ทำให้", "เพิ่ม", "สร้าง", "เขียน", "เปลี่ยน", "ออกแบบใหม่", "ลบ", "อัปเดต",
+                "ปรับปรุง", "ปรับ", "พัฒนา", "ทำระบบ", "ทำหน้า", "ทำเว็บ", "แปลง"].contains(where: value.contains)
     }
 
     static func mutates(name: String, arguments: [String: Any]) -> Bool {

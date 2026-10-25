@@ -240,6 +240,20 @@ struct InteractiveImagePreviewView: View {
         .onChange(of: url) { _ in
             loadImage()
         }
+        .onReceive(NotificationCenter.default.publisher(for: NSNotification.Name("MicroCodeFileSaved"))) { note in
+            guard PreviewHotReloadEngine.shared.isAutoHotReloadEnabled else { return }
+            if let savedPath = note.userInfo?["path"] as? String,
+               URL(fileURLWithPath: savedPath).standardizedFileURL.path == url.standardizedFileURL.path {
+                loadImage()
+            }
+        }
+        .onReceive(NotificationCenter.default.publisher(for: NSNotification.Name("MicroCodeWorkspaceFileDidChange"))) { note in
+            guard PreviewHotReloadEngine.shared.isAutoHotReloadEnabled else { return }
+            if let changedPath = note.userInfo?["path"] as? String,
+               URL(fileURLWithPath: changedPath).standardizedFileURL.path == url.standardizedFileURL.path {
+                loadImage()
+            }
+        }
     }
     
     private func updateSelection(start: CGPoint, current: CGPoint) {

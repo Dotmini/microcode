@@ -65,17 +65,17 @@ final class AIModelCatalog: ObservableObject {
 
     private let cacheKey = "microcode.aiModelCatalog.v14"
     private let refreshDateKey = "microcode.aiModelCatalogRefreshDate.v14"
-    private let refreshInterval: TimeInterval = 5 * 60 // 5 minutes
+    private let refreshInterval: TimeInterval = 60 * 60 // 1 hour cache TTL to avoid startup network/heap bloat
 
     private init() {
         providers = Self.fallbackProviders
         loadCachedCatalog()
-        // Auto-integrate local ecosystem models and refresh live models from provider APIs on launch
+        // Auto-integrate cached local ecosystem models; only hit live provider APIs if cache is expired
         Task { @MainActor [weak self] in
             guard let self else { return }
             self.integrateEcosystemEngines(LocalEcosystemDiscovery.shared.engines)
-            try? await Task.sleep(nanoseconds: 200_000_000)
-            await self.refreshIfNeeded(force: true)
+            try? await Task.sleep(nanoseconds: 500_000_000)
+            await self.refreshIfNeeded(force: false)
         }
     }
 
@@ -101,7 +101,10 @@ final class AIModelCatalog: ObservableObject {
         "claude-3-7-sonnet-20250219"
     ]
 
-    private static let acpProviderIDs: Set<String> = ["agy", "codex", "claude_code", "opencode", "zed"]
+    private static let acpProviderIDs: Set<String> = [
+        "agy", "codex", "claude_code", "opencode", "zed",
+        "gemini_cli", "cursor", "goose", "cline", "aider"
+    ]
 
     func normalizedSelection(provider: String, model: String) -> (provider: String, model: String) {
         let keyMode = UserDefaults.standard.string(forKey: "aiKeyMode") ?? "direct"
@@ -150,7 +153,7 @@ final class AIModelCatalog: ObservableObject {
         // and NEVER let "omni" (Dotmini Cloud) hijack the provider!
         let knownDirectProviders: Set<String> = [
             "gemini", "openai", "anthropic", "deepseek", "glm", "copilot", "aipass",
-            "openrouter", "groq", "mistral", "kimi", "perplexity", "typhoon",
+            "9router", "openrouter", "groq", "mistral", "kimi", "perplexity", "typhoon",
             "cerebras", "together", "fireworks", "minimax", "nvidia",
             "qwen", "grok", "local"
         ]
@@ -218,6 +221,7 @@ final class AIModelCatalog: ObservableObject {
         lastUpdated = Date()
         source = "Live API & CLI Discovery (\(providers.flatMap(\.models).count) models)"
         saveCachedCatalog()
+        IdleStateCompactor.relieveAllMallocZones()
     }
 
     public func integrateEcosystemEngines(_ engines: [EcosystemEngineInfo]) {
@@ -378,6 +382,10 @@ final class AIModelCatalog: ObservableObject {
         }
     }
 
+    private static let microcodeDefaults = UserDefaults(suiteName: "com.dotmini.microcode")
+    private static let codetunnerDefaults = UserDefaults(suiteName: "com.dotmini.codetunner")
+    private static var checkedOpenCodeConfig: Set<String> = []
+
     public static func resolveKey(_ provider: String) -> String {
         let directKey = "\(provider)_api_key"
         if let val = UserDefaults.standard.string(forKey: directKey), !val.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
@@ -393,8 +401,8 @@ final class AIModelCatalog: ObservableObject {
         if !authServiceKey.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
             return authServiceKey.trimmingCharacters(in: .whitespacesAndNewlines)
         }
-        for suite in ["com.dotmini.microcode", "com.dotmini.codetunner"] {
-            if let val = UserDefaults(suiteName: suite)?.string(forKey: directKey), !val.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+        for suiteDefaults in [microcodeDefaults, codetunnerDefaults] {
+            if let val = suiteDefaults?.string(forKey: directKey), !val.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
                 return val.trimmingCharacters(in: .whitespacesAndNewlines)
             }
         }
@@ -402,7 +410,7 @@ final class AIModelCatalog: ObservableObject {
             if let val = UserDefaults.standard.string(forKey: "apiKey"), !val.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
                 return val.trimmingCharacters(in: .whitespacesAndNewlines)
             }
-            if let val = UserDefaults(suiteName: "com.dotmini.codetunner")?.string(forKey: "api_key_ChatGPT"), !val.isEmpty {
+            if let val = codetunnerDefaults?.string(forKey: "api_key_ChatGPT"), !val.isEmpty {
                 return val
             }
         }
@@ -413,7 +421,8 @@ final class AIModelCatalog: ObservableObject {
         if provider == "gemini", let val = ProcessInfo.processInfo.environment["GOOGLE_API_KEY"], !val.isEmpty {
             return val
         }
-        if provider == "glm" || provider == "deepseek" {
+        if (provider == "glm" || provider == "deepseek") && !checkedOpenCodeConfig.contains(provider) {
+            checkedOpenCodeConfig.insert(provider)
             let opencodeURL = FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent(".config/opencode/opencode.json")
             if let data = try? Data(contentsOf: opencodeURL),
                let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
@@ -475,7 +484,8 @@ final class AIModelCatalog: ObservableObject {
                        lower.contains("audio") || lower.contains("aqa") || lower.contains("imagen") ||
                        lower.contains("veo") || lower.contains("learnlm") || lower.contains("image") ||
                        lower.contains("banana") || lower.contains("lyria") || lower.contains("robotics") ||
-                       lower.contains("computer-use") || lower.contains("deep-research") || lower.contains("antigravity") {
+                       lower.contains("computer-use") || lower.contains("deep-research") || lower.contains("antigravity") ||
+                       lower.contains("argon") {
                         continue
                     }
                     
@@ -1016,9 +1026,11 @@ final class AIModelCatalog: ObservableObject {
         }
     }
 
-    /// Fetches live models for OpenRouter, Mistral, Kimi, Typhoon, Cerebras, Together, Fireworks, MiniMax, and NVIDIA NIM when API keys are configured.
+    /// Fetches live models for 9Router, OpenRouter, Mistral, Kimi, Typhoon, Cerebras, Together, Fireworks, MiniMax, and NVIDIA NIM.
     private func fetchLiveAdditionalProviderModels() async {
+        let nineRouterBase = UserDefaults.standard.string(forKey: "9router_base_url") ?? "http://127.0.0.1:20128/v1"
         let targets: [(id: String, endpoint: String)] = [
+            ("9router", "\(nineRouterBase)/models"),
             ("openrouter", "https://openrouter.ai/api/v1/models"),
             ("mistral", "https://api.mistral.ai/v1/models"),
             ("kimi", "https://api.moonshot.ai/v1/models"),
@@ -1039,9 +1051,12 @@ final class AIModelCatalog: ObservableObject {
 
     private func fetchLiveOpenAICompatibleModels(providerId: String, endpoint: String) async {
         let key = resolveKey(providerId)
-        guard !key.isEmpty, let url = URL(string: endpoint) else { return }
-        var req = URLRequest(url: url, timeoutInterval: 10)
-        req.setValue("Bearer \(key)", forHTTPHeaderField: "Authorization")
+        let allowNoKey = (providerId == "9router")
+        guard (!key.isEmpty || allowNoKey), let url = URL(string: endpoint) else { return }
+        var req = URLRequest(url: url, timeoutInterval: providerId == "9router" ? 3.5 : 10)
+        if !key.isEmpty {
+            req.setValue("Bearer \(key)", forHTTPHeaderField: "Authorization")
+        }
         req.setValue("application/json", forHTTPHeaderField: "Accept")
         if providerId == "openrouter" {
             req.setValue("https://dotmini.net", forHTTPHeaderField: "HTTP-Referer")
@@ -1093,6 +1108,9 @@ final class AIModelCatalog: ObservableObject {
         case "grok": await fetchLiveGrokModels()
         case "groq": await fetchLiveGroqModels()
         case "qwen": await fetchLiveQwenModels()
+        case "9router":
+            let base = UserDefaults.standard.string(forKey: "9router_base_url") ?? "http://127.0.0.1:20128/v1"
+            await fetchLiveOpenAICompatibleModels(providerId: "9router", endpoint: "\(base)/models")
         case "openrouter": await fetchLiveOpenAICompatibleModels(providerId: "openrouter", endpoint: "https://openrouter.ai/api/v1/models")
         case "mistral": await fetchLiveOpenAICompatibleModels(providerId: "mistral", endpoint: "https://api.mistral.ai/v1/models")
         case "kimi": await fetchLiveOpenAICompatibleModels(providerId: "kimi", endpoint: "https://api.moonshot.ai/v1/models")
@@ -1104,7 +1122,7 @@ final class AIModelCatalog: ObservableObject {
         case "perplexity", "minimax": break
         case "copilot", "github": await fetchLiveCopilotModels()
         case "aipass": await fetchLiveAiPassModels()
-        case "agy", "codex", "claude_code", "opencode", "zed":
+        case "agy", "codex", "claude_code", "opencode", "zed", "gemini_cli", "cursor", "goose", "cline", "aider":
             await LocalEcosystemDiscovery.shared.refresh()
         case "local":
             await LocalLLMService.shared.scanForServers()
@@ -1251,16 +1269,27 @@ final class AIModelCatalog: ObservableObject {
         switch provider.lowercased() {
         case "agy", "antigravity": return "Antigravity"
         case "gemini", "google": return "Google Gemini"
+        case "gemini_cli": return "Google Gemini CLI"
         case "openai": return "OpenAI"
         case "claude_code", "claude": return "Claude Code"
         case "anthropic": return "Anthropic"
         case "opencode": return "OpenCode"
         case "codex": return "Codex"
+        case "cursor", "cursor-agent": return "Cursor Agent"
+        case "goose": return "Block Goose"
+        case "cline": return "Cline"
+        case "roo": return "Roo Code"
+        case "windsurf": return "Windsurf"
+        case "amp": return "Sourcegraph Amp"
         case "zed": return "Zed"
         case "aider": return "Aider"
         case "omni": return "Dotmini Cloud"
         case "deepseek": return "DeepSeek"
+        case "9router": return "9Router Gateway"
         case "openrouter": return "OpenRouter"
+        case "litellm": return "LiteLLM"
+        case "vllm": return "vLLM"
+        case "lmstudio": return "LM Studio"
         case "groq": return "Groq"
         case "mistral": return "Mistral AI"
         case "kimi", "moonshot": return "Moonshot Kimi"
@@ -1506,6 +1535,17 @@ final class AIModelCatalog: ObservableObject {
             // Music & Audio Generation Models
             AIModelDefinition(id: "lyria-3-clip-preview", name: "Lyria 3 Clip — 30s Music Gen (AiPASS)", provider: "aipass", badge: "MUSIC"),
             AIModelDefinition(id: "lyria-3-pro-preview", name: "Lyria 3 Pro — Full Song + Vocals (AiPASS)", provider: "aipass", badge: "MUSIC")
+        ]),
+        AIProviderDefinition(id: "9router", name: "9Router Smart Gateway", icon: "9router", endpoint: "localhost:20128/v1", models: [
+            AIModelDefinition(id: "claude-sonnet-4-6", name: "Claude Sonnet 4.6 (9Router Tier 1)", provider: "9router", badge: "3-TIER AUTO"),
+            AIModelDefinition(id: "claude-opus-4-6", name: "Claude Opus 4.6 (9Router Tier 1)", provider: "9router", badge: "FLAGSHIP"),
+            AIModelDefinition(id: "gpt-5.4", name: "GPT-5.4 (9Router Tier 1)", provider: "9router", badge: "FLAGSHIP"),
+            AIModelDefinition(id: "gemini-2.5-pro", name: "Gemini 2.5 Pro (9Router Tier 1)", provider: "9router", badge: "PRO"),
+            AIModelDefinition(id: "gemini-2.5-flash", name: "Gemini 2.5 Flash (9Router Tier 3 Free)", provider: "9router", badge: "FREE TIER"),
+            AIModelDefinition(id: "glm-4.7", name: "GLM-4.7 (9Router Tier 2 Cheap)", provider: "9router", badge: "CHEAP TIER"),
+            AIModelDefinition(id: "kimi-k2", name: "Kimi K2 (9Router Tier 2 Cheap)", provider: "9router", badge: "CHEAP TIER"),
+            AIModelDefinition(id: "qwen3-coder-plus", name: "Qwen3 Coder Plus (9Router Tier 3 Free)", provider: "9router", badge: "FREE TIER"),
+            AIModelDefinition(id: "deepseek-r1", name: "DeepSeek R1 (9Router Smart Fallback)", provider: "9router", badge: "REASONING")
         ]),
         AIProviderDefinition(id: "openrouter", name: "OpenRouter", icon: "point.3.connected.trianglepath.dotted", endpoint: "openrouter.ai/api/v1", models: [
             AIModelDefinition(id: "anthropic/claude-sonnet-4", name: "Claude Sonnet 4 (OpenRouter)", provider: "openrouter", badge: "AGENT"),

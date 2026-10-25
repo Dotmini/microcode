@@ -59,7 +59,7 @@ final class LocalEcosystemDiscovery: ObservableObject {
     @Published private(set) var isScanning: Bool = false
     @Published private(set) var lastScanDate: Date?
     
-    private let userDefaultsCacheKey = "microcode_ecosystem_discovered_models_v4"
+    private let userDefaultsCacheKey = "microcode_ecosystem_discovered_models_v5"
     
     private init() {
         loadCachedEngines()
@@ -85,15 +85,29 @@ final class LocalEcosystemDiscovery: ObservableObject {
         async let openCodeTask = discoverOpenCode()
         let codexEngine = discoverCodex()
         let zedEngine = discoverZed()
+        let geminiCLIEngine = discoverGeminiCLI()
+        let cursorEngine = discoverCursorAgent()
+        let copilotEngine = discoverCopilot()
+        let gooseEngine = discoverGoose()
+        let clineEngine = discoverCline()
+        let qwenEngine = discoverQwenCode()
+        let aiderEngine = discoverAider()
         
         let (agyEngine, openCodeEngine) = await (agyTask, openCodeTask)
         let claudeEngine = await discoverClaude(agyModels: agyEngine.models)
         
         let discovered: [EcosystemEngineInfo] = [
             agyEngine,
-            openCodeEngine,
-            codexEngine,
             claudeEngine,
+            codexEngine,
+            geminiCLIEngine,
+            openCodeEngine,
+            cursorEngine,
+            copilotEngine,
+            gooseEngine,
+            clineEngine,
+            qwenEngine,
+            aiderEngine,
             zedEngine
         ]
         
@@ -544,6 +558,174 @@ final class LocalEcosystemDiscovery: ObservableObject {
         )
     }
     
+    // MARK: - 6. Additional Major Harnesses (Gemini CLI, Cursor, Copilot, Goose, Cline, Qwen Code, Aider)
+    
+    private func discoverGeminiCLI() -> EcosystemEngineInfo {
+        let path = resolveBinary("gemini") ?? resolveBinaryFast("gemini")
+        let home = FileManager.default.homeDirectoryForCurrentUser
+        let settingsFile = home.appendingPathComponent(".gemini/settings.json")
+        let isInstalled = path != nil
+        var activeModel: String? = "gemini-2.5-pro"
+        if let data = try? Data(contentsOf: settingsFile),
+           let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+           let m = json["model"] as? String, !m.isEmpty {
+            activeModel = m
+        }
+        let models: [AIModelDefinition] = isInstalled ? [
+            AIModelDefinition(id: "gemini-2.5-pro", name: "Gemini 2.5 Pro (Gemini CLI)", provider: "gemini_cli", badge: "FLAGSHIP"),
+            AIModelDefinition(id: "gemini-2.5-flash", name: "Gemini 2.5 Flash (Gemini CLI)", provider: "gemini_cli", badge: "FAST"),
+            AIModelDefinition(id: "gemini-3.1-pro", name: "Gemini 3.1 Pro (Gemini CLI)", provider: "gemini_cli", badge: "PRO")
+        ] : []
+        return EcosystemEngineInfo(
+            id: "gemini_cli",
+            name: "Google Gemini CLI",
+            icon: "sparkles",
+            binaryPath: path,
+            isInstalled: isInstalled,
+            isAuthenticated: isInstalled,
+            activeModel: activeModel,
+            models: models,
+            details: isInstalled
+                ? "Google Gemini CLI (`@google/gemini-cli`) installed at \(path ?? "")"
+                : "Install via `npm install -g @google/gemini-cli`"
+        )
+    }
+    
+    private func discoverCursorAgent() -> EcosystemEngineInfo {
+        let path = resolveBinary("cursor-agent") ?? resolveBinaryFast("cursor-agent")
+        let isInstalled = path != nil
+        let models: [AIModelDefinition] = isInstalled ? [
+            AIModelDefinition(id: "claude-sonnet-4-6", name: "Claude Sonnet 4.6 (Cursor)", provider: "cursor", badge: "CURSOR PRO"),
+            AIModelDefinition(id: "gpt-5.4", name: "GPT-5.4 (Cursor)", provider: "cursor", badge: "FLAGSHIP"),
+            AIModelDefinition(id: "cursor-fast", name: "Cursor Fast", provider: "cursor", badge: "FAST")
+        ] : []
+        return EcosystemEngineInfo(
+            id: "cursor",
+            name: "Cursor Agent CLI",
+            icon: "cursorarrow.rays",
+            binaryPath: path,
+            isInstalled: isInstalled,
+            isAuthenticated: isInstalled,
+            activeModel: models.first?.id,
+            models: models,
+            details: isInstalled
+                ? "Cursor Agent CLI (`cursor-agent`) ready"
+                : "Cursor Agent CLI (`cursor-agent`) not installed"
+        )
+    }
+    
+    private func discoverCopilot() -> EcosystemEngineInfo {
+        let path = resolveBinary("copilot") ?? resolveBinaryFast("copilot") ?? resolveBinary("gh") ?? resolveBinaryFast("gh")
+        let isInstalled = path != nil
+        let models: [AIModelDefinition] = isInstalled ? [
+            AIModelDefinition(id: "claude-sonnet-4.6", name: "Claude Sonnet 4.6 (Copilot)", provider: "copilot", badge: "COPILOT PRO"),
+            AIModelDefinition(id: "gpt-5.4", name: "GPT-5.4 (Copilot)", provider: "copilot", badge: "COPILOT"),
+            AIModelDefinition(id: "gemini-2.5-pro", name: "Gemini 2.5 Pro (Copilot)", provider: "copilot", badge: "COPILOT")
+        ] : []
+        return EcosystemEngineInfo(
+            id: "copilot",
+            name: "GitHub Copilot CLI",
+            icon: "chevron.left.forwardslash.chevron.right",
+            binaryPath: path,
+            isInstalled: isInstalled,
+            isAuthenticated: isInstalled,
+            activeModel: models.first?.id,
+            models: models,
+            details: isInstalled
+                ? "GitHub Copilot CLI (`\(path ?? "copilot")`) detected"
+                : "Install via `npm install -g @github/copilot` or `gh extension install github/gh-copilot`"
+        )
+    }
+    
+    private func discoverGoose() -> EcosystemEngineInfo {
+        let path = resolveBinary("goose") ?? resolveBinaryFast("goose")
+        let isInstalled = path != nil
+        let models: [AIModelDefinition] = isInstalled ? [
+            AIModelDefinition(id: "claude-sonnet-4-6", name: "Goose ACP (Claude Sonnet 4.6)", provider: "goose", badge: "ACP NATIVE"),
+            AIModelDefinition(id: "gpt-4.1", name: "Goose ACP (GPT-4.1)", provider: "goose", badge: "ACP NATIVE")
+        ] : []
+        return EcosystemEngineInfo(
+            id: "goose",
+            name: "Block Goose (ACP)",
+            icon: "bird.fill",
+            binaryPath: path,
+            isInstalled: isInstalled,
+            isAuthenticated: isInstalled,
+            activeModel: models.first?.id,
+            models: models,
+            details: isInstalled
+                ? "Block Goose CLI (`goose acp`) native ACP v1 agent"
+                : "Install via `brew install block-goose-cli`"
+        )
+    }
+    
+    private func discoverCline() -> EcosystemEngineInfo {
+        let path = resolveBinary("cline") ?? resolveBinaryFast("cline")
+        let isInstalled = path != nil
+        let models: [AIModelDefinition] = isInstalled ? [
+            AIModelDefinition(id: "claude-sonnet-4-6", name: "Cline (Claude Sonnet 4.6)", provider: "cline", badge: "CLINE"),
+            AIModelDefinition(id: "deepseek-r1", name: "Cline (DeepSeek R1)", provider: "cline", badge: "REASONING")
+        ] : []
+        return EcosystemEngineInfo(
+            id: "cline",
+            name: "Cline CLI",
+            icon: "terminal",
+            binaryPath: path,
+            isInstalled: isInstalled,
+            isAuthenticated: isInstalled,
+            activeModel: models.first?.id,
+            models: models,
+            details: isInstalled
+                ? "Cline CLI (`cline`) autonomous coding harness"
+                : "Install via `npm install -g cline`"
+        )
+    }
+    
+    private func discoverQwenCode() -> EcosystemEngineInfo {
+        let path = resolveBinary("qwen") ?? resolveBinaryFast("qwen")
+        let isInstalled = path != nil
+        let models: [AIModelDefinition] = isInstalled ? [
+            AIModelDefinition(id: "qwen3-coder-plus", name: "Qwen3 Coder Plus", provider: "qwen", badge: "CODING"),
+            AIModelDefinition(id: "qwen-max", name: "Qwen Max", provider: "qwen", badge: "FLAGSHIP")
+        ] : []
+        return EcosystemEngineInfo(
+            id: "qwen",
+            name: "Alibaba Qwen Code",
+            icon: "cpu.fill",
+            binaryPath: path,
+            isInstalled: isInstalled,
+            isAuthenticated: isInstalled,
+            activeModel: models.first?.id,
+            models: models,
+            details: isInstalled
+                ? "Qwen Code CLI (`@qwen-code/qwen-code`) detected"
+                : "Install via `npm install -g @qwen-code/qwen-code`"
+        )
+    }
+    
+    private func discoverAider() -> EcosystemEngineInfo {
+        let path = resolveBinary("aider") ?? resolveBinaryFast("aider")
+        let isInstalled = path != nil
+        let models: [AIModelDefinition] = isInstalled ? [
+            AIModelDefinition(id: "sonnet", name: "Aider Architect (Claude Sonnet)", provider: "aider", badge: "ARCHITECT"),
+            AIModelDefinition(id: "deepseek", name: "Aider Architect (DeepSeek V3)", provider: "aider", badge: "FAST"),
+            AIModelDefinition(id: "o3-mini", name: "Aider Architect (o3-mini)", provider: "aider", badge: "REASONING")
+        ] : []
+        return EcosystemEngineInfo(
+            id: "aider",
+            name: "Aider Architect",
+            icon: "hammer.fill",
+            binaryPath: path,
+            isInstalled: isInstalled,
+            isAuthenticated: isInstalled,
+            activeModel: models.first?.id,
+            models: models,
+            details: isInstalled
+                ? "Aider AI Pair Programmer (`aider`) ready"
+                : "Install via `pipx install aider-chat` or `brew install aider`"
+        )
+    }
+    
     // MARK: - Helpers
     
     private func resolveBinary(_ name: String) -> String? {
@@ -701,18 +883,6 @@ final class LocalEcosystemDiscovery: ObservableObject {
                 details: "Live models from `agy models`"
             ),
             EcosystemEngineInfo(
-                id: "opencode",
-                name: "OpenCode",
-                icon: "laptopcomputer",
-                binaryPath: resolveBinaryFast("opencode"),
-                isInstalled: resolveBinaryFast("opencode") != nil,
-                isAuthenticated: false,
-                activeModel: nil,
-                models: [],
-                details: "Fetching live models from `opencode models`..."
-            ),
-            codex,
-            EcosystemEngineInfo(
                 id: "claude_code",
                 name: "Anthropic Claude Code",
                 icon: "command.square.fill",
@@ -723,6 +893,25 @@ final class LocalEcosystemDiscovery: ObservableObject {
                 models: [],
                 details: "Reading ~/.claude/settings.json..."
             ),
+            codex,
+            discoverGeminiCLI(),
+            EcosystemEngineInfo(
+                id: "opencode",
+                name: "OpenCode",
+                icon: "laptopcomputer",
+                binaryPath: resolveBinaryFast("opencode"),
+                isInstalled: resolveBinaryFast("opencode") != nil,
+                isAuthenticated: false,
+                activeModel: nil,
+                models: [],
+                details: "Fetching live models from `opencode models`..."
+            ),
+            discoverCursorAgent(),
+            discoverCopilot(),
+            discoverGoose(),
+            discoverCline(),
+            discoverQwenCode(),
+            discoverAider(),
             zed
         ]
     }

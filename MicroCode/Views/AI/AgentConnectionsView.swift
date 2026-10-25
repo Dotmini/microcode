@@ -20,11 +20,17 @@ import AppKit
 public enum AgentConnectionType: String, CaseIterable, Identifiable {
     case claudeCode = "claude_code"
     case agy = "agy"
-    case openCode = "opencode"
     case codex = "codex"
-    case microcodeNative = "microcode_native"
+    case geminiCLI = "gemini_cli"
+    case openCode = "opencode"
+    case nineRouter = "9router"
     case cursorAgent = "cursor_agent"
     case githubCopilot = "github_copilot"
+    case goose = "goose"
+    case cline = "cline"
+    case qwenCode = "qwen"
+    case aider = "aider"
+    case microcodeNative = "microcode_native"
     case freeModel = "free_model"
     
     public var id: String { rawValue }
@@ -33,11 +39,17 @@ public enum AgentConnectionType: String, CaseIterable, Identifiable {
         switch self {
         case .claudeCode: return "Claude Code"
         case .agy: return "Antigravity (AGY)"
+        case .codex: return "OpenAI Codex"
+        case .geminiCLI: return "Google Gemini CLI"
         case .openCode: return "OpenCode"
-        case .codex: return "Codex"
-        case .microcodeNative: return "MicroCode Native"
+        case .nineRouter: return "9Router Smart Gateway"
         case .cursorAgent: return "Cursor Agent"
-        case .githubCopilot: return "GitHub Copilot"
+        case .githubCopilot: return "GitHub Copilot CLI"
+        case .goose: return "Block Goose (ACP)"
+        case .cline: return "Cline CLI"
+        case .qwenCode: return "Alibaba Qwen Code"
+        case .aider: return "Aider Architect"
+        case .microcodeNative: return "MicroCode Native"
         case .freeModel: return "Free AI Model"
         }
     }
@@ -46,43 +58,46 @@ public enum AgentConnectionType: String, CaseIterable, Identifiable {
         switch self {
         case .claudeCode: return "Anthropic CLI agent with hybrid reasoning"
         case .agy: return "Google Antigravity CLI (Live `agy models` discovery)"
-        case .openCode: return "Open-source coding agent & local models"
         case .codex: return "OpenAI Codex CLI & flagship coding models"
+        case .geminiCLI: return "Official `@google/gemini-cli` autonomous agent"
+        case .openCode: return "Open-source coding agent & local models"
+        case .nineRouter: return "3-Tier Smart Auto-Fallback Router (Sub → Cheap API → Free)"
+        case .cursorAgent: return "Cursor background agent CLI (`cursor-agent`)"
+        case .githubCopilot: return "GitHub Copilot workspace CLI (`copilot` / `gh copilot`)"
+        case .goose: return "Block Goose native ACP v1 agent (`goose acp`)"
+        case .cline: return "Cline autonomous coding CLI (`cline`)"
+        case .qwenCode: return "Alibaba Qwen3-Coder terminal agent (`qwen`)"
+        case .aider: return "Aider AI pair programming architect (`aider`)"
         case .microcodeNative: return "In-app engine with BYOK / Web Subscription"
-        case .cursorAgent: return "Cursor background agent CLI"
-        case .githubCopilot: return "GitHub Copilot workspace CLI"
         case .freeModel: return "DeepSeek & Nemotron free models — no card needed"
         }
     }
     
     public var requirementBadge: String {
         switch self {
-        case .claudeCode: return "Needs Claude Pro"
+        case .claudeCode: return "Claude Pro / API"
         case .agy: return "Live AGY Models"
+        case .codex: return "ChatGPT Plus / API"
+        case .geminiCLI: return "Free Tier / Google AI"
         case .openCode: return "Free & Local Models"
-        case .codex: return "Needs ChatGPT Plus"
+        case .nineRouter: return "localhost:20128 • Zero Downtime"
+        case .cursorAgent: return "Cursor Pro"
+        case .githubCopilot: return "GitHub Copilot"
+        case .goose: return "ACP v1 Native"
+        case .cline: return "Any Provider / 9Router"
+        case .qwenCode: return "Qwen OAuth / Free Quota"
+        case .aider: return "Git-Native Architect"
         case .microcodeNative: return "Ready — one click"
-        case .cursorAgent: return "Needs Cursor Pro"
-        case .githubCopilot: return "Needs Copilot (any paid plan)"
         case .freeModel: return "Free to run, no card needed"
         }
     }
     
     public var isRecommended: Bool {
-        return self == .claudeCode || self == .agy
+        return self == .claudeCode || self == .agy || self == .nineRouter
     }
     
     public var iconName: String {
-        switch self {
-        case .claudeCode: return "brain.head.profile"
-        case .agy: return "sparkles"
-        case .openCode: return "laptopcomputer"
-        case .codex: return "cpu"
-        case .microcodeNative: return "bolt.shield.fill"
-        case .cursorAgent: return "square.stack.3d.up.fill"
-        case .githubCopilot: return "chevron.left.forwardslash.chevron.right"
-        case .freeModel: return "gift.fill"
-        }
+        return id
     }
     
     public var iconColor: Color {
@@ -91,10 +106,11 @@ public enum AgentConnectionType: String, CaseIterable, Identifiable {
         case .agy: return Color(red: 0.26, green: 0.52, blue: 0.96)
         case .openCode: return Color(red: 0.88, green: 0.35, blue: 0.28)
         case .codex: return Color(red: 0.06, green: 0.64, blue: 0.50)
+        case .nineRouter: return .orange
         case .microcodeNative: return .accentColor
         case .cursorAgent: return .purple
         case .githubCopilot: return .primary
-        case .freeModel: return .blue
+        default: return .blue
         }
     }
     
@@ -102,10 +118,16 @@ public enum AgentConnectionType: String, CaseIterable, Identifiable {
         switch self {
         case .claudeCode: return "npm install -g @anthropic-ai/claude-code"
         case .agy: return "curl -fsSL https://antigravity.google/install.sh | bash"
-        case .openCode: return "npm install -g opencode-ai@latest"
         case .codex: return "npm install -g @openai/codex"
+        case .geminiCLI: return "npm install -g @google/gemini-cli"
+        case .openCode: return "npm install -g opencode-ai@latest"
+        case .nineRouter: return "npm install -g 9router"
         case .cursorAgent: return "curl -fsSL https://cursor.com/install-cli | bash"
-        case .githubCopilot: return "npm install -g @github/copilot-cli"
+        case .githubCopilot: return "npm install -g @github/copilot"
+        case .goose: return "brew install block-goose-cli"
+        case .cline: return "npm install -g cline"
+        case .qwenCode: return "npm install -g @qwen-code/qwen-code"
+        case .aider: return "pipx install aider-chat"
         case .freeModel, .microcodeNative: return ""
         }
     }
@@ -114,10 +136,16 @@ public enum AgentConnectionType: String, CaseIterable, Identifiable {
         switch self {
         case .claudeCode: return "claude auth login"
         case .agy: return "agy auth login"
-        case .openCode: return "opencode auth login"
         case .codex: return "codex login"
-        case .cursorAgent: return "cursor auth login"
+        case .geminiCLI: return "gemini"
+        case .openCode: return "opencode auth login"
+        case .nineRouter: return "9router"
+        case .cursorAgent: return "cursor-agent login"
         case .githubCopilot: return "copilot auth"
+        case .goose: return "goose configure"
+        case .cline: return "cline auth"
+        case .qwenCode: return "qwen"
+        case .aider: return "aider --version"
         case .freeModel, .microcodeNative: return ""
         }
     }
@@ -128,6 +156,13 @@ public enum AgentConnectionType: String, CaseIterable, Identifiable {
         case .agy: return .agy
         case .openCode: return .openCode
         case .codex: return .codexEngine
+        case .geminiCLI: return .geminiCLI
+        case .cursorAgent: return .cursorAgent
+        case .githubCopilot: return .githubCopilot
+        case .goose: return .goose
+        case .cline: return .cline
+        case .qwenCode: return .qwenCode
+        case .aider: return .aider
         default: return nil
         }
     }
@@ -144,6 +179,7 @@ public struct AgentConnectionsView: View {
     
     @State private var activeWizardTarget: AgentConnectionType? = nil
     @State private var toastMessage: String? = nil
+    @AppStorage("use9RouterForHarnesses") private var use9RouterForHarnesses: Bool = false
     
     private var modalBackground: Color {
         colorScheme == .dark ? Color.black : Color(nsColor: .windowBackgroundColor)
@@ -237,6 +273,7 @@ public struct AgentConnectionsView: View {
             // List of Agents
             ScrollView {
                 VStack(spacing: 10) {
+                    nineRouterProxyBanner
                     ForEach(AgentConnectionType.allCases) { type in
                         if type == .freeModel {
                             freeModelCard
@@ -440,6 +477,61 @@ public struct AgentConnectionsView: View {
         .buttonStyle(.plain)
     }
     
+    // MARK: - 9Router Harness Proxy Banner
+    
+    private var nineRouterProxyBanner: some View {
+        HStack(spacing: 14) {
+            ZStack {
+                RoundedRectangle(cornerRadius: 8, style: .continuous)
+                    .fill(Color.primary.opacity(0.04))
+                    .frame(width: 38, height: 38)
+                    .overlay(
+                        RoundedRectangle(cornerRadius: 8, style: .continuous)
+                            .stroke(Color.primary.opacity(0.1), lineWidth: 1)
+                    )
+                AIProviderBrandIcon(provider: "9router", size: 24)
+            }
+            
+            VStack(alignment: .leading, spacing: 2) {
+                HStack(spacing: 6) {
+                    Text("Route CLI Harnesses via 9Router (localhost:20128)")
+                        .font(.system(size: 12.5, weight: .semibold))
+                        .foregroundColor(.primary)
+                    Text("3-TIER SMART PROXY")
+                        .font(.system(size: 8.5, weight: .bold))
+                        .padding(.horizontal, 5)
+                        .padding(.vertical, 1.5)
+                        .background(Color.primary.opacity(0.12))
+                        .foregroundColor(.primary)
+                        .clipShape(Capsule())
+                        .overlay(
+                            Capsule().stroke(Color.primary.opacity(0.25), lineWidth: 0.8)
+                        )
+                }
+                Text("Injects OPENAI_BASE_URL & ANTHROPIC_BASE_URL=http://127.0.0.1:20128 into Claude Code, Codex, OpenCode, Cursor, Goose, Cline & Aider for automatic Tier 1 → Tier 2 → Tier 3 fallback.")
+                    .font(.system(size: 10.5))
+                    .foregroundColor(.secondary)
+                    .lineLimit(2)
+            }
+            
+            Spacer()
+            
+            Toggle("", isOn: $use9RouterForHarnesses)
+                .toggleStyle(.switch)
+                .labelsHidden()
+        }
+        .padding(.horizontal, 14)
+        .padding(.vertical, 10)
+        .background(
+            RoundedRectangle(cornerRadius: 10, style: .continuous)
+                .fill(cardSurface)
+                .overlay(
+                    RoundedRectangle(cornerRadius: 10, style: .continuous)
+                        .stroke(use9RouterForHarnesses ? Color.primary.opacity(0.4) : cardBorder, lineWidth: use9RouterForHarnesses ? 1.5 : 1)
+                )
+        )
+    }
+    
     // MARK: - Helpers
     
     private struct AgentStatus {
@@ -450,13 +542,13 @@ public struct AgentConnectionsView: View {
     private func statusFor(_ type: AgentConnectionType) -> AgentStatus {
         switch type {
         case .claudeCode:
-            if let _ = discovery.engines.first(where: { $0.id == "claude_code" && $0.isInstalled }) {
+            if discovery.engines.contains(where: { $0.id == "claude_code" && $0.isInstalled }) {
                 return AgentStatus(label: "Ready — one click", color: .green)
             }
             return AgentStatus(label: "Not installed", color: .secondary)
             
         case .agy:
-            if let _ = discovery.engines.first(where: { $0.id == "agy" && $0.isInstalled }) {
+            if discovery.engines.contains(where: { $0.id == "agy" && $0.isInstalled }) {
                 return AgentStatus(label: "Ready — one click", color: .green)
             }
             return AgentStatus(label: "Not installed", color: .secondary)
@@ -472,16 +564,61 @@ public struct AgentConnectionsView: View {
             return AgentStatus(label: "Not installed", color: .secondary)
             
         case .codex:
-            if let _ = discovery.engines.first(where: { $0.id == "codex" && $0.isInstalled }) {
+            if discovery.engines.contains(where: { $0.id == "codex" && $0.isInstalled }) {
                 return AgentStatus(label: "Ready — one click", color: .green)
             }
             return AgentStatus(label: "Not installed", color: .secondary)
             
+        case .geminiCLI:
+            if discovery.engines.contains(where: { $0.id == "gemini_cli" && $0.isInstalled }) {
+                return AgentStatus(label: "Ready — one click", color: .green)
+            }
+            return AgentStatus(label: "Not installed (`npm i -g @google/gemini-cli`)", color: .secondary)
+            
+        case .nineRouter:
+            if LocalLLMService.shared.detectedServers.contains(where: { $0.type == .nineRouter && $0.isOnline }) || ACPHostService.resolveExecutablePath("9router") != nil {
+                return AgentStatus(label: "Ready on localhost:20128", color: .green)
+            }
+            return AgentStatus(label: "Install via `npm i -g 9router`", color: .secondary)
+            
+        case .cursorAgent:
+            if discovery.engines.contains(where: { $0.id == "cursor" && $0.isInstalled }) || acpHost.detectedAgents[.cursorAgent] != nil {
+                return AgentStatus(label: "Ready — one click", color: .green)
+            }
+            return AgentStatus(label: "Not installed", color: .secondary)
+            
+        case .githubCopilot:
+            if discovery.engines.contains(where: { $0.id == "copilot" && $0.isInstalled }) || acpHost.detectedAgents[.githubCopilot] != nil {
+                return AgentStatus(label: "Ready — one click", color: .green)
+            }
+            return AgentStatus(label: "Not installed", color: .secondary)
+            
+        case .goose:
+            if discovery.engines.contains(where: { $0.id == "goose" && $0.isInstalled }) || acpHost.detectedAgents[.goose] != nil {
+                return AgentStatus(label: "Ready — native ACP v1", color: .green)
+            }
+            return AgentStatus(label: "Not installed (`brew install block-goose-cli`)", color: .secondary)
+            
+        case .cline:
+            if discovery.engines.contains(where: { $0.id == "cline" && $0.isInstalled }) || acpHost.detectedAgents[.cline] != nil {
+                return AgentStatus(label: "Ready — one click", color: .green)
+            }
+            return AgentStatus(label: "Not installed (`npm i -g cline`)", color: .secondary)
+            
+        case .qwenCode:
+            if discovery.engines.contains(where: { $0.id == "qwen" && $0.isInstalled }) || acpHost.detectedAgents[.qwenCode] != nil {
+                return AgentStatus(label: "Ready — one click", color: .green)
+            }
+            return AgentStatus(label: "Not installed (`npm i -g @qwen-code/qwen-code`)", color: .secondary)
+            
+        case .aider:
+            if discovery.engines.contains(where: { $0.id == "aider" && $0.isInstalled }) || acpHost.detectedAgents[.aider] != nil {
+                return AgentStatus(label: "Ready — one click", color: .green)
+            }
+            return AgentStatus(label: "Not installed (`pipx install aider-chat`)", color: .secondary)
+            
         case .microcodeNative:
             return AgentStatus(label: "Ready — one click", color: .green)
-            
-        case .cursorAgent, .githubCopilot:
-            return AgentStatus(label: "Not installed", color: .secondary)
             
         case .freeModel:
             return AgentStatus(label: "Free to run", color: .blue)
@@ -489,20 +626,20 @@ public struct AgentConnectionsView: View {
     }
     
     private func isCurrentAgent(_ type: AgentConnectionType) -> Bool {
-        switch type {
-        case .agy:
-            return appState.aiProvider == "agy"
-        case .claudeCode:
-            return appState.aiProvider == "claude_code"
-        case .openCode:
-            return appState.aiProvider == "opencode"
-        case .codex:
-            return appState.aiProvider == "codex"
-        case .microcodeNative:
-            return !["agy", "claude_code", "opencode", "codex", "zed"].contains(appState.aiProvider)
-        default:
+        if !appState.isCurrentAIConnected {
             return false
         }
+        if type == .nineRouter {
+            return appState.aiProvider == "9router"
+        }
+        if let acpType = type.acpType {
+            return appState.aiProvider == acpType.engineId
+        }
+        if type == .microcodeNative {
+            let acpIds = Set(ACPAgentType.allCases.map(\.engineId))
+            return !acpIds.contains(appState.aiProvider) && appState.aiProvider != "9router"
+        }
+        return false
     }
     
     private func connectFreeModel() {
@@ -1079,69 +1216,53 @@ public struct AgentSetupWizardView: View {
     }
     
     private func availableModelsForTarget() -> [String] {
-        switch target {
-        case .agy:
-            return discovery.models(for: "agy").map(\.id)
-        case .claudeCode:
-            return discovery.models(for: "claude_code").map(\.id)
-        case .openCode:
-            return discovery.models(for: "opencode").map(\.id)
-        case .codex:
-            return discovery.models(for: "codex").map(\.id)
-        default:
-            return []
+        if target == .nineRouter {
+            return AIModelCatalog.shared.provider("9router")?.models.map(\.id) ?? []
         }
+        if let acpType = target.acpType {
+            return discovery.models(for: acpType.engineId).map(\.id)
+        }
+        return []
     }
     
     private func connectAgent() {
         connectionError = nil
         let effortParam = selectedEffort == "Agent default" ? "high" : selectedEffort
         
+        if target == .nineRouter {
+            acpHost.activeAgentId = nil
+            UserDefaults.standard.set("direct", forKey: "aiKeyMode")
+            appState.aiProvider = "9router"
+            let targetModel = selectedModel == "Agent default"
+                ? (AIModelCatalog.shared.provider("9router")?.models.first?.id ?? "claude-sonnet-4-6")
+                : selectedModel
+            appState.aiModel = targetModel
+            appState.saveSettings()
+            Task { await AIModelCatalog.shared.fetchLiveModelsForProvider("9router") }
+            onConnected()
+            return
+        }
+        
+        if let acpType = target.acpType {
+            if let _ = acpHost.quickConnect(acpType, effort: effortParam) {
+                UserDefaults.standard.set("acp", forKey: "aiKeyMode")
+                let engId = acpType.engineId
+                appState.aiProvider = engId
+                let targetModel = selectedModel == "Agent default"
+                    ? (discovery.models(for: engId).first?.id ?? "")
+                    : selectedModel
+                if !targetModel.isEmpty {
+                    appState.aiModel = targetModel
+                }
+                appState.saveSettings()
+                onConnected()
+            } else {
+                connectionError = "Could not find '\(acpType.defaultCommand)' executable. Please run the installation command above."
+            }
+            return
+        }
+        
         switch target {
-        case .agy:
-            if let _ = acpHost.quickConnect(.agy, effort: effortParam) {
-                appState.aiProvider = "agy"
-                let targetModel = selectedModel == "Agent default" ? (discovery.models(for: "agy").first?.id ?? AIModelCatalog.shared.provider("gemini")?.models.first?.id ?? "") : selectedModel
-                appState.aiModel = targetModel
-                appState.saveSettings()
-                onConnected()
-            } else {
-                connectionError = "Could not find 'agy' executable. Please run the installation command above."
-            }
-            
-        case .claudeCode:
-            if let _ = acpHost.quickConnect(.claudeCode, effort: effortParam) {
-                appState.aiProvider = "claude_code"
-                let targetModel = selectedModel == "Agent default" ? (discovery.models(for: "claude_code").first?.id ?? AIModelCatalog.shared.provider("anthropic")?.models.first?.id ?? "") : selectedModel
-                appState.aiModel = targetModel
-                appState.saveSettings()
-                onConnected()
-            } else {
-                connectionError = "Could not find 'claude' executable. Please run the installation command above."
-            }
-            
-        case .openCode:
-            if let _ = acpHost.quickConnect(.openCode, effort: effortParam) {
-                appState.aiProvider = "opencode"
-                let targetModel = selectedModel == "Agent default" ? (discovery.models(for: "opencode").first?.id ?? "") : selectedModel
-                appState.aiModel = targetModel
-                appState.saveSettings()
-                onConnected()
-            } else {
-                connectionError = "Could not find 'opencode' executable. Please run the installation command above."
-            }
-            
-        case .codex:
-            if let _ = acpHost.quickConnect(.codexEngine, effort: effortParam) {
-                appState.aiProvider = "codex"
-                let targetModel = selectedModel == "Agent default" ? (discovery.models(for: "codex").first?.id ?? AIModelCatalog.shared.provider("openai")?.models.first?.id ?? "") : selectedModel
-                appState.aiModel = targetModel
-                appState.saveSettings()
-                onConnected()
-            } else {
-                connectionError = "Could not find 'codex' executable. Please run the installation command above or use MicroCode Native."
-            }
-            
         case .microcodeNative:
             acpHost.activeAgentId = nil
             appState.aiProvider = "gemini"

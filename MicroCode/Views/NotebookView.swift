@@ -448,6 +448,8 @@ final class NotebookCellModel: ObservableObject, Identifiable {
 
 @MainActor
 final class NotebookViewModel: ObservableObject {
+    static let shared = NotebookViewModel()
+
     @Published var notebooks: [NotebookModel] = []
     @Published var activeNotebookId: UUID?
     @Published var selectedCellId: UUID?
@@ -2508,7 +2510,7 @@ final class NotebookViewModel: ObservableObject {
 
 struct NotebookView: View {
     @EnvironmentObject var appState: AppState
-    @StateObject private var viewModel = NotebookViewModel()
+    @ObservedObject private var viewModel = NotebookViewModel.shared
     @ObservedObject private var pythonEnvManager = PythonEnvManager.shared
     @ObservedObject private var cloudGPU = CloudGPUService.shared
     @ObservedObject private var sharedMemory = SharedMemoryService.shared
@@ -2594,7 +2596,7 @@ struct NotebookView: View {
             }
             // Sync Python version with appState
             viewModel.selectedPythonPath = appState.selectedPythonVersion
-            if let workspace = appState.workspaceFolder {
+            if appState.editorMode == .science, let workspace = appState.workspaceFolder {
                 viewModel.configureScientificProject(workspace)
                 viewModel.syncScientificFiles(from: workspace)
             }

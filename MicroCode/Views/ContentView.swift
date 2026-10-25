@@ -58,23 +58,14 @@ struct ContentView: View {
         )
         .background(
             Button("") {
-                withAnimation(.easeInOut(duration: 0.2)) {
-                    appState.aiChatVisible.toggle()
-                }
+                appState.aiChatVisible.toggle()
             }
                 .keyboardShortcut("l", modifiers: .command)
                 .hidden()
         )
         .background(
-            Button("") { appState.toggleEditorMode(.browser) }
-                .keyboardShortcut("b", modifiers: [.command, .shift])
-                .hidden()
-        )
-        .background(
             Button("") {
-                withAnimation(.easeInOut(duration: 0.22)) {
-                    appState.toggleSidebar()
-                }
+                appState.toggleSidebar()
             }
                 .keyboardShortcut("b", modifiers: .command)
                 .hidden()
@@ -96,7 +87,7 @@ struct ContentView: View {
 
     @ViewBuilder
     private var welcomeOverlay: some View {
-        if !welcomeCompleted {
+        if !welcomeCompleted || appState.showingFirstLaunchWelcome {
             FirstLaunchWelcomeView {
                 // Write file-based flag so it survives app re-signing
                 let dir = FileManager.default.homeDirectoryForCurrentUser
@@ -106,7 +97,10 @@ struct ContentView: View {
                     atPath: dir.appendingPathComponent(".welcome_done").path,
                     contents: Data(), attributes: nil
                 )
-                welcomeCompleted = true
+                withAnimation(.easeOut(duration: 0.2)) {
+                    welcomeCompleted = true
+                    appState.showingFirstLaunchWelcome = false
+                }
             }
             .environmentObject(appState)
             .transition(.opacity)
@@ -249,6 +243,7 @@ struct AgenticEditorWorkspace: View {
     @EnvironmentObject var appState: AppState
     @StateObject private var agent = AgentService.shared
     @State private var surface: AgenticWorkspaceSurface = .agent
+    @State private var shortcutMonitor: Any? = nil
     @AppStorage("microcode_agentic_sidebar_width") private var sidebarWidth: Double = 270
 
     private var targetSidebarWidth: CGFloat {
@@ -266,9 +261,13 @@ struct AgenticEditorWorkspace: View {
         [.embedded, .browser, .apiClient, .remoteX, .notebook, .playground].contains(appState.editorMode)
     }
 
+    private var shouldShowWelcome: Bool {
+        (appState.workspaceFolder == nil && appState.openFiles.isEmpty && appState.editorMode == .code) || appState.showingWelcomeHome
+    }
+
     var body: some View {
         Group {
-            if (appState.workspaceFolder == nil && appState.openFiles.isEmpty && appState.editorMode == .code) || appState.showingWelcomeHome {
+            if shouldShowWelcome {
                 WelcomeScreen(surface: $surface)
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
                     .background(
@@ -323,13 +322,8 @@ struct AgenticEditorWorkspace: View {
                     if appState.agenticContextVisible {
                         AgenticContextInspector(surface: $surface)
                             .layoutPriority(1)
-                            .transition(.asymmetric(
-                                insertion: .move(edge: .trailing).combined(with: .opacity),
-                                removal: .move(edge: .trailing).combined(with: .opacity)
-                            ))
                     }
                 }
-                .animation(.easeInOut(duration: 0.22), value: appState.sidebarVisible)
                 .background(appState.appTheme.isGlass ? Color.clear : Color(nsColor: appState.appTheme.workspaceBackground))
             }
         }
@@ -337,20 +331,23 @@ struct AgenticEditorWorkspace: View {
             if let workspace = appState.workspaceFolder {
                 agent.setWorkspace(workspace.path)
             }
-            if appState.editorMode != .aiAgent {
-                surface = .editor
+            surface = (appState.editorMode == .aiAgent) ? .agent : .editor
+            installFastShortcutMonitorIfNeeded()
+        }
+        .onDisappear {
+            if let monitor = shortcutMonitor {
+                NSEvent.removeMonitor(monitor)
+                shortcutMonitor = nil
             }
         }
         .onChange(of: appState.editorMode) { newMode in
-            if newMode == .aiAgent {
-                surface = .agent
-            } else {
-                surface = .editor
-            }
-        }
-        .onReceive(NotificationCenter.default.publisher(for: NSNotification.Name("MicroCodeEditorModeChanged"))) { notif in
-            if let mode = notif.object as? EditorMode {
-                surface = (mode == .aiAgent) ? .agent : .editor
+            var tx = Transaction()
+            tx.disablesAnimations = true
+            withTransaction(tx) {
+                let targetSurface: AgenticWorkspaceSurface = (newMode == .aiAgent) ? .agent : .editor
+                if surface != targetSurface {
+                    surface = targetSurface
+                }
             }
         }
         .onReceive(NotificationCenter.default.publisher(for: NSNotification.Name("MicroCodeWorkspaceChanged"))) { notif in
@@ -383,6 +380,57 @@ struct AgenticEditorWorkspace: View {
                     }
                 }
             }
+        }
+    }
+
+    private func installFastShortcutMonitorIfNeeded() {
+        guard shortcutMonitor == nil else { return }
+        shortcutMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { event in
+            let flags = event.modifierFlags.intersection(.deviceIndependentFlagsMask)
+            guard let chars = event.charactersIgnoringModifiers?.lowercased(), !chars.isEmpty else {
+                return event
+            }
+            if flags == [.control] || flags == [.command, .option] {
+                switch chars {
+                case "0" where flags == [.control]:
+                    var tx = Transaction()
+                    tx.disablesAnimations = true
+                    withTransaction(tx) {
+                        appState.showingWelcomeHome.toggle()
+                    }
+                    return nil
+                case "1":
+                    appState.switchToMode(.code)
+                    return nil
+                case "2":
+                    appState.switchToMode(.aiAgent)
+                    return nil
+                case "3":
+                    appState.switchToMode(.notebook)
+                    return nil
+                case "4":
+                    appState.switchToMode(.playground)
+                    return nil
+                case "5":
+                    appState.switchToMode(.science)
+                    return nil
+                case "6":
+                    appState.switchToMode(.browser)
+                    return nil
+                case "7":
+                    appState.switchToMode(.remoteX)
+                    return nil
+                case "8":
+                    appState.switchToMode(.embedded)
+                    return nil
+                case "9":
+                    appState.openAPIStudio()
+                    return nil
+                default:
+                    break
+                }
+            }
+            return event
         }
     }
 
@@ -608,8 +656,7 @@ struct AgenticEditorWorkspace: View {
             // Surface Toggle (Agent vs Code Editor vs More Mode)
             HStack(spacing: 2) {
                 Button {
-                    surface = .agent
-                    appState.setEditorMode(.aiAgent)
+                    appState.switchToMode(.aiAgent)
                 } label: {
                     HStack(spacing: 4) {
                         Image(systemName: "brain")
@@ -622,8 +669,7 @@ struct AgenticEditorWorkspace: View {
                 .agenticTabStyle(active: surface == .agent || appState.editorMode == .aiAgent)
 
                 Button {
-                    surface = .editor
-                    appState.setEditorMode(.code)
+                    appState.switchToMode(.code)
                 } label: {
                     HStack(spacing: 4) {
                         Image(systemName: "curlybraces")
@@ -637,42 +683,28 @@ struct AgenticEditorWorkspace: View {
 
                 Menu {
                     Button("Playground Mode") {
-                        appState.showingWelcomeHome = false
-                        appState.setEditorMode(.playground)
-                        surface = .editor
+                        appState.switchToMode(.playground)
                     }
                     Button("Cell Mode (Notebook)") {
-                        appState.showingWelcomeHome = false
-                        appState.setEditorMode(.notebook)
-                        surface = .editor
+                        appState.switchToMode(.notebook)
                     }
                     Button("SSH Remote Browser") {
-                        appState.showingWelcomeHome = false
-                        appState.setEditorMode(.remoteX)
-                        surface = .editor
+                        appState.switchToMode(.remoteX)
                     }
                     Button("Science Mode") {
-                        appState.showingWelcomeHome = false
-                        appState.setEditorMode(.science)
-                        surface = .editor
+                        appState.switchToMode(.science)
                     }
                     Button("IDE Web Browser") {
-                        appState.showingWelcomeHome = false
-                        appState.setEditorMode(.browser)
-                        surface = .editor
+                        appState.switchToMode(.browser)
                     }
                     Button("Embed & IoT Studio") {
-                        appState.showingWelcomeHome = false
-                        appState.setEditorMode(.embedded)
-                        surface = .editor
+                        appState.switchToMode(.embedded)
                     }
                     Button("API Studio") {
                         appState.openAPIStudio()
-                        surface = .editor
                     }
                     Button("Extension Studio") {
                         appState.openExtensionStudio()
-                        surface = .editor
                     }
                 } label: {
                     HStack(spacing: 3) {
@@ -799,6 +831,7 @@ struct AgenticWorkspaceSidebar: View {
     @State private var isProjectsExpanded = true
     @State private var isFilesExpanded = true
     @State private var collapsedProjectIds: Set<String> = []
+    @State private var manuallyExpandedProjectIds: Set<String> = []
     @State private var searchText: String = ""
     @State private var isSearchVisible: Bool = false
     @State private var renamingChatId: String? = nil
@@ -1019,10 +1052,12 @@ struct AgenticWorkspaceSidebar: View {
         VStack(alignment: .leading, spacing: 2) {
             Button(action: {
                 withAnimation(.easeInOut(duration: 0.18)) {
-                    if collapsedProjectIds.contains(group.id) {
-                        collapsedProjectIds.remove(group.id)
-                    } else {
+                    if isExpanded {
                         collapsedProjectIds.insert(group.id)
+                        manuallyExpandedProjectIds.remove(group.id)
+                    } else {
+                        collapsedProjectIds.remove(group.id)
+                        manuallyExpandedProjectIds.insert(group.id)
                     }
                     if let path = group.projectPath, !path.isEmpty {
                         let folderURL = URL(fileURLWithPath: path)
@@ -1245,8 +1280,27 @@ struct AgenticWorkspaceSidebar: View {
         .background(Color.primary.opacity(0.02))
     }
 
+    private func isActiveProjectGroup(_ group: ProjectChatGroup) -> Bool {
+        if let ws = appState.workspaceFolder?.path ?? agent.currentWorkspace, !ws.isEmpty, group.projectPath == ws {
+            return true
+        }
+        if let activeId = agent.activeChatId, group.chats.contains(where: { $0.id == activeId }) {
+            return true
+        }
+        return group.id == agent.projectGroups.first?.id
+    }
+
     private func isProjectGroupExpanded(_ group: ProjectChatGroup) -> Bool {
-        return !collapsedProjectIds.contains(group.id)
+        if !searchText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            return true
+        }
+        if collapsedProjectIds.contains(group.id) {
+            return false
+        }
+        if manuallyExpandedProjectIds.contains(group.id) {
+            return true
+        }
+        return isActiveProjectGroup(group)
     }
 }
 
@@ -4048,7 +4102,7 @@ struct EditorArea: View {
                 }
             }
         }
-        .id(appState.editorMode.rawValue)  // Force re-render when mode changes
+        .id(appState.editorMode.rawValue)
     }
     
     // MARK: - File Convert Banner
@@ -5704,7 +5758,11 @@ struct WelcomeScreen: View {
         }
         .onAppear {
             loadRecentProjects()
-            appState.checkDerivedDataSize()
+        }
+        .onChange(of: selectedTab) { newTab in
+            if newTab == .settings {
+                appState.checkDerivedDataSize()
+            }
         }
         .sheet(isPresented: $showCloneSheet) {
             cloneSheetView
@@ -6031,7 +6089,7 @@ struct WelcomeScreen: View {
                     .font(.system(size: 14, weight: .semibold))
                     .foregroundColor(.secondary)
                 
-                if recentProjects.isEmpty {
+                if recentProjects.isEmpty || appState.simulateUnconnectedAI {
                     VStack(spacing: 12) {
                         Image(systemName: "folder.badge.questionmark")
                             .font(.system(size: 24))
@@ -9051,7 +9109,7 @@ struct SettingsView: View {
         return HStack(spacing: 10) {
             ZStack {
                 RoundedRectangle(cornerRadius: 6).fill(Color.primary.opacity(0.04)).frame(width: 28, height: 28)
-                Image(systemName: "server.rack").font(.system(size: 13)).foregroundColor(.secondary)
+                AIProviderBrandIcon(provider: server.type.brandKey, size: 18)
             }
             VStack(alignment: .leading, spacing: 2) {
                 HStack(spacing: 6) {
@@ -9083,7 +9141,7 @@ struct SettingsView: View {
         return HStack(spacing: 8) {
             ZStack {
                 RoundedRectangle(cornerRadius: 6).fill(Color.primary.opacity(0.04)).frame(width: 28, height: 28)
-                Image(systemName: "cpu").font(.system(size: 12)).foregroundColor(.secondary)
+                AIProviderBrandIcon(provider: localLLM.activeServer?.type.brandKey ?? "local", size: 16)
             }
             VStack(alignment: .leading, spacing: 1) {
                 Text(model.name).font(.system(size: 11, weight: .medium)).lineLimit(1)
@@ -10187,33 +10245,25 @@ struct GlobalKeyboardShortcutsModifier: ViewModifier {
 
             // Panels & Layout (⌘J, ⌘I, ⌘⌥G, ⌘⌥P)
             Button("") {
-                withAnimation(.easeInOut(duration: 0.2)) {
-                    appState.toggleConsole()
-                }
+                appState.toggleConsole()
             }
             .keyboardShortcut("j", modifiers: .command)
             .hidden()
 
             Button("") {
-                withAnimation(.easeInOut(duration: 0.2)) {
-                    appState.toggleAgenticContext()
-                }
+                appState.toggleAgenticContext()
             }
             .keyboardShortcut("i", modifiers: .command)
             .hidden()
 
             Button("") {
-                withAnimation(.easeInOut(duration: 0.2)) {
-                    appState.toggleGitPanel()
-                }
+                appState.toggleGitPanel()
             }
             .keyboardShortcut("g", modifiers: [.command, .option])
             .hidden()
 
             Button("") {
-                withAnimation(.easeInOut(duration: 0.2)) {
-                    appState.showingPreviewView.toggle()
-                }
+                appState.showingPreviewView.toggle()
             }
             .keyboardShortcut("p", modifiers: [.command, .option])
             .hidden()

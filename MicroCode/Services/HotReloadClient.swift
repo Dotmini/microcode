@@ -78,7 +78,7 @@ class HotReloadClient: ObservableObject {
     private var statusCheckTimer: Timer?
     
     private init() {
-        startStatusPolling()
+        // Poll status only on-demand when the preview agent is started
     }
     
     deinit {
@@ -99,6 +99,7 @@ class HotReloadClient: ObservableObject {
         if response.success {
             isAgentRunning = true
             lastError = nil
+            startStatusPolling()
         } else {
             lastError = response.error ?? "Failed to start agent"
             throw HotReloadError.agentStartFailed(lastError!)
@@ -107,12 +108,16 @@ class HotReloadClient: ObservableObject {
     
     /// Stop the preview agent process
     func stopAgent() async throws {
+        statusCheckTimer?.invalidate()
+        statusCheckTimer = nil
         let url = URL(string: "\(baseURL)/api/preview/agent/stop")!
         var request = LocalBackendAuth.request(url: url)
         request.httpMethod = "POST"
         
         let (_, _) = try await URLSession.shared.data(for: request)
-        isAgentRunning = false
+        if isAgentRunning {
+            isAgentRunning = false
+        }
     }
     
     /// Check agent status
@@ -122,9 +127,19 @@ class HotReloadClient: ObservableObject {
         do {
             let (data, _) = try await URLSession.shared.data(for: LocalBackendAuth.request(url: url))
             let response = try JSONDecoder().decode(PreviewStatusResponse.self, from: data)
-            isAgentRunning = response.serverRunning
+            if isAgentRunning != response.serverRunning {
+                isAgentRunning = response.serverRunning
+            }
+            if !response.serverRunning {
+                statusCheckTimer?.invalidate()
+                statusCheckTimer = nil
+            }
         } catch {
-            isAgentRunning = false
+            if isAgentRunning {
+                isAgentRunning = false
+            }
+            statusCheckTimer?.invalidate()
+            statusCheckTimer = nil
         }
     }
     
@@ -241,6 +256,7 @@ class HotReloadClient: ObservableObject {
     // MARK: - Private Helpers
     
     private func startStatusPolling() {
+        guard statusCheckTimer == nil else { return }
         statusCheckTimer = Timer.scheduledTimer(withTimeInterval: 5.0, repeats: true) { [weak self] _ in
             Task { @MainActor in
                 await self?.checkStatus()

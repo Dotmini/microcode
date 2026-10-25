@@ -61,6 +61,7 @@ struct AIAgentView: View {
     @ObservedObject private var previewDock = PreviewDockService.shared
     @ObservedObject private var voiceCoding = VoiceCodingService.shared
     @State private var collapsedProjectsInChatSidebar: Set<String> = []
+    @State private var manuallyExpandedProjectsInChatSidebar: Set<String> = []
     @FocusState private var isInputFocused: Bool
     
     // MARK: - AI Enhancement State
@@ -78,14 +79,9 @@ struct AIAgentView: View {
     @AppStorage("studioAspectRatio") private var studioAspectRatio: String = "16:9"
     @AppStorage("studioResolution") private var studioResolution: String = "1080p"
     @AppStorage("studioDuration") private var studioDuration: String = "5s"
-    @State private var isCompareMode = false
-    @AppStorage("compareSecondaryModel") private var compareSecondaryModel: String = "DeepSeek-V4.1-Flash"
     @ObservedObject private var scopeGuard = WorkspaceScopeGuard.shared
     @ObservedObject private var secretShield = SecretShieldMonitor.shared
     @ObservedObject private var subAgentHarness = SubAgentHarness.shared
-    @State private var showingContextXRayPopover = false
-    @State private var newPinnedConstraintText = ""
-    @State private var lastPrunedTokensCount: Int? = nil
     @State private var secretActionToast: String? = nil
     
     private var selectedSubAgentDisplayName: String {
@@ -221,10 +217,16 @@ struct AIAgentView: View {
         switch type {
         case .agy: return .indigo
         case .codexEngine: return .green
-        case .claudeCode: return .blue
+        case .claudeCode: return .orange
+        case .geminiCLI: return .blue
         case .openCode: return .orange
+        case .cursorAgent: return .purple
+        case .githubCopilot: return .primary
+        case .goose: return .teal
+        case .cline: return .cyan
+        case .qwenCode: return .indigo
         case .zedEngine: return .cyan
-        case .aider: return .yellow
+        case .aider: return .green
         case .custom: return .accentColor
         }
     }
@@ -234,25 +236,34 @@ struct AIAgentView: View {
         case .agy: return "Antigravity"
         case .codexEngine: return "Codex"
         case .claudeCode: return "Claude Code"
+        case .geminiCLI: return "Gemini CLI"
         case .openCode: return "OpenCode"
+        case .cursorAgent: return "Cursor"
+        case .githubCopilot: return "Copilot"
+        case .goose: return "Goose"
+        case .cline: return "Cline"
+        case .qwenCode: return "Qwen Code"
         case .zedEngine: return "Zed"
         case .aider: return "Aider"
         case .custom: return config.name
         }
     }
     
+    private var activeBrandIconKey: String {
+        if let activeAgent = activeExternalAgentConfig {
+            return activeAgent.type.brandIconKey
+        }
+        if currentExecutionMode == .subscription,
+           let subStr = UserDefaults.standard.string(forKey: "subscriptionActiveProvider"),
+           !subStr.isEmpty {
+            return subStr
+        }
+        return appState.aiProvider.isEmpty ? "microcode" : appState.aiProvider
+    }
+    
     private var currentModelDisplayName: String {
         if let activeAgent = activeExternalAgentConfig {
-            let engineId: String
-            switch activeAgent.type {
-            case .agy: engineId = "agy"
-            case .codexEngine: engineId = "codex"
-            case .claudeCode: engineId = "claude_code"
-            case .openCode: engineId = "opencode"
-            case .zedEngine: engineId = "zed"
-            case .aider: engineId = "aider"
-            case .custom: engineId = "custom"
-            }
+            let engineId = activeAgent.type.engineId
             let providerName = activeAgentShortName(for: activeAgent)
             let engineModels = LocalEcosystemDiscovery.shared.models(for: engineId)
             let modelName: String = {
@@ -417,6 +428,9 @@ struct AIAgentView: View {
                                             isLoading: agent.isLoading,
                                             domain: agent.domain,
                                             currentToolExecution: agent.currentToolExecution,
+                                            hasEarlierMessages: agent.hasEarlierMessages,
+                                            queuedMessages: agent.messageQueue,
+                                            activeChatId: agent.activeChatId,
                                             onApplyChange: { change in applyChange(change) },
                                             onRejectChange: { change in rejectChange(change) },
                                             onSuggestionTap: { suggestion in inputText = suggestion; sendMessage() },
@@ -527,6 +541,13 @@ struct AIAgentView: View {
             }
             Task { await deviceRuntime.refresh(workspace: newFolder) }
         }
+        .onReceive(NotificationCenter.default.publisher(for: NSNotification.Name("MicroCodePlanApprovedReturnToChat"))) { _ in
+            withAnimation(.easeInOut(duration: 0.2)) {
+                isPlanMode = false
+                isPlanFullscreen = false
+                planManager.isPlanVisible = false
+            }
+        }
         .sheet(isPresented: $showingTeamTasks) {
             TeamTasksView(
                 workspacePath: agent.currentWorkspace ?? (sessionScope == .editor ? appState.workspaceFolder?.path : nil),
@@ -572,6 +593,9 @@ struct AIAgentView: View {
         }
         .onReceive(NotificationCenter.default.publisher(for: NSNotification.Name("MicroCode.OpenAgentConnections"))) { _ in
             showingAgentConnections = true
+        }
+        .onReceive(NotificationCenter.default.publisher(for: NSNotification.Name("MicroCode.CloseAgentConnections"))) { _ in
+            showingAgentConnections = false
         }
         .onReceive(NotificationCenter.default.publisher(for: NSNotification.Name("MicroCode.OpenAgentEcosystem"))) { notification in
             if let tabName = notification.object as? String {
@@ -666,7 +690,7 @@ struct AIAgentView: View {
                 .padding(.leading, 2)
 
                 // Feature #8: "Where Was I?" Instant Project Briefing Card
-                if sessionScope == .editor, let briefing = agent.projectBriefing {
+                if sessionScope == .editor, let briefing = agent.projectBriefing, appState.isCurrentAIConnected {
                     projectBriefingCardView(briefing)
                 }
                 
@@ -738,10 +762,12 @@ struct AIAgentView: View {
         VStack(alignment: .leading, spacing: 2) {
             Button(action: {
                 withAnimation(.easeInOut(duration: 0.18)) {
-                    if collapsedProjectsInChatSidebar.contains(group.id) {
-                        collapsedProjectsInChatSidebar.remove(group.id)
-                    } else {
+                    if isExpanded {
                         collapsedProjectsInChatSidebar.insert(group.id)
+                        manuallyExpandedProjectsInChatSidebar.remove(group.id)
+                    } else {
+                        collapsedProjectsInChatSidebar.remove(group.id)
+                        manuallyExpandedProjectsInChatSidebar.insert(group.id)
                     }
                 }
             }) {
@@ -795,7 +821,19 @@ struct AIAgentView: View {
     }
     
     private func isChatSidebarGroupExpanded(_ group: ProjectChatGroup) -> Bool {
-        return !collapsedProjectsInChatSidebar.contains(group.id)
+        if collapsedProjectsInChatSidebar.contains(group.id) {
+            return false
+        }
+        if manuallyExpandedProjectsInChatSidebar.contains(group.id) {
+            return true
+        }
+        if let ws = appState.workspaceFolder?.path ?? agent.currentWorkspace, !ws.isEmpty, group.projectPath == ws {
+            return true
+        }
+        if let activeId = agent.activeChatId, group.chats.contains(where: { $0.id == activeId }) {
+            return true
+        }
+        return group.id == agent.projectGroups.first?.id
     }
     
     // MARK: - Header Bar
@@ -931,7 +969,8 @@ struct AIAgentView: View {
                                 deviceRuntime.showingDeviceRuntimeSheet = true
                             }
 
-                            let appleSimulators = deviceRuntime.devices.filter(\.isAppleSimulator)
+                            // Only render ready/booted simulators in the quick Menu to avoid allocating 80+ NSMenuItems when closed
+                            let appleSimulators = deviceRuntime.devices.filter { $0.isAppleSimulator && $0.isReadyForLaunch }
                             let physicalAppleDevices = deviceRuntime.devices.filter(\.isPhysicalAppleDevice)
                             let androidDevices = deviceRuntime.devices.filter { $0.platform == .android }
 
@@ -1155,46 +1194,6 @@ struct AIAgentView: View {
                         .fixedSize()
                     }
                     .padding(2)
-                    
-                    // P5: Compact cost status widget (shown when wide enough)
-                    if !isCompact {
-                        CostStatusWidget()
-                    }
-
-                    // Feature #5: Context X-Ray & Token Pruner HUD Button
-                    Button {
-                        showingContextXRayPopover.toggle()
-                    } label: {
-                        HStack(spacing: 3) {
-                            Image(systemName: "chart.pie.fill")
-                                .font(.system(size: 9.5))
-                                .foregroundColor(agent.pinnedConstraints.isEmpty ? .secondary : .accentColor)
-                            if !isVeryCompact {
-                                Text("X-Ray")
-                                    .font(.system(size: 10, weight: .medium))
-                            }
-                            if !agent.pinnedConstraints.isEmpty {
-                                Text("\(agent.pinnedConstraints.count)")
-                                    .font(.system(size: 8.5, weight: .bold, design: .monospaced))
-                                    .padding(.horizontal, 3.5)
-                                    .padding(.vertical, 1)
-                                    .background(Color.accentColor.opacity(0.18))
-                                    .foregroundColor(.accentColor)
-                                    .cornerRadius(3)
-                            }
-                        }
-                        .foregroundColor(.secondary)
-                        .padding(.horizontal, 6)
-                        .frame(height: 24)
-                        .background(showingContextXRayPopover ? Color.primary.opacity(0.09) : Color.clear)
-                        .cornerRadius(5)
-                    }
-                    .buttonStyle(.plain)
-                    .fixedSize()
-                    .help("Context X-Ray, Token Pruner & Pinned Hard Constraints")
-                    .popover(isPresented: $showingContextXRayPopover, arrowEdge: .bottom) {
-                        contextXRayPopoverView
-                    }
                     
                     Spacer(minLength: 4)
                     
@@ -1826,7 +1825,11 @@ struct AIAgentView: View {
             
             HStack(spacing: 8) {
                 Button(action: {
-                    planManager.reject()
+                    withAnimation(.easeInOut(duration: 0.2)) {
+                        isPlanMode = false
+                        isPlanFullscreen = false
+                        planManager.reject()
+                    }
                 }) {
                     Text("Reject")
                         .font(.system(size: 10.5, weight: .medium))
@@ -1841,7 +1844,11 @@ struct AIAgentView: View {
                 Spacer()
                 
                 Button(action: {
-                    planManager.approve()
+                    withAnimation(.easeInOut(duration: 0.2)) {
+                        isPlanMode = false
+                        isPlanFullscreen = false
+                        planManager.approve()
+                    }
                 }) {
                     HStack(spacing: 5) {
                         Image(systemName: "checkmark")
@@ -2616,58 +2623,6 @@ struct AIAgentView: View {
     @ViewBuilder
     private var inputCardView: some View {
         VStack(alignment: .leading, spacing: 6) {
-            if isCompareMode {
-                HStack(spacing: 6) {
-                    Image(systemName: "rectangle.split.2x1.fill")
-                        .font(.system(size: 10, weight: .semibold))
-                        .foregroundColor(.accentColor)
-                    Text("Compare Mode:")
-                        .font(.system(size: 10.5, weight: .bold))
-                        .foregroundColor(.accentColor)
-                    Text(currentModelDisplayName)
-                        .font(.system(size: 10, weight: .medium, design: .monospaced))
-                        .foregroundColor(.primary.opacity(0.85))
-                        .lineLimit(1)
-                    Text("vs")
-                        .font(.system(size: 10, weight: .semibold))
-                        .foregroundColor(.secondary)
-                    Menu {
-                        ForEach(["DeepSeek-V4.1-Flash", "claude-sonnet-5-5@default", "gpt-6-luna", "gemini-3.8-flash", "glm-5.1@jts", "kimi-k2.5"], id: \.self) { m in
-                            Button(m) { compareSecondaryModel = m }
-                        }
-                    } label: {
-                        HStack(spacing: 3) {
-                            Text(compareSecondaryModel)
-                                .font(.system(size: 10, weight: .semibold, design: .monospaced))
-                                .lineLimit(1)
-                            Image(systemName: "chevron.down")
-                                .font(.system(size: 7, weight: .bold))
-                        }
-                        .foregroundColor(.accentColor)
-                        .padding(.horizontal, 6)
-                        .padding(.vertical, 2)
-                        .background(Color.accentColor.opacity(0.14))
-                        .cornerRadius(4)
-                    }
-                    .menuStyle(.borderlessButton)
-                    .fixedSize()
-                    Spacer()
-                    Button {
-                        isCompareMode = false
-                    } label: {
-                        Image(systemName: "xmark.circle.fill")
-                            .font(.system(size: 11))
-                            .foregroundColor(.secondary)
-                    }
-                    .buttonStyle(.plain)
-                    .help("Exit Compare Mode")
-                }
-                .padding(.horizontal, 8)
-                .padding(.vertical, 4)
-                .background(Color.accentColor.opacity(0.08))
-                .cornerRadius(6)
-            }
-
             // Multiline text input
             if #available(macOS 13.0, *) {
                 TextField("Ask anything, @ to mention, / for actions", text: $inputText, axis: .vertical)
@@ -2683,11 +2638,6 @@ struct AIAgentView: View {
                             let cmd = slashCommandService.suggestions[min(slashSelectedIndex, slashCommandService.suggestions.count - 1)]
                             showSlashSuggestions = false
                             slashSelectedIndex = 0
-                            if cmd == .compare {
-                                isCompareMode.toggle()
-                                inputText = ""
-                                return
-                            }
                             let trimmed = inputText.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
                             if trimmed == "/\(cmd.rawValue)" && !cmd.requiresArgument {
                                 sendMessage()
@@ -2871,12 +2821,7 @@ struct AIAgentView: View {
                         onSelect: { command in
                             showSlashSuggestions = false
                             slashSelectedIndex = 0
-                            if command == .compare {
-                                isCompareMode.toggle()
-                                inputText = ""
-                            } else {
-                                inputText = "/\(command.rawValue) "
-                            }
+                            inputText = "/\(command.rawValue) "
                         }
                     )
                     .environmentObject(appState)
@@ -3450,166 +3395,6 @@ struct AIAgentView: View {
                 .stroke(Color.primary.opacity(0.08), lineWidth: 0.8)
         )
     }
-
-    // MARK: - Feature #5: Context X-Ray & Token Pruner Popover
-
-    private var contextXRayPopoverView: some View {
-        let xray = agent.computeContextXRay()
-        return VStack(alignment: .leading, spacing: 10) {
-            HStack {
-                Image(systemName: "chart.pie.fill")
-                    .font(.system(size: 11, weight: .semibold))
-                    .foregroundColor(.accentColor)
-                Text("Context X-Ray & Token Pruner")
-                    .font(.system(size: 11.5, weight: .bold))
-                Spacer()
-                Text("~\(xray.totalTokens.formatted()) / \(xray.budgetCeiling.formatted()) tok")
-                    .font(.system(size: 10, weight: .semibold, design: .monospaced))
-                    .foregroundColor(.secondary)
-            }
-
-            // Token distribution rows
-            VStack(alignment: .leading, spacing: 5) {
-                contextXRayRow(label: "System & Workspace Rules", tokens: xray.systemAndRulesTokens, total: xray.totalTokens, color: .blue)
-                contextXRayRow(label: "Pinned Hard Constraints", tokens: xray.pinnedConstraintsTokens, total: xray.totalTokens, color: .purple)
-                contextXRayRow(label: "Conversation Messages", tokens: xray.conversationProseTokens, total: xray.totalTokens, color: .green)
-                contextXRayRow(label: "Tool Outputs (Prunable)", tokens: xray.toolOutputsTokens, total: xray.totalTokens, color: .orange)
-            }
-            .padding(8)
-            .background(Color.primary.opacity(0.04))
-            .cornerRadius(6)
-
-            // 1-Click Prune Tool Outputs + Auto-Failover Toggle
-            HStack(spacing: 8) {
-                Button {
-                    let freed = agent.pruneBulkyToolOutputs()
-                    lastPrunedTokensCount = freed
-                } label: {
-                    HStack(spacing: 4) {
-                        Image(systemName: "scissors")
-                            .font(.system(size: 9.5, weight: .semibold))
-                        Text("Prune Bulky Tool Outputs")
-                            .font(.system(size: 10, weight: .semibold))
-                    }
-                    .padding(.horizontal, 8)
-                    .padding(.vertical, 4)
-                    .background(Color.orange.opacity(0.16))
-                    .foregroundColor(.orange)
-                    .cornerRadius(5)
-                }
-                .buttonStyle(.plain)
-
-                if let freed = lastPrunedTokensCount {
-                    Text(freed > 0 ? "Freed ~\(freed) tok" : "Already compact")
-                        .font(.system(size: 9.5, design: .monospaced))
-                        .foregroundColor(.green)
-                }
-
-                Spacer()
-
-                Toggle(isOn: $agent.autoFailoverEnabled) {
-                    Text("Auto-Failover")
-                        .font(.system(size: 10, weight: .medium))
-                }
-                .toggleStyle(.switch)
-                .controlSize(.mini)
-                .help("Zero-Drop Auto-Failover: automatically switch to healthy backup provider/model on 429/503 errors")
-            }
-
-            Divider()
-
-            // Pinned Hard Constraints Section
-            VStack(alignment: .leading, spacing: 6) {
-                HStack {
-                    Image(systemName: "pin.fill")
-                        .font(.system(size: 9.5))
-                        .foregroundColor(.purple)
-                    Text("Pinned Hard Constraints (Never Pruned)")
-                        .font(.system(size: 10.5, weight: .bold))
-                    Spacer()
-                }
-
-                HStack(spacing: 6) {
-                    TextField("Add constraint (e.g. Use Swift 6, Do not touch auth)...", text: $newPinnedConstraintText)
-                        .textFieldStyle(.plain)
-                        .font(.system(size: 10.5))
-                        .padding(.horizontal, 6)
-                        .padding(.vertical, 4)
-                        .background(Color.primary.opacity(0.06))
-                        .cornerRadius(4)
-                        .onSubmit {
-                            agent.addPinnedConstraint(newPinnedConstraintText)
-                            newPinnedConstraintText = ""
-                        }
-                    Button("Pin") {
-                        agent.addPinnedConstraint(newPinnedConstraintText)
-                        newPinnedConstraintText = ""
-                    }
-                    .font(.system(size: 10, weight: .semibold))
-                    .padding(.horizontal, 8)
-                    .padding(.vertical, 4)
-                    .background(Color.purple.opacity(0.16))
-                    .foregroundColor(.purple)
-                    .cornerRadius(4)
-                    .buttonStyle(.plain)
-                    .disabled(newPinnedConstraintText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
-                }
-
-                if agent.pinnedConstraints.isEmpty {
-                    Text("No pinned constraints yet. Pinned rules stay at the top of system context across every turn.")
-                        .font(.system(size: 9.5))
-                        .foregroundColor(.secondary)
-                } else {
-                    ScrollView {
-                        VStack(alignment: .leading, spacing: 4) {
-                            ForEach(Array(agent.pinnedConstraints.enumerated()), id: \.offset) { idx, item in
-                                HStack(spacing: 6) {
-                                    Image(systemName: "pin.circle.fill")
-                                        .font(.system(size: 10))
-                                        .foregroundColor(.purple)
-                                    Text(item)
-                                        .font(.system(size: 10))
-                                        .lineLimit(2)
-                                    Spacer()
-                                    Button {
-                                        agent.removePinnedConstraint(at: idx)
-                                    } label: {
-                                        Image(systemName: "xmark.circle.fill")
-                                            .font(.system(size: 10))
-                                            .foregroundColor(.secondary)
-                                    }
-                                    .buttonStyle(.plain)
-                                }
-                                .padding(.horizontal, 6)
-                                .padding(.vertical, 3)
-                                .background(Color.primary.opacity(0.04))
-                                .cornerRadius(4)
-                            }
-                        }
-                    }
-                    .frame(maxHeight: 110)
-                }
-            }
-        }
-        .padding(12)
-        .frame(width: 350)
-    }
-
-    private func contextXRayRow(label: String, tokens: Int, total: Int, color: Color) -> some View {
-        let pct = Int(round((Double(tokens) / Double(max(1, total))) * 100))
-        return HStack(spacing: 6) {
-            Circle()
-                .fill(color)
-                .frame(width: 6, height: 6)
-            Text(label)
-                .font(.system(size: 10))
-                .foregroundColor(.primary.opacity(0.85))
-            Spacer()
-            Text("\(tokens.formatted()) tok (\(pct)%)")
-                .font(.system(size: 9.5, design: .monospaced))
-                .foregroundColor(.secondary)
-        }
-    }
     
     private var voiceInputButton: some View {
         Button(action: {
@@ -3660,11 +3445,6 @@ struct AIAgentView: View {
             }) {
                 Label("Code Review (/review)", systemImage: "checkmark.shield")
             }
-            Button(action: {
-                isCompareMode.toggle()
-            }) {
-                Label(isCompareMode ? "Disable Compare Mode (/compare)" : "Compare 2 Models (/compare)", systemImage: "rectangle.split.2x1")
-            }
         } label: {
             Image(systemName: "plus")
                 .font(.system(size: 12, weight: .semibold))
@@ -3707,27 +3487,45 @@ struct AIAgentView: View {
     }
     
     private var modelSelectorDropdown: some View {
-        Menu {
-            modelMenuContent
-        } label: {
-            Label(
-                "\(currentExecutionMode.badgeTitle) · \(currentModelDisplayName)",
-                systemImage: currentExecutionMode.icon
+        Button(action: {
+            if !appState.isCurrentAIConnected {
+                showingAgentConnections = true
+            } else {
+                presentNativeModelMenu()
+            }
+        }) {
+            HStack(spacing: 5) {
+                if !appState.isCurrentAIConnected {
+                    Image(systemName: "link")
+                        .font(.system(size: 10, weight: .medium))
+                        .foregroundColor(.secondary)
+                    Text("Connect AI")
+                        .font(.system(size: 11, weight: .medium))
+                        .foregroundColor(.primary)
+                        .lineLimit(1)
+                } else {
+                    AIProviderBrandIcon(provider: activeBrandIconKey, size: 13)
+                    Text("\(currentExecutionMode.badgeTitle) · \(currentModelDisplayName)")
+                        .font(.system(size: 11, weight: .medium))
+                        .lineLimit(1)
+                        .truncationMode(.tail)
+                }
+                Image(systemName: "chevron.up.chevron.down")
+                    .font(.system(size: 8.5, weight: .semibold))
+                    .foregroundColor(.secondary)
+            }
+            .frame(maxWidth: 235)
+            .padding(.horizontal, 7)
+            .padding(.vertical, 3)
+            .background(Color.primary.opacity(0.06))
+            .cornerRadius(6)
+            .overlay(
+                RoundedRectangle(cornerRadius: 6)
+                    .stroke(Color.white.opacity(0.1), lineWidth: 1)
             )
-            .font(.system(size: 11, weight: .medium))
-            .lineLimit(1)
-            .truncationMode(.tail)
+            .contentShape(Rectangle())
         }
-        .menuStyle(.borderlessButton)
-        .frame(maxWidth: 235)
-        .padding(.horizontal, 7)
-        .padding(.vertical, 3)
-        .background(Color.primary.opacity(0.06))
-        .cornerRadius(6)
-        .overlay(
-            RoundedRectangle(cornerRadius: 6)
-                .stroke(Color.white.opacity(0.1), lineWidth: 1)
-        )
+        .buttonStyle(.plain)
     }
     
     private var sendOrStopButton: some View {
@@ -4210,19 +4008,6 @@ struct AIAgentView: View {
                         agent.messages.append(usageMsg)
                     }
                     return
-                case .compare:
-                    isCompareMode = true
-                    let arg = parsed.argument.trimmingCharacters(in: .whitespacesAndNewlines)
-                    if arg.isEmpty {
-                        let cmpMsg = AgentMessageModel(
-                            id: UUID().uuidString, role: .assistant,
-                            content: "**Compare Mode Enabled** (`\(appState.aiModel)` vs `\(compareSecondaryModel)`). Send your next prompt to compare both models side-by-side.",
-                            toolResults: [], pendingChanges: [], timestamp: Date()
-                        )
-                        agent.messages.append(cmpMsg)
-                        return
-                    }
-                    userText = arg
                 case .squad:
                     let arg = parsed.argument.trimmingCharacters(in: .whitespacesAndNewlines)
                     if arg.isEmpty {
@@ -4245,12 +4030,6 @@ struct AIAgentView: View {
         if !contextPrompt.isEmpty {
             userText = userText + "\n\n" + contextPrompt
             contextProviderService.clearAll()
-        }
-        
-        // If Compare Mode (2 Models Arena) is active, run both models in parallel
-        if isCompareMode {
-            runCompareArenaMessage(userText, attachments: currentAttachments)
-            return
         }
         
         // If AI is busy when the user hits Enter / Send, interrupt the current turn cleanly
@@ -4276,87 +4055,6 @@ struct AIAgentView: View {
             contextProviderService.clearAll()
         }
         agent.enqueueMessage(userText, attachments: currentAttachments)
-    }
-    
-    private func runCompareArenaMessage(_ userText: String, attachments currentAttachments: [AIAttachment] = []) {
-        let fullUserContent = userText + (currentAttachments.isEmpty ? "" : "\n[Attached: \(currentAttachments.map(\.name).joined(separator: ", "))]")
-        _ = agent.prepareUserTurn(fullUserContent, createStreamingPlaceholder: false)
-        
-        let responseId = UUID().uuidString
-        let primaryModel = appState.aiModel.isEmpty ? "gemini-3.8-flash" : appState.aiModel
-        let secondaryModel = (compareSecondaryModel == primaryModel) ? "claude-sonnet-5-5@default" : compareSecondaryModel
-        let providerString = appState.aiProvider
-        let primaryProvider = StreamableAIProvider(rawValue: providerString) ?? .gemini
-        let secondaryProvider = StreamableAIProvider.detect(from: secondaryModel)
-        let primaryKey = appState.resolveApiKey(for: providerString)
-        let secondaryKey = appState.resolveApiKey(for: secondaryProvider.rawValue)
-        
-        agent.messages.append(AgentMessageModel(
-            id: responseId, role: .assistant,
-            content: "### Compare Arena: `\(primaryModel)` vs `\(secondaryModel)`\n\nGenerating parallel responses...",
-            toolResults: [], pendingChanges: [], timestamp: Date()
-        ))
-        agent.isLoading = true
-        agent.saveChats()
-        
-        Task { @MainActor in
-            let sysPrompt = "You are MicroCode AI — a senior software engineering assistant. Respond clearly and concisely in the user's language."
-            let msgs: [[(String, Any)]] = [[("_role", "user"), ("text", userText)]]
-            
-            async let primaryTask: String = {
-                do {
-                    let res = try await AIClient.shared.sendSync(
-                        messages: msgs,
-                        systemPrompt: sysPrompt,
-                        provider: primaryProvider,
-                        model: primaryModel,
-                        apiKey: primaryKey,
-                        tools: nil
-                    )
-                    return res.text
-                } catch {
-                    return "Error: \(error.localizedDescription)"
-                }
-            }()
-            
-            async let secondaryTask: String = {
-                do {
-                    let res = try await AIClient.shared.sendSync(
-                        messages: msgs,
-                        systemPrompt: sysPrompt,
-                        provider: secondaryProvider,
-                        model: secondaryModel,
-                        apiKey: secondaryKey,
-                        tools: nil
-                    )
-                    return res.text
-                } catch {
-                    return "Error: \(error.localizedDescription)"
-                }
-            }()
-            
-            let (outA, outB) = await (primaryTask, secondaryTask)
-            let combined = """
-            ### Model A: `\(primaryModel)`
-            
-            \(outA.isEmpty ? "_(No output)_" : outA)
-            
-            ---
-            
-            ### Model B: `\(secondaryModel)`
-            
-            \(outB.isEmpty ? "_(No output)_" : outB)
-            """
-            
-            if let idx = self.agent.messages.firstIndex(where: { $0.id == responseId }) {
-                self.agent.messages[idx] = AgentMessageModel(
-                    id: responseId, role: .assistant, content: combined,
-                    toolResults: [], pendingChanges: [], timestamp: Date()
-                )
-            }
-            self.agent.isLoading = false
-            self.agent.saveChats()
-        }
     }
     
     private func runCEOSquadMessage(_ userText: String, attachments currentAttachments: [AIAttachment] = []) {
@@ -4440,6 +4138,10 @@ struct AIAgentView: View {
     }
     
     private func executeMessage(_ userText: String, attachments currentAttachments: [AIAttachment] = []) {
+        if !appState.isCurrentAIConnected {
+            showingAgentConnections = true
+            return
+        }
         
         // Editor state belongs only to the software session. Science uses its
         // own research root, selected artifacts and compact evidence index.
@@ -4960,16 +4662,7 @@ struct AIAgentView: View {
         UserDefaults.standard.set("acp", forKey: "aiKeyMode")
         activeACPAgent = config
         acpHost.activeAgentId = config.id
-        let engineId: String
-        switch config.type {
-        case .agy: engineId = "agy"
-        case .codexEngine: engineId = "codex"
-        case .claudeCode: engineId = "claude_code"
-        case .openCode: engineId = "opencode"
-        case .zedEngine: engineId = "zed"
-        case .aider: engineId = "aider"
-        case .custom: engineId = "custom"
-        }
+        let engineId = config.type.engineId
         appState.aiProvider = engineId
         let engineModels = LocalEcosystemDiscovery.shared.models(for: engineId)
         if !engineModels.contains(where: { $0.id == appState.aiModel }) {
@@ -4987,7 +4680,14 @@ struct AIAgentView: View {
         case "agy": type = .agy
         case "codex": type = .codexEngine
         case "claude_code": type = .claudeCode
+        case "gemini_cli": type = .geminiCLI
         case "opencode": type = .openCode
+        case "cursor": type = .cursorAgent
+        case "copilot": type = .githubCopilot
+        case "goose": type = .goose
+        case "cline": type = .cline
+        case "qwen": type = .qwenCode
+        case "aider": type = .aider
         case "zed": type = .zedEngine
         default: type = .agy
         }
@@ -5064,355 +4764,372 @@ struct AIAgentView: View {
     }
     
     private var modelSelector: some View {
-        Menu {
-            modelMenuContent
-        } label: {
-            Label(
-                "\(currentExecutionMode.badgeTitle) · \(headerModelDisplayName)",
-                systemImage: currentExecutionMode.icon
+        Button(action: {
+            if !appState.isCurrentAIConnected {
+                showingAgentConnections = true
+            } else {
+                presentNativeModelMenu()
+            }
+        }) {
+            HStack(spacing: 4) {
+                if !appState.isCurrentAIConnected {
+                    Image(systemName: "link")
+                        .font(.system(size: 9.5, weight: .medium))
+                        .foregroundColor(.secondary)
+                    Text("Connect AI")
+                        .font(.system(size: 10, weight: .medium))
+                        .foregroundColor(.primary)
+                        .lineLimit(1)
+                } else {
+                    AIProviderBrandIcon(provider: activeBrandIconKey, size: 12)
+                    Text("\(currentExecutionMode.badgeTitle) · \(headerModelDisplayName)")
+                        .font(.system(size: 10, weight: .medium))
+                        .lineLimit(1)
+                        .truncationMode(.tail)
+                }
+                Image(systemName: "chevron.down")
+                    .font(.system(size: 7.5, weight: .semibold))
+                    .foregroundColor(.secondary)
+            }
+            .frame(maxWidth: 195)
+            .padding(.horizontal, 6)
+            .padding(.vertical, 3)
+            .background(Color.primary.opacity(0.06))
+            .cornerRadius(4)
+            .overlay(
+                RoundedRectangle(cornerRadius: 4)
+                    .stroke(Color.white.opacity(0.1), lineWidth: 0.5)
             )
-            .font(.system(size: 10, weight: .medium))
-            .lineLimit(1)
-            .truncationMode(.tail)
+            .contentShape(Rectangle())
         }
-        .menuStyle(.borderlessButton)
-        .frame(maxWidth: 195)
-        .padding(.horizontal, 6)
-        .padding(.vertical, 3)
-        .background(Color.primary.opacity(0.06))
-        .cornerRadius(4)
-        .overlay(
-            RoundedRectangle(cornerRadius: 4)
-                .stroke(Color.white.opacity(0.1), lineWidth: 0.5)
-        )
+        .buttonStyle(.plain)
         .help("Select Mode & AI Model (ACP, Dotmini Cloud, BYOK, Subscription)")
     }
     
     @ViewBuilder
     private func providerIcon(for provider: String) -> some View {
-        switch provider {
-        case "gemini":      Image(systemName: "sparkles").foregroundColor(.purple)
-        case "agy":         Image(systemName: "sparkles").foregroundColor(.purple)
-        case "openai":      Image(systemName: "brain.head.profile").foregroundColor(.green)
-        case "codex":       Image(systemName: "terminal.fill").foregroundColor(.green)
-        case "anthropic":   Image(systemName: "bubble.left.and.text.bubble.right").foregroundColor(.orange)
-        case "claude_code": Image(systemName: "command.square.fill").foregroundColor(.orange)
-        case "opencode":    Image(systemName: "laptopcomputer").foregroundColor(Color(red: 0.88, green: 0.35, blue: 0.28))
-        case "deepseek":    Image(systemName: "water.waves").foregroundColor(.blue)
-        case "zed":         Image(systemName: "chevron.left.forwardslash.chevron.right").foregroundColor(.blue)
-        case "grok":        Image(systemName: "bolt.fill").foregroundColor(.red)
-        case "local":       Image(systemName: "desktopcomputer").foregroundColor(.mint)
-        default:            Image(systemName: "cpu").foregroundColor(.accentColor)
-        }
+        AIProviderBrandIcon(provider: provider, size: 14)
     }
     
     private func hasActiveKey(_ provider: String) -> Bool {
         if provider == "local" {
             return LocalLLMService.shared.activeServer?.isOnline == true
         }
+        if provider == "9router" {
+            return LocalLLMService.shared.detectedServers.contains(where: { $0.type == .nineRouter && $0.isOnline })
+                || ACPHostService.resolveExecutablePath("9router") != nil
+                || !appState.resolveApiKey(for: "9router").isEmpty
+        }
         return !appState.resolveApiKey(for: provider).isEmpty
     }
     
-    @ViewBuilder
-    private var modelMenuContent: some View {
-        // MARK: - 1. ✨ Subscription (OAuth Accounts)
-        Menu {
-            let providersToShow: [SubscriptionProviderType] = {
-                let connected = SubscriptionAuthManager.shared.connectedProviders()
-                return connected.isEmpty ? SubscriptionProviderType.allCases : connected
-            }()
-            
-            ForEach(providersToShow, id: \.rawValue) { (prov: SubscriptionProviderType) in
-                subscriptionProviderSubmenu(prov: prov)
-            }
-            
-            Divider()
-            Button(action: { appState.showingSettingsDialog = true }) {
-                Label("Manage Subscriptions in Settings...", systemImage: "gearshape")
-            }
-        } label: {
-            HStack {
-                Label("Subscription (ChatGPT, Claude, Gemini)", systemImage: "sparkles")
-                if currentExecutionMode == .subscription {
-                    Spacer()
-                    Image(systemName: "checkmark")
-                }
-            }
+    // MARK: - On-Demand Native NSMenu Model Picker (Zero Idle AttributeGraph / PropertyList Overhead)
+    
+    private func makeActionMenuItem(
+        _ title: String,
+        brandKey: String? = nil,
+        systemImage: String? = nil,
+        checked: Bool = false,
+        enabled: Bool = true,
+        action: (() -> Void)? = nil
+    ) -> NSMenuItem {
+        let item = NSMenuItem(
+            title: title,
+            action: action != nil ? #selector(ClosureMenuActionHandler.performMenuAction(_:)) : nil,
+            keyEquivalent: ""
+        )
+        if let action {
+            item.target = ClosureMenuActionHandler.shared
+            item.representedObject = action
         }
-        
-        // MARK: - 2. 🔑 BYOK (Bring Your Own Key)
-        Menu {
-            let byokProviders = AIModelCatalog.shared.providers.filter { !["omni", "agy", "codex", "claude_code", "zed", "local"].contains($0.id) }
-            ForEach(byokProviders, id: \.id) { (prov: AIProviderDefinition) in
-                byokProviderSubmenu(prov: prov)
-            }
-            Divider()
-            Button(action: {
-                Task {
-                    await AIModelCatalog.shared.refreshLiveProviderModels()
-                }
-            }) {
-                Label("Fetch All Provider Models", systemImage: "arrow.clockwise")
-            }
-        } label: {
-            HStack {
-                Label("BYOK (Direct API Key)", systemImage: "key.fill")
-                if currentExecutionMode == .byok {
-                    Spacer()
-                    Image(systemName: "checkmark")
-                }
-            }
+        item.isEnabled = enabled
+        item.state = checked ? .on : .off
+        if let brandKey {
+            item.image = AIProviderBrandIcon.menuImage(for: brandKey, size: 15)
+        } else if let systemImage, let img = NSImage(systemSymbolName: systemImage, accessibilityDescription: nil) {
+            item.image = img
         }
+        return item
+    }
+    
+    private func makeSubmenuItem(
+        _ title: String,
+        brandKey: String? = nil,
+        systemImage: String? = nil,
+        checked: Bool = false,
+        submenu: NSMenu
+    ) -> NSMenuItem {
+        let item = NSMenuItem(title: title, action: nil, keyEquivalent: "")
+        item.submenu = submenu
+        item.state = checked ? .on : .off
+        if let brandKey {
+            item.image = AIProviderBrandIcon.menuImage(for: brandKey, size: 15)
+        } else if let systemImage, let img = NSImage(systemSymbolName: systemImage, accessibilityDescription: nil) {
+            item.image = img
+        }
+        return item
+    }
+    
+    private func makeSubscriptionModelMenuItem(_ subModel: SubscriptionModelInfo) -> NSMenuItem {
+        let title = subModel.badge.isEmpty ? subModel.name : "\(subModel.name) [\(subModel.badge)]"
+        let isChecked = (currentExecutionMode == .subscription && appState.aiModel == subModel.modelID)
+        return makeActionMenuItem(title, brandKey: subModel.provider.rawValue, checked: isChecked) {
+            switchToNativeMode(mode: "subscription")
+            appState.aiProvider = subModel.aiProviderID
+            appState.aiModel = subModel.modelID
+            SubscriptionAuthManager.shared.activeProvider = subModel.provider
+            UserDefaults.standard.set(subModel.provider.rawValue, forKey: "subscriptionActiveProvider")
+            UserDefaults.standard.set("subscription", forKey: "aiKeyMode")
+            appState.saveSettings()
+        }
+    }
+    
+    private func presentNativeModelMenu() {
+        let rootMenu = NSMenu(title: "Select AI Model")
+        rootMenu.autoenablesItems = false
         
-        // MARK: - 3. 💻 Local LLM (Ollama, LM Studio, MLX)
-        Menu {
-            let servers = LocalLLMService.shared.detectedServers
-            let onlineServers = servers.filter { $0.isOnline }
-            
-            if onlineServers.isEmpty {
-                Text("No Running Local LLM Server Found")
-                Text("Checked ports 11434 (Ollama), 1234 (LM Studio), 8080 (MLX)")
-                    .font(.caption)
-                Divider()
-                Button(action: {
-                    Task {
-                        await LocalLLMService.shared.scanForServers()
-                        AIModelCatalog.shared.integrateLocalModels()
-                    }
-                }) {
-                    Label("Scan for Local Engines (Ollama, LM Studio)", systemImage: "arrow.clockwise")
-                }
-                Button(action: { appState.showingSettingsDialog = true }) {
-                    Label("Configure Local LLM in Settings...", systemImage: "gearshape")
-                }
+        // 1. Subscription (OAuth Accounts)
+        let subMenu = NSMenu(title: "Subscription")
+        subMenu.autoenablesItems = false
+        let connected = SubscriptionAuthManager.shared.connectedProviders()
+        let providersToShow = connected.isEmpty ? SubscriptionProviderType.allCases : connected
+        for prov in providersToShow {
+            let isConnected = SubscriptionAuthManager.shared.isConnected(prov)
+            let provMenu = NSMenu(title: prov.displayName)
+            provMenu.autoenablesItems = false
+            if prov == .aipass {
+                let groups = Self.groupedAiPassModels(from: prov.modelInfos)
+                let chatSub = NSMenu(title: "Chat")
+                groups.chat.forEach { chatSub.addItem(makeSubscriptionModelMenuItem($0)) }
+                provMenu.addItem(makeSubmenuItem("Chat, Coding & Reasoning (\(groups.chat.count))", brandKey: "aipass", submenu: chatSub))
+                
+                let imgSub = NSMenu(title: "Image")
+                groups.image.forEach { imgSub.addItem(makeSubscriptionModelMenuItem($0)) }
+                provMenu.addItem(makeSubmenuItem("Image Generation (\(groups.image.count))", brandKey: "aipass", submenu: imgSub))
+                
+                let vidSub = NSMenu(title: "Video")
+                groups.video.forEach { vidSub.addItem(makeSubscriptionModelMenuItem($0)) }
+                provMenu.addItem(makeSubmenuItem("Video Generation (\(groups.video.count))", brandKey: "aipass", submenu: vidSub))
+                
+                let musSub = NSMenu(title: "Music")
+                groups.music.forEach { musSub.addItem(makeSubscriptionModelMenuItem($0)) }
+                provMenu.addItem(makeSubmenuItem("Audio & Music Generation (\(groups.music.count))", brandKey: "aipass", submenu: musSub))
             } else {
-                ForEach(onlineServers) { srv in
-                    Menu("\(srv.displayName) (\(srv.models.count) models)") {
-                        if srv.models.isEmpty {
-                            Text("No models loaded on this server")
-                        } else {
-                            ForEach(srv.models) { m in
-                                Button(action: {
-                                    switchToNativeMode(mode: "local")
-                                    appState.aiProvider = "local"
-                                    appState.aiModel = m.id
-                                    LocalLLMService.shared.selectedModelId = m.id
-                                    LocalLLMService.cachedEndpoint = srv.endpoint
-                                    LocalLLMService.cachedModel = m.id
-                                    appState.saveSettings()
-                                }) {
-                                    HStack {
-                                        Text(m.displayName)
-                                        if let size = m.size, !size.isEmpty {
-                                            Text("• \(size)")
-                                                .foregroundColor(.secondary)
-                                        }
-                                        if currentExecutionMode == .local && appState.aiModel == m.id {
-                                            Image(systemName: "checkmark")
-                                        }
-                                    }
-                                }
-                            }
-                        }
-                    }
-                }
-                Divider()
-                Button(action: {
-                    Task {
-                        await LocalLLMService.shared.scanForServers()
-                        AIModelCatalog.shared.integrateLocalModels()
-                    }
-                }) {
-                    Label("Rescan Local Engines", systemImage: "arrow.clockwise")
-                }
-                Button(action: { appState.showingSettingsDialog = true }) {
-                    Label("Local LLM Settings...", systemImage: "gearshape")
+                for subModel in prov.modelInfos.prefix(32) {
+                    provMenu.addItem(makeSubscriptionModelMenuItem(subModel))
                 }
             }
-        } label: {
-            HStack {
-                Label("Local LLM (Ollama, LM Studio, MLX)", systemImage: "desktopcomputer")
-                if currentExecutionMode == .local {
-                    Spacer()
-                    Image(systemName: "checkmark")
+            provMenu.addItem(.separator())
+            provMenu.addItem(makeActionMenuItem("Enter Custom Model ID...") {
+                promptCustomModel(provider: prov.rawValue, isSubscription: true)
+            })
+            if isConnected {
+                provMenu.addItem(makeActionMenuItem("Fetch Live Models Now") {
+                    Task { await SubscriptionAuthManager.shared.fetchLiveModels(for: prov) }
+                })
+            } else {
+                provMenu.addItem(.separator())
+                provMenu.addItem(makeActionMenuItem("Connect \(prov.displayName) in Settings...") {
+                    appState.showingSettingsDialog = true
+                })
+            }
+            subMenu.addItem(makeSubmenuItem("\(prov.displayName)\(isConnected ? " (Active)" : "")", brandKey: prov.rawValue, submenu: provMenu))
+        }
+        subMenu.addItem(.separator())
+        subMenu.addItem(makeActionMenuItem("Manage Subscriptions in Settings...", systemImage: "gearshape") {
+            appState.showingSettingsDialog = true
+        })
+        rootMenu.addItem(makeSubmenuItem(
+            "Subscription (ChatGPT, Claude, Gemini)",
+            brandKey: connected.first?.rawValue ?? "claude",
+            checked: currentExecutionMode == .subscription,
+            submenu: subMenu
+        ))
+        
+        // 2. BYOK & Smart Routers (9Router, OpenRouter, Direct API Key)
+        let byokMenu = NSMenu(title: "BYOK")
+        byokMenu.autoenablesItems = false
+        let acpSet: Set<String> = ["omni", "agy", "codex", "claude_code", "opencode", "zed", "gemini_cli", "cursor", "goose", "cline", "aider", "local"]
+        let byokProviders = AIModelCatalog.shared.providers.filter { !acpSet.contains($0.id) }
+        for prov in byokProviders {
+            let hasKey = hasActiveKey(prov.id)
+            let provMenu = NSMenu(title: prov.name)
+            provMenu.autoenablesItems = false
+            let displayedModels = Array(prov.models.prefix(24))
+            for m in displayedModels {
+                let label = m.badge.isEmpty ? m.name : "\(m.name) (\(m.badge))"
+                let isChecked = (currentExecutionMode == .byok && appState.aiProvider == prov.id && appState.aiModel == m.id)
+                provMenu.addItem(makeActionMenuItem(label, brandKey: prov.id, checked: isChecked) {
+                    switchToNativeMode(mode: "direct")
+                    setModel(prov.id, m.id)
+                })
+            }
+            if prov.models.count > displayedModels.count {
+                provMenu.addItem(makeActionMenuItem("Browse All \(prov.models.count) Models in Settings...") {
+                    appState.showingSettingsDialog = true
+                })
+            }
+            provMenu.addItem(.separator())
+            provMenu.addItem(makeActionMenuItem("Enter Custom Model ID...") {
+                promptCustomModel(provider: prov.id, isSubscription: false)
+            })
+            if hasKey || prov.id == "9router" {
+                provMenu.addItem(makeActionMenuItem("Fetch Live Models Now") {
+                    Task { await AIModelCatalog.shared.fetchLiveModelsForProvider(prov.id) }
+                })
+            } else {
+                provMenu.addItem(.separator())
+                provMenu.addItem(makeActionMenuItem("Set \(prov.name) API Key in Settings...") {
+                    appState.showingSettingsDialog = true
+                })
+            }
+            let statusSuffix = prov.id == "9router" ? (hasKey ? " (Ready)" : " (localhost:20128)") : (hasKey ? "" : " (No Key)")
+            byokMenu.addItem(makeSubmenuItem("\(prov.name)\(statusSuffix)", brandKey: prov.id, submenu: provMenu))
+        }
+        byokMenu.addItem(.separator())
+        byokMenu.addItem(makeActionMenuItem("Fetch All Provider Models", systemImage: "arrow.clockwise") {
+            Task { await AIModelCatalog.shared.refreshLiveProviderModels() }
+        })
+        rootMenu.addItem(makeSubmenuItem(
+            "BYOK & Smart Routers (9Router, OpenRouter, Direct API)",
+            brandKey: currentExecutionMode == .byok ? appState.aiProvider : "9router",
+            checked: currentExecutionMode == .byok,
+            submenu: byokMenu
+        ))
+        
+        // 3. Local LLM (9Router, LiteLLM, Ollama, LM Studio, MLX)
+        let localMenu = NSMenu(title: "Local LLM")
+        localMenu.autoenablesItems = false
+        let onlineServers = LocalLLMService.shared.detectedServers.filter { $0.isOnline }
+        if onlineServers.isEmpty {
+            localMenu.addItem(makeActionMenuItem("No Running Local LLM Server Found", enabled: false))
+            localMenu.addItem(.separator())
+            localMenu.addItem(makeActionMenuItem("Scan for Local Engines (9Router, Ollama, LM Studio)", systemImage: "arrow.clockwise") {
+                Task {
+                    await LocalLLMService.shared.scanForServers()
+                    AIModelCatalog.shared.integrateLocalModels()
                 }
+            })
+            localMenu.addItem(makeActionMenuItem("Configure Local LLM in Settings...", systemImage: "gearshape") {
+                appState.showingSettingsDialog = true
+            })
+        } else {
+            for srv in onlineServers {
+                let srvMenu = NSMenu(title: srv.displayName)
+                srvMenu.autoenablesItems = false
+                if srv.models.isEmpty {
+                    srvMenu.addItem(makeActionMenuItem("No models loaded on this server", enabled: false))
+                } else {
+                    for m in srv.models {
+                        let title = (m.size?.isEmpty == false) ? "\(m.displayName) • \(m.size!)" : m.displayName
+                        let isChecked = (currentExecutionMode == .local && appState.aiModel == m.id)
+                        srvMenu.addItem(makeActionMenuItem(title, brandKey: srv.type.brandKey, checked: isChecked) {
+                            switchToNativeMode(mode: "local")
+                            appState.aiProvider = "local"
+                            appState.aiModel = m.id
+                            LocalLLMService.shared.selectedModelId = m.id
+                            LocalLLMService.cachedEndpoint = srv.endpoint
+                            LocalLLMService.cachedModel = m.id
+                            appState.saveSettings()
+                        })
+                    }
+                }
+                localMenu.addItem(makeSubmenuItem("\(srv.displayName) (\(srv.models.count) models)", brandKey: srv.type.brandKey, submenu: srvMenu))
+            }
+            localMenu.addItem(.separator())
+            localMenu.addItem(makeActionMenuItem("Rescan Local Engines", systemImage: "arrow.clockwise") {
+                Task {
+                    await LocalLLMService.shared.scanForServers()
+                    AIModelCatalog.shared.integrateLocalModels()
+                }
+            })
+            localMenu.addItem(makeActionMenuItem("Local LLM Settings...", systemImage: "gearshape") {
+                appState.showingSettingsDialog = true
+            })
+        }
+        rootMenu.addItem(makeSubmenuItem(
+            "Local LLM (Ollama, LM Studio, MLX)",
+            brandKey: "local",
+            checked: currentExecutionMode == .local,
+            submenu: localMenu
+        ))
+        
+        // 4. ACP (Major CLI Harnesses)
+        let acpMenu = NSMenu(title: "ACP")
+        acpMenu.autoenablesItems = false
+        for engine in LocalEcosystemDiscovery.shared.engines {
+            let engMenu = NSMenu(title: engine.name)
+            engMenu.autoenablesItems = false
+            if engine.models.isEmpty {
+                engMenu.addItem(makeActionMenuItem("Connect \(engine.name) in Agent Connections...", brandKey: engine.id) {
+                    showingAgentConnections = true
+                })
+            } else {
+                for m in engine.models {
+                    let title = m.badge.isEmpty ? m.name : "\(m.name) (\(m.badge))"
+                    let isChecked = (currentExecutionMode == .acp && appState.aiProvider == engine.id && appState.aiModel == m.id)
+                    engMenu.addItem(makeActionMenuItem(title, brandKey: engine.id, checked: isChecked) {
+                        switchToEngine(engine.id, modelId: m.id)
+                    })
+                }
+            }
+            acpMenu.addItem(makeSubmenuItem(engine.name + (engine.isInstalled ? "" : " (Not Installed)"), brandKey: engine.id, submenu: engMenu))
+        }
+        rootMenu.addItem(makeSubmenuItem(
+            "ACP Harnesses (Claude Code, AGY, Codex, Gemini CLI, Goose, Cursor...)",
+            brandKey: currentExecutionMode == .acp ? activeBrandIconKey : "agy",
+            checked: currentExecutionMode == .acp,
+            submenu: acpMenu
+        ))
+        
+        // 5. Dotmini Cloud (Sovereign AI)
+        let cloudMenu = NSMenu(title: "Dotmini Cloud")
+        cloudMenu.autoenablesItems = false
+        if let omni = AIModelCatalog.shared.provider("omni") {
+            let groups = Self.groupedOmniModels(from: omni.models)
+            let sections: [(String, String, [AIModelDefinition])] = [
+                ("Flagship & Deep Reasoning", "microcode", groups.reasoning),
+                ("Google Gemini", "gemini", groups.gemini),
+                ("Anthropic Claude", "claude", groups.claude),
+                ("OpenAI", "openai", groups.openAI),
+                ("DeepSeek", "deepseek", groups.deepseek),
+                ("Thai AI & Open Source", "typhoon", groups.openSource)
+            ]
+            for (title, secBrand, list) in sections where !list.isEmpty {
+                let secMenu = NSMenu(title: title)
+                secMenu.autoenablesItems = false
+                for m in list {
+                    let isChecked = (currentExecutionMode == .cloud && appState.aiModel == m.id)
+                    secMenu.addItem(makeActionMenuItem(m.name, brandKey: secBrand, checked: isChecked) {
+                        switchToNativeMode(mode: "cloud")
+                        setModel("omni", m.id)
+                    })
+                }
+                cloudMenu.addItem(makeSubmenuItem(title, brandKey: secBrand, submenu: secMenu))
             }
         }
+        rootMenu.addItem(makeSubmenuItem(
+            "Dotmini Cloud (Sovereign AI)",
+            brandKey: "microcode",
+            checked: currentExecutionMode == .cloud,
+            submenu: cloudMenu
+        ))
         
-        // MARK: - 4. 🔌 ACP (Local CLI Agent)
-        Menu {
-            ForEach(LocalEcosystemDiscovery.shared.engines) { engine in
-                Menu(engine.name + (engine.isInstalled ? "" : " (Not Installed)")) {
-                    ForEach(engine.models) { m in
-                        Button(action: {
-                            switchToEngine(engine.id, modelId: m.id)
-                        }) {
-                            HStack {
-                                Text(m.name)
-                                if !m.badge.isEmpty { Text("(\(m.badge))") }
-                                if currentExecutionMode == .acp && appState.aiProvider == engine.id && appState.aiModel == m.id {
-                                    Image(systemName: "checkmark")
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-        } label: {
-            HStack {
-                Label("ACP (Local CLI Agents)", systemImage: "terminal.fill")
-                if currentExecutionMode == .acp {
-                    Spacer()
-                    Image(systemName: "checkmark")
-                }
-            }
-        }
-        
-        // MARK: - 5. ☁️ Dotmini Cloud (Sovereign AI)
-        Menu {
-            if let omni = AIModelCatalog.shared.provider("omni") {
-                let groups = Self.groupedOmniModels(from: omni.models)
-                
-                if !groups.reasoning.isEmpty {
-                    Menu("🌟 Flagship & Deep Reasoning") {
-                        ForEach(groups.reasoning) { m in
-                            Button(action: {
-                                switchToNativeMode(mode: "cloud")
-                                setModel("omni", m.id)
-                            }) {
-                                HStack {
-                                    Text(m.name)
-                                    if currentExecutionMode == .cloud && appState.aiModel == m.id {
-                                        Image(systemName: "checkmark")
-                                    }
-                                }
-                            }
-                        }
-                    }
-                }
-                
-                if !groups.gemini.isEmpty {
-                    Menu("Google Gemini") {
-                        ForEach(groups.gemini) { m in
-                            Button(action: {
-                                switchToNativeMode(mode: "cloud")
-                                setModel("omni", m.id)
-                            }) {
-                                HStack {
-                                    Text(m.name)
-                                    if currentExecutionMode == .cloud && appState.aiModel == m.id {
-                                        Image(systemName: "checkmark")
-                                    }
-                                }
-                            }
-                        }
-                    }
-                }
-                
-                if !groups.claude.isEmpty {
-                    Menu("Anthropic Claude") {
-                        ForEach(groups.claude) { m in
-                            Button(action: {
-                                switchToNativeMode(mode: "cloud")
-                                setModel("omni", m.id)
-                            }) {
-                                HStack {
-                                    Text(m.name)
-                                    if currentExecutionMode == .cloud && appState.aiModel == m.id {
-                                        Image(systemName: "checkmark")
-                                    }
-                                }
-                            }
-                        }
-                    }
-                }
-                
-                if !groups.openAI.isEmpty {
-                    Menu("OpenAI") {
-                        ForEach(groups.openAI) { m in
-                            Button(action: {
-                                switchToNativeMode(mode: "cloud")
-                                setModel("omni", m.id)
-                            }) {
-                                HStack {
-                                    Text(m.name)
-                                    if currentExecutionMode == .cloud && appState.aiModel == m.id {
-                                        Image(systemName: "checkmark")
-                                    }
-                                }
-                            }
-                        }
-                    }
-                }
-                
-                if !groups.deepseek.isEmpty {
-                    Menu("DeepSeek") {
-                        ForEach(groups.deepseek) { m in
-                            Button(action: {
-                                switchToNativeMode(mode: "cloud")
-                                setModel("omni", m.id)
-                            }) {
-                                HStack {
-                                    Text(m.name)
-                                    if currentExecutionMode == .cloud && appState.aiModel == m.id {
-                                        Image(systemName: "checkmark")
-                                    }
-                                }
-                            }
-                        }
-                    }
-                }
-                
-                if !groups.openSource.isEmpty {
-                    Menu("Thai AI & Open Source") {
-                        ForEach(groups.openSource) { m in
-                            Button(action: {
-                                switchToNativeMode(mode: "cloud")
-                                setModel("omni", m.id)
-                            }) {
-                                HStack {
-                                    Text(m.name)
-                                    if currentExecutionMode == .cloud && appState.aiModel == m.id {
-                                        Image(systemName: "checkmark")
-                                    }
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-        } label: {
-            HStack {
-                Label("Dotmini Cloud (Sovereign AI)", systemImage: "cloud.fill")
-                if currentExecutionMode == .cloud {
-                    Spacer()
-                    Image(systemName: "checkmark")
-                }
-            }
-        }
-        
-        Divider()
-        
-        Button {
+        rootMenu.addItem(.separator())
+        rootMenu.addItem(makeActionMenuItem("Manage Agent Connections & Setup…", systemImage: "slider.horizontal.2.square") {
             showingAgentConnections = true
-        } label: {
-            Label("Manage Agent Connections & Setup…", systemImage: "slider.horizontal.2.square")
-        }
-        
-        Button(action: {
+        })
+        rootMenu.addItem(makeActionMenuItem("Rescan Local Engines & Cloud APIs", systemImage: "arrow.triangle.2.circlepath") {
             Task {
                 await AIModelCatalog.shared.refreshLiveProviderModels()
                 await LocalEcosystemDiscovery.shared.refresh()
             }
-        }) {
-            Label("Rescan Local Engines & Cloud APIs", systemImage: "arrow.triangle.2.circlepath")
-        }
-        
-        Button(action: {
+        })
+        rootMenu.addItem(makeActionMenuItem("AI Settings...", systemImage: "gearshape") {
             appState.showingSettingsDialog = true
-        }) {
-            Label("AI Settings...", systemImage: "gearshape")
-        }
+        })
+        
+        rootMenu.popUp(positioning: nil, at: NSEvent.mouseLocation, in: nil)
     }
     
     private func setModel(_ provider: String, _ model: String) {
@@ -5528,122 +5245,6 @@ struct AIAgentView: View {
         )
         cachedAiPassGroups = built
         return built
-    }
-
-    @ViewBuilder
-    private func subscriptionProviderSubmenu(prov: SubscriptionProviderType) -> some View {
-        let isConnected = SubscriptionAuthManager.shared.isConnected(prov)
-        Menu("\(prov.displayName)\(isConnected ? " (Active)" : "")") {
-            if prov == .aipass {
-                let groups = Self.groupedAiPassModels(from: prov.modelInfos)
-                
-                Menu("Chat, Coding & Reasoning (\(groups.chat.count))") {
-                    ForEach(groups.chat) { subModel in
-                        subscriptionModelButton(subModel)
-                    }
-                }
-                Menu("Image Generation (\(groups.image.count))") {
-                    ForEach(groups.image) { subModel in
-                        subscriptionModelButton(subModel)
-                    }
-                }
-                Menu("Video Generation (\(groups.video.count))") {
-                    ForEach(groups.video) { subModel in
-                        subscriptionModelButton(subModel)
-                    }
-                }
-                Menu("Audio & Music Generation (\(groups.music.count))") {
-                    ForEach(groups.music) { subModel in
-                        subscriptionModelButton(subModel)
-                    }
-                }
-            } else {
-                ForEach(prov.modelInfos.prefix(32)) { subModel in
-                    subscriptionModelButton(subModel)
-                }
-            }
-            Divider()
-            Button("Enter Custom Model ID...") {
-                promptCustomModel(provider: prov.rawValue, isSubscription: true)
-            }
-            if isConnected {
-                Button("Fetch Live Models Now") {
-                    Task {
-                        await SubscriptionAuthManager.shared.fetchLiveModels(for: prov)
-                    }
-                }
-            }
-            if !isConnected {
-                Divider()
-                Button("Connect \(prov.displayName) in Settings...") {
-                    appState.showingSettingsDialog = true
-                }
-            }
-        }
-    }
-    
-    @ViewBuilder
-    private func subscriptionModelButton(_ subModel: SubscriptionModelInfo) -> some View {
-        Button(action: {
-            switchToNativeMode(mode: "subscription")
-            appState.aiProvider = subModel.aiProviderID
-            appState.aiModel = subModel.modelID
-            SubscriptionAuthManager.shared.activeProvider = subModel.provider
-            UserDefaults.standard.set(subModel.provider.rawValue, forKey: "subscriptionActiveProvider")
-            UserDefaults.standard.set("subscription", forKey: "aiKeyMode")
-            appState.saveSettings()
-        }) {
-            HStack {
-                Text(subModel.badge.isEmpty ? subModel.name : "\(subModel.name) [\(subModel.badge)]")
-                if currentExecutionMode == .subscription && appState.aiModel == subModel.modelID {
-                    Image(systemName: "checkmark")
-                }
-            }
-        }
-    }
-
-    @ViewBuilder
-    private func byokProviderSubmenu(prov: AIProviderDefinition) -> some View {
-        let hasKey = hasActiveKey(prov.id)
-        let displayedModels = Array(prov.models.prefix(24))
-        Menu("\(prov.name)\(hasKey ? "" : " (No Key)")") {
-            ForEach(displayedModels) { m in
-                Button(action: {
-                    switchToNativeMode(mode: "direct")
-                    setModel(prov.id, m.id)
-                }) {
-                    HStack {
-                        Text(m.name)
-                        if !m.badge.isEmpty { Text("(\(m.badge))") }
-                        if currentExecutionMode == .byok && appState.aiProvider == prov.id && appState.aiModel == m.id {
-                            Image(systemName: "checkmark")
-                        }
-                    }
-                }
-            }
-            if prov.models.count > displayedModels.count {
-                Button("Browse All \(prov.models.count) Models in Settings...") {
-                    appState.showingSettingsDialog = true
-                }
-            }
-            Divider()
-            Button("Enter Custom Model ID...") {
-                promptCustomModel(provider: prov.id, isSubscription: false)
-            }
-            if hasKey {
-                Button("Fetch Live Models Now") {
-                    Task {
-                        await AIModelCatalog.shared.fetchLiveModelsForProvider(prov.id)
-                    }
-                }
-            }
-            if !hasKey {
-                Divider()
-                Button("Set \(prov.name) API Key in Settings...") {
-                    appState.showingSettingsDialog = true
-                }
-            }
-        }
     }
     
     private func shortModelName(_ model: String) -> String {
@@ -6809,25 +6410,11 @@ struct MessageContentParser {
 
 // MARK: - Chat Stage
 
-private struct ChatScrollBottomVisibleKey: PreferenceKey {
-    static var defaultValue: Int = 0
-    static func reduce(value: inout Int, nextValue: () -> Int) {
-        value = nextValue()
-    }
-}
-
-private struct ChatScrollViewHeightKey: PreferenceKey {
-    static var defaultValue: CGFloat = 0
-    static func reduce(value: inout CGFloat, nextValue: () -> CGFloat) {
-        value = nextValue()
-    }
-}
-
 /// Non-reactive reference box so high-frequency 120Hz NSEvent.scrollWheel ticks
 /// never trigger SwiftUI @State body re-evaluations on AgentChatStage.
 private final class ChatScrollInteractionTracker {
     var lastUserScrollUpTime: Date = .distantPast
-    var viewportHeight: CGFloat = 0
+    var lastAutoScrollTime: Date = .distantPast
     var monitor: Any? = nil
 }
 
@@ -6837,6 +6424,9 @@ struct AgentChatStage: View, Equatable {
     let isLoading: Bool
     var domain: AgentDomain = .software
     var currentToolExecution: String? = nil
+    var hasEarlierMessages: Bool = false
+    var queuedMessages: [QueuedMessage] = []
+    var activeChatId: String? = nil
     var onApplyChange: ((PendingChangeModel) -> Void)? = nil
     var onRejectChange: ((PendingChangeModel) -> Void)? = nil
     var onSuggestionTap: ((String) -> Void)? = nil
@@ -6847,7 +6437,6 @@ struct AgentChatStage: View, Equatable {
     var onDeleteMessage: ((String, Bool) -> Void)? = nil
     
     @ObservedObject private var planManager = ImplementationPlanManager.shared
-    @ObservedObject private var agentService = AgentService.shared
     @State private var userScrolledUp: Bool = false
     @State private var scrollTracker = ChatScrollInteractionTracker()
     
@@ -6855,6 +6444,9 @@ struct AgentChatStage: View, Equatable {
         lhs.isLoading == rhs.isLoading &&
         lhs.domain == rhs.domain &&
         lhs.currentToolExecution == rhs.currentToolExecution &&
+        lhs.hasEarlierMessages == rhs.hasEarlierMessages &&
+        lhs.queuedMessages.count == rhs.queuedMessages.count &&
+        lhs.activeChatId == rhs.activeChatId &&
         lhs.messages.count == rhs.messages.count &&
         lhs.messages.first?.id == rhs.messages.first?.id &&
         lhs.messages.last?.id == rhs.messages.last?.id &&
@@ -6868,7 +6460,7 @@ struct AgentChatStage: View, Equatable {
             ZStack(alignment: .bottom) {
                 ScrollView {
                     VStack(spacing: 0) {
-                        if messages.isEmpty && !isLoading && agentService.messageQueue.isEmpty {
+                        if messages.isEmpty && !isLoading && queuedMessages.isEmpty {
                             VStack(spacing: 20) {
                                 Spacer().frame(height: 40)
                                 
@@ -6917,9 +6509,6 @@ struct AgentChatStage: View, Equatable {
                                         .buttonStyle(.plain)
                                     }
                                 }
-                                // Keep the first-turn actions in the same compact
-                                // reading column as a real conversation instead of
-                                // stretching controls from edge to edge.
                                 .frame(maxWidth: 720)
                                 .frame(maxWidth: .infinity)
                                 .padding(.horizontal, 24)
@@ -6928,7 +6517,7 @@ struct AgentChatStage: View, Equatable {
                                 Spacer()
                             }
                         } else {
-                            if AgentService.shared.hasEarlierMessages {
+                            if hasEarlierMessages {
                                 Button("Load earlier messages") {
                                     AgentService.shared.loadEarlierMessages()
                                 }
@@ -6959,7 +6548,7 @@ struct AgentChatStage: View, Equatable {
                                     HStack(spacing: 10) {
                                         ProgressView()
                                             .controlSize(.small)
-                                        Text(currentToolExecution ?? agentService.currentToolExecution ?? "Agent is executing task...")
+                                        Text(currentToolExecution ?? "Agent is executing task...")
                                             .font(.system(size: 12, weight: .medium, design: .monospaced))
                                             .foregroundColor(.secondary)
                                         Spacer()
@@ -6975,7 +6564,7 @@ struct AgentChatStage: View, Equatable {
                             }
                             
                             // Render any queued user messages directly in the chat stream so they never appear to vanish
-                            ForEach(agentService.messageQueue) { queued in
+                            ForEach(queuedMessages) { queued in
                                 HStack(spacing: 0) {
                                     Spacer(minLength: 0)
                                     VStack(alignment: .trailing, spacing: 4) {
@@ -7005,7 +6594,7 @@ struct AgentChatStage: View, Equatable {
                                             .foregroundColor(.orange)
                                             
                                             Button(action: {
-                                                agentService.stopGeneration(autoProcessQueue: true)
+                                                AgentService.shared.stopGeneration(autoProcessQueue: true)
                                             }) {
                                                 Text("ส่งทันที (Send Now)")
                                                     .font(.system(size: 10, weight: .semibold))
@@ -7018,7 +6607,7 @@ struct AgentChatStage: View, Equatable {
                                             .buttonStyle(.plain)
                                             
                                             Button(action: {
-                                                agentService.cancelQueuedMessage(id: queued.id)
+                                                AgentService.shared.cancelQueuedMessage(id: queued.id)
                                             }) {
                                                 Text("ยกเลิก")
                                                     .font(.system(size: 10))
@@ -7051,45 +6640,12 @@ struct AgentChatStage: View, Equatable {
                                 .padding(.vertical, 8)
                             }
                             
-                            // Reliable Bottom Anchor (quantized to 24pt buckets to prevent 120Hz preference churn)
-                            GeometryReader { geo in
-                                Color.clear
-                                    .preference(
-                                        key: ChatScrollBottomVisibleKey.self,
-                                        value: Int((geo.frame(in: .named("ChatScrollSpace")).maxY / 24.0).rounded())
-                                    )
-                            }
-                            .frame(height: 1)
-                            .id("BOTTOM_CHAT_ANCHOR")
+                            Color.clear
+                                .frame(height: 1)
+                                .id("BOTTOM_CHAT_ANCHOR")
                         }
                     }
                     .padding(.bottom, 16)
-                }
-                .coordinateSpace(name: "ChatScrollSpace")
-                .background(
-                    GeometryReader { geo in
-                        Color.clear
-                            .preference(key: ChatScrollViewHeightKey.self, value: geo.size.height)
-                    }
-                )
-                .onPreferenceChange(ChatScrollViewHeightKey.self) { h in
-                    scrollTracker.viewportHeight = h
-                }
-                .onPreferenceChange(ChatScrollBottomVisibleKey.self) { bottomBucket in
-                    let viewportH = scrollTracker.viewportHeight
-                    guard viewportH > 0 else { return }
-                    let bottomY = CGFloat(bottomBucket) * 24.0
-                    let distanceBelow = bottomY - viewportH
-                    let recentlyScrolledManually = Date().timeIntervalSince(scrollTracker.lastUserScrollUpTime) < 1.5
-                    if distanceBelow > 72 && recentlyScrolledManually {
-                        if !userScrolledUp {
-                            userScrolledUp = true
-                        }
-                    } else if distanceBelow <= 36 {
-                        if userScrolledUp && Date().timeIntervalSince(scrollTracker.lastUserScrollUpTime) > 0.6 {
-                            userScrolledUp = false
-                        }
-                    }
                 }
                 
                 // Floating "Scroll to latest" button when user scrolls up
@@ -7123,7 +6679,7 @@ struct AgentChatStage: View, Equatable {
                     .transition(.opacity.combined(with: .scale(scale: 0.9)))
                 }
             }
-            .onChange(of: AgentService.shared.activeChatId) { _ in
+            .onChange(of: activeChatId) { _ in
                 userScrolledUp = false
                 scrollTracker.lastUserScrollUpTime = .distantPast
                 DispatchQueue.main.async {
@@ -7152,7 +6708,7 @@ struct AgentChatStage: View, Equatable {
                     }
                 }
             }
-            .onChange(of: agentService.messageQueue.count) { newCount in
+            .onChange(of: queuedMessages.count) { newCount in
                 if newCount > 0 {
                     userScrolledUp = false
                     scrollTracker.lastUserScrollUpTime = .distantPast
@@ -7173,7 +6729,11 @@ struct AgentChatStage: View, Equatable {
             }
             .onChange(of: messages.last?.content) { _ in
                 if !userScrolledUp {
-                    proxy.scrollTo("BOTTOM_CHAT_ANCHOR", anchor: .bottom)
+                    let now = Date()
+                    if now.timeIntervalSince(scrollTracker.lastAutoScrollTime) >= 0.07 {
+                        scrollTracker.lastAutoScrollTime = now
+                        proxy.scrollTo("BOTTOM_CHAT_ANCHOR", anchor: .bottom)
+                    }
                 }
             }
             .onAppear {
@@ -7184,10 +6744,11 @@ struct AgentChatStage: View, Equatable {
                     let tracker = scrollTracker
                     scrollTracker.monitor = NSEvent.addLocalMonitorForEvents(matching: [.scrollWheel]) { event in
                         // Positive scrollingDeltaY means scrolling upward toward earlier messages
-                        if event.scrollingDeltaY > 1.5 {
+                        if event.scrollingDeltaY > 2.5 {
                             tracker.lastUserScrollUpTime = Date()
-                        } else if event.scrollingDeltaY < -2.0 {
-                            tracker.lastUserScrollUpTime = .distantPast
+                            if !userScrolledUp {
+                                userScrolledUp = true
+                            }
                         }
                         return event
                     }
@@ -7605,11 +7166,17 @@ struct RichMessageRow: View, Equatable {
             HStack(spacing: 0) {
                 Spacer(minLength: 0)
                 VStack(alignment: .leading, spacing: 6) {
-                    aiCellContent
-                        .textSelection(.enabled)
-                        .contextMenu {
-                            assistantMessageContextMenu
-                        }
+                    AICellContentHost(
+                        message: message,
+                        isStreaming: isStreaming,
+                        onApplyChange: onApplyChange,
+                        onRejectChange: onRejectChange
+                    )
+                    .equatable()
+                    .textSelection(.enabled)
+                    .contextMenu {
+                        assistantMessageContextMenu
+                    }
                     if !isStreaming && (!message.content.isEmpty || !message.toolResults.isEmpty) {
                         assistantActionToolbar
                             .opacity((isHoveringMessage || isCopied) ? 0.92 : 0)
@@ -7979,8 +7546,25 @@ struct RichMessageRow: View, Equatable {
             isCopied = false
         }
     }
-    
-    private var aiCellContent: some View {
+}
+
+// MARK: - Equatable AI Cell Content Host (Isolates Hover State from Markdown/Tool Tree)
+
+private struct AICellContentHost: View, Equatable {
+    let message: AgentMessageModel
+    let isStreaming: Bool
+    var onApplyChange: ((PendingChangeModel) -> Void)?
+    var onRejectChange: ((PendingChangeModel) -> Void)?
+
+    static func == (lhs: AICellContentHost, rhs: AICellContentHost) -> Bool {
+        lhs.message.id == rhs.message.id &&
+        lhs.message.content == rhs.message.content &&
+        lhs.message.toolResults.count == rhs.message.toolResults.count &&
+        lhs.message.pendingChanges == rhs.message.pendingChanges &&
+        lhs.isStreaming == rhs.isStreaming
+    }
+
+    var body: some View {
         let blocks = MessageContentParser.parse(message.content)
         let lastThoughtIdx = blocks.lastIndex(where: {
             if case .thought = $0 { return true }
@@ -8661,28 +8245,29 @@ public final class DiffCacheManager {
     private static var cache: [String: CachedDiffEntry] = [:]
     private static let lock = NSLock()
     
-    public static func getOrComputeDiff(id: String, old: String, new: String) -> [UnifiedDiffLine] {
-        return getOrComputeDiffEntry(id: id, old: old, new: new).lines
+    public static func getOrComputeDiff(id: String, old: @autoclosure () -> String, new: @autoclosure () -> String) -> [UnifiedDiffLine] {
+        return getOrComputeDiffEntry(id: id, old: old(), new: new()).lines
     }
     
-    public static func getOrComputeDiffEntry(id: String, old: String, new: String) -> CachedDiffEntry {
-        let key = "\(id)-\(old.hashValue)-\(new.hashValue)"
+    public static func getOrComputeDiffEntry(id: String, old: @autoclosure () -> String, new: @autoclosure () -> String) -> CachedDiffEntry {
         lock.lock()
-        if let found = cache[key] {
+        if let found = cache[id] {
             lock.unlock()
             return found
         }
         lock.unlock()
         
-        let lines = computeDiff(old: old, new: new)
+        let oldStr = old()
+        let newStr = new()
+        let lines = computeDiff(old: oldStr, new: newStr)
         let maxChars = lines.reduce(0) { max($0, min($1.text.count, 240)) }
         // Fast O(1) monospaced width calculation (11pt monospaced ≈ 6.65pt/char + 128pt gutter/padding)
         let minContentWidth = CGFloat(maxChars) * 6.65 + 128.0
         let entry = CachedDiffEntry(lines: lines, minContentWidth: minContentWidth)
         
         lock.lock()
-        if cache.count > 24 { cache.removeAll(keepingCapacity: false) }
-        cache[key] = entry
+        if cache.count > 64 { cache.removeAll(keepingCapacity: true) }
+        cache[id] = entry
         lock.unlock()
         
         return entry
@@ -10734,24 +10319,24 @@ struct ToolActivityItemRow: View {
     }
     
     private var rowStyle: RowStyle {
-        let output = result.output
+        let preview = result.outputPreview
         let params = AgentToolBox.normalizeToolParams(result.toolParams ?? [:])
         var lineInfo: String? = nil
         
         if let startLine = params["StartLine"] as? Int, let endLine = params["EndLine"] as? Int {
             lineInfo = "#L\(startLine)-\(endLine)"
-        } else if let lineMatch = output.range(of: #"#L\d+(-\d+)?"#, options: .regularExpression) {
-            lineInfo = String(output[lineMatch])
+        } else if let lineMatch = preview.range(of: #"#L\d+(-\d+)?"#, options: .regularExpression) {
+            lineInfo = String(preview[lineMatch])
         }
         
         let targetFile = (params["path"] as? String) ?? (params["TargetFile"] as? String) ?? (params["AbsolutePath"] as? String) ?? (params["file_path"] as? String)
-        let resolvedFileName = (targetFile != nil ? URL(fileURLWithPath: targetFile!).lastPathComponent : extractFileName(output))?
+        let resolvedFileName = (targetFile != nil ? URL(fileURLWithPath: targetFile!).lastPathComponent : extractFileName(preview))?
             .trimmingCharacters(in: CharacterSet(charactersIn: "{}\"'"))
         
         switch result.toolName {
         case "file_read", "read_file", "view_file":
             let name = resolvedFileName ?? "source file"
-            let lines = lineInfo ?? (output.contains("\n") ? "#L1-\(min(350, output.components(separatedBy: .newlines).count))" : nil)
+            let lines = lineInfo ?? (result.outputLineCount > 1 ? "#L1-\(min(350, result.outputLineCount))" : nil)
             return .fileAnalyze(fileName: name, lineRange: lines)
             
         case "multi_file_read":
@@ -10764,7 +10349,7 @@ struct ToolActivityItemRow: View {
             
         case "file_write", "replace_in_file", "multi_replace_in_file", "write_to_file", "patch_file", "apply_patch":
             let name = resolvedFileName ?? "file"
-            let stats = computeDiffLineStats(params: params, output: output)
+            let stats = computeDiffLineStats(params: params, output: preview)
             return .fileEdit(verb: "Edited", fileName: name, added: stats.added, removed: stats.removed)
             
         case "shell", "run_command":
@@ -10791,7 +10376,7 @@ struct ToolActivityItemRow: View {
             return .generic(verb: "Device", detail: action)
             
         case "grep_search", "file_search", "find_symbol":
-            let query = (params["query"] as? String) ?? (params["pattern"] as? String) ?? (params["symbol"] as? String) ?? extractQuery(output)
+            let query = (params["query"] as? String) ?? (params["pattern"] as? String) ?? (params["symbol"] as? String) ?? extractQuery(preview)
             return .generic(verb: "Searched", detail: String(query.prefix(48)))
             
         case "list_directory_tree", "list_dir":
@@ -12253,6 +11838,15 @@ struct ChatMediaBlockView: View {
         if panel.runModal() == .OK, let destURL = panel.url {
             try? FileManager.default.removeItem(at: destURL)
             try? FileManager.default.copyItem(at: sourceURL, to: destURL)
+        }
+    }
+}
+
+private final class ClosureMenuActionHandler: NSObject {
+    static let shared = ClosureMenuActionHandler()
+    @objc func performMenuAction(_ sender: NSMenuItem) {
+        if let action = sender.representedObject as? () -> Void {
+            action()
         }
     }
 }

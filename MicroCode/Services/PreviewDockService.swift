@@ -12,6 +12,7 @@ import Foundation
 import Combine
 import SwiftUI
 import AppKit
+import WebKit
 
 public enum PreviewDockTabKind: Equatable {
     case web
@@ -540,4 +541,395 @@ public final class PreviewDockService: ObservableObject {
             IOSDeviceCaptureService.shared.stopCapture()
         }
     }
+
+    public var isVisible: Bool {
+        isDockVisible || DeviceRuntimeService.shared.showingEmbeddedDeviceDock
+    }
+
+    public var selectedTab: PreviewDockTabKind? {
+        activeTab?.kind
+    }
+
+    public func reloadWeb() {
+        DeviceRuntimeService.shared.webRefreshTrigger.toggle()
+    }
 }
+
+// MARK: - Universal Preview Hot Reload Engine (Playground-Style Instant Live Reload)
+
+@MainActor
+public final class PreviewHotReloadEngine: ObservableObject {
+    public static let shared = PreviewHotReloadEngine()
+
+    private static let autoReloadKey = "microcode.preview.autoHotReload"
+    private static let liveTypingKey = "microcode.preview.liveTyping"
+
+    /// Automatically hot-reload WebApp, App Runtime (iOS/Android/Flutter/RN), and File Previews on Save or AI Agent edit.
+    @Published public var isAutoHotReloadEnabled: Bool {
+        didSet { UserDefaults.standard.set(isAutoHotReloadEnabled, forKey: Self.autoReloadKey) }
+    }
+
+    /// Playground-style instant live buffer preview as the user types in the Code Editor (before pressing ⌘S).
+    @Published public var isLiveTypingEnabled: Bool {
+        didSet { UserDefaults.standard.set(isLiveTypingEnabled, forKey: Self.liveTypingKey) }
+    }
+
+    @Published public var isReloading: Bool = false
+    @Published public var reloadCount: Int = 0
+    @Published public var lastReloadDurationMs: Int = 0
+    @Published public var lastModifiedFileName: String = ""
+    @Published public var lastModifiedFilePath: String = ""
+    @Published public var lastReloadSource: String = ""
+    @Published public var lastReloadTimestamp: Date = .distantPast
+    @Published public var liveBufferOverrides: [String: String] = [:]
+
+    private var liveTypingDebounceTask: Task<Void, Never>?
+    private var workspaceWatcherTimer: Timer?
+    private var watchedFileModDates: [String: Date] = [:]
+    private var lastScannedWorkspacePath: String = ""
+
+    private init() {
+        if UserDefaults.standard.object(forKey: Self.autoReloadKey) == nil {
+            self.isAutoHotReloadEnabled = true
+        } else {
+            self.isAutoHotReloadEnabled = UserDefaults.standard.bool(forKey: Self.autoReloadKey)
+        }
+        if UserDefaults.standard.object(forKey: Self.liveTypingKey) == nil {
+            self.isLiveTypingEnabled = true
+        } else {
+            self.isLiveTypingEnabled = UserDefaults.standard.bool(forKey: Self.liveTypingKey)
+        }
+        setupObservers()
+        startLightweightWorkspaceWatcher()
+    }
+
+    private func setupObservers() {
+        NotificationCenter.default.addObserver(
+            forName: NSNotification.Name("MicroCodeAgentTerminalCommand"),
+            object: nil,
+            queue: .main
+        ) { [weak self] note in
+            guard let phase = note.userInfo?["phase"] as? String, phase == "completed" else { return }
+            Task { @MainActor [weak self] in
+                self?.scanWorkspaceForRecentChanges(source: "Terminal")
+            }
+        }
+    }
+
+    /// Called when a file is saved in the Code Editor (`⌘S`) or modified on disk by an AI Agent tool.
+    public func notifyFileSaved(path: String, content: String? = nil, source: String = "Editor") {
+        let start = CFAbsoluteTimeGetCurrent()
+        let standardized = URL(fileURLWithPath: path).standardizedFileURL.path
+        let fileName = (standardized as NSString).lastPathComponent
+        let ext = (standardized as NSString).pathExtension.lowercased()
+
+        if let content {
+            liveBufferOverrides[standardized] = content
+        } else {
+            liveBufferOverrides.removeValue(forKey: standardized)
+        }
+
+        if let attr = try? FileManager.default.attributesOfItem(atPath: standardized),
+           let modDate = attr[.modificationDate] as? Date {
+            watchedFileModDates[standardized] = modDate
+        }
+
+        lastModifiedFilePath = standardized
+        lastModifiedFileName = fileName
+        lastReloadSource = source
+        lastReloadTimestamp = Date()
+        reloadCount += 1
+
+        var userInfo: [String: Any] = [
+            "path": standardized,
+            "fileName": fileName,
+            "ext": ext,
+            "source": source
+        ]
+        if let content {
+            userInfo["content"] = content
+        }
+
+        // 1. Broadcast standard notifications so WebApp Preview, File Previews, and Diff views update immediately
+        NotificationCenter.default.post(
+            name: NSNotification.Name("MicroCodeFileSaved"),
+            object: standardized,
+            userInfo: userInfo
+        )
+        NotificationCenter.default.post(
+            name: NSNotification.Name("MicroCodeWorkspaceFileDidChange"),
+            object: standardized,
+            userInfo: userInfo
+        )
+        NotificationCenter.default.post(
+            name: NSNotification.Name("FileUpdatedExternally"),
+            object: nil,
+            userInfo: userInfo
+        )
+
+        // 2. If a CSS file was modified, inject CSS directly into the active WKWebView without full page flash
+        if ["css", "scss", "less"].contains(ext) {
+            let cssText = content ?? (try? String(contentsOfFile: standardized, encoding: .utf8)) ?? ""
+            injectLiveCSSIntoWebView(fileName: fileName, cssContent: cssText)
+        }
+
+        // 3. Trigger App Runtime Auto Hot Reload (iOS Simulator / Android Emulator / Flutter / React Native / macOS)
+        if isAutoHotReloadEnabled {
+            let appSourceExts: Set<String> = [
+                "swift", "m", "mm", "h", "c", "cpp", "storyboard", "xib", "plist",
+                "kt", "kts", "java", "xml", " darts", "dart",
+                "js", "jsx", "ts", "tsx", "json"
+            ]
+            if appSourceExts.contains(ext) && !standardized.contains("/.microcode/") {
+                DeviceRuntimeService.shared.scheduleAutoHotReload(changedFilePath: standardized, source: source)
+            }
+        }
+
+        let elapsedMs = max(1, Int((CFAbsoluteTimeGetCurrent() - start) * 1000))
+        lastReloadDurationMs = elapsedMs
+    }
+
+    /// Called as the user types in the Code Editor for Playground-style zero-save live preview.
+    public func notifyLiveBufferEdited(path: String, content: String, language: String) {
+        guard !path.isEmpty else { return }
+        let standardized = URL(fileURLWithPath: path).standardizedFileURL.path
+        liveBufferOverrides[standardized] = content
+
+        guard isLiveTypingEnabled && isAutoHotReloadEnabled else { return }
+
+        let ext = (standardized as NSString).pathExtension.lowercased()
+        let fileName = (standardized as NSString).lastPathComponent
+        let isSwift = ext == "swift" || language.lowercased() == "swift"
+        let debounceNs: UInt64 = isSwift ? 650_000_000 : 160_000_000
+
+        liveTypingDebounceTask?.cancel()
+        liveTypingDebounceTask = Task { @MainActor [weak self] in
+            try? await Task.sleep(nanoseconds: debounceNs)
+            guard !Task.isCancelled, let self else { return }
+
+            let start = CFAbsoluteTimeGetCurrent()
+            self.lastModifiedFilePath = standardized
+            self.lastModifiedFileName = fileName
+            self.lastReloadSource = "Live Typing"
+            self.lastReloadTimestamp = Date()
+            self.reloadCount += 1
+
+            let userInfo: [String: Any] = [
+                "path": standardized,
+                "fileName": fileName,
+                "ext": ext,
+                "content": content,
+                "language": language,
+                "source": "Live Typing"
+            ]
+
+            // Instant CSS hot-injection into active Web Preview
+            if ext == "css" {
+                self.injectLiveCSSIntoWebView(fileName: fileName, cssContent: content)
+            } else if ext == "html" || ext == "htm" || ext == "svg" {
+                self.injectLiveHTMLIntoWebViewIfMatching(filePath: standardized, htmlContent: content)
+            }
+
+            // Notify active File Preview & SwiftUI Live Preview tabs
+            NotificationCenter.default.post(
+                name: NSNotification.Name("MicroCodeLiveBufferUpdated"),
+                object: standardized,
+                userInfo: userInfo
+            )
+
+            // Also forward to backend HotReloadService if enabled for compiled languages
+            if ["swift", "rust", "rs", "c", "cpp"].contains(ext) && HotReloadService.shared.isEnabled {
+                HotReloadService.shared.requestReload(
+                    sourceCode: content,
+                    language: ext,
+                    filePath: standardized
+                )
+            }
+
+            self.lastReloadDurationMs = max(1, Int((CFAbsoluteTimeGetCurrent() - start) * 1000))
+        }
+    }
+
+    /// Injects updated CSS directly into the active Preview WKWebView without reloading the page or losing JS state/scroll.
+    public func injectLiveCSSIntoWebView(fileName: String, cssContent: String) {
+        guard let webView = IDEBrowserAutomationService.shared.activePreviewWebView else { return }
+        let escapedFileName = fileName
+            .replacingOccurrences(of: "\\", with: "\\\\")
+            .replacingOccurrences(of: "'", with: "\\'")
+        let base64CSS = Data(cssContent.utf8).base64EncodedString()
+
+        let script = """
+        (() => {
+            try {
+                const cssText = new TextDecoder().decode(Uint8Array.from(atob('\(base64CSS)'), c => c.charCodeAt(0)));
+                const targetName = '\(escapedFileName)';
+                let styleEl = document.querySelector(`style[data-mc-hot="${targetName}"]`);
+                if (!styleEl) {
+                    styleEl = document.createElement('style');
+                    styleEl.setAttribute('data-mc-hot', targetName);
+                    document.head.appendChild(styleEl);
+                }
+                styleEl.textContent = cssText;
+                // Also bust cache on matching <link rel="stylesheet">
+                document.querySelectorAll('link[rel="stylesheet"]').forEach(link => {
+                    const href = link.getAttribute('href') || '';
+                    if (href.includes(targetName)) {
+                        const clean = href.split('?')[0];
+                        link.setAttribute('href', clean + '?mc_hot=' + Date.now());
+                    }
+                });
+                return true;
+            } catch (e) {
+                return false;
+            }
+        })();
+        """
+        webView.evaluateJavaScript(script, completionHandler: nil)
+    }
+
+    /// Updates local HTML/SVG preview live in the active WKWebView while preserving scroll position.
+    public func injectLiveHTMLIntoWebViewIfMatching(filePath: String, htmlContent: String) {
+        guard let webView = IDEBrowserAutomationService.shared.activePreviewWebView else { return }
+        let currentURL = webView.url ?? DeviceRuntimeService.shared.targetWebURL
+        guard let currentURL, currentURL.isFileURL else { return }
+        let currentPath = currentURL.standardizedFileURL.path
+        guard currentPath == filePath else { return }
+
+        let base64HTML = Data(htmlContent.utf8).base64EncodedString()
+        let script = """
+        (() => {
+            try {
+                const sx = window.scrollX || 0;
+                const sy = window.scrollY || 0;
+                const html = new TextDecoder().decode(Uint8Array.from(atob('\(base64HTML)'), c => c.charCodeAt(0)));
+                const parser = new DOMParser();
+                const doc = parser.parseFromString(html, 'text/html');
+                if (doc && doc.body && document.body) {
+                    if (doc.head && document.head) {
+                        document.head.innerHTML = doc.head.innerHTML;
+                    }
+                    document.body.innerHTML = doc.body.innerHTML;
+                    document.body.className = doc.body.className;
+                    document.body.setAttribute('style', doc.body.getAttribute('style') || '');
+                    window.scrollTo(sx, sy);
+                    return true;
+                }
+            } catch (e) {}
+            return false;
+        })();
+        """
+        webView.evaluateJavaScript(script) { result, _ in
+            if (result as? Bool) != true {
+                let baseDir = URL(fileURLWithPath: filePath).deletingLastPathComponent()
+                webView.loadHTMLString(htmlContent, baseURL: baseDir)
+            }
+        }
+    }
+
+    /// Performs a scroll-preserving reload on a WKWebView.
+    public func reloadWebViewPreservingScroll(_ webView: WKWebView) {
+        webView.evaluateJavaScript("[window.scrollX || 0, window.scrollY || 0]") { result, _ in
+            var scrollX: Double = 0
+            var scrollY: Double = 0
+            if let arr = result as? [Double], arr.count == 2 {
+                scrollX = arr[0]
+                scrollY = arr[1]
+            } else if let arr = result as? [NSNumber], arr.count == 2 {
+                scrollX = arr[0].doubleValue
+                scrollY = arr[1].doubleValue
+            }
+            if webView.url?.isFileURL == true, let fileURL = webView.url {
+                webView.loadFileURL(fileURL, allowingReadAccessTo: URL(fileURLWithPath: "/"))
+            } else {
+                webView.reloadFromOrigin()
+            }
+            if scrollX > 0 || scrollY > 0 {
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.18) {
+                    webView.evaluateJavaScript("window.scrollTo(\(scrollX), \(scrollY));", completionHandler: nil)
+                }
+            }
+        }
+    }
+
+    // MARK: - Lightweight Workspace File Modification Watcher
+
+    private func startLightweightWorkspaceWatcher() {
+        workspaceWatcherTimer = Timer.scheduledTimer(withTimeInterval: 1.5, repeats: true) { [weak self] _ in
+            Task { @MainActor [weak self] in
+                guard let self, self.isAutoHotReloadEnabled else { return }
+                guard PreviewDockService.shared.isDockVisible || DeviceRuntimeService.shared.showingEmbeddedDeviceDock else { return }
+                self.scanWorkspaceForRecentChanges(source: "Disk")
+            }
+        }
+    }
+
+    public func scanWorkspaceForRecentChanges(source: String = "Disk") {
+        guard let wsPath = AgentService.shared.currentWorkspace ?? AppState.shared?.workspaceFolder?.path,
+              !wsPath.isEmpty else { return }
+
+        if lastScannedWorkspacePath != wsPath {
+            lastScannedWorkspacePath = wsPath
+            watchedFileModDates.removeAll()
+            seedWorkspaceDates(rootPath: wsPath)
+            return
+        }
+
+        let rootURL = URL(fileURLWithPath: wsPath)
+        let CandidateDirs = ["", "src", "app", "lib", "public", "components", "pages", "views", "styles", "assets"]
+        let watchedExts: Set<String> = [
+            "html", "htm", "css", "scss", "js", "jsx", "ts", "tsx", "vue", "svelte",
+            "swift", "kt", "java", "dart", "py", "md", "svg", "json"
+        ]
+        let fm = FileManager.default
+
+        for sub in CandidateDirs {
+            let dirURL = sub.isEmpty ? rootURL : rootURL.appendingPathComponent(sub)
+            guard let items = try? fm.contentsOfDirectory(
+                at: dirURL,
+                includingPropertiesForKeys: [.contentModificationDateKey, .isRegularFileKey],
+                options: [.skipsHiddenFiles]
+            ) else { continue }
+
+            for item in items {
+                let ext = item.pathExtension.lowercased()
+                guard watchedExts.contains(ext) else { continue }
+                guard let vals = try? item.resourceValues(forKeys: [.contentModificationDateKey, .isRegularFileKey]),
+                      vals.isRegularFile == true,
+                      let modDate = vals.contentModificationDate else { continue }
+
+                let itemPath = item.standardizedFileURL.path
+                if let prevDate = watchedFileModDates[itemPath] {
+                    if modDate.timeIntervalSince(prevDate) > 0.05 {
+                        watchedFileModDates[itemPath] = modDate
+                        notifyFileSaved(path: itemPath, content: nil, source: source)
+                        return
+                    }
+                } else {
+                    watchedFileModDates[itemPath] = modDate
+                }
+            }
+        }
+    }
+
+    private func seedWorkspaceDates(rootPath: String) {
+        let rootURL = URL(fileURLWithPath: rootPath)
+        let candidateDirs = ["", "src", "app", "lib", "public", "components", "pages", "views", "styles", "assets"]
+        let fm = FileManager.default
+        for sub in candidateDirs {
+            let dirURL = sub.isEmpty ? rootURL : rootURL.appendingPathComponent(sub)
+            guard let items = try? fm.contentsOfDirectory(
+                at: dirURL,
+                includingPropertiesForKeys: [.contentModificationDateKey, .isRegularFileKey],
+                options: [.skipsHiddenFiles]
+            ) else { continue }
+            for item in items {
+                if let vals = try? item.resourceValues(forKeys: [.contentModificationDateKey, .isRegularFileKey]),
+                   vals.isRegularFile == true,
+                   let modDate = vals.contentModificationDate {
+                    watchedFileModDates[item.standardizedFileURL.path] = modDate
+                }
+            }
+        }
+    }
+}
+

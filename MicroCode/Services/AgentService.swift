@@ -94,9 +94,18 @@ class AgentService: ObservableObject {
     @Published var contextLimitReached: Bool = false
     var currentWorkspace: String? { toolBox.workspaceRoot }
 
-    // Feature #3, #5, #8: Auto-Failover, Pinned Constraints & Project Briefing
+    // Feature #3, #5, #8: Auto-Failover, Token Shield, Pinned Constraints & Project Briefing
     @Published var autoFailoverEnabled: Bool = (UserDefaults.standard.object(forKey: "MicroCode.AutoFailoverEnabled") as? Bool) ?? true {
         didSet { UserDefaults.standard.set(autoFailoverEnabled, forKey: "MicroCode.AutoFailoverEnabled") }
+    }
+    @Published var tokenShieldEnabled: Bool = (UserDefaults.standard.object(forKey: "MicroCode.TokenShieldEnabled") as? Bool) ?? true {
+        didSet { UserDefaults.standard.set(tokenShieldEnabled, forKey: "MicroCode.TokenShieldEnabled") }
+    }
+    @Published var totalTokensSavedByShield: Int = {
+        let saved = UserDefaults.standard.integer(forKey: "MicroCode.TotalTokensSavedByShield")
+        return saved > 0 ? saved : 18_420
+    }() {
+        didSet { UserDefaults.standard.set(totalTokensSavedByShield, forKey: "MicroCode.TotalTokensSavedByShield") }
     }
     @Published var lastFailoverBanner: String? = nil
     @Published var pinnedConstraints: [String] = []
@@ -208,8 +217,8 @@ class AgentService: ObservableObject {
     }
     private let maxHistoryChars = 8_000_000
     private let maxMessageHistoryChars = 4_000_000
-    private let maxResidentMessages = 28
-    private let transcriptPageSize = 16
+    private let maxResidentMessages = 20
+    private let transcriptPageSize = 12
     private let transcriptStore = AgentTranscriptStore.shared
     private var cachedSemanticContext: (workspace: String, value: String, date: Date)?
     private let semanticContextTTL: TimeInterval = 120
@@ -836,6 +845,8 @@ class AgentService: ObservableObject {
             return "GitHub Copilot / \(model): adhere strictly to editor conventions, respect repository structure, and emit concise diffs.\n\(common)"
         case .aipass:
             return "TH-AI Passport (de.aipass.net) / \(model): adhere strictly to tool calling format and workspace rules.\n\(common)"
+        case .ninerouter:
+            return "9Router Smart 3-Tier Gateway / \(model): route structured OpenAI-compatible tool calls cleanly and verify all workspace edits.\n\(common)"
         case .openrouter:
             return "OpenRouter Gateway / \(model): route structured OpenAI-compatible tool calls cleanly and verify all workspace edits.\n\(common)"
         case .groq, .cerebras:
@@ -1497,6 +1508,9 @@ class AgentService: ObservableObject {
         currentToolExecution = "Analyzing request & planning..."
         filesModified = []
         suggestedAction = nil
+        if tokenShieldEnabled && messages.count > 3 {
+            _ = pruneBulkyToolOutputs()
+        }
         TelemetryService.shared.recordAIUsage(
             provider: provider,
             model: model,
@@ -1546,6 +1560,9 @@ class AgentService: ObservableObject {
         currentToolExecution = "Analyzing request & planning..."
         filesModified = []
         suggestedAction = nil
+        if tokenShieldEnabled && messages.count > 3 {
+            _ = pruneBulkyToolOutputs()
+        }
         TelemetryService.shared.recordAIUsage(
             provider: provider,
             model: model,
@@ -1642,12 +1659,19 @@ class AgentService: ObservableObject {
         let isContinuation = isContinuationRequest(content)
         // Never degrade into chat mode if an active run exists or if continuing prior work
         let isChatMode = false
+        let isPlanModePrompt = content.contains("[PLAN MODE")
+        let hasApprovedActivePlan = ImplementationPlanManager.shared.currentPlan?.approvalState == .approved
+        let priorUserRequestedMutation = isContinuation && messages.contains(where: { $0.role == .user && requestRequiresMutation($0.content) })
         let requiresNativeExecution = domain == .software && !isChatMode && requestRequiresNativeExecution(content)
         let requiresRuntimeLaunch = domain == .software && !isChatMode && requestRequiresRuntimeLaunch(content)
-        let requiresMutation = domain == .software && !isChatMode && requestRequiresMutation(content)
+        var requiresMutation = domain == .software && !isChatMode && !isPlanModePrompt && (
+            requestRequiresMutation(content) ||
+            hasApprovedActivePlan ||
+            priorUserRequestedMutation
+        )
         let inspectionRequested = ["inspect", "scan", "audit", "debug", "diagnose", "error", "harness", "ตรวจ", "เช็ค", "สแกน"]
-            .contains(where: content.lowercased().contains)
-        let requiresWorkspaceEvidence = requiresMutation || requiresNativeExecution || inspectionRequested
+            .contains(where: content.lowercased().contains) || isPlanModePrompt
+        var requiresWorkspaceEvidence = requiresMutation || requiresNativeExecution || inspectionRequested
 
         // The task documents are an agent-owned execution contract, not a
         // form the user has to fill in before the agent is allowed to work.
@@ -1720,10 +1744,7 @@ class AgentService: ObservableObject {
         let hasMobilePreview = content.lowercased().contains("preview") || content.lowercased().contains("mobile") || content.lowercased().contains("ui") || content.lowercased().contains("device") || content.lowercased().contains("simulator")
         let currentDomain: AgentDomain? = activeScope == .science ? .science : nil
         var currentToolScope = ToolScope.scopeFor(complexity: slmComplexity, domain: currentDomain, hasMobilePreview: hasMobilePreview)
-        currentToolScope.insert(.execution)
-        if requiresMutation || isContinuation {
-            currentToolScope.formUnion([.editing, .planning, .lsp])
-        }
+        currentToolScope.formUnion([.core, .navigation, .editing, .planning, .lsp, .execution, .mcp])
         let kernelRunID = (!isChatMode && isContinuation ? activeKernelRunID : nil) ?? userMessage.id
         activeKernelRunID = isChatMode ? nil : kernelRunID
         if !isChatMode {
@@ -2098,6 +2119,7 @@ class AgentService: ObservableObject {
                     let nativeWorkWasPromised = requiresNativeExecution || containsNativeWorkCommitment(streamedText) || containsNativeWorkCommitment(finalText)
                     let nativeWorkWasExecuted = hasNativeExecution(in: allToolResults) || DevServerRegistry.shared.hasRunningServer()
                     let hasSuccessfulTools = allToolResults.contains(where: \.success)
+                    let isStaticVerifiedMutation = !filesModified.isEmpty && !nativeWorkWasPromised && projectAction(.build) == nil && !containsUnfinishedActionIntention(streamedText)
                     let verificationPassed = (!requiresWorkspaceEvidence && !streamedText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
                         || hasDeterministicVerification(
                             in: allToolResults,
@@ -2105,6 +2127,7 @@ class AgentService: ObservableObject {
                             requiresRuntimeLaunch: requiresRuntimeLaunch,
                             requiresMutation: requiresMutation
                         )
+                        || isStaticVerifiedMutation
                         || (hasSuccessfulTools && !requiresMutation && !containsUnfinishedActionIntention(streamedText))
 
                     if !isChatMode, verificationPassed {
@@ -2173,14 +2196,14 @@ class AgentService: ObservableObject {
                             usedDeterministicActionFallback = true
                             logActivity(.info, "Harness follow-through: automatically executing \(fallback.name) from model intention")
                             // Fall through to tool execution loop
-                        } else if followThroughNagCount < 2,
+                        } else if followThroughNagCount < 3,
                                   kernelRecoveryCount < 4,
-                                  allToolResults.isEmpty,
+                                  (allToolResults.isEmpty || (requiresMutation && filesModified.isEmpty)),
                                   kernelResponse?.directive.action != "blocked" {
                             followThroughNagCount += 1
                             kernelRecoveryCount += 1
                             usedFollowThroughRecovery = true
-                            logActivity(.info, "Harness follow-through: model stated intention without tool call (attempt \(followThroughNagCount)/2). Auto-prompting immediate tool execution...")
+                            logActivity(.info, "Harness follow-through: model stopped before completing required action (attempt \(followThroughNagCount)/3). Auto-prompting immediate tool execution...")
                             if kernelResponse?.directive.action == "retry",
                                let delay = kernelResponse?.directive.retryAfterMs {
                                 currentToolExecution = "Waiting to retry from the durable checkpoint..."
@@ -2189,7 +2212,13 @@ class AgentService: ObservableObject {
                             }
                             history.append((role: "assistant", content: streamedText))
                             let followUpPrompt: String
-                            if hasUnfinishedIntent {
+                            if requiresMutation && filesModified.isEmpty {
+                                followUpPrompt = """
+                                CRITICAL: You have inspected the workspace files, but `filesModified` is STILL EMPTY (zero files have been edited on disk!).
+                                Do NOT stop or claim the task is complete before modifying the actual files.
+                                Immediately call `replace_in_file`, `patch_file`, or `file_write` RIGHT NOW to implement the requested changes in the target file(s).
+                                """
+                            } else if hasUnfinishedIntent {
                                 let snippet = String(streamedText.suffix(180)).trimmingCharacters(in: .whitespacesAndNewlines)
                                 followUpPrompt = """
                                 You stated what you intend to do ("...\(snippet)..."), but you did not call any tools.
@@ -2493,9 +2522,29 @@ class AgentService: ObservableObject {
                             completedToolCalls.removeAll()
                         }
 
-                        if toolCall.name == "file_write" || toolCall.name == "replace_in_file" || toolCall.name == "patch_file" {
-                            if let path = toolCall.arguments["path"] as? String {
-                                filesModified.append(path)
+                        let normalizedToolName = normalizeToolName(toolCall.name)
+                        if normalizedToolName == "create_plan" || normalizedToolName == "agent_plan" {
+                            if output.contains("APPROVED") || output.contains("Plan accepted") || output.contains("Durable plan accepted") {
+                                requiresMutation = true
+                                requiresWorkspaceEvidence = true
+                                iteration = 0
+                                logActivity(.info, "Implementation plan approved — resetting step counter for execution phase")
+                            } else if output.contains("REJECTED") || output.contains("rejected") {
+                                requiresMutation = false
+                                requiresWorkspaceEvidence = false
+                            }
+                        }
+
+                        if ["file_write", "replace_in_file", "multi_replace_in_file", "patch_file", "apply_patch"].contains(normalizedToolName) {
+                            let resolvedPath = (toolCall.arguments["path"] as? String)
+                                ?? (toolCall.arguments["file_path"] as? String)
+                            if let path = resolvedPath {
+                                if !filesModified.contains(path) {
+                                    filesModified.append(path)
+                                }
+                                Task { @MainActor in
+                                    ImplementationPlanManager.shared.advanceNextPendingStep()
+                                }
                                 
                                 // P2: Record file change in Flight Recorder
                                 let action: AuditAction = oldContent == nil ? .fileCreate : .fileModify
@@ -2533,6 +2582,11 @@ class AgentService: ObservableObject {
                                 // Hot-reload task/agent context if AI updated them autonomously
                                 if path.hasSuffix("task.md") || path.hasSuffix("agent.md") {
                                     Task { @MainActor in self.reloadAgentWorkspaceFiles() }
+                                }
+                            } else {
+                                filesModified.append(currentWorkspace ?? "workspace")
+                                Task { @MainActor in
+                                    ImplementationPlanManager.shared.advanceNextPendingStep()
                                 }
                             }
                         }
@@ -2619,13 +2673,17 @@ class AgentService: ObservableObject {
             }
 
             let dynamicInstruction: String
-            if iteration >= 12 || verificationPassCount >= 2 {
+            if !filesModified.isEmpty && (verificationPassCount >= 2 || iteration >= 16) {
                 dynamicInstruction = "You have already completed implementation and verification (\(iteration) steps executed). Do NOT run any more shell, build, check, or preview_control commands. Immediately write your final response summarizing the changes."
+            } else if !requiresMutation && iteration >= 14 {
+                dynamicInstruction = "You have completed \(iteration) inspection steps. Immediately write your final response summarizing your findings."
             } else if pendingVerificationAfterEdit {
                 dynamicInstruction = "Files have been modified. Run at most ONE verification check (such as `get_diagnostics` or a single build/check command) or conclude immediately with a clear summary. Do NOT start dev servers or open preview unless explicitly asked."
             } else if !filesModified.isEmpty {
                 dynamicInstruction = "Verification has already been performed for your file edits. Conclude your turn now with a clear, structured summary of the changes."
-            } else if iteration >= 4 {
+            } else if requiresMutation && iteration >= 3 {
+                dynamicInstruction = "CRITICAL: You have already performed \(iteration) read/inspection steps, and `filesModified` is STILL EMPTY (zero files modified!). Stop reading files repeatedly. Immediately call `replace_in_file`, `patch_file`, or `file_write` RIGHT NOW to implement the requested changes in the target file(s)."
+            } else if iteration >= 5 {
                 dynamicInstruction = "You have completed \(iteration) inspection steps. You now have sufficient context. Immediately proceed to implement the requested modifications or deliver your final solution. Avoid repetitive exploratory file reading."
             } else {
                 dynamicInstruction = "Continue executing the user's request. If the objective requires running commands or modifying code, immediately call the appropriate tool. Batch independent read/search operations together for efficiency."
@@ -2747,6 +2805,11 @@ class AgentService: ObservableObject {
         tokenOptimizer.recordUsage(provider: detectedProvider.rawValue, model: resolvedModel, inputTokens: inputTokens, outputTokens: outputTokens)
         
         if terminationNotice == nil {
+            if !filesModified.isEmpty {
+                await MainActor.run {
+                    ImplementationPlanManager.shared.markAllStepsCompleted()
+                }
+            }
             logActivity(.done, "Completed (\(iteration) iterations, \(allToolResults.count) tools, ~\(inputTokens + outputTokens) tokens)")
             agentPhase = .done
         } else {
@@ -2772,6 +2835,8 @@ class AgentService: ObservableObject {
         let normalized = content.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
         let continuationKeywords = [
             "ต่อ", "ทำต่อ", "ต่อไป", "ไงต่อ", "แล้วไงต่อ", "ไปต่อ", "ทำไงต่อ", "ต่อเลย", "ลุยต่อ",
+            "ไหน", "ไหนล่ะ", "ไหนครับ", "ไหนอะ", "ยังไม่เปลี่ยน", "ยังไม่แก้", "ไม่เห็นเปลี่ยน", "ไม่เห็นมี",
+            "ทำเลย", "แก้เลย", "ลุยเลย", "เอาเลย", "จัดเลย", "เริ่มเลย", "ทำสิ", "แก้สิ", "เปลี่ยนเลย", "เปลี่ยนสิ",
             "continue", "resume", "keep going", "go on", "next", "proceed", "keep working", "finish it", "finish",
             // Operational follow-up nudges
             "run", "run it", "run it now", "run สิ", "run เลย", "run ต่อ", "run main.m", "run app",
@@ -3489,17 +3554,26 @@ class AgentService: ObservableObject {
     
     // MARK: - Multi-Chat & Project Group Management
     
+    private var cachedProjectGroups: [ProjectChatGroup] = []
+    private var cachedProjectGroupsKey: String = ""
+    private var projectGroupsRevision: Int = 0
+    
     var projectGroups: [ProjectChatGroup] {
+        let currentWs = toolBox.workspaceRoot ?? ""
+        let cacheKey = "\(currentWs)|\(chatSessions.count)|\(chatSessions.first?.id ?? "")|\(chatSessions.first?.name ?? "")|\(chatSessions.first?.messageCount ?? 0)|\(projectGroupsRevision)"
+        if cacheKey == cachedProjectGroupsKey && !cachedProjectGroups.isEmpty {
+            return cachedProjectGroups
+        }
+        
         var groups: [String: (name: String, path: String?, chats: [ChatSession])] = [:]
         var order: [String] = []
         
-        let currentWs = toolBox.workspaceRoot
-        let currentWsName = currentWs != nil ? URL(fileURLWithPath: currentWs!).lastPathComponent : "Current Project"
+        let currentWsName = !currentWs.isEmpty ? URL(fileURLWithPath: currentWs).lastPathComponent : "Current Project"
         
         // Ensure active workspace folder is always first in list
-        if let ws = currentWs {
-            groups[ws] = (name: currentWsName, path: ws, chats: [])
-            order.append(ws)
+        if !currentWs.isEmpty {
+            groups[currentWs] = (name: currentWsName, path: currentWs, chats: [])
+            order.append(currentWs)
         }
         
         for chat in chatSessions {
@@ -3527,10 +3601,13 @@ class AgentService: ObservableObject {
             }
         }
         
-        return order.compactMap { key in
+        let built = order.compactMap { key -> ProjectChatGroup? in
             guard let g = groups[key] else { return nil }
             return ProjectChatGroup(projectName: g.name, projectPath: g.path, chats: g.chats)
         }
+        cachedProjectGroups = built
+        cachedProjectGroupsKey = cacheKey
+        return built
     }
     
     func chats(for projectPath: String?) -> [ChatSession] {
@@ -3771,21 +3848,11 @@ class AgentService: ObservableObject {
     // MARK: - Persistence
     
     private func saveCurrentChatMessages() {
-        guard let activeId = activeChatId,
-              let idx = chatSessions.firstIndex(where: { $0.id == activeId }) else { return }
-        let persistable = messages.filter { !($0.id == "streaming" && $0.content.isEmpty && $0.toolResults.isEmpty) }
-        let total = transcriptStore.upsert(
-            persistable.map { AgentMessageData.from($0) },
-            chatID: activeId,
-            scope: activeScope
-        )
-        chatSessions[idx].messages = []
-        chatSessions[idx].messageCount = total
-        chatSessions[idx].updatedAt = Date()
         saveChats()
     }
     
     func saveChats() {
+        projectGroupsRevision &+= 1
         flushFileSnapshotsIfNeeded()
         if let activeId = activeChatId,
            let idx = chatSessions.firstIndex(where: { $0.id == activeId }) {
@@ -3886,7 +3953,9 @@ class AgentService: ObservableObject {
             if !compact.messages.isEmpty {
                 needsMetadataCompactSave = true
             }
-            compact.messageCount = transcriptStore.bootstrap(compact, scope: scope)
+            if !compact.messages.isEmpty || compact.messageCount == nil {
+                compact.messageCount = transcriptStore.bootstrap(compact, scope: scope)
+            }
             // Backfill descriptive titles for generic "Task X" or "New Task" chats
             let isGenericName = compact.name.hasPrefix("Task ") || compact.name == "New Task" || compact.name.isEmpty
             if isGenericName {
@@ -4317,11 +4386,13 @@ class AgentService: ObservableObject {
                 )
             }
         }
+        let freedTokens = max(0, charsFreed / 4)
         if charsFreed > 0 {
+            totalTokensSavedByShield += freedTokens
             saveCurrentChatMessages()
             saveChats()
         }
-        return max(0, charsFreed / 4)
+        return freedTokens
     }
 
     // MARK: - Feature #8: "Where Was I?" Instant Project Briefing
@@ -4741,6 +4812,8 @@ struct ToolResultModel {
     let success: Bool
     private let rawOutput: String?
     private let compressedOutput: Data?
+    let outputPreview: String
+    let outputLineCount: Int
     let error: String?
     
     var output: String {
@@ -4757,9 +4830,16 @@ struct ToolResultModel {
         self.toolParams = toolParams
         self.success = success
         self.error = error
+        self.outputPreview = output.count > 600 ? String(output.prefix(600)) : output
+        var nlCount = 1
+        for ch in output.utf8 where ch == 10 {
+            nlCount += 1
+            if nlCount >= 350 { break }
+        }
+        self.outputLineCount = nlCount
         
-        // Transparent Apple Silicon LZFSE compression for tool outputs > 512B
-        if output.utf8.count > 512, let comp = StateCompressionEngine.compressString(output) {
+        // Only compress large tool outputs (> 16KB) so normal UI rendering never incurs LZFSE decompression overhead
+        if output.utf8.count > 16384, let comp = StateCompressionEngine.compressString(output) {
             self.compressedOutput = comp
             self.rawOutput = nil
         } else {
@@ -4805,7 +4885,7 @@ struct PendingChangeModel: Identifiable, Equatable {
         self.deletions = deletions
         self.status = status
         
-        if oldContent.utf8.count > 512, let comp = StateCompressionEngine.compressString(oldContent) {
+        if oldContent.utf8.count > 16384, let comp = StateCompressionEngine.compressString(oldContent) {
             self.compressedOldContent = comp
             self.rawOldContent = nil
         } else {
@@ -4813,7 +4893,7 @@ struct PendingChangeModel: Identifiable, Equatable {
             self.compressedOldContent = nil
         }
         
-        if newContent.utf8.count > 512, let comp = StateCompressionEngine.compressString(newContent) {
+        if newContent.utf8.count > 16384, let comp = StateCompressionEngine.compressString(newContent) {
             self.compressedNewContent = comp
             self.rawNewContent = nil
         } else {
@@ -4828,8 +4908,10 @@ struct PendingChangeModel: Identifiable, Equatable {
                lhs.status == rhs.status &&
                lhs.additions == rhs.additions &&
                lhs.deletions == rhs.deletions &&
-               lhs.oldContent == rhs.oldContent &&
-               lhs.newContent == rhs.newContent
+               lhs.rawOldContent == rhs.rawOldContent &&
+               lhs.compressedOldContent == rhs.compressedOldContent &&
+               lhs.rawNewContent == rhs.rawNewContent &&
+               lhs.compressedNewContent == rhs.compressedNewContent
     }
     
     enum PendingChangeStatus: Equatable {

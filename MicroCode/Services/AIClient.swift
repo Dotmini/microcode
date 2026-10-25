@@ -27,6 +27,7 @@ enum StreamableAIProvider: String, CaseIterable {
     case openai = "openai"
     case gemini = "gemini"
     case deepseek = "deepseek"
+    case ninerouter = "9router"
     case openrouter = "openrouter"
     case groq = "groq"
     case mistral = "mistral"
@@ -55,6 +56,7 @@ enum StreamableAIProvider: String, CaseIterable {
     var cloudBaseURL: String {
         switch self {
         case .local: return LocalLLMService.cachedEndpoint
+        case .ninerouter: return directBaseURL
         default: return Self.cloudProxyURL
         }
     }
@@ -67,6 +69,7 @@ enum StreamableAIProvider: String, CaseIterable {
         case .openai: return "https://api.openai.com/v1"
         case .anthropic: return "https://api.anthropic.com/v1"
         case .deepseek: return "https://api.deepseek.com/v1"
+        case .ninerouter: return UserDefaults.standard.string(forKey: "9router_base_url") ?? "http://127.0.0.1:20128/v1"
         case .openrouter: return "https://openrouter.ai/api/v1"
         case .groq: return "https://api.groq.com/openai/v1"
         case .mistral: return "https://api.mistral.ai/v1"
@@ -100,6 +103,7 @@ enum StreamableAIProvider: String, CaseIterable {
         case .openai: return "gpt-4.1"
         case .gemini: return "gemini-2.5-flash"
         case .deepseek: return "deepseek-chat"
+        case .ninerouter: return "claude-sonnet-4-6"
         case .openrouter: return "anthropic/claude-sonnet-4"
         case .groq: return "llama-3.3-70b-versatile"
         case .mistral: return "codestral-latest"
@@ -123,7 +127,7 @@ enum StreamableAIProvider: String, CaseIterable {
     /// Whether this provider uses OpenAI-compatible chat/completions API format
     var usesOpenAIFormat: Bool {
         switch self {
-        case .omni, .openai, .deepseek, .openrouter, .groq, .mistral, .kimi, .perplexity,
+        case .omni, .openai, .deepseek, .ninerouter, .openrouter, .groq, .mistral, .kimi, .perplexity,
              .typhoon, .cerebras, .together, .fireworks, .minimax, .nvidia,
              .grok, .qwen, .glm, .copilot, .local:
             return true
@@ -135,7 +139,7 @@ enum StreamableAIProvider: String, CaseIterable {
     /// Whether this provider requires an API key
     var requiresAPIKey: Bool {
         switch self {
-        case .local: return false
+        case .local, .ninerouter: return false
         default: return true
         }
     }
@@ -488,7 +492,7 @@ final class AIClient: ObservableObject {
             return !trimmed.isEmpty && !trimmed.hasPrefix("{")
         case .omni:
             return false
-        case .openrouter, .groq, .mistral, .kimi, .perplexity, .typhoon,
+        case .ninerouter, .openrouter, .groq, .mistral, .kimi, .perplexity, .typhoon,
              .cerebras, .together, .fireworks, .minimax, .nvidia,
              .copilot, .aipass, .glm, .grok, .qwen, .local:
             return !trimmed.isEmpty && !trimmed.hasPrefix("{")
@@ -861,7 +865,7 @@ final class AIClient: ObservableObject {
                             }
                         case .anthropic:
                             try await streamAnthropic(prompt: safePrompt, attachments: attachments, systemPrompt: systemPrompt, conversationHistory: trimmedHistory, model: resolvedModel, apiKey: requestKey, tools: tools, onToken: onToken, onToolCall: onToolCall)
-                        case .omni, .openai, .deepseek, .openrouter, .groq, .mistral, .kimi, .perplexity,
+                        case .omni, .openai, .deepseek, .ninerouter, .openrouter, .groq, .mistral, .kimi, .perplexity,
                              .typhoon, .cerebras, .together, .fireworks, .minimax, .nvidia,
                              .grok, .qwen, .glm, .copilot, .local:
                             try await streamOpenAI(prompt: safePrompt, attachments: attachments, systemPrompt: systemPrompt, conversationHistory: trimmedHistory, model: resolvedModel, apiKey: requestKey, baseURL: baseURL, tools: tools, onToken: onToken, onToolCall: onToolCall)
@@ -1441,7 +1445,7 @@ final class AIClient: ObservableObject {
                 return try await syncAnthropic(messages: messages, systemPrompt: systemPrompt, model: resolvedModel, apiKey: actualKey, tools: tools)
             case .aipass:
                 return (text: "", toolCalls: [])
-            case .omni, .openai, .deepseek, .openrouter, .groq, .mistral, .kimi, .perplexity,
+            case .omni, .openai, .deepseek, .ninerouter, .openrouter, .groq, .mistral, .kimi, .perplexity,
                  .typhoon, .cerebras, .together, .fireworks, .minimax, .nvidia,
                  .grok, .qwen, .glm, .copilot, .local:
                 return try await syncOpenAI(messages: messages, systemPrompt: systemPrompt, model: resolvedModel, apiKey: actualKey, baseURL: baseURL, tools: tools)
@@ -1507,7 +1511,14 @@ final class AIClient: ObservableObject {
     
     private func streamGemini(prompt: String, attachments: [AIAttachment], systemPrompt: String?, conversationHistory: [(role: String, content: String)], model: String, apiKey: String, tools: [[String: Any]]?, onToken: @escaping (String) -> Void, onToolCall: ((AIToolCall) -> Void)?) async throws {
         let baseURL = StreamableAIProvider.gemini.directBaseURL
-        let cleanModel = model.hasPrefix("models/") ? String(model.dropFirst(7)) : model
+        let rawModel = model.hasPrefix("models/") ? String(model.dropFirst(7)) : model
+        let lowerRaw = rawModel.lowercased()
+        let cleanModel: String
+        if lowerRaw.contains("argon") || lowerRaw.contains("3.8") || lowerRaw.contains("3.7") || lowerRaw.contains("3.6") || lowerRaw.contains("3.5") || lowerRaw == "gemini-3-flash" {
+            cleanModel = "gemini-2.5-flash"
+        } else {
+            cleanModel = rawModel
+        }
         let isVertexEnterprise = EnterpriseAIAuthService.shared.mode == .geminiVertex
         
         let url: URL
@@ -2208,7 +2219,23 @@ final class AIClient: ObservableObject {
                     )
                     return
                 }
-                // All CodeAssist buckets exhausted on 429 — fail over to Codex OAuth, Z.AI GLM, or DeepSeek
+                // All CodeAssist buckets exhausted on 429 — try direct Google Gemini API key first before non-Gemini providers
+                let directGeminiKey = AIModelCatalog.resolveKey("gemini")
+                if Self.isValidDirectAPIKey(directGeminiKey, for: .gemini) {
+                    NSLog("⚠️ [streamGoogleCodeAssist] CodeAssist pools exhausted (HTTP %d) — failing over to direct Google Gemini API (gemini-2.5-flash)", code)
+                    try await streamGemini(
+                        prompt: prompt,
+                        attachments: attachments,
+                        systemPrompt: systemPrompt,
+                        conversationHistory: conversationHistory,
+                        model: "gemini-2.5-flash",
+                        apiKey: directGeminiKey,
+                        tools: tools,
+                        onToken: onToken,
+                        onToolCall: onToolCall
+                    )
+                    return
+                }
                 if let codexCreds = Self.loadCodexOAuthCredentials(fallbackToken: "") {
                     NSLog("⚠️ [streamGoogleCodeAssist] CodeAssist pools exhausted (HTTP %d) — failing over to Codex OAuth (%@)", code, codexCreds.defaultModel)
                     try await streamCodexResponses(

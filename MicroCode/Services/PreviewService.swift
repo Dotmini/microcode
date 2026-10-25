@@ -107,29 +107,109 @@ class PreviewService: ObservableObject {
         }
     }
     
-    // MARK: - Core Logic: Run Preview
+    // MARK: - Core Logic: Run Preview (Real swiftc Dynamic Library & NSHostingView Renderer)
     
-    /// Kept for compatibility with the legacy preview window.  A source file
-    /// cannot be rendered faithfully by parsing Swift text: use the real Xcode
-    /// Canvas handoff in `RightPreviewPanel` instead.
-    func runSwiftPlayground(filePath: String) async {
-        previewImage = nil
-        previewError = "SwiftUI Canvas is rendered by Xcode. Use Save & Open Xcode Canvas."
-        appendLog("↗️ Open \(URL(fileURLWithPath: filePath).lastPathComponent) in Xcode Canvas for the real preview.")
+    @Published var liveDylibPath: String?
+    @Published var liveDylibTrigger: UUID = UUID()
+    @Published var lastCompileDurationMs: Int = 0
+    
+    /// Compiles and renders a SwiftUI file using the real system `swiftc` compiler + `NSHostingView`.
+    func runSwiftPlayground(filePath: String, codeOverride: String? = nil) async {
+        isPreviewLoading = true
+        previewError = nil
+        let start = CFAbsoluteTimeGetCurrent()
+        let fileName = URL(fileURLWithPath: filePath).lastPathComponent
+        appendLog("⚡ Compiling \(fileName) for Live Preview...")
+        
+        let rawCode: String
+        if let override = codeOverride, !override.isEmpty {
+            rawCode = override
+        } else if let buffered = PreviewHotReloadEngine.shared.liveBufferOverrides[URL(fileURLWithPath: filePath).standardizedFileURL.path] {
+            rawCode = buffered
+        } else if let disk = try? String(contentsOfFile: filePath, encoding: .utf8) {
+            rawCode = disk
+        } else {
+            previewError = "Unable to read Swift file at \(filePath)"
+            isPreviewLoading = false
+            return
+        }
+        
+        do {
+            // 1. Compile interactive dylib for instant in-memory NSHostingView rendering
+            let dylibPath = try await SwiftUILivePreviewCompiler.compileDylib(
+                code: rawCode,
+                width: configuration.device.width,
+                height: configuration.device.height,
+                isDark: configuration.colorScheme == .dark
+            )
+            self.liveDylibPath = dylibPath
+            self.liveDylibTrigger = UUID()
+            
+            // 2. Also capture snapshot image for views expecting previewImage
+            if let snapshot = SwiftUILivePreviewCompiler.renderImageFromDylib(
+                dylibPath: dylibPath,
+                size: CGSize(
+                    width: configuration.orientation == .landscape ? configuration.device.height : configuration.device.width,
+                    height: configuration.orientation == .landscape ? configuration.device.width : configuration.device.height
+                )
+            ) {
+                self.previewImage = snapshot
+            }
+            
+            let ms = max(1, Int((CFAbsoluteTimeGetCurrent() - start) * 1000))
+            self.lastCompileDurationMs = ms
+            appendLog("✅ Hot Reloaded \(fileName) in \(ms)ms")
+        } catch {
+            self.previewError = error.localizedDescription
+            appendLog("❌ Compilation error: \(error.localizedDescription)")
+        }
         isPreviewLoading = false
     }
 
-    
     // MARK: - Universal Preview
     
     @Published var universalPreviewImages: [UUID: NSImage] = [:]
     
-    /// The old multi-device surface also produced guessed mockups.  Real
-    /// multi-device testing belongs to Device Runtime / Xcode previews.
+    /// Compiles the SwiftUI view once into a dylib and renders real NSHostingView snapshots across all target device sizes.
     func runUniversalPreview(filePath: String, devices: [DeviceFrame], isDark: Bool) async {
+        isPreviewLoading = true
+        previewError = nil
         universalPreviewImages = [:]
-        previewError = "Use Xcode Canvas or Device Runtime for real multi-device previews."
-        appendLog("↗️ MicroCode did not generate a mock multi-device preview for \(URL(fileURLWithPath: filePath).lastPathComponent).")
+        let start = CFAbsoluteTimeGetCurrent()
+        
+        guard let rawCode = (try? String(contentsOfFile: filePath, encoding: .utf8)) else {
+            previewError = "Unable to read \(URL(fileURLWithPath: filePath).lastPathComponent)"
+            isPreviewLoading = false
+            return
+        }
+        
+        do {
+            let dylibPath = try await SwiftUILivePreviewCompiler.compileDylib(
+                code: rawCode,
+                width: 393,
+                height: 852,
+                isDark: isDark
+            )
+            self.liveDylibPath = dylibPath
+            self.liveDylibTrigger = UUID()
+            
+            var results: [UUID: NSImage] = [:]
+            for device in devices {
+                if let img = SwiftUILivePreviewCompiler.renderImageFromDylib(
+                    dylibPath: dylibPath,
+                    size: CGSize(width: device.width, height: device.height)
+                ) {
+                    results[device.id] = img
+                }
+            }
+            self.universalPreviewImages = results
+            let ms = max(1, Int((CFAbsoluteTimeGetCurrent() - start) * 1000))
+            self.lastCompileDurationMs = ms
+            appendLog("✅ Rendered Universal Preview (\(devices.count) devices) in \(ms)ms")
+        } catch {
+            previewError = error.localizedDescription
+            appendLog("❌ Universal preview failed: \(error.localizedDescription)")
+        }
         isPreviewLoading = false
     }
     
@@ -631,3 +711,170 @@ struct LivePreviewPanel: View {
         .background(Color(nsColor: .windowBackgroundColor))
     }
 }
+
+// MARK: - SwiftUILivePreviewCompiler (Real swiftc Dynamic Library + NSHostingView Engine)
+
+enum SwiftUILivePreviewCompiler {
+    struct CompilationError: LocalizedError {
+        let message: String
+        var errorDescription: String? { message }
+    }
+
+    /// Compiles arbitrary SwiftUI source code into a loadable `.dylib` with `@_cdecl("createPreviewView")`
+    /// so it can be hosted interactively via `DynamicSwiftUIView` or rendered to an `NSImage`.
+    static func compileDylib(
+        code: String,
+        width: CGFloat = 393,
+        height: CGFloat = 852,
+        isDark: Bool = false
+    ) async throws -> String {
+        let detectedViewName = detectRootViewName(in: code)
+        var sanitizedLines: [String] = []
+        var skipMainBlock = false
+
+        for line in code.components(separatedBy: .newlines) {
+            let trimmed = line.trimmingCharacters(in: .whitespaces)
+            if trimmed == "@main" {
+                skipMainBlock = true
+                continue
+            }
+            if skipMainBlock, trimmed.hasPrefix("struct "), trimmed.contains(": App") {
+                continue
+            }
+            sanitizedLines.append(line)
+        }
+
+        let cleanedBody = sanitizedLines.joined(separator: "\n")
+        let hasSwiftUIImport = cleanedBody.contains("import SwiftUI")
+        let hasAppKitImport = cleanedBody.contains("import AppKit")
+        let schemeExpr = isDark ? ".dark" : ".light"
+
+        let wrapper = """
+        \(hasSwiftUIImport ? "" : "import SwiftUI")
+        \(hasAppKitImport ? "" : "import AppKit")
+
+        \(cleanedBody)
+
+        @_cdecl("microcode_create_preview")
+        public func microcode_create_preview() -> UnsafeMutableRawPointer {
+            return createPreviewView()
+        }
+
+        @_cdecl("createPreviewView")
+        public func createPreviewView() -> UnsafeMutableRawPointer {
+            let root = AnyView(
+                \(detectedViewName)()
+                    .preferredColorScheme(\(schemeExpr))
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+            )
+            let hosting = NSHostingView(rootView: root)
+            hosting.frame = NSRect(x: 0, y: 0, width: \(Int(width)), height: \(Int(height)))
+            return Unmanaged.passRetained(hosting).toOpaque()
+        }
+        """
+
+        let tempDir = URL(fileURLWithPath: NSTemporaryDirectory()).appendingPathComponent("MicroCodeLivePreviews", isDirectory: true)
+        try? FileManager.default.createDirectory(at: tempDir, withIntermediateDirectories: true)
+
+        // Keep temp directory bounded to the 6 most recent files
+        if let existing = try? FileManager.default.contentsOfDirectory(
+            at: tempDir,
+            includingPropertiesForKeys: [.contentModificationDateKey],
+            options: [.skipsHiddenFiles]
+        ), existing.count > 12 {
+            let sorted = existing.sorted {
+                let d1 = (try? $0.resourceValues(forKeys: [.contentModificationDateKey]).contentModificationDate) ?? .distantPast
+                let d2 = (try? $1.resourceValues(forKeys: [.contentModificationDateKey]).contentModificationDate) ?? .distantPast
+                return d1 < d2
+            }
+            for oldURL in sorted.dropLast(8) {
+                try? FileManager.default.removeItem(at: oldURL)
+            }
+        }
+
+        let token = UUID().uuidString.prefix(8)
+        let sourceURL = tempDir.appendingPathComponent("LivePreview_\(token).swift")
+        let dylibURL = tempDir.appendingPathComponent("libLivePreview_\(token).dylib")
+
+        try wrapper.write(to: sourceURL, atomically: true, encoding: .utf8)
+
+        return try await withCheckedThrowingContinuation { continuation in
+            DispatchQueue.global(qos: .userInitiated).async {
+                defer { try? FileManager.default.removeItem(at: sourceURL) }
+
+                let process = Process()
+                process.executableURL = URL(fileURLWithPath: "/usr/bin/xcrun")
+                process.arguments = [
+                    "swiftc",
+                    "-emit-library",
+                    "-o", dylibURL.path,
+                    sourceURL.path,
+                    "-target", "arm64-apple-macosx13.0"
+                ]
+
+                let errPipe = Pipe()
+                process.standardError = errPipe
+                process.standardOutput = Pipe()
+
+                do {
+                    try process.run()
+                    process.waitUntilExit()
+                    if process.terminationStatus == 0 {
+                        continuation.resume(returning: dylibURL.path)
+                    } else {
+                        let data = errPipe.fileHandleForReading.readDataToEndOfFile()
+                        let errText = String(data: data, encoding: .utf8) ?? "Unknown swiftc error"
+                        continuation.resume(throwing: CompilationError(message: errText))
+                    }
+                } catch {
+                    continuation.resume(throwing: error)
+                }
+            }
+        }
+    }
+
+    /// Loads a compiled `.dylib`, instantiates the `NSHostingView`, and renders an `NSImage` snapshot.
+    @MainActor
+    static func renderImageFromDylib(dylibPath: String, size: CGSize) -> NSImage? {
+        guard let handle = dlopen(dylibPath, RTLD_NOW) else { return nil }
+        defer { dlclose(handle) }
+        guard let sym = dlsym(handle, "createPreviewView") else { return nil }
+
+        typealias CreateFunc = @convention(c) () -> UnsafeMutableRawPointer
+        let create = unsafeBitCast(sym, to: CreateFunc.self)
+        let ptr = create()
+        let view = Unmanaged<NSView>.fromOpaque(ptr).takeRetainedValue()
+        view.frame = NSRect(origin: .zero, size: size)
+        view.layoutSubtreeIfNeeded()
+
+        guard let rep = view.bitmapImageRepForCachingDisplay(in: view.bounds) else { return nil }
+        view.cacheDisplay(in: view.bounds, to: rep)
+        let image = NSImage(size: size)
+        image.addRepresentation(rep)
+        return image
+    }
+
+    /// Automatically detects the primary `View`-conforming struct in a Swift source file.
+    static func detectRootViewName(in code: String) -> String {
+        let pattern = #"struct\s+([A-Za-z_][A-Za-z0-9_]*)\s*:\s*[^{]*\bView\b"#
+        guard let regex = try? NSRegularExpression(pattern: pattern) else {
+            return "ContentView"
+        }
+        let nsRange = NSRange(code.startIndex..<code.endIndex, in: code)
+        let matches = regex.matches(in: code, range: nsRange)
+        var candidates: [String] = []
+        for match in matches {
+            if match.numberOfRanges > 1,
+               let range = Range(match.range(at: 1), in: code) {
+                let name = String(code[range])
+                if !name.hasSuffix("_Previews") {
+                    candidates.append(name)
+                }
+            }
+        }
+        if candidates.contains("PreviewWrapper") { return "PreviewWrapper" }
+        if candidates.contains("ContentView") { return "ContentView" }
+        return candidates.first ?? "ContentView"
+    }
+}
+

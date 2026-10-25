@@ -597,6 +597,13 @@ final class TelemetryService: ObservableObject {
                     case .claudeCode: return "claude-sonnet-4-6"
                     case .agy: return "gemini-3.8-pro"
                     case .codexEngine: return "gpt-5.4"
+                    case .geminiCLI: return "gemini-2.5-pro"
+                    case .cursorAgent: return "claude-sonnet-4-6"
+                    case .githubCopilot: return "claude-sonnet-4.6"
+                    case .goose: return "claude-sonnet-4-6"
+                    case .cline: return "claude-sonnet-4-6"
+                    case .qwenCode: return "qwen3-coder-plus"
+                    case .aider: return "sonnet"
                     case .openCode: return rawAppModel
                     case .zedEngine: return "claude-sonnet-4-6"
                     default: return rawAppModel
