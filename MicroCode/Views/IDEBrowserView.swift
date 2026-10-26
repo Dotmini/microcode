@@ -38,6 +38,7 @@ struct BrowserPickedElement: Identifiable, Codable, Equatable {
     var boundsHeight: Double = 0
     var viewportWidth: Double = 800
     var viewportHeight: Double = 600
+    var note: String = ""
     let timestamp: Date
 }
 
@@ -85,6 +86,7 @@ final class IDEBrowserAutomationService: NSObject, ObservableObject, WKScriptMes
     @Published var networkLogs: [BrowserNetworkEntry] = []
     @Published var lastEvaluatedResult: String = ""
     @Published var isInspectMode: Bool = false
+    @Published var pickedElements: [BrowserPickedElement] = []
     @Published var lastPickedElement: BrowserPickedElement? = nil
     @Published var activePortProcesses: [ActiveLocalPortProcess] = []
     @Published var isScanningPorts: Bool = false
@@ -160,37 +162,53 @@ final class IDEBrowserAutomationService: NSObject, ObservableObject, WKScriptMes
             };
         }
 
-        // Always-On Interactive DOM Inspector: Right-Click (คลิกขวา), Drag-to-Select (ลากคลุม), and Hover-Inspect
+        // Always-On Interactive Multi-Point DOM Inspector: Right-Click, Drag-to-Select, and Hover-Inspect
+        window.__mcPinnedSelectors = window.__mcPinnedSelectors || [];
+
         function ensureInspectorDOM() {
             if (!document.body) return null;
             var overlay = document.getElementById('__mc_inspect_overlay');
             var label = document.getElementById('__mc_inspect_label');
             var dragBox = document.getElementById('__mc_drag_box');
+            var pinnedRoot = document.getElementById('__mc_pinned_container');
             if (!overlay) {
                 overlay = document.createElement('div');
                 overlay.id = '__mc_inspect_overlay';
-                overlay.style.cssText = 'position:fixed;pointer-events:none;z-index:2147483645;border:2px solid #00D2FF;background:rgba(0,210,255,0.14);border-radius:5px;box-shadow:0 0 0 1px rgba(0,210,255,0.3),0 4px 16px rgba(0,210,255,0.18);transition:all 0.04s ease;display:none;';
+                overlay.style.cssText = 'position:fixed;pointer-events:none;z-index:2147483645;border:1.5px dashed rgba(255,255,255,0.88);background:rgba(255,255,255,0.06);border-radius:4px;box-shadow:0 0 0 1px rgba(0,0,0,0.65),0 4px 14px rgba(0,0,0,0.28);transition:all 0.04s ease;display:none;';
                 document.body.appendChild(overlay);
             }
             if (!label) {
                 label = document.createElement('div');
                 label.id = '__mc_inspect_label';
-                label.style.cssText = 'position:fixed;pointer-events:none;z-index:2147483646;background:#0D1117;color:#00D2FF;font:600 11px -apple-system,BlinkMacSystemFont,monospace;padding:3px 8px;border-radius:4px;border:1px solid #00D2FF;box-shadow:0 4px 12px rgba(0,0,0,0.45);display:none;white-space:nowrap;';
+                label.style.cssText = 'position:fixed;pointer-events:none;z-index:2147483646;background:#18181B;color:#FAFAFA;font:600 10.5px -apple-system,BlinkMacSystemFont,monospace;padding:3px 7px;border-radius:4px;border:1px solid rgba(255,255,255,0.24);box-shadow:0 4px 12px rgba(0,0,0,0.5);display:none;white-space:nowrap;';
                 document.body.appendChild(label);
             }
             if (!dragBox) {
                 dragBox = document.createElement('div');
                 dragBox.id = '__mc_drag_box';
-                dragBox.style.cssText = 'position:fixed;pointer-events:none;z-index:2147483647;border:1.5px dashed #00D2FF;background:rgba(0,210,255,0.10);border-radius:4px;display:none;';
+                dragBox.style.cssText = 'position:fixed;pointer-events:none;z-index:2147483647;border:1.5px dashed rgba(255,255,255,0.85);background:rgba(255,255,255,0.08);box-shadow:0 0 0 1px rgba(0,0,0,0.5);border-radius:4px;display:none;';
                 document.body.appendChild(dragBox);
             }
-            return { overlay: overlay, label: label, dragBox: dragBox };
+            if (!pinnedRoot) {
+                pinnedRoot = document.createElement('div');
+                pinnedRoot.id = '__mc_pinned_container';
+                pinnedRoot.style.cssText = 'position:fixed;left:0;top:0;width:0;height:0;pointer-events:none;z-index:2147483644;';
+                document.body.appendChild(pinnedRoot);
+            }
+            return { overlay: overlay, label: label, dragBox: dragBox, pinnedRoot: pinnedRoot };
         }
 
         function isInternalInspectorNode(el) {
             if (!el) return true;
-            var id = el.id || '';
-            return id === '__mc_inspect_overlay' || id === '__mc_inspect_label' || id === '__mc_drag_box';
+            var cur = el;
+            while (cur) {
+                var id = cur.id || '';
+                if (id === '__mc_inspect_overlay' || id === '__mc_inspect_label' || id === '__mc_drag_box' || id === '__mc_pinned_container') {
+                    return true;
+                }
+                cur = cur.parentElement;
+            }
+            return false;
         }
 
         function buildSelectorForElement(el) {
@@ -198,7 +216,7 @@ final class IDEBrowserAutomationService: NSObject, ObservableObject, WKScriptMes
             var parts = [];
             var cur = el;
             var depth = 0;
-            while (cur && cur.tagName && depth < 3) {
+            while (cur && cur.tagName && depth < 4) {
                 var tag = cur.tagName.toLowerCase();
                 var idPart = cur.id ? ('#' + cur.id) : '';
                 var clsPart = '';
@@ -206,13 +224,74 @@ final class IDEBrowserAutomationService: NSObject, ObservableObject, WKScriptMes
                     var classes = cur.className.trim().split(/\\s+/).filter(Boolean).slice(0, 2);
                     if (classes.length > 0) clsPart = '.' + classes.join('.');
                 }
-                parts.unshift(tag + idPart + clsPart);
+                var nthPart = '';
+                if (!idPart && cur.parentElement) {
+                    var siblings = Array.prototype.filter.call(cur.parentElement.children, function(c) {
+                        return c.tagName === cur.tagName;
+                    });
+                    if (siblings.length > 1) {
+                        var idx = siblings.indexOf(cur) + 1;
+                        if (idx > 0) nthPart = ':nth-of-type(' + idx + ')';
+                    }
+                }
+                parts.unshift(tag + idPart + clsPart + nthPart);
                 if (idPart || tag === 'body' || tag === 'html') break;
                 cur = cur.parentElement;
                 depth++;
             }
             return parts.join(' > ');
         }
+
+        window.__mcRenderPinnedOverlays = function() {
+            var ui = ensureInspectorDOM();
+            if (!ui || !ui.pinnedRoot) return;
+            ui.pinnedRoot.innerHTML = '';
+            var list = window.__mcPinnedSelectors || [];
+            list.forEach(function(sel, idx) {
+                var target = null;
+                try { target = document.querySelector(sel); } catch (e) {}
+                if (!target || !target.getBoundingClientRect) return;
+                var r = target.getBoundingClientRect();
+                if (r.width <= 0 && r.height <= 0) return;
+
+                var box = document.createElement('div');
+                box.style.cssText = 'position:fixed;pointer-events:none;border:1.5px solid #FAFAFA;background:rgba(24,24,27,0.12);box-shadow:0 0 0 1px rgba(0,0,0,0.75),0 2px 8px rgba(0,0,0,0.3);border-radius:4px;';
+                box.style.left = r.left + 'px';
+                box.style.top = r.top + 'px';
+                box.style.width = Math.max(4, r.width) + 'px';
+                box.style.height = Math.max(4, r.height) + 'px';
+
+                var badge = document.createElement('div');
+                badge.style.cssText = 'position:fixed;pointer-events:none;background:#18181B;color:#FAFAFA;font:700 10px -apple-system,BlinkMacSystemFont,monospace;padding:2px 6px;border-radius:3px;border:1px solid rgba(255,255,255,0.32);box-shadow:0 2px 6px rgba(0,0,0,0.45);white-space:nowrap;';
+                var tag = target.tagName ? target.tagName.toLowerCase() : 'el';
+                var shortCls = (target.className && typeof target.className === 'string' && target.className.trim())
+                    ? ('.' + target.className.trim().split(/\\s+/)[0])
+                    : (target.id ? ('#' + target.id) : '');
+                badge.textContent = '#' + (idx + 1) + ' ' + tag + shortCls;
+                badge.style.left = Math.max(4, Math.min(window.innerWidth - 140, r.left)) + 'px';
+                badge.style.top = (r.top > 22 ? (r.top - 20) : (r.top + 4)) + 'px';
+
+                ui.pinnedRoot.appendChild(box);
+                ui.pinnedRoot.appendChild(badge);
+            });
+        };
+
+        window.__mcSyncPinnedSelectors = function(selectorsArray) {
+            window.__mcPinnedSelectors = Array.isArray(selectorsArray) ? selectorsArray : [];
+            window.__mcRenderPinnedOverlays();
+        };
+
+        window.addEventListener('scroll', function() {
+            if (window.__mcPinnedSelectors && window.__mcPinnedSelectors.length > 0) {
+                window.__mcRenderPinnedOverlays();
+            }
+        }, true);
+
+        window.addEventListener('resize', function() {
+            if (window.__mcPinnedSelectors && window.__mcPinnedSelectors.length > 0) {
+                window.__mcRenderPinnedOverlays();
+            }
+        }, true);
 
         function highlightElementOnPage(el, badgeSuffix) {
             var ui = ensureInspectorDOM();
@@ -225,20 +304,31 @@ final class IDEBrowserAutomationService: NSObject, ObservableObject, WKScriptMes
             ui.overlay.style.height = Math.max(4, r.height) + 'px';
             var idPart = el.id ? ('#' + el.id) : '';
             var clsPart = (el.className && typeof el.className === 'string' && el.className.trim()) ? ('.' + el.className.trim().split(/\\s+/).slice(0,2).join('.')) : '';
-            ui.label.textContent = '🎯 ' + el.tagName.toLowerCase() + idPart + clsPart + ' (' + Math.round(r.width) + '×' + Math.round(r.height) + ')' + (badgeSuffix ? ' • ' + badgeSuffix : '');
+            ui.label.textContent = el.tagName.toLowerCase() + idPart + clsPart + ' (' + Math.round(r.width) + '×' + Math.round(r.height) + ')' + (badgeSuffix ? ' · ' + badgeSuffix : '');
             ui.label.style.display = 'block';
             ui.label.style.left = Math.max(6, Math.min(window.innerWidth - 220, r.left)) + 'px';
             ui.label.style.top = (r.top > 30 ? (r.top - 26) : (r.bottom + 6)) + 'px';
         }
 
-        function pickAndSendElement(el, selectedText, modeLabel) {
+        function pickAndSendElement(el, selectedText, modeLabel, allowToggle) {
             if (!el || isInternalInspectorNode(el)) return;
             if (el.nodeType === 3) el = el.parentElement;
             if (!el || !el.tagName) return;
-            highlightElementOnPage(el, modeLabel || 'Selected for AI Edit');
+            var selector = buildSelectorForElement(el);
+            var existingIdx = (window.__mcPinnedSelectors || []).indexOf(selector);
+            if (allowToggle && existingIdx !== -1) {
+                window.__mcPinnedSelectors.splice(existingIdx, 1);
+                window.__mcRenderPinnedOverlays();
+                send('element_unpicked', { selector: selector });
+                return;
+            }
+            if (existingIdx === -1) {
+                window.__mcPinnedSelectors.push(selector);
+            }
+            window.__mcRenderPinnedOverlays();
+            highlightElementOnPage(el, '#' + window.__mcPinnedSelectors.length + ' Selected');
             var r = el.getBoundingClientRect();
             var cs = window.getComputedStyle(el);
-            var selector = buildSelectorForElement(el);
             var stylesSummary = 'display:' + cs.display + '; color:' + cs.color + '; bg:' + cs.backgroundColor + '; font:' + cs.fontSize + ' ' + cs.fontFamily + '; padding:' + cs.padding;
             var rawText = (selectedText && selectedText.length > 0) ? ('[Selected: "' + selectedText.slice(0, 240) + '"]') : ((el.innerText || el.value || '').trim().slice(0, 240));
             send('element_picked', {
@@ -263,24 +353,37 @@ final class IDEBrowserAutomationService: NSObject, ObservableObject, WKScriptMes
             ui.overlay.style.display = 'none';
             ui.label.style.display = 'none';
             ui.dragBox.style.display = 'none';
+            window.__mcPinnedSelectors = [];
+            if (ui.pinnedRoot) ui.pinnedRoot.innerHTML = '';
         };
 
-        // 1. Right-Click (คลิกขวา) anywhere on Preview -> Inspect Element & Open Direct Agent Edit
+        window.__mcHideHoverHighlightOnly = function() {
+            var ui = ensureInspectorDOM();
+            if (!ui) return;
+            ui.overlay.style.display = 'none';
+            ui.label.style.display = 'none';
+            ui.dragBox.style.display = 'none';
+        };
+
+        // 1. Right-Click anywhere on Preview -> Add Element to Multi-Selection
         window.addEventListener('contextmenu', function(e) {
             var el = document.elementFromPoint(e.clientX, e.clientY) || e.target;
             if (!el || isInternalInspectorNode(el)) return;
             e.preventDefault();
             e.stopPropagation();
             var sel = (window.getSelection && window.getSelection().toString() || '').trim();
-            pickAndSendElement(el, sel, 'Right-Click Inspect');
+            pickAndSendElement(el, sel, 'Right-Click Inspect', false);
         }, true);
 
         // 2. Hover + Left-Click when Inspect Mode is active (or Alt/Option + Click anytime)
+        // Keeps Inspect Mode active so user can click multiple elements in sequence!
         window.addEventListener('mousemove', function(e) {
             if (window.__mcInspectActive) {
                 var el = document.elementFromPoint(e.clientX, e.clientY);
                 if (!el || isInternalInspectorNode(el)) return;
-                highlightElementOnPage(el, 'Click to Edit with AI');
+                var sel = buildSelectorForElement(el);
+                var idx = (window.__mcPinnedSelectors || []).indexOf(sel);
+                highlightElementOnPage(el, idx !== -1 ? ('#' + (idx + 1) + ' (Click to Remove)') : 'Click to Add Point');
             }
         }, true);
 
@@ -290,17 +393,16 @@ final class IDEBrowserAutomationService: NSObject, ObservableObject, WKScriptMes
             if (!el || isInternalInspectorNode(el)) return;
             e.preventDefault();
             e.stopPropagation();
-            window.__mcInspectActive = false;
-            pickAndSendElement(el, '', 'Picked for AI Edit');
+            pickAndSendElement(el, '', 'Selected', true);
         }, true);
 
-        // 3. Drag-to-Select / Marquee Box (ลากคลุม) -> Draws Cyan Selection Box & Picks Target Element/Text
+        // 3. Drag-to-Select / Marquee Box -> Selects Region or Multiple Elements Inside Box
         var dragStart = null;
         var isMarqueeDragging = false;
         window.addEventListener('mousedown', function(e) {
-            if (e.button !== 0 || window.__mcInspectActive) return;
+            if (e.button !== 0) return;
             var tag = (e.target && e.target.tagName) ? e.target.tagName.toLowerCase() : '';
-            if (tag === 'input' || tag === 'textarea' || tag === 'select') return;
+            if (!window.__mcInspectActive && (tag === 'input' || tag === 'textarea' || tag === 'select')) return;
             dragStart = { x: e.clientX, y: e.clientY, target: e.target };
             isMarqueeDragging = false;
         }, true);
@@ -341,6 +443,34 @@ final class IDEBrowserAutomationService: NSObject, ObservableObject, WKScriptMes
             var dist = Math.hypot(dx, dy);
             if (!wasDragging && dist < 18) return;
 
+            var boxLeft = Math.min(start.x, e.clientX);
+            var boxRight = Math.max(start.x, e.clientX);
+            var boxTop = Math.min(start.y, e.clientY);
+            var boxBottom = Math.max(start.y, e.clientY);
+
+            // If in Inspect Mode or Shift-dragging, collect distinct interactive/content elements inside marquee box
+            if (window.__mcInspectActive || e.shiftKey) {
+                var candidates = Array.from(document.querySelectorAll('button, a, input, select, textarea, h1, h2, h3, h4, p, li, img, section, article, [role="button"]'));
+                var matched = candidates.filter(function(node) {
+                    if (isInternalInspectorNode(node)) return false;
+                    var r = node.getBoundingClientRect();
+                    if (r.width < 8 || r.height < 8) return false;
+                    var cx = r.left + r.width / 2;
+                    var cy = r.top + r.height / 2;
+                    return cx >= boxLeft && cx <= boxRight && cy >= boxTop && cy <= boxBottom;
+                });
+                // Filter out parent containers if their child is already in matched
+                var leafMatched = matched.filter(function(node) {
+                    return !matched.some(function(other) { return other !== node && node.contains(other); });
+                }).slice(0, 8);
+                if (leafMatched.length > 0) {
+                    leafMatched.forEach(function(node) {
+                        pickAndSendElement(node, '', 'Marquee Selected', false);
+                    });
+                    return;
+                }
+            }
+
             var selText = '';
             var selEl = null;
             if (window.getSelection) {
@@ -357,7 +487,7 @@ final class IDEBrowserAutomationService: NSObject, ObservableObject, WKScriptMes
                 selEl = document.elementFromPoint(cx, cy) || start.target || e.target;
             }
             if (selEl && !isInternalInspectorNode(selEl)) {
-                pickAndSendElement(selEl, selText, selText ? 'Text Selection' : 'Region Selected');
+                pickAndSendElement(selEl, selText, selText ? 'Text Selection' : 'Region Selected', false);
             }
         }, true);
     })();
@@ -410,8 +540,7 @@ final class IDEBrowserAutomationService: NSObject, ObservableObject, WKScriptMes
             let vpW = (body["viewportWidth"] as? NSNumber)?.doubleValue ?? 800
             let vpH = (body["viewportHeight"] as? NSNumber)?.doubleValue ?? 600
             Task { @MainActor in
-                self.isInspectMode = false
-                self.lastPickedElement = BrowserPickedElement(
+                let newEl = BrowserPickedElement(
                     selector: selector,
                     tag: tag,
                     text: text,
@@ -426,11 +555,72 @@ final class IDEBrowserAutomationService: NSObject, ObservableObject, WKScriptMes
                     viewportHeight: vpH,
                     timestamp: Date()
                 )
+                if let existingIdx = self.pickedElements.firstIndex(where: { $0.selector == selector }) {
+                    var updated = newEl
+                    updated.id = self.pickedElements[existingIdx].id
+                    updated.note = self.pickedElements[existingIdx].note
+                    self.pickedElements[existingIdx] = updated
+                    self.lastPickedElement = updated
+                } else {
+                    self.pickedElements.append(newEl)
+                    if self.pickedElements.count > 20 {
+                        self.pickedElements.removeFirst(self.pickedElements.count - 20)
+                    }
+                    self.lastPickedElement = newEl
+                }
+                self.syncPinnedHighlights()
+            }
+        } else if type == "element_unpicked" {
+            let selector = body["selector"] as? String ?? ""
+            Task { @MainActor in
+                self.pickedElements.removeAll { $0.selector == selector }
+                self.lastPickedElement = self.pickedElements.last
+                self.syncPinnedHighlights()
             }
         }
     }
     
+    func syncPinnedHighlights(target: String = "preview") {
+        let wv = resolveWebView(target: target)
+        let selectors = pickedElements.map(\.selector)
+        if let data = try? JSONSerialization.data(withJSONObject: selectors),
+           let json = String(data: data, encoding: .utf8) {
+            wv.evaluateJavaScript("if (window.__mcSyncPinnedSelectors) window.__mcSyncPinnedSelectors(\(json));", completionHandler: nil)
+        }
+    }
+
+    func removePickedElement(id: UUID, target: String = "preview") {
+        pickedElements.removeAll { $0.id == id }
+        lastPickedElement = pickedElements.last
+        syncPinnedHighlights(target: target)
+        if pickedElements.isEmpty {
+            let wv = resolveWebView(target: target)
+            wv.evaluateJavaScript("if (window.__mcHideHoverHighlightOnly) window.__mcHideHoverHighlightOnly();", completionHandler: nil)
+        }
+    }
+
+    func focusPickedElementOnPage(_ el: BrowserPickedElement, target: String = "preview") {
+        let wv = resolveWebView(target: target)
+        let escaped = el.selector.replacingOccurrences(of: "\\", with: "\\\\").replacingOccurrences(of: "'", with: "\\'")
+        let js = """
+        (function() {
+            try {
+                var target = document.querySelector('\(escaped)');
+                if (target) {
+                    target.scrollIntoView({ behavior: 'smooth', block: 'center', inline: 'nearest' });
+                    if (window.__mcRenderPinnedOverlays) {
+                        setTimeout(window.__mcRenderPinnedOverlays, 120);
+                        setTimeout(window.__mcRenderPinnedOverlays, 350);
+                    }
+                }
+            } catch (e) {}
+        })();
+        """
+        wv.evaluateJavaScript(js, completionHandler: nil)
+    }
+
     func clearPickedElement(target: String = "preview") {
+        pickedElements.removeAll()
         lastPickedElement = nil
         isInspectMode = false
         let wv = resolveWebView(target: target)
@@ -444,8 +634,8 @@ final class IDEBrowserAutomationService: NSObject, ObservableObject, WKScriptMes
         let js = """
         (function() {
             window.__mcInspectActive = \(nextState ? "true" : "false");
-            if (!window.__mcInspectActive && window.__mcClearInspectorHighlight) {
-                window.__mcClearInspectorHighlight();
+            if (!window.__mcInspectActive && window.__mcHideHoverHighlightOnly) {
+                window.__mcHideHoverHighlightOnly();
                 return 'Inspect Mode Disabled';
             }
             return 'Inspect Mode Enabled';
@@ -455,27 +645,66 @@ final class IDEBrowserAutomationService: NSObject, ObservableObject, WKScriptMes
     }
     
     func sendPickedElementToAgent(_ el: BrowserPickedElement, instruction: String = "", pageURL: String? = nil, autoSend: Bool? = nil) {
+        sendPickedElementsToAgent([el], instruction: instruction, pageURL: pageURL, autoSend: autoSend)
+    }
+
+    func sendPickedElementsToAgent(_ elements: [BrowserPickedElement]? = nil, instruction: String = "", pageURL: String? = nil, autoSend: Bool? = nil) {
+        let targets = elements ?? (pickedElements.isEmpty ? (lastPickedElement.map { [$0] } ?? []) : pickedElements)
+        guard !targets.isEmpty else { return }
+
         let resolvedURL = pageURL ?? AppState.shared?.browserURL ?? "http://localhost:3000"
         let trimmedInstruction = instruction.trimmingCharacters(in: .whitespacesAndNewlines)
-        let shouldAutoSend = autoSend ?? !trimmedInstruction.isEmpty
-        var contextPrompt = """
-        [Inspect Element Target]
-        - Page URL: \(resolvedURL)
-        - Selector: `\(el.selector)` (`<\(el.tag)>` at \(el.rect))
-        """
-        if !el.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-            contextPrompt += "\n- Element / Selected Text: `\(el.text)`"
+        let hasPerElementNotes = targets.contains { !$0.note.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }
+        let shouldAutoSend = autoSend ?? (!trimmedInstruction.isEmpty || hasPerElementNotes)
+
+        var contextPrompt: String
+        if targets.count == 1, let el = targets.first {
+            contextPrompt = """
+            [Inspect Element Target]
+            - Page URL: \(resolvedURL)
+            - Selector: `\(el.selector)` (`<\(el.tag)>` at \(el.rect))
+            """
+            if !el.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                contextPrompt += "\n- Element / Selected Text: `\(el.text)`"
+            }
+            contextPrompt += """
+            \n- Computed Styles: `\(el.styles)`
+            - HTML Snippet:
+            ```html
+            \(el.outerHTML)
+            ```
+            """
+            let combinedNote = [el.note.trimmingCharacters(in: .whitespacesAndNewlines), trimmedInstruction]
+                .filter { !$0.isEmpty }
+                .joined(separator: " — ")
+            if !combinedNote.isEmpty {
+                contextPrompt += "\n\nInstruction: \(combinedNote)"
+            }
+        } else {
+            contextPrompt = """
+            [Multi-Point Inspect Targets (\(targets.count) Elements Selected)]
+            - Page URL: \(resolvedURL)
+            """
+            for (idx, el) in targets.enumerated() {
+                let itemNum = idx + 1
+                let itemNote = el.note.trimmingCharacters(in: .whitespacesAndNewlines)
+                contextPrompt += "\n\n### Target #\(itemNum): `\(el.selector)` (`<\(el.tag)>` at \(el.rect))"
+                if !itemNote.isEmpty {
+                    contextPrompt += "\n- **Specific Edit for #\(itemNum)**: \(itemNote)"
+                }
+                if !el.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                    contextPrompt += "\n- Text Content: `\(el.text)`"
+                }
+                contextPrompt += "\n- Computed Styles: `\(el.styles)`"
+                contextPrompt += "\n- HTML Snippet:\n```html\n\(el.outerHTML)\n```"
+            }
+            if !trimmedInstruction.isEmpty {
+                contextPrompt += "\n\n### Overall Instruction for Selected Targets:\n\(trimmedInstruction)"
+            } else if !hasPerElementNotes {
+                contextPrompt += "\n\n### Overall Instruction for Selected Targets:\nปรับปรุงและแก้ไของค์ประกอบทั้ง \(targets.count) จุดที่เลือกให้สมบูรณ์และสอดคล้องกัน"
+            }
         }
-        contextPrompt += """
-        \n- Computed Styles: `\(el.styles)`
-        - HTML Snippet:
-        ```html
-        \(el.outerHTML)
-        ```
-        """
-        if !trimmedInstruction.isEmpty {
-            contextPrompt += "\n\nInstruction: \(trimmedInstruction)"
-        }
+
         NSPasteboard.general.clearContents()
         NSPasteboard.general.setString(contextPrompt, forType: .string)
         AppState.shared?.aiChatVisible = true
@@ -1113,39 +1342,62 @@ struct IDEBrowserView: View {
             // Navigation bar
             navigationBar
             
-            if let picked = automation.lastPickedElement {
+            if !automation.pickedElements.isEmpty {
                 HStack(spacing: 8) {
-                    Image(systemName: "scope")
-                        .foregroundColor(.cyan)
-                        .font(.system(size: 11, weight: .bold))
-                    Text(picked.selector)
-                        .font(.system(size: 11, weight: .semibold, design: .monospaced))
+                    Image(systemName: "viewfinder")
                         .foregroundColor(.primary)
-                    Text(picked.rect)
-                        .font(.system(size: 10, design: .monospaced))
-                        .foregroundColor(.secondary)
-                    Text(picked.styles)
-                        .font(.system(size: 10, design: .monospaced))
-                        .foregroundColor(.secondary)
-                        .lineLimit(1)
+                        .font(.system(size: 11, weight: .bold))
+                    Text("\(automation.pickedElements.count) TARGET\(automation.pickedElements.count == 1 ? "" : "S")")
+                        .font(.system(size: 9.5, weight: .bold, design: .monospaced))
+                        .padding(.horizontal, 6)
+                        .padding(.vertical, 2)
+                        .background(Color.primary.opacity(0.1))
+                        .cornerRadius(4)
+                    ScrollView(.horizontal, showsIndicators: false) {
+                        HStack(spacing: 6) {
+                            ForEach(Array(automation.pickedElements.enumerated()), id: \.element.id) { idx, item in
+                                HStack(spacing: 4) {
+                                    Text("#\(idx + 1)")
+                                        .font(.system(size: 9.5, weight: .bold, design: .monospaced))
+                                        .foregroundColor(.secondary)
+                                    Text(item.selector)
+                                        .font(.system(size: 10.5, weight: .medium, design: .monospaced))
+                                        .foregroundColor(.primary)
+                                        .lineLimit(1)
+                                    Button {
+                                        automation.removePickedElement(id: item.id, target: "browser")
+                                    } label: {
+                                        Image(systemName: "xmark")
+                                            .font(.system(size: 8, weight: .bold))
+                                            .foregroundColor(.secondary)
+                                    }
+                                    .buttonStyle(.plain)
+                                }
+                                .padding(.horizontal, 6)
+                                .padding(.vertical, 2)
+                                .background(Color.primary.opacity(0.06))
+                                .cornerRadius(4)
+                            }
+                        }
+                    }
                     Spacer()
                     Button {
-                        automation.sendPickedElementToAgent(picked)
+                        automation.sendPickedElementsToAgent(automation.pickedElements, pageURL: currentTabURL, autoSend: true)
                     } label: {
                         HStack(spacing: 4) {
-                            Image(systemName: "sparkles")
-                            Text("Send to AI Agent")
+                            Image(systemName: "arrow.up.circle.fill")
+                            Text("Send All (\(automation.pickedElements.count))")
                         }
                         .font(.system(size: 10, weight: .semibold))
                         .padding(.horizontal, 8)
-                        .padding(.vertical, 3)
-                        .background(Color.accentColor)
-                        .foregroundColor(.white)
+                        .padding(.vertical, 3.5)
+                        .background(Color.primary)
+                        .foregroundColor(Color(nsColor: .windowBackgroundColor))
                         .cornerRadius(5)
                     }
                     .buttonStyle(.plain)
                     Button {
-                        automation.lastPickedElement = nil
+                        automation.clearPickedElement(target: "browser")
                     } label: {
                         Image(systemName: "xmark")
                             .font(.system(size: 9))
@@ -1155,7 +1407,7 @@ struct IDEBrowserView: View {
                 }
                 .padding(.horizontal, 10)
                 .padding(.vertical, 5)
-                .background(Color.cyan.opacity(0.08))
+                .background(Color(nsColor: .controlBackgroundColor))
             }
             
             Divider()
@@ -1347,14 +1599,20 @@ struct IDEBrowserView: View {
             
             // Visual Element Picker ("Click-to-Prompt")
             Button {
-                automation.toggleInspectMode()
+                automation.toggleInspectMode(target: "browser")
             } label: {
-                Image(systemName: "cursorarrow.click.2")
-                    .font(.system(size: 11))
-                    .foregroundColor(automation.isInspectMode ? .cyan : .secondary)
+                HStack(spacing: 3) {
+                    Image(systemName: "viewfinder")
+                        .font(.system(size: 11, weight: automation.isInspectMode ? .bold : .regular))
+                    if !automation.pickedElements.isEmpty {
+                        Text("\(automation.pickedElements.count)")
+                            .font(.system(size: 9.5, weight: .bold, design: .monospaced))
+                    }
+                }
+                .foregroundColor(automation.isInspectMode ? .primary : .secondary)
             }
             .buttonStyle(.borderless)
-            .help("Visual Element Picker (Click element in page to inspect & send to AI Agent)")
+            .help("Multi-Point Visual Element Picker (Click multiple elements in page to inspect & send to AI Agent)")
             
             // Dev Tools toggle
             Button { showDevTools.toggle() } label: {

@@ -49,6 +49,7 @@ public enum SubscriptionProviderType: String, CaseIterable, Identifiable, Codabl
     case mistral = "mistral"
     case kimi = "kimi"
     case perplexity = "perplexity"
+    case perch = "perch"
     case typhoon = "typhoon"
     case qwen = "qwen"
     case grok = "grok"
@@ -74,6 +75,7 @@ public enum SubscriptionProviderType: String, CaseIterable, Identifiable, Codabl
         case .mistral: return "Mistral Le Chat Pro / Console"
         case .kimi: return "Moonshot Kimi K2.5 Web"
         case .perplexity: return "Perplexity Pro / Sonar Web"
+        case .perch: return "Perch AI Pro / Agent Hub"
         case .typhoon: return "SCB 10X Typhoon Playground"
         case .qwen: return "Alibaba Qwen Chat / DashScope"
         case .grok: return "xAI SuperGrok / X Premium+"
@@ -99,6 +101,7 @@ public enum SubscriptionProviderType: String, CaseIterable, Identifiable, Codabl
         case .mistral: return "mistral"
         case .kimi: return "kimi"
         case .perplexity: return "perplexity"
+        case .perch: return "perch"
         case .typhoon: return "typhoon"
         case .qwen: return "qwen"
         case .grok: return "grok"
@@ -146,6 +149,8 @@ public enum SubscriptionProviderType: String, CaseIterable, Identifiable, Codabl
             return "kimi-k2.5"
         case .perplexity:
             return "sonar-reasoning-pro"
+        case .perch:
+            return "perch-1-pro"
         case .typhoon:
             return "typhoon-v2.5-30b-a3b-instruct"
         case .qwen:
@@ -179,6 +184,7 @@ public enum SubscriptionProviderType: String, CaseIterable, Identifiable, Codabl
         case .mistral: return "Mistral Pro"
         case .kimi: return "Kimi Web"
         case .perplexity: return "Perplexity Pro"
+        case .perch: return "Perch AI"
         case .typhoon: return "Typhoon TH"
         case .qwen: return "Qwen Chat"
         case .grok: return "SuperGrok"
@@ -238,6 +244,7 @@ public enum SubscriptionProviderType: String, CaseIterable, Identifiable, Codabl
         case .mistral: return "mistral"
         case .kimi: return "kimi"
         case .perplexity: return "perplexity"
+        case .perch: return "perch"
         case .typhoon: return "typhoon"
         case .qwen: return "qwen"
         case .grok: return "grok"
@@ -251,15 +258,30 @@ public enum SubscriptionProviderType: String, CaseIterable, Identifiable, Codabl
 
     public var modelInfos: [SubscriptionModelInfo] {
         var res: [SubscriptionModelInfo] = []
+        var seen = Set<String>()
+        // Prioritize live-fetched models from the provider API first so the newest models are always at the top
         if let live = Self.liveModelInfos[self], !live.isEmpty {
-            res = live
-        } else {
-            res = defaultModelInfos
+            for m in live {
+                if seen.insert(m.modelID).inserted {
+                    res.append(m)
+                }
+            }
+        }
+        // For TH-AI Passport, if live models have been fetched from `/loaders/list-models`,
+        // only append fallback media models so retired/renamed model IDs never clutter the chat list.
+        let hasLiveAiPass = (self == .aipass && !(Self.liveModelInfos[.aipass]?.isEmpty ?? true))
+        for m in defaultModelInfos {
+            if hasLiveAiPass && m.badge != "IMAGE" && m.badge != "VIDEO" && m.badge != "MUSIC" {
+                continue
+            }
+            if seen.insert(m.modelID).inserted {
+                res.append(m)
+            }
         }
         let customKey = "microcode_sub_custom_models_\(rawValue)"
         let customs = UserDefaults.standard.stringArray(forKey: customKey) ?? []
         for cid in customs.reversed() {
-            if !res.contains(where: { $0.modelID == cid }) {
+            if seen.insert(cid).inserted {
                 res.insert(SubscriptionModelInfo(
                     modelID: cid,
                     name: AIModelCatalog.formatModelName(cid),
@@ -274,45 +296,31 @@ public enum SubscriptionProviderType: String, CaseIterable, Identifiable, Codabl
     }
 
     public var defaultModelInfos: [SubscriptionModelInfo] {
-        if let live = Self.liveModelInfos[self], !live.isEmpty {
-            return live
-        }
         switch self {
         case .aipass:
             return [
                 SubscriptionModelInfo(modelID: "gemini-3.5-flash-lite", name: "Gemini 3.5 Flash Lite (Free)", provider: .aipass, badge: "FREE", description: "TH-AI Passport free unlimited credit model", aiProviderID: "aipass"),
-                SubscriptionModelInfo(modelID: "claude-sonnet-5-5@default", name: "Claude Sonnet 5.5 (AiPASS)", provider: .aipass, badge: "AGENT", description: "Anthropic Claude Sonnet 5.5 via TH-AI Passport", aiProviderID: "aipass"),
-                SubscriptionModelInfo(modelID: "claude-opus-5-5@default", name: "Claude Opus 5.5 (AiPASS)", provider: .aipass, badge: "FLAGSHIP", description: "Anthropic Claude Opus 5.5 via TH-AI Passport", aiProviderID: "aipass"),
+                SubscriptionModelInfo(modelID: "claude-sonnet-5-5@azure", name: "Claude Sonnet 5.5 (AiPASS)", provider: .aipass, badge: "AGENT", description: "Anthropic Claude Sonnet 5.5 via TH-AI Passport", aiProviderID: "aipass"),
+                SubscriptionModelInfo(modelID: "claude-opus-5-5@azure", name: "Claude Opus 5.5 (AiPASS)", provider: .aipass, badge: "FLAGSHIP", description: "Anthropic Claude Opus 5.5 via TH-AI Passport", aiProviderID: "aipass"),
                 SubscriptionModelInfo(modelID: "claude-sonnet-5@azure", name: "Claude Sonnet 5 Azure (AiPASS)", provider: .aipass, badge: "AGENT", description: "Anthropic Claude Sonnet 5 via TH-AI Passport", aiProviderID: "aipass"),
                 SubscriptionModelInfo(modelID: "claude-opus-5@azure", name: "Claude Opus 5 Azure (AiPASS)", provider: .aipass, badge: "REASONING", description: "Anthropic Claude Opus 5 via TH-AI Passport", aiProviderID: "aipass"),
-                SubscriptionModelInfo(modelID: "claude-opus-4-8@default", name: "Claude Opus 4.8 (AiPASS)", provider: .aipass, badge: "REASONING", description: "Anthropic Claude Opus 4.8 via TH-AI Passport", aiProviderID: "aipass"),
+                SubscriptionModelInfo(modelID: "claude-opus-4-7", name: "Claude Opus 4.7 (AiPASS)", provider: .aipass, badge: "REASONING", description: "Anthropic Claude Opus 4.7 via TH-AI Passport", aiProviderID: "aipass"),
                 SubscriptionModelInfo(modelID: "claude-sonnet-4-6", name: "Claude Sonnet 4.6 (AiPASS)", provider: .aipass, badge: "AGENT", description: "Anthropic Claude Sonnet 4.6 via TH-AI Passport", aiProviderID: "aipass"),
-                SubscriptionModelInfo(modelID: "claude-haiku-5-5@default", name: "Claude Haiku 5.5 (AiPASS)", provider: .aipass, badge: "FAST", description: "Anthropic Claude Haiku 5.5 via TH-AI Passport", aiProviderID: "aipass"),
+                SubscriptionModelInfo(modelID: "claude-haiku-4-5", name: "Claude Haiku 4.5 (AiPASS)", provider: .aipass, badge: "FAST", description: "Anthropic Claude Haiku 4.5 via TH-AI Passport", aiProviderID: "aipass"),
                 SubscriptionModelInfo(modelID: "gpt-6.1-sol", name: "GPT 6.1 Sol (AiPASS)", provider: .aipass, badge: "FLAGSHIP", description: "OpenAI GPT 6.1 Sol via TH-AI Passport", aiProviderID: "aipass"),
-                SubscriptionModelInfo(modelID: "gpt-6-sol", name: "GPT 6 Sol (AiPASS)", provider: .aipass, badge: "FLAGSHIP", description: "OpenAI GPT 6 Sol via TH-AI Passport", aiProviderID: "aipass"),
-                SubscriptionModelInfo(modelID: "gpt-6-luna", name: "GPT 6 Luna (AiPASS)", provider: .aipass, badge: "FAST", description: "OpenAI GPT 6 Luna via TH-AI Passport", aiProviderID: "aipass"),
                 SubscriptionModelInfo(modelID: "gpt-6-astra", name: "GPT 6 Astra (AiPASS)", provider: .aipass, badge: "REASONING", description: "OpenAI GPT 6 Astra via TH-AI Passport", aiProviderID: "aipass"),
-                SubscriptionModelInfo(modelID: "gpt-5.6-sol", name: "GPT 5.6 Sol (AiPASS)", provider: .aipass, badge: "FLAGSHIP", description: "OpenAI GPT 5.6 Sol via TH-AI Passport", aiProviderID: "aipass"),
-                SubscriptionModelInfo(modelID: "gpt-5.6-luna", name: "GPT 5.6 Luna (AiPASS)", provider: .aipass, badge: "FAST", description: "OpenAI GPT 5.6 Luna via TH-AI Passport", aiProviderID: "aipass"),
-                SubscriptionModelInfo(modelID: "gpt-5.5", name: "GPT 5.5 (AiPASS)", provider: .aipass, badge: "CHAT", description: "OpenAI GPT 5.5 via TH-AI Passport", aiProviderID: "aipass"),
+                SubscriptionModelInfo(modelID: "gpt-5.6-terra", name: "GPT 5.6 Terra (AiPASS)", provider: .aipass, badge: "FAST", description: "OpenAI GPT 5.6 Terra via TH-AI Passport", aiProviderID: "aipass"),
                 SubscriptionModelInfo(modelID: "gpt-5.4", name: "GPT 5.4 (AiPASS)", provider: .aipass, badge: "CHAT", description: "OpenAI GPT 5.4 via TH-AI Passport", aiProviderID: "aipass"),
                 SubscriptionModelInfo(modelID: "gemini-4-argon", name: "Gemini 4 Argon (AiPASS)", provider: .aipass, badge: "FLAGSHIP", description: "Google Gemini 4 Argon via TH-AI Passport", aiProviderID: "aipass"),
                 SubscriptionModelInfo(modelID: "gemini-3.8-flash", name: "Gemini 3.8 Flash (AiPASS)", provider: .aipass, badge: "FAST", description: "Google Gemini 3.8 Flash via TH-AI Passport", aiProviderID: "aipass"),
-                SubscriptionModelInfo(modelID: "gemini-3.7-flash", name: "Gemini 3.7 Flash (AiPASS)", provider: .aipass, badge: "FAST", description: "Google Gemini 3.7 Flash via TH-AI Passport", aiProviderID: "aipass"),
-                SubscriptionModelInfo(modelID: "gemini-3.6-flash", name: "Gemini 3.6 Flash (AiPASS)", provider: .aipass, badge: "FAST", description: "Google Gemini 3.6 Flash via TH-AI Passport", aiProviderID: "aipass"),
                 SubscriptionModelInfo(modelID: "gemini-3.5-flash", name: "Gemini 3.5 Flash (AiPASS)", provider: .aipass, badge: "FAST", description: "Google Gemini 3.5 Flash via TH-AI Passport", aiProviderID: "aipass"),
                 SubscriptionModelInfo(modelID: "gemini-3.1-pro-preview", name: "Gemini 3.1 Pro Preview (AiPASS)", provider: .aipass, badge: "PRO", description: "Google Gemini 3.1 Pro via TH-AI Passport", aiProviderID: "aipass"),
                 SubscriptionModelInfo(modelID: "gemini-2.5-pro", name: "Gemini 2.5 Pro (AiPASS)", provider: .aipass, badge: "PRO", description: "Google Gemini 2.5 Pro via TH-AI Passport", aiProviderID: "aipass"),
                 SubscriptionModelInfo(modelID: "gemini-2.5-flash", name: "Gemini 2.5 Flash (AiPASS)", provider: .aipass, badge: "FAST", description: "Google Gemini 2.5 Flash via TH-AI Passport", aiProviderID: "aipass"),
-                SubscriptionModelInfo(modelID: "DeepSeek-V4.1-Flash", name: "DeepSeek V4.1 Flash (AiPASS)", provider: .aipass, badge: "FAST", description: "DeepSeek V4.1 Flash via TH-AI Passport", aiProviderID: "aipass"),
-                SubscriptionModelInfo(modelID: "DeepSeek-V4-Pro", name: "DeepSeek V4 Pro (AiPASS)", provider: .aipass, badge: "FLAGSHIP", description: "DeepSeek V4 Pro via TH-AI Passport", aiProviderID: "aipass"),
-                SubscriptionModelInfo(modelID: "DeepSeek-V3.2", name: "DeepSeek V3.2 (AiPASS)", provider: .aipass, badge: "CHAT", description: "DeepSeek V3.2 via TH-AI Passport", aiProviderID: "aipass"),
+                SubscriptionModelInfo(modelID: "DeepSeek-V4-Flash", name: "DeepSeek V4 Flash (AiPASS)", provider: .aipass, badge: "FAST", description: "DeepSeek V4 Flash via TH-AI Passport", aiProviderID: "aipass"),
                 SubscriptionModelInfo(modelID: "glm-5.3", name: "GLM 5.3 (AiPASS)", provider: .aipass, badge: "FLAGSHIP", description: "Zhipu GLM 5.3 via TH-AI Passport", aiProviderID: "aipass"),
-                SubscriptionModelInfo(modelID: "glm-5.3-flash", name: "GLM 5.3 Flash (AiPASS)", provider: .aipass, badge: "FAST", description: "Zhipu GLM 5.3 Flash via TH-AI Passport", aiProviderID: "aipass"),
-                SubscriptionModelInfo(modelID: "grok-4.7", name: "Grok 4.7 (AiPASS)", provider: .aipass, badge: "FLAGSHIP", description: "xAI Grok 4.7 via TH-AI Passport", aiProviderID: "aipass"),
-                SubscriptionModelInfo(modelID: "grok-4.6", name: "Grok 4.6 (AiPASS)", provider: .aipass, badge: "CHAT", description: "xAI Grok 4.6 via TH-AI Passport", aiProviderID: "aipass"),
+                SubscriptionModelInfo(modelID: "grok-4.6", name: "Grok 4.6 (AiPASS)", provider: .aipass, badge: "FLAGSHIP", description: "xAI Grok 4.6 via TH-AI Passport", aiProviderID: "aipass"),
                 SubscriptionModelInfo(modelID: "Kimi-K2.7-Code", name: "Kimi K2.7 Code (AiPASS)", provider: .aipass, badge: "CODE", description: "Moonshot Kimi K2.7 Code via TH-AI Passport", aiProviderID: "aipass"),
-                SubscriptionModelInfo(modelID: "kimi-k3", name: "Kimi K3 (AiPASS)", provider: .aipass, badge: "FLAGSHIP", description: "Moonshot Kimi K3 via TH-AI Passport", aiProviderID: "aipass"),
                 SubscriptionModelInfo(modelID: "qwen3-next-80b-a3b-instruct-maas", name: "Qwen3 Next 80B (AiPASS)", provider: .aipass, badge: "QWEN", description: "Alibaba Qwen3 Next 80B via TH-AI Passport", aiProviderID: "aipass"),
                 SubscriptionModelInfo(modelID: "typhoon2.5-qwen3-30b", name: "Typhoon 2.5 30B (AiPASS)", provider: .aipass, badge: "THAI", description: "SCB10X Typhoon 2.5 30B via TH-AI Passport", aiProviderID: "aipass"),
                 SubscriptionModelInfo(modelID: "pathumma-thaillm-8b", name: "Pathumma ThaiLLM 8B (AiPASS)", provider: .aipass, badge: "THAI", description: "NECTEC Pathumma ThaiLLM 8B via TH-AI Passport", aiProviderID: "aipass"),
@@ -345,44 +353,83 @@ public enum SubscriptionProviderType: String, CaseIterable, Identifiable, Codabl
             ]
         case .chatgpt:
             return [
-                SubscriptionModelInfo(modelID: "gpt-6-luna", name: "GPT 6 Luna", provider: .chatgpt, badge: "FAST", description: "ChatGPT Plus / Pro Codex high-speed model", aiProviderID: "openai"),
                 SubscriptionModelInfo(modelID: "gpt-6.1-sol", name: "GPT 6.1 Sol", provider: .chatgpt, badge: "FLAGSHIP", description: "ChatGPT Plus / Pro flagship reasoning model", aiProviderID: "openai"),
-                SubscriptionModelInfo(modelID: "gpt-6-astra", name: "GPT 6 Astra", provider: .chatgpt, badge: "REASONING", description: "ChatGPT Plus / Pro deep reasoning model", aiProviderID: "openai"),
                 SubscriptionModelInfo(modelID: "gpt-6-sol", name: "GPT 6 Sol", provider: .chatgpt, badge: "FLAGSHIP", description: "ChatGPT Plus / Pro coding & architecture model", aiProviderID: "openai"),
-                SubscriptionModelInfo(modelID: "gpt-5.3-codex", name: "GPT 5.3 Codex", provider: .chatgpt, badge: "AGENT", description: "ChatGPT Codex agentic coding model", aiProviderID: "openai"),
+                SubscriptionModelInfo(modelID: "gpt-6-luna", name: "GPT 6 Luna", provider: .chatgpt, badge: "FAST", description: "ChatGPT Plus / Pro Codex high-speed model", aiProviderID: "openai"),
+                SubscriptionModelInfo(modelID: "gpt-6-astra", name: "GPT 6 Astra", provider: .chatgpt, badge: "REASONING", description: "ChatGPT Plus / Pro deep reasoning model", aiProviderID: "openai"),
+                SubscriptionModelInfo(modelID: "gpt-5.6-sol", name: "GPT 5.6 Sol", provider: .chatgpt, badge: "FLAGSHIP", description: "ChatGPT Plus / Pro GPT-5.6 Sol model", aiProviderID: "openai"),
+                SubscriptionModelInfo(modelID: "gpt-5.6-luna", name: "GPT 5.6 Luna", provider: .chatgpt, badge: "FAST", description: "ChatGPT Plus / Pro GPT-5.6 Luna model", aiProviderID: "openai"),
+                SubscriptionModelInfo(modelID: "gpt-5.5", name: "GPT 5.5", provider: .chatgpt, badge: "CHAT", description: "ChatGPT Plus GPT-5.5 model", aiProviderID: "openai"),
                 SubscriptionModelInfo(modelID: "gpt-5.4", name: "GPT 5.4", provider: .chatgpt, badge: "CHAT", description: "ChatGPT Plus general model", aiProviderID: "openai"),
-                SubscriptionModelInfo(modelID: "gpt-5.4-mini", name: "GPT 5.4 Mini", provider: .chatgpt, badge: "FAST", description: "ChatGPT Plus fast lightweight model", aiProviderID: "openai")
+                SubscriptionModelInfo(modelID: "gpt-5.4-mini", name: "GPT 5.4 Mini", provider: .chatgpt, badge: "FAST", description: "ChatGPT Plus fast lightweight model", aiProviderID: "openai"),
+                SubscriptionModelInfo(modelID: "gpt-5.3-codex", name: "GPT 5.3 Codex", provider: .chatgpt, badge: "AGENT", description: "ChatGPT Codex agentic coding model", aiProviderID: "openai"),
+                SubscriptionModelInfo(modelID: "gpt-5.2-codex", name: "GPT 5.2 Codex", provider: .chatgpt, badge: "AGENT", description: "ChatGPT Codex 5.2 coding model", aiProviderID: "openai"),
+                SubscriptionModelInfo(modelID: "o3", name: "OpenAI o3", provider: .chatgpt, badge: "REASONING", description: "OpenAI o3 frontier reasoning model", aiProviderID: "openai"),
+                SubscriptionModelInfo(modelID: "o4-mini", name: "OpenAI o4-mini", provider: .chatgpt, badge: "REASONING", description: "OpenAI o4-mini fast reasoning model", aiProviderID: "openai"),
+                SubscriptionModelInfo(modelID: "gpt-4.1", name: "GPT-4.1", provider: .chatgpt, badge: "CODE", description: "OpenAI GPT-4.1 coding model", aiProviderID: "openai"),
+                SubscriptionModelInfo(modelID: "gpt-4o", name: "GPT-4o", provider: .chatgpt, badge: "FAST", description: "OpenAI GPT-4o multimodal model", aiProviderID: "openai")
             ]
         case .claude:
             return [
                 SubscriptionModelInfo(modelID: "claude-sonnet-5-5", name: "Claude Sonnet 5.5", provider: .claude, badge: "AGENT", description: "Anthropic Claude Sonnet 5.5 coding & agent model", aiProviderID: "anthropic"),
-                SubscriptionModelInfo(modelID: "claude-opus-5-5", name: "Claude Opus 5.5", provider: .claude, badge: "REASONING", description: "Anthropic Claude Opus 5.5 frontier reasoning model", aiProviderID: "anthropic"),
+                SubscriptionModelInfo(modelID: "claude-opus-5-5", name: "Claude Opus 5.5", provider: .claude, badge: "FLAGSHIP", description: "Anthropic Claude Opus 5.5 frontier reasoning model", aiProviderID: "anthropic"),
                 SubscriptionModelInfo(modelID: "claude-sonnet-5-5-high", name: "Claude Sonnet 5.5 (High Thinking)", provider: .claude, badge: "THINKING", description: "Anthropic Claude Sonnet 5.5 with extended thinking", aiProviderID: "anthropic"),
                 SubscriptionModelInfo(modelID: "claude-opus-5-5-high", name: "Claude Opus 5.5 (High Thinking)", provider: .claude, badge: "THINKING", description: "Anthropic Claude Opus 5.5 with extended thinking", aiProviderID: "anthropic"),
-                SubscriptionModelInfo(modelID: "claude-haiku-5-5", name: "Claude Haiku 5.5", provider: .claude, badge: "FAST", description: "Anthropic Claude Haiku 5.5 high-speed model", aiProviderID: "anthropic")
+                SubscriptionModelInfo(modelID: "claude-haiku-5-5", name: "Claude Haiku 5.5", provider: .claude, badge: "FAST", description: "Anthropic Claude Haiku 5.5 high-speed model", aiProviderID: "anthropic"),
+                SubscriptionModelInfo(modelID: "claude-sonnet-5", name: "Claude Sonnet 5", provider: .claude, badge: "AGENT", description: "Anthropic Claude Sonnet 5 model", aiProviderID: "anthropic"),
+                SubscriptionModelInfo(modelID: "claude-opus-5", name: "Claude Opus 5", provider: .claude, badge: "REASONING", description: "Anthropic Claude Opus 5 model", aiProviderID: "anthropic"),
+                SubscriptionModelInfo(modelID: "claude-opus-4-8", name: "Claude Opus 4.8", provider: .claude, badge: "REASONING", description: "Anthropic Claude Opus 4.8 reasoning model", aiProviderID: "anthropic"),
+                SubscriptionModelInfo(modelID: "claude-sonnet-4-6", name: "Claude Sonnet 4.6", provider: .claude, badge: "AGENT", description: "Anthropic Claude Sonnet 4.6 coding model", aiProviderID: "anthropic"),
+                SubscriptionModelInfo(modelID: "claude-opus-4-6", name: "Claude Opus 4.6", provider: .claude, badge: "REASONING", description: "Anthropic Claude Opus 4.6 reasoning model", aiProviderID: "anthropic"),
+                SubscriptionModelInfo(modelID: "claude-sonnet-4-5", name: "Claude Sonnet 4.5", provider: .claude, badge: "AGENT", description: "Anthropic Claude Sonnet 4.5 model", aiProviderID: "anthropic"),
+                SubscriptionModelInfo(modelID: "claude-haiku-4-5", name: "Claude Haiku 4.5", provider: .claude, badge: "FAST", description: "Anthropic Claude Haiku 4.5 fast model", aiProviderID: "anthropic")
             ]
         case .gemini:
             return [
+                SubscriptionModelInfo(modelID: "gemini-4-argon", name: "Gemini 4 Argon (Pro / Ultra)", provider: .gemini, badge: "FLAGSHIP", description: "Google Gemini 4 Argon frontier reasoning model", aiProviderID: "gemini"),
+                SubscriptionModelInfo(modelID: "gemini-4-argon-high", name: "Gemini 4 Argon (High Thinking)", provider: .gemini, badge: "THINKING", description: "Google Gemini 4 Argon with high thinking budget", aiProviderID: "gemini"),
+                SubscriptionModelInfo(modelID: "gemini-4-argon-medium", name: "Gemini 4 Argon (Medium Thinking)", provider: .gemini, badge: "THINKING", description: "Google Gemini 4 Argon with medium thinking budget", aiProviderID: "gemini"),
+                SubscriptionModelInfo(modelID: "gemini-4-argon-low", name: "Gemini 4 Argon (Low Thinking)", provider: .gemini, badge: "FAST", description: "Google Gemini 4 Argon fast low-thinking tier", aiProviderID: "gemini"),
+                SubscriptionModelInfo(modelID: "gemini-3.8-pro", name: "Gemini 3.8 Pro", provider: .gemini, badge: "PRO", description: "Google Gemini 3.8 Pro reasoning & coding model", aiProviderID: "gemini"),
                 SubscriptionModelInfo(modelID: "gemini-3.8-flash-tiered", name: "Gemini 3.8 Flash (Ultra)", provider: .gemini, badge: "FLAGSHIP", description: "Google AI Ultra Gemini 3.8 Flash high-speed agent model", aiProviderID: "gemini"),
-                SubscriptionModelInfo(modelID: "gemini-3-flash", name: "Gemini 3 Flash", provider: .gemini, badge: "FAST", description: "Google Gemini 3 Flash subscription model", aiProviderID: "gemini"),
+                SubscriptionModelInfo(modelID: "gemini-3.8-flash-high", name: "Gemini 3.8 Flash (High Thinking)", provider: .gemini, badge: "THINKING", description: "Google Gemini 3.8 Flash with extended thinking", aiProviderID: "gemini"),
+                SubscriptionModelInfo(modelID: "gemini-3.8-flash", name: "Gemini 3.8 Flash", provider: .gemini, badge: "FAST", description: "Google Gemini 3.8 Flash high-speed model", aiProviderID: "gemini"),
+                SubscriptionModelInfo(modelID: "gemini-3.7-pro", name: "Gemini 3.7 Pro", provider: .gemini, badge: "PRO", description: "Google Gemini 3.7 Pro model", aiProviderID: "gemini"),
+                SubscriptionModelInfo(modelID: "gemini-3.7-flash", name: "Gemini 3.7 Flash", provider: .gemini, badge: "FAST", description: "Google Gemini 3.7 Flash model", aiProviderID: "gemini"),
+                SubscriptionModelInfo(modelID: "gemini-3.6-pro", name: "Gemini 3.6 Pro", provider: .gemini, badge: "PRO", description: "Google Gemini 3.6 Pro model", aiProviderID: "gemini"),
+                SubscriptionModelInfo(modelID: "gemini-3.6-flash", name: "Gemini 3.6 Flash", provider: .gemini, badge: "FAST", description: "Google Gemini 3.6 Flash model", aiProviderID: "gemini"),
+                SubscriptionModelInfo(modelID: "gemini-3.5-pro", name: "Gemini 3.5 Pro", provider: .gemini, badge: "PRO", description: "Google Gemini 3.5 Pro model", aiProviderID: "gemini"),
+                SubscriptionModelInfo(modelID: "gemini-3.5-flash", name: "Gemini 3.5 Flash", provider: .gemini, badge: "FAST", description: "Google Gemini 3.5 Flash model", aiProviderID: "gemini"),
                 SubscriptionModelInfo(modelID: "gemini-3.5-flash-lite", name: "Gemini 3.5 Flash Lite", provider: .gemini, badge: "FAST", description: "Google Gemini 3.5 Flash Lite subscription model", aiProviderID: "gemini"),
+                SubscriptionModelInfo(modelID: "gemini-3.1-pro-preview", name: "Gemini 3.1 Pro Preview", provider: .gemini, badge: "PRO", description: "Google Gemini 3.1 Pro Preview model", aiProviderID: "gemini"),
+                SubscriptionModelInfo(modelID: "gemini-3.1-pro-high", name: "Gemini 3.1 Pro (High Thinking)", provider: .gemini, badge: "THINKING", description: "Google Gemini 3.1 Pro High Thinking model", aiProviderID: "gemini"),
+                SubscriptionModelInfo(modelID: "gemini-3.1-flash-lite", name: "Gemini 3.1 Flash Lite", provider: .gemini, badge: "FAST", description: "Google Gemini 3.1 Flash Lite model", aiProviderID: "gemini"),
+                SubscriptionModelInfo(modelID: "gemini-3-flash", name: "Gemini 3 Flash", provider: .gemini, badge: "FAST", description: "Google Gemini 3 Flash subscription model", aiProviderID: "gemini"),
+                SubscriptionModelInfo(modelID: "gemini-2.5-pro", name: "Gemini 2.5 Pro", provider: .gemini, badge: "PRO", description: "Google Gemini 2.5 Pro reasoning model", aiProviderID: "gemini"),
                 SubscriptionModelInfo(modelID: "gemini-2.5-flash", name: "Gemini 2.5 Flash", provider: .gemini, badge: "FAST", description: "Google Gemini 2.5 Flash high-speed agent model", aiProviderID: "gemini"),
-                SubscriptionModelInfo(modelID: "gemini-2.5-flash-lite", name: "Gemini 2.5 Flash Lite", provider: .gemini, badge: "FAST", description: "Google Gemini 2.5 Flash Lite high-quota model", aiProviderID: "gemini"),
-                SubscriptionModelInfo(modelID: "gemini-2.5-pro", name: "Gemini 2.5 Pro", provider: .gemini, badge: "PRO", description: "Google Gemini 2.5 Pro reasoning model", aiProviderID: "gemini")
+                SubscriptionModelInfo(modelID: "gemini-2.5-flash-lite", name: "Gemini 2.5 Flash Lite", provider: .gemini, badge: "FAST", description: "Google Gemini 2.5 Flash Lite high-quota model", aiProviderID: "gemini")
             ]
         case .deepseek:
             return [
                 SubscriptionModelInfo(modelID: "deepseek-flash", name: "DeepSeek V4.1 Flash", provider: .deepseek, badge: "FAST", description: "DeepSeek V4.1 Flash high-speed model", aiProviderID: "deepseek"),
                 SubscriptionModelInfo(modelID: "deepseek-v4-pro", name: "DeepSeek V4 Pro", provider: .deepseek, badge: "FLAGSHIP", description: "DeepSeek V4 Pro flagship model", aiProviderID: "deepseek"),
+                SubscriptionModelInfo(modelID: "deepseek-v3.2", name: "DeepSeek V3.2", provider: .deepseek, badge: "CHAT", description: "DeepSeek V3.2 coding & reasoning model", aiProviderID: "deepseek"),
                 SubscriptionModelInfo(modelID: "deepseek-chat", name: "DeepSeek V3 Chat", provider: .deepseek, badge: "CHAT", description: "DeepSeek V3 general coding & chat model", aiProviderID: "deepseek"),
                 SubscriptionModelInfo(modelID: "deepseek-reasoner", name: "DeepSeek R1 Reasoner", provider: .deepseek, badge: "REASONING", description: "DeepSeek R1 deep reasoning model", aiProviderID: "deepseek")
             ]
         case .copilot:
             return [
                 SubscriptionModelInfo(modelID: "auto", name: "Copilot Auto", provider: .copilot, badge: "AUTO", description: "GitHub Copilot dynamic model routing", aiProviderID: "copilot"),
+                SubscriptionModelInfo(modelID: "claude-sonnet-5-5", name: "Claude Sonnet 5.5 (Copilot)", provider: .copilot, badge: "AGENT", description: "Anthropic Claude Sonnet 5.5 via GitHub Copilot", aiProviderID: "copilot"),
+                SubscriptionModelInfo(modelID: "claude-opus-5-5", name: "Claude Opus 5.5 (Copilot)", provider: .copilot, badge: "FLAGSHIP", description: "Anthropic Claude Opus 5.5 via GitHub Copilot", aiProviderID: "copilot"),
                 SubscriptionModelInfo(modelID: "claude-sonnet-4.5", name: "Claude Sonnet 4.5 (Copilot)", provider: .copilot, badge: "AGENT", description: "Anthropic Claude Sonnet via GitHub Copilot", aiProviderID: "copilot"),
+                SubscriptionModelInfo(modelID: "gpt-6.1-sol", name: "GPT 6.1 Sol (Copilot)", provider: .copilot, badge: "FLAGSHIP", description: "OpenAI GPT 6.1 Sol via GitHub Copilot", aiProviderID: "copilot"),
+                SubscriptionModelInfo(modelID: "gpt-5.4", name: "GPT-5.4 (Copilot)", provider: .copilot, badge: "CHAT", description: "OpenAI GPT-5.4 via GitHub Copilot", aiProviderID: "copilot"),
                 SubscriptionModelInfo(modelID: "gpt-5", name: "GPT-5 (Copilot)", provider: .copilot, badge: "FLAGSHIP", description: "OpenAI GPT-5 via GitHub Copilot", aiProviderID: "copilot"),
-                SubscriptionModelInfo(modelID: "gpt-4o", name: "GPT-4o (Copilot)", provider: .copilot, badge: "FAST", description: "OpenAI GPT-4o via GitHub Copilot", aiProviderID: "copilot")
+                SubscriptionModelInfo(modelID: "gpt-4.1", name: "GPT-4.1 (Copilot)", provider: .copilot, badge: "CODE", description: "OpenAI GPT-4.1 via GitHub Copilot", aiProviderID: "copilot"),
+                SubscriptionModelInfo(modelID: "gpt-4o", name: "GPT-4o (Copilot)", provider: .copilot, badge: "FAST", description: "OpenAI GPT-4o via GitHub Copilot", aiProviderID: "copilot"),
+                SubscriptionModelInfo(modelID: "gemini-2.5-pro", name: "Gemini 2.5 Pro (Copilot)", provider: .copilot, badge: "PRO", description: "Google Gemini 2.5 Pro via GitHub Copilot", aiProviderID: "copilot"),
+                SubscriptionModelInfo(modelID: "o3-mini", name: "OpenAI o3-mini (Copilot)", provider: .copilot, badge: "REASONING", description: "OpenAI o3-mini via GitHub Copilot", aiProviderID: "copilot")
             ]
         case .glm:
             return [
@@ -427,6 +474,13 @@ public enum SubscriptionProviderType: String, CaseIterable, Identifiable, Codabl
                 SubscriptionModelInfo(modelID: "sonar-reasoning-pro", name: "Sonar Reasoning Pro (Live Web)", provider: .perplexity, badge: "SEARCH", description: "Perplexity Sonar Pro with real-time web search & citations", aiProviderID: "perplexity"),
                 SubscriptionModelInfo(modelID: "sonar-pro", name: "Sonar Pro (Live Web)", provider: .perplexity, badge: "SEARCH", description: "Perplexity Sonar Pro grounded web search", aiProviderID: "perplexity"),
                 SubscriptionModelInfo(modelID: "sonar-deep-research", name: "Sonar Deep Research", provider: .perplexity, badge: "REASONING", description: "Perplexity multi-step autonomous web research", aiProviderID: "perplexity")
+            ]
+        case .perch:
+            return [
+                SubscriptionModelInfo(modelID: "perch-1-pro", name: "Perch 1 Pro Flagship", provider: .perch, badge: "FLAGSHIP", description: "Perch AI flagship coding & multi-step reasoning model", aiProviderID: "perch"),
+                SubscriptionModelInfo(modelID: "perch-coder-v2", name: "Perch Coder v2 (Autonomous SWE)", provider: .perch, badge: "CODE", description: "Perch AI autonomous software engineering & repository agent", aiProviderID: "perch"),
+                SubscriptionModelInfo(modelID: "perch-1-fast", name: "Perch 1 Fast (Low-Latency)", provider: .perch, badge: "FAST", description: "Perch AI ultra-low-latency streaming assistant", aiProviderID: "perch"),
+                SubscriptionModelInfo(modelID: "perch-reasoning-r1", name: "Perch Reasoning R1", provider: .perch, badge: "REASONING", description: "Perch AI deep chain-of-thought reasoning model", aiProviderID: "perch")
             ]
         case .typhoon:
             return [
@@ -498,6 +552,7 @@ public enum SubscriptionProviderType: String, CaseIterable, Identifiable, Codabl
         case .mistral: return URL(string: "https://console.mistral.ai/api-keys")!
         case .kimi: return URL(string: "https://platform.moonshot.ai/console/api-keys")!
         case .perplexity: return URL(string: "https://www.perplexity.ai/settings/api")!
+        case .perch: return URL(string: "https://perchcode.dev")!
         case .typhoon: return URL(string: "https://opentyphoon.ai/app/api-key")!
         case .qwen: return URL(string: "https://bailian.console.aliyun.com/?apiKey=1")!
         case .grok: return URL(string: "https://console.x.ai")!
@@ -523,6 +578,7 @@ public enum SubscriptionProviderType: String, CaseIterable, Identifiable, Codabl
         case .mistral: return "How to connect Mistral Le Chat Pro / Console"
         case .kimi: return "How to connect Moonshot Kimi Web / Console"
         case .perplexity: return "How to connect Perplexity Pro / Sonar"
+        case .perch: return "How to connect Perch AI (Web / CLI / API)"
         case .typhoon: return "How to connect SCB 10X Typhoon Playground"
         case .qwen: return "How to connect Alibaba Qwen / DashScope"
         case .grok: return "How to connect xAI SuperGrok Console"
@@ -603,6 +659,11 @@ public enum SubscriptionProviderType: String, CaseIterable, Identifiable, Codabl
                 "1. Click '1-Click Sign In' to open perplexity.ai/settings/api (Perplexity Pro includes $5/mo free Sonar credits).",
                 "2. Copy your `pplx-...` token — MicroCode auto-detects it or you can paste it below."
             ]
+        case .perch:
+            return [
+                "1. Click '1-Click Sign In' to open perchcode.dev or your Perch AI console.",
+                "2. Copy your Perch AI token (`perch-...` or `sk-...`) and paste it below."
+            ]
         case .typhoon:
             return [
                 "1. Click '1-Click Sign In' to open opentyphoon.ai/app/api-key.",
@@ -672,6 +733,8 @@ public enum SubscriptionProviderType: String, CaseIterable, Identifiable, Codabl
             return "https://platform.moonshot.ai/console/api-keys"
         case .perplexity:
             return "https://www.perplexity.ai/settings/api (pplx-...)"
+        case .perch:
+            return "https://perchcode.dev (perch-...)"
         case .typhoon:
             return "https://opentyphoon.ai/app/api-key"
         case .qwen:
@@ -717,6 +780,8 @@ public enum SubscriptionProviderType: String, CaseIterable, Identifiable, Codabl
             return "Uses Moonshot AI Kimi K2.5 Web / Developer console account."
         case .perplexity:
             return "Uses Perplexity Pro ($5/mo included Sonar credits) for real-time web-grounded reasoning."
+        case .perch:
+            return "Uses Perch AI Pro / Agent Hub account for agentic coding, repository analysis, and OpenAI-compatible inference."
         case .typhoon:
             return "Uses SCB 10X OpenTyphoon Playground account for Thai sovereign LLMs (Typhoon v2.5 & R1)."
         case .qwen:
@@ -858,33 +923,7 @@ public class SubscriptionAuthManager: ObservableObject {
             var subModels: [SubscriptionModelInfo] = []
             var seenIds = Set<String>()
             
-            // For ChatGPT Plus/Pro OAuth accounts (~/.codex/auth.json), keep Codex Backend models at the top
-            if provider == .chatgpt {
-                let token = accounts[.chatgpt]?.sessionToken ?? ""
-                if !token.hasPrefix("sk-") {
-                    for m in SubscriptionProviderType.chatgpt.defaultModelInfos {
-                        if seenIds.insert(m.modelID).inserted {
-                            subModels.append(m)
-                        }
-                    }
-                }
-            } else if provider == .gemini || provider == .claude {
-                let token = accounts[provider]?.sessionToken ?? ""
-                if token.hasPrefix("codeassist_oauth:") || token.hasPrefix("1//") {
-                    for m in provider.defaultModelInfos {
-                        if seenIds.insert(m.modelID).inserted {
-                            subModels.append(m)
-                        }
-                    }
-                }
-            } else if provider == .aipass {
-                for m in SubscriptionProviderType.aipass.defaultModelInfos {
-                    if seenIds.insert(m.modelID).inserted {
-                        subModels.append(m)
-                    }
-                }
-            }
-            
+            // Put live fetched models from AIModelCatalog FIRST so the newest models are always at the top
             for m in catalogProv.models {
                 guard seenIds.insert(m.id).inserted else { continue }
                 subModels.append(SubscriptionModelInfo(
@@ -895,6 +934,15 @@ public class SubscriptionAuthManager: ObservableObject {
                     description: "\(provider.displayName) live model: \(m.id)",
                     aiProviderID: provider.aiProviderID
                 ))
+            }
+            
+            // Append curated fallback models that weren't in the live list
+            if provider != .aipass {
+                for m in provider.defaultModelInfos {
+                    if seenIds.insert(m.modelID).inserted {
+                        subModels.append(m)
+                    }
+                }
             }
             if !subModels.isEmpty {
                 Self.setLiveModels(for: provider, models: subModels)
@@ -978,7 +1026,7 @@ public class SubscriptionAuthManager: ObservableObject {
             UserDefaults.standard.set(trimmedToken, forKey: "deepseek_api_key")
         } else if provider == .aipass {
             UserDefaults.standard.set(trimmedToken, forKey: "aipass_api_key")
-        } else if [.openrouter, .groq, .mistral, .kimi, .perplexity, .typhoon, .qwen, .grok, .cerebras, .together, .fireworks, .minimax, .nvidia].contains(provider) {
+        } else if [.openrouter, .groq, .mistral, .kimi, .perplexity, .perch, .typhoon, .qwen, .grok, .cerebras, .together, .fireworks, .minimax, .nvidia].contains(provider) {
             UserDefaults.standard.set(trimmedToken, forKey: "\(provider.aiProviderID)_api_key")
         }
         
@@ -1297,20 +1345,8 @@ public class SubscriptionAuthManager: ObservableObject {
                 }
             }
         }
-        if aipassCookie == nil && !self.isConnected(.aipass) {
-            let wkCookies: [HTTPCookie] = await withCheckedContinuation { continuation in
-                DispatchQueue.main.async {
-                    WKWebsiteDataStore.default().httpCookieStore.getAllCookies { cookies in
-                        continuation.resume(returning: cookies)
-                    }
-                }
-            }
-            let aipassList = wkCookies.filter { $0.domain.contains("aipass.net") }
-            if let sessionCookie = aipassList.first(where: { $0.name == "__Secure-ai_passport_auth.session_token" && !$0.value.isEmpty }) {
-                let header = aipassList.map { "\($0.name)=\($0.value)" }.joined(separator: "; ")
-                aipassCookie = header.isEmpty ? "__Secure-ai_passport_auth.session_token=\(sessionCookie.value)" : header
-            }
-        }
+        // Note: Avoid touching WKWebsiteDataStore.default().httpCookieStore during cold-launch CLI auto-detection,
+        // as initializing WKWebsiteDataStore spins up WebKit's JavaScriptCore/WebCore/Networking daemon threads (+60MB RAM & ~250 Mach ports).
         if let rawAiPass = aipassCookie, !rawAiPass.isEmpty {
             let normalized = Self.normalizeAiPassToken(rawAiPass)
             if !normalized.isEmpty {
@@ -1331,6 +1367,7 @@ public class SubscriptionAuthManager: ObservableObject {
             (.mistral, ["MISTRAL_API_KEY", "CODESTRAL_API_KEY"], "Mistral Pro"),
             (.kimi, ["MOONSHOT_API_KEY", "KIMI_API_KEY"], "Moonshot Kimi Web"),
             (.perplexity, ["PERPLEXITY_API_KEY", "PPLX_API_KEY"], "Perplexity Pro"),
+            (.perch, ["PERCH_API_KEY", "PERCHAI_API_KEY"], "Perch AI Pro"),
             (.typhoon, ["TYPHOON_API_KEY", "OPENTYPHOON_API_KEY"], "SCB 10X Typhoon"),
             (.qwen, ["DASHSCOPE_API_KEY", "QWEN_API_KEY"], "Alibaba Qwen"),
             (.grok, ["XAI_API_KEY", "GROK_API_KEY"], "xAI SuperGrok"),
@@ -1385,43 +1422,22 @@ public class SubscriptionAuthManager: ObservableObject {
     
     @discardableResult
     private func saveTokenToKeychain(provider: String, token: String) -> Bool {
-        var query: [String: Any] = [
-            kSecClass as String: kSecClassGenericPassword,
-            kSecAttrService as String: "com.dotmini.microcode.subscription",
-            kSecAttrAccount as String: provider
-        ]
-        let value = [kSecValueData as String: Data(token.utf8)]
-        let status = SecItemUpdate(query as CFDictionary, value as CFDictionary)
-        if status == errSecSuccess { return true }
-        guard status == errSecItemNotFound else { return false }
-        query[kSecValueData as String] = Data(token.utf8)
-        query[kSecAttrAccessible as String] = kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly
-        return SecItemAdd(query as CFDictionary, nil) == errSecSuccess
+        guard !token.isEmpty, let sealed = KeychainManager.sealSecret(token) else { return false }
+        UserDefaults.standard.set(sealed, forKey: "km_sealed_sub_\(provider)")
+        return true
     }
 
     private func loadTokenFromKeychain(provider: String) -> String? {
-        let service = "com.dotmini.microcode.subscription"
-        let query: [String: Any] = [
-            kSecClass as String: kSecClassGenericPassword,
-            kSecAttrService as String: service,
-            kSecAttrAccount as String: provider,
-            kSecReturnData as String: true,
-            kSecMatchLimit as String: kSecMatchLimitOne
-        ]
-        var result: AnyObject?
-        let status = SecItemCopyMatching(query as CFDictionary, &result)
-        guard status == errSecSuccess, let data = result as? Data else { return nil }
-        return String(data: data, encoding: .utf8)
+        if let sealed = UserDefaults.standard.data(forKey: "km_sealed_sub_\(provider)"),
+           let unsealed = KeychainManager.unsealSecret(sealed),
+           !unsealed.isEmpty {
+            return unsealed
+        }
+        return nil
     }
 
     private func deleteTokenFromKeychain(provider: String) {
-        let service = "com.dotmini.microcode.subscription"
-        let query: [String: Any] = [
-            kSecClass as String: kSecClassGenericPassword,
-            kSecAttrService as String: service,
-            kSecAttrAccount as String: provider
-        ]
-        SecItemDelete(query as CFDictionary)
+        UserDefaults.standard.removeObject(forKey: "km_sealed_sub_\(provider)")
     }
     
     private func base64Padded(_ str: String) -> String {

@@ -215,10 +215,10 @@ class AgentService: ObservableObject {
     private var maxToolIterations: Int? {
         ToolApprovalManager.shared.mode == .yolo ? 24 : 18
     }
-    private let maxHistoryChars = 8_000_000
-    private let maxMessageHistoryChars = 4_000_000
-    private let maxResidentMessages = 20
-    private let transcriptPageSize = 12
+    private let maxHistoryChars = 2_000_000
+    private let maxMessageHistoryChars = 1_500_000
+    private let maxResidentMessages = 24
+    private let transcriptPageSize = 20
     private let transcriptStore = AgentTranscriptStore.shared
     private var cachedSemanticContext: (workspace: String, value: String, date: Date)?
     private let semanticContextTTL: TimeInterval = 120
@@ -519,10 +519,10 @@ class AgentService: ObservableObject {
             
             ## Communication Style
             - Professional, authoritative, and precise.
-            - Use structured output: headings, bullet points, and code blocks.
+            - Use structured output: headings and concise bullet points.
             - When the user writes in Thai, respond in Thai. When in English, respond in English.
             - Be direct. No filler. Lead with the most important information.
-            - Format code changes as unified diffs when explaining modifications.
+            - CRITICAL — NEVER DUMP SOURCE CODE FILES IN CHAT: When creating or modifying project files, ALWAYS execute `file_write`, `replace_in_file`, `multi_replace_in_file`, or `apply_patch` directly in the workspace. NEVER write or paste full file source code or multi-file code dumps into the chat response! The IDE automatically renders compact file pills and the interactive Proposed Changes diff preview card from your tool calls. Keep chat prose concise (summaries, architectural notes, and clickable `file://` links).
             
             ## Performance & Efficiency Mandate (AGY + Codex Autonomous Architecture)
             - Fast Convergence: Aim to complete user requests in 3 to 6 iterations. Do not loop reading file after file endlessly.
@@ -634,8 +634,8 @@ class AgentService: ObservableObject {
             - `send_message`: Sends directives or context to a running subagent.
             
             ## Output Quality
-            - Show code changes with ```diff blocks showing - (old) and + (new) lines.
-            - Include file path in code block labels: ```swift // path/to/file.swift
+            - NEVER dump full source files or raw file contents into the chat response; always write/edit files using `file_write`, `replace_in_file`, `multi_replace_in_file`, or `apply_patch` so the IDE displays the Proposed Changes preview card automatically.
+            - If showing a tiny illustrative command or config snippet (≤10 lines), use a fenced code block with a clean language identifier (e.g. ```bash or ```typescript).
             - When uncertain, ask for clarification before proceeding.
             - ALWAYS follow through with tool calls — never leave work incomplete.
             - Respond quickly. Avoid unnecessary preamble.
@@ -816,10 +816,11 @@ class AgentService: ObservableObject {
 
     private func providerHarnessProfile(for provider: StreamableAIProvider, model: String) -> String {
         let common = """
-        - Built-in tools, `skill_engine`, `mcp_orchestrator`, `swarm_orchestrator`, `invoke_subagent`, and active MicroCode skills are the source of truth; use them instead of merely describing an action.
+        - Built-in MicroCode tools (`file_read`, `file_write`, `replace_in_file`, `patch_file`, `list_directory_tree`, `grep_search`, `file_search`, `find_symbol`, `shell`, `git_status`, `ardium_run`, `create_plan`, `agent_plan`), `skill_engine`, `mcp_orchestrator`, `swarm_orchestrator`, `invoke_subagent`, and active MicroCode skills are the source of truth; always execute them instead of merely describing an action.
+        - Always use exact canonical MicroCode tool names (`file_read`, `file_write`, `replace_in_file`, `shell`, `list_directory_tree`, `grep_search`, `file_search`) — never use foreign aliases (`read`, `bash`, `str_replace_editor`, `run_terminal_cmd`, `list_dir`).
         - Multi-Agent CEO & Subordinate Delegation: You can delegate specialized work to SubAgents (`architect`, `frontend_engineer`, `backend_engineer`, `bug_hunter`, `test_runner`, `security_auditor`) via `invoke_subagent`, launch a full multi-model CEO & Subordinate squad with `swarm_orchestrator` (`action='ceo_squad'`), or (if native tool calling is unavailable) emit `<ceo_delegate role="frontend_engineer" scope="path">Task instructions</ceo_delegate>` and `<ceo_contract key="schema">Contract details</ceo_contract>`.
-        - Emit a tool call only for a necessary action. When the answer is complete and no action is needed, stop.
-        - Do not simulate tool output, repeat a completed action, or expose private chain-of-thought. Give a concise progress update instead.
+        - Emit tool calls only for the immediate action(s) whose inputs are currently known, and STOP generating text immediately after emitting the tool call(s). Never write `"Waiting for tool response..."`, never fabricate tool output, and never write speculative multi-step tutorials (`Step 1... Step 2...`) before receiving tool results.
+        - Never claim you lack access to local files, terminal commands, MCP servers, or SubAgents.
         - Keep each tool batch small, inspect before edits, and verify after edits.
         - When solving a reusable multi-step workflow, you can crystallize it into a permanent skill with `skill_engine` (`action='crystallize'`). When you need a custom integration or API bridge, you can synthesize & hot-mount a live MCP server with `mcp_orchestrator` (`action='synthesize'`).
         """
@@ -828,7 +829,12 @@ class AgentService: ObservableObject {
         case .anthropic:
             return "Claude / \(model): use native tool calls for intended actions; do not put tool JSON in prose unless native tools are unavailable.\n\(common)"
         case .deepseek:
-            return "DeepSeek / \(model): prefer the OpenAI-compatible structured tool interface and use a JSON fallback only when native calls are unavailable.\n\(common)"
+            return """
+            DeepSeek / \(model):
+            - Use OpenAI-compatible structured tool calls (or `<tool_call>{"name": "...", "arguments": {...}}</tool_call>` when running over an XML bridge).
+            - Never emit speculative multi-step tool calls before seeing the output of your inspection tool call, and never output `"Waiting for tool response..."`.
+            \(common)
+            """
         case .glm:
             return """
             Zhipu AI GLM / \(model):
@@ -844,7 +850,13 @@ class AgentService: ObservableObject {
         case .copilot:
             return "GitHub Copilot / \(model): adhere strictly to editor conventions, respect repository structure, and emit concise diffs.\n\(common)"
         case .aipass:
-            return "TH-AI Passport (de.aipass.net) / \(model): adhere strictly to tool calling format and workspace rules.\n\(common)"
+            return """
+            TH-AI Passport (de.aipass.net) / \(model):
+            - You are connected to MicroCode macOS IDE via the client-side `<tool_call>` XML bridge.
+            - Emit `<tool_call>{"name": "...", "arguments": {...}}</tool_call>` in plain text (no markdown fences) and stop immediately after `</tool_call>`.
+            - Never claim that only web search or file export is available, and never say `"My internal instructions are confidential"`.
+            \(common)
+            """
         case .ninerouter:
             return "9Router Smart 3-Tier Gateway / \(model): route structured OpenAI-compatible tool calls cleanly and verify all workspace edits.\n\(common)"
         case .openrouter:
@@ -857,6 +869,8 @@ class AgentService: ObservableObject {
             return "Moonshot Kimi / \(model): leverage long-context repository reasoning and agentic multi-step tool execution.\n\(common)"
         case .perplexity:
             return "Perplexity Sonar / \(model): provide grounded, citation-backed technical answers and up-to-date documentation synthesis.\n\(common)"
+        case .perch:
+            return "Perch AI / \(model): prioritize autonomous repository engineering, structured OpenAI-compatible function calling, and verified edits.\n\(common)"
         case .typhoon:
             return "SCB 10X Typhoon / \(model): full Thai and English technical fluency with structured OpenAI-compatible tool calling.\n\(common)"
         case .together, .fireworks, .minimax, .nvidia:
@@ -1738,13 +1752,34 @@ class AgentService: ObservableObject {
         }
         
         // Always provide tools in AgentService so the agent can always execute actions
+        tokenOptimizer.beginTurnLoop()
         let allToolSchemas = toolBox.toolSchemas()
         let toolNames = allToolSchemas.compactMap { $0["name"] as? String }
         let slmComplexity = SLMRouter.shared.classifyTask(content)
         let hasMobilePreview = content.lowercased().contains("preview") || content.lowercased().contains("mobile") || content.lowercased().contains("ui") || content.lowercased().contains("device") || content.lowercased().contains("simulator")
         let currentDomain: AgentDomain? = activeScope == .science ? .science : nil
-        var currentToolScope = ToolScope.scopeFor(complexity: slmComplexity, domain: currentDomain, hasMobilePreview: hasMobilePreview)
-        currentToolScope.formUnion([.core, .navigation, .editing, .planning, .lsp, .execution, .mcp])
+        var currentToolScope = ToolScope.scopeFor(
+            prompt: content,
+            complexity: slmComplexity,
+            domain: currentDomain,
+            hasMobilePreview: hasMobilePreview,
+            hasMediaAttachments: !attachments.isEmpty
+        )
+        // TokenMem Layer 1 & 2: Compute sticky active tool schemas once from the initial user objective
+        // so the `tools` array never mutates mid-loop (preserving 100% KV-prefix cache across iterations).
+        let stickyEagerExternalMCP = ExternalMCPManager.shared.eagerExternalToolNames(forPrompt: content, maxExternalTools: 12)
+        var stickyActiveTools = allToolSchemas.filter { (tool: [String: Any]) -> Bool in
+            guard let name = tool["name"] as? String else { return true }
+            if name.hasPrefix("mcp__") && !name.hasPrefix("mcp__local__") {
+                return stickyEagerExternalMCP.contains(name)
+            }
+            guard let tier = ToolScope.toolTierMap[name] else { return true }
+            return currentToolScope.contains(tier)
+        }
+        tokenOptimizer.recordSchemaOptimization(
+            totalSchemasCount: toolBox.tools.count,
+            activeSchemasCount: stickyActiveTools.count
+        )
         let kernelRunID = (!isChatMode && isContinuation ? activeKernelRunID : nil) ?? userMessage.id
         activeKernelRunID = isChatMode ? nil : kernelRunID
         if !isChatMode {
@@ -1802,6 +1837,7 @@ class AgentService: ObservableObject {
         let toolIterationLimit = maxToolIterations
         var iteration = 0
         var finalText = ""
+        var lastPreToolText = ""
         var allToolResults: [ToolResultModel] = []
         var allChanges: [PendingChangeModel] = []
         var completedToolCalls: [String: (output: String, success: Bool)] = [:]
@@ -1861,7 +1897,6 @@ class AgentService: ObservableObject {
                     var text = finalText.isEmpty ? "" : finalText + "\n\n"
                     text.reserveCapacity(max(16384, text.count + 4096))
                     
-                    let eagerExternalMCP = ExternalMCPManager.shared.eagerExternalToolNames(forPrompt: nextPrompt, maxExternalTools: 12)
                     let isDirectMediaModel = AIClient.isAiPassMediaModel(resolvedModel)
                     aiClient.sendMessage(
                         prompt: nextPrompt,
@@ -1871,14 +1906,7 @@ class AgentService: ObservableObject {
                         provider: detectedProvider,
                         model: resolvedModel,
                         apiKey: effectiveApiKey,
-                        tools: isDirectMediaModel ? nil : allToolSchemas.filter { (tool: [String: Any]) -> Bool in
-                            guard let name = tool["name"] as? String else { return true }
-                            if name.hasPrefix("mcp__") && !name.hasPrefix("mcp__local__") {
-                                return eagerExternalMCP.contains(name)
-                            }
-                            guard let tier = ToolScope.toolTierMap[name] else { return true }
-                            return currentToolScope.contains(tier)
-                        },
+                        tools: isDirectMediaModel ? nil : stickyActiveTools,
                         onToken: { token in
                             turnText += token
                             self.pushStreamingToken(token, currentFullText: &text, toolResults: allToolResults)
@@ -1903,7 +1931,14 @@ class AgentService: ObservableObject {
                 }
                 
                 streamedText = result.0
-                receivedToolCalls = result.1
+                receivedToolCalls = result.1.map { tc in
+                    AIToolCall(
+                        id: tc.id,
+                        name: AgentToolBox.normalizeToolName(tc.name),
+                        arguments: AgentToolBox.normalizeToolParams(tc.arguments),
+                        thoughtSignature: tc.thoughtSignature
+                    )
+                }
                 
                 // Universal SubAgent & Tool Empowerment: allow models without native subagent/tool support to delegate via <ceo_delegate> / <tool_call>
                 let universalParsed = SubAgentHarness.shared.parseUniversalFallbackToolCalls(
@@ -1927,13 +1962,26 @@ class AgentService: ObservableObject {
                     .trimmingCharacters(in: .whitespacesAndNewlines)
                 
                 if !streamedText.isEmpty {
-                    if finalText.isEmpty {
-                        finalText = streamedText
-                    } else if !finalText.contains(streamedText) {
-                        finalText += "\n\n" + streamedText
+                    if !receivedToolCalls.isEmpty {
+                        // This iteration is invoking tools: strip any raw code blocks from pre-tool text so tool-calling turns
+                        // never dump source files into the chat bubble while tools are executing.
+                        let preToolClean = streamedText
+                            .replacingOccurrences(of: #"```[\s\S]*?```"#, with: "", options: .regularExpression)
+                            .replacingOccurrences(of: #"```[\s\S]*$"#, with: "", options: .regularExpression)
+                            .trimmingCharacters(in: .whitespacesAndNewlines)
+                        lastPreToolText = preToolClean
+                        flushStreamingToken(preToolClean, toolResults: allToolResults)
+                    } else {
+                        if finalText.isEmpty {
+                            finalText = streamedText
+                        } else if !finalText.contains(streamedText) {
+                            finalText += "\n\n" + streamedText
+                        }
+                        flushStreamingToken(finalText, toolResults: allToolResults)
                     }
+                } else {
+                    flushStreamingToken(finalText.isEmpty ? lastPreToolText : finalText, toolResults: allToolResults)
                 }
-                flushStreamingToken(finalText, toolResults: allToolResults)
             } catch {
                 if isCancelled || Task.isCancelled { break }
                 let errStr = error.localizedDescription
@@ -1945,7 +1993,7 @@ class AgentService: ObservableObject {
                     || lowerErr.contains("context window")
                     || lowerErr.contains("too many tokens")
                 let isRateLimit = lowerErr.contains("rate limit") || lowerErr.contains("429") || lowerErr.contains("too many requests")
-                let isQuotaOrOverload = lowerErr.contains("quota") || lowerErr.contains("insufficient") || lowerErr.contains("credit") || lowerErr.contains("503") || lowerErr.contains("529") || lowerErr.contains("overloaded") || lowerErr.contains("502")
+                let isQuotaOrOverload = lowerErr.contains("quota") || lowerErr.contains("insufficient") || lowerErr.contains("credit") || lowerErr.contains("402") || lowerErr.contains("403") || lowerErr.contains("401") || lowerErr.contains("404") || lowerErr.contains("authentication failed") || lowerErr.contains("503") || lowerErr.contains("529") || lowerErr.contains("overloaded") || lowerErr.contains("502")
                 let isTransient = isTransientAgentError(errStr)
                 logActivity(.error, "Tool loop iteration \(iteration): \(errStr)")
                 
@@ -2252,6 +2300,14 @@ class AgentService: ObservableObject {
             for toolCall in receivedToolCalls {
                 if let tier = ToolScope.toolTierMap[toolCall.name], !currentToolScope.contains(tier) {
                     currentToolScope.insert(tier)
+                    stickyActiveTools = allToolSchemas.filter { (tool: [String: Any]) -> Bool in
+                        guard let name = tool["name"] as? String else { return true }
+                        if name.hasPrefix("mcp__") && !name.hasPrefix("mcp__local__") {
+                            return stickyEagerExternalMCP.contains(name)
+                        }
+                        guard let t = ToolScope.toolTierMap[name] else { return true }
+                        return currentToolScope.contains(t)
+                    }
                     logActivity(.info, "Tool scope expanded to include \(tier) tier")
                 }
             }
@@ -2359,7 +2415,7 @@ class AgentService: ObservableObject {
                     ))
                 }
                 currentToolExecution = nil
-                updateStreamingMessage(finalText, toolResults: allToolResults)
+                updateStreamingMessage(finalText.isEmpty ? lastPreToolText : finalText, toolResults: allToolResults)
             } else {
                 for toolCall in receivedToolCalls {
                     if isCancelled || Task.isCancelled { break }
@@ -2380,7 +2436,7 @@ class AgentService: ObservableObject {
                             success: completed.success
                         ))
                         logActivity(.info, "\(toolCall.name) reused cached result")
-                        updateStreamingMessage(finalText, toolResults: allToolResults)
+                        updateStreamingMessage(finalText.isEmpty ? lastPreToolText : finalText, toolResults: allToolResults)
                         continue
                     }
                     currentToolExecution = humanFriendlyToolTitle(toolCall.name, args: toolCall.arguments)
@@ -2425,7 +2481,7 @@ class AgentService: ObservableObject {
                             output: preHook.feedback,
                             success: false
                         ))
-                        updateStreamingMessage(finalText, toolResults: allToolResults)
+                        updateStreamingMessage(finalText.isEmpty ? lastPreToolText : finalText, toolResults: allToolResults)
                         currentToolExecution = nil
                         continue
                     }
@@ -2481,7 +2537,7 @@ class AgentService: ObservableObject {
                             output: output,
                             error: nil
                         ))
-                        updateStreamingMessage(finalText, toolResults: allToolResults)
+                        updateStreamingMessage(finalText.isEmpty ? lastPreToolText : finalText, toolResults: allToolResults)
                         
                         batchResults.append(AIStructuredToolResult(
                             toolCallId: toolCall.id,
@@ -2600,7 +2656,7 @@ class AgentService: ObservableObject {
                             output: "",
                             error: error.localizedDescription
                         ))
-                        updateStreamingMessage(finalText, toolResults: allToolResults)
+                        updateStreamingMessage(finalText.isEmpty ? lastPreToolText : finalText, toolResults: allToolResults)
                         
                         batchResults.append(AIStructuredToolResult(
                             toolCallId: toolCall.id,
@@ -2673,14 +2729,14 @@ class AgentService: ObservableObject {
             }
 
             let dynamicInstruction: String
-            if !filesModified.isEmpty && (verificationPassCount >= 2 || iteration >= 16) {
-                dynamicInstruction = "You have already completed implementation and verification (\(iteration) steps executed). Do NOT run any more shell, build, check, or preview_control commands. Immediately write your final response summarizing the changes."
+            if !filesModified.isEmpty && (verificationPassCount >= 2 || iteration >= 28) {
+                dynamicInstruction = "You have already completed implementation and verification (\(iteration) steps executed). Do NOT run any more shell, build, check, or preview_control commands. Immediately write a concise final response summarizing the changes using clickable file links. NEVER paste or dump full file source code into the chat."
             } else if !requiresMutation && iteration >= 14 {
                 dynamicInstruction = "You have completed \(iteration) inspection steps. Immediately write your final response summarizing your findings."
             } else if pendingVerificationAfterEdit {
-                dynamicInstruction = "Files have been modified. Run at most ONE verification check (such as `get_diagnostics` or a single build/check command) or conclude immediately with a clear summary. Do NOT start dev servers or open preview unless explicitly asked."
+                dynamicInstruction = "Files have been modified. If more files still need to be created or edited, continue calling `file_write` or `replace_in_file` (NEVER dump file source code into chat). Otherwise run at most ONE verification check (`get_diagnostics` or build/check command) or conclude with a concise summary."
             } else if !filesModified.isEmpty {
-                dynamicInstruction = "Verification has already been performed for your file edits. Conclude your turn now with a clear, structured summary of the changes."
+                dynamicInstruction = "Verification has already been performed for your file edits. If all planned files are written to disk, conclude your turn now with a concise, structured summary of the changes (NEVER dump source code in chat)."
             } else if requiresMutation && iteration >= 3 {
                 dynamicInstruction = "CRITICAL: You have already performed \(iteration) read/inspection steps, and `filesModified` is STILL EMPTY (zero files modified!). Stop reading files repeatedly. Immediately call `replace_in_file`, `patch_file`, or `file_write` RIGHT NOW to implement the requested changes in the target file(s)."
             } else if iteration >= 5 {
@@ -2766,6 +2822,9 @@ class AgentService: ObservableObject {
             }
         }
         
+        if finalText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty && !lastPreToolText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            finalText = lastPreToolText
+        }
         if let notice = terminationNotice, !finalText.contains(notice) {
             finalText += "\n\n⚠️ \(notice)"
         }
@@ -3011,8 +3070,9 @@ class AgentService: ObservableObject {
     }
     
     private func updateStreamingMessage(_ text: String, toolResults: [ToolResultModel]) {
+        let sanitizedText = AIStructuredTurnCodec.stripToolCallArtifacts(text)
         let streamMsg = AgentMessageModel(
-            id: "streaming", role: .assistant, content: text,
+            id: "streaming", role: .assistant, content: sanitizedText,
             toolResults: toolResults, pendingChanges: [], timestamp: Date()
         )
         let block = { [weak self] in
@@ -3437,7 +3497,15 @@ class AgentService: ObservableObject {
             switch msg.role {
             case .user, .assistant:
                 let limit = min(maxMessageHistoryChars, remaining)
-                let content = boundedHistoryText(msg.content, limit: limit)
+                var rawContent = msg.content
+                if msg.role == .assistant && !msg.toolResults.isEmpty {
+                    let toolSummary = msg.toolResults.prefix(8).map { tr in
+                        let status = tr.success ? "ok" : "error"
+                        return "\(tr.toolName)(\(status))"
+                    }.joined(separator: ", ")
+                    rawContent = "[Executed MicroCode Tools: \(toolSummary)]\n" + rawContent
+                }
+                let content = boundedHistoryText(rawContent, limit: limit)
                 guard !content.isEmpty else { continue }
                 result.append((role: msg.role == .user ? "user" : "assistant", content: content))
                 remaining -= content.count
@@ -3642,6 +3710,7 @@ class AgentService: ObservableObject {
     }
     
     func switchChat(to chatId: String) {
+        if activeChatId == chatId && (!messages.isEmpty || isLoading) { return }
         guard let chat = chatSessions.first(where: { $0.id == chatId }) else { return }
         contextLimitReached = false
         
@@ -4024,8 +4093,9 @@ class AgentService: ObservableObject {
     private func parseTextBasedToolCalls(_ text: String) -> [AIToolCall] {
         var calls: [AIToolCall] = []
         let registeredToolNames = Set(toolBox.tools.keys)
-        let isKnownTool: (String) -> Bool = { name in
-            registeredToolNames.contains(name) || name.hasPrefix("mcp__")
+        let isKnownTool: (String) -> Bool = { rawName in
+            let canonical = AgentToolBox.normalizeToolName(rawName)
+            return registeredToolNames.contains(canonical) || canonical.hasPrefix("mcp__")
         }
         
         // Pattern 0: [Tool Call: tool_name({...})]
@@ -4036,7 +4106,8 @@ class AgentService: ObservableObject {
                 let matches = regex.matches(in: text, range: NSRange(location: 0, length: nsText.length))
                 for match in matches {
                     guard match.numberOfRanges > 2 else { continue }
-                    let toolName = nsText.substring(with: match.range(at: 1)).trimmingCharacters(in: .whitespacesAndNewlines)
+                    let rawToolName = nsText.substring(with: match.range(at: 1)).trimmingCharacters(in: .whitespacesAndNewlines)
+                    let toolName = AgentToolBox.normalizeToolName(rawToolName)
                     let argsStr = nsText.substring(with: match.range(at: 2)).trimmingCharacters(in: .whitespacesAndNewlines)
                     guard isKnownTool(toolName) else { continue }
                     let args = parseToolArgs(argsStr, toolName: toolName)
@@ -4059,22 +4130,28 @@ class AgentService: ObservableObject {
                 if let data = jsonStr.data(using: .utf8),
                    let parsed = try? JSONSerialization.jsonObject(with: data) {
                     if let json = parsed as? [String: Any],
-                       let name = (json["name"] as? String) ?? (json["tool"] as? String),
-                       isKnownTool(name) {
-                        let args = (json["arguments"] as? [String: Any])
-                            ?? (json["parameters"] as? [String: Any])
-                            ?? (json["args"] as? [String: Any])
-                            ?? [:]
-                        calls.append(AIToolCall(id: UUID().uuidString, name: name, arguments: AgentToolBox.normalizeToolParams(args)))
+                       let rawName = (json["name"] as? String) ?? (json["tool"] as? String) ?? (json["function"] as? String) {
+                        let name = AgentToolBox.normalizeToolName(rawName)
+                        if isKnownTool(name) {
+                            let args = (json["arguments"] as? [String: Any])
+                                ?? (json["parameters"] as? [String: Any])
+                                ?? (json["args"] as? [String: Any])
+                                ?? (json["input"] as? [String: Any])
+                                ?? [:]
+                            calls.append(AIToolCall(id: UUID().uuidString, name: name, arguments: AgentToolBox.normalizeToolParams(args)))
+                        }
                     } else if let arr = parsed as? [[String: Any]] {
                         for json in arr {
-                            if let name = (json["name"] as? String) ?? (json["tool"] as? String),
-                               isKnownTool(name) {
-                                let args = (json["arguments"] as? [String: Any])
-                                    ?? (json["parameters"] as? [String: Any])
-                                    ?? (json["args"] as? [String: Any])
-                                    ?? [:]
-                                calls.append(AIToolCall(id: UUID().uuidString, name: name, arguments: AgentToolBox.normalizeToolParams(args)))
+                            if let rawName = (json["name"] as? String) ?? (json["tool"] as? String) ?? (json["function"] as? String) {
+                                let name = AgentToolBox.normalizeToolName(rawName)
+                                if isKnownTool(name) {
+                                    let args = (json["arguments"] as? [String: Any])
+                                        ?? (json["parameters"] as? [String: Any])
+                                        ?? (json["args"] as? [String: Any])
+                                        ?? (json["input"] as? [String: Any])
+                                        ?? [:]
+                                    calls.append(AIToolCall(id: UUID().uuidString, name: name, arguments: AgentToolBox.normalizeToolParams(args)))
+                                }
                             }
                         }
                     }
@@ -4082,6 +4159,45 @@ class AgentService: ObservableObject {
             }
         }
         if !calls.isEmpty { return calls }
+
+        // Pattern 1B: DeepSeek DSML (`<｜DSML｜invoke name="...">`) & `<invoke name="...">` XML blocks
+        if text.contains("invoke") || text.contains("DSML") {
+            let invokePattern = #"<(?:[｜\|]DSML[｜\|])?invoke\s+name="([^"]+)"[^>]*>([\s\S]*?)</(?:[｜\|]DSML[｜\|])?invoke>"#
+            let paramPattern = #"<(?:[｜\|]DSML[｜\|])?parameter\s+name="([^"]+)"[^>]*>([\s\S]*?)</(?:[｜\|]DSML[｜\|])?parameter>"#
+            if let invokeRegex = try? NSRegularExpression(pattern: invokePattern),
+               let paramRegex = try? NSRegularExpression(pattern: paramPattern) {
+                let nsText = text as NSString
+                let invokeMatches = invokeRegex.matches(in: text, range: NSRange(location: 0, length: nsText.length))
+                for match in invokeMatches {
+                    guard match.numberOfRanges > 2 else { continue }
+                    let rawName = nsText.substring(with: match.range(at: 1)).trimmingCharacters(in: .whitespacesAndNewlines)
+                    let name = AgentToolBox.normalizeToolName(rawName)
+                    guard isKnownTool(name) else { continue }
+                    let bodyStr = nsText.substring(with: match.range(at: 2))
+                    let nsBody = bodyStr as NSString
+                    var paramsDict: [String: Any] = [:]
+                    let paramMatches = paramRegex.matches(in: bodyStr, range: NSRange(location: 0, length: nsBody.length))
+                    for pm in paramMatches {
+                        guard pm.numberOfRanges > 2 else { continue }
+                        let pName = nsBody.substring(with: pm.range(at: 1)).trimmingCharacters(in: .whitespacesAndNewlines)
+                        let pValRaw = nsBody.substring(with: pm.range(at: 2)).trimmingCharacters(in: .whitespacesAndNewlines)
+                        if (pValRaw.hasPrefix("{") && pValRaw.hasSuffix("}")) || (pValRaw.hasPrefix("[") && pValRaw.hasSuffix("]")),
+                           let d = pValRaw.data(using: .utf8),
+                           let obj = try? JSONSerialization.jsonObject(with: d) {
+                            paramsDict[pName] = obj
+                        } else if pValRaw.lowercased() == "true" {
+                            paramsDict[pName] = true
+                        } else if pValRaw.lowercased() == "false" {
+                            paramsDict[pName] = false
+                        } else {
+                            paramsDict[pName] = pValRaw
+                        }
+                    }
+                    calls.append(AIToolCall(id: UUID().uuidString, name: name, arguments: AgentToolBox.normalizeToolParams(paramsDict)))
+                }
+            }
+            if !calls.isEmpty { return calls }
+        }
         
         // Pattern 2: ```json { "name": "tool_name", "arguments": {...} } ```
         let jsonBlockPattern = "```(?:tool_call|json)?\\s*(\\{[\\s\\S]*?\"name\"\\s*:\\s*\"([^\"]+)\"[\\s\\S]*?\\})\\s*```"
@@ -4091,7 +4207,8 @@ class AgentService: ObservableObject {
             for match in matches {
                 guard match.numberOfRanges > 2 else { continue }
                 let fullJsonStr = nsText.substring(with: match.range(at: 1))
-                let name = nsText.substring(with: match.range(at: 2))
+                let rawName = nsText.substring(with: match.range(at: 2))
+                let name = AgentToolBox.normalizeToolName(rawName)
                 if isKnownTool(name),
                    let data = fullJsonStr.data(using: .utf8),
                    let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] {
@@ -4248,7 +4365,10 @@ class AgentService: ObservableObject {
         // 1. Connected Subscriptions (TH-AI Passport, GitHub Copilot, ChatGPT, Claude)
         if SubscriptionAuthManager.shared.isConnected(.aipass) {
             let aipassKey = SubscriptionAuthManager.shared.token(for: .aipass) ?? ""
-            for m in ["claude-sonnet-4-6", "gpt-5.4", "gemini-2.5-pro", "deepseek-v3.2", "qwen3-coder-plus"] {
+            if currentProvider == .deepseek || currentModel.lowercased().contains("deepseek") {
+                pool.append(Candidate(provider: .aipass, model: "DeepSeek-V4-Flash", apiKey: aipassKey, label: "TH-AI Passport (DeepSeek-V4-Flash)"))
+            }
+            for m in ["claude-sonnet-5-5@azure", "gpt-6.1-sol", "gemini-4-argon", "DeepSeek-V4-Flash", "gemini-3.5-flash-lite"] {
                 pool.append(Candidate(provider: .aipass, model: m, apiKey: aipassKey, label: "TH-AI Passport (\(m))"))
             }
         }
@@ -4260,23 +4380,21 @@ class AgentService: ObservableObject {
         }
         if SubscriptionAuthManager.shared.isConnected(.claude) {
             let claudeKey = SubscriptionAuthManager.shared.token(for: .claude) ?? ""
-            pool.append(Candidate(provider: .anthropic, model: "claude-sonnet-4-6", apiKey: claudeKey, label: "Claude Sub (claude-sonnet-4-6)"))
+            pool.append(Candidate(provider: .anthropic, model: "claude-sonnet-5-5", apiKey: claudeKey, label: "Claude Sub (claude-sonnet-5-5)"))
         }
         if SubscriptionAuthManager.shared.isConnected(.chatgpt) {
             let chatgptKey = SubscriptionAuthManager.shared.token(for: .chatgpt) ?? ""
-            pool.append(Candidate(provider: .openai, model: "gpt-5.3-codex", apiKey: chatgptKey, label: "ChatGPT Sub (gpt-5.3-codex)"))
+            pool.append(Candidate(provider: .openai, model: "gpt-6.1-sol", apiKey: chatgptKey, label: "ChatGPT Sub (gpt-6.1-sol)"))
         }
 
         // 2. BYOK Keys configured in AppState / AIModelCatalog
         let byokOrder: [(provider: StreamableAIProvider, keyName: String, defaultModel: String, label: String)] = [
+            (.gemini, "gemini", "gemini-3.5-flash", "Gemini (gemini-3.5-flash)"),
             (.gemini, "gemini", "gemini-2.5-flash", "Gemini (gemini-2.5-flash)"),
-            (.gemini, "gemini", "gemini-2.5-pro", "Gemini (gemini-2.5-pro)"),
-            (.anthropic, "anthropic", "claude-sonnet-4-6", "Anthropic (claude-sonnet-4-6)"),
-            (.openai, "openai", "gpt-4.1", "OpenAI (gpt-4.1)"),
-            (.deepseek, "deepseek", "deepseek-chat", "DeepSeek (deepseek-chat)"),
-            (.openrouter, "openrouter", "anthropic/claude-3.7-sonnet", "OpenRouter (claude-3.7-sonnet)"),
-            (.groq, "groq", "llama-3.3-70b-versatile", "Groq (llama-3.3-70b)"),
-            (.glm, "glm", "glm-4-plus", "GLM (glm-4-plus)")
+            (.anthropic, "anthropic", "claude-sonnet-5-5", "Anthropic (claude-sonnet-5-5)"),
+            (.openai, "openai", "gpt-5.2", "OpenAI (gpt-5.2)"),
+            (.glm, "glm", "glm-5.3-flash", "GLM (glm-5.3-flash)"),
+            (.deepseek, "deepseek", "deepseek-flash", "DeepSeek (deepseek-flash)")
         ]
         for item in byokOrder {
             let resolvedKey = (AppState.shared?.resolveApiKey(for: item.keyName) ?? AIModelCatalog.resolveKey(item.keyName)).trimmingCharacters(in: .whitespacesAndNewlines)

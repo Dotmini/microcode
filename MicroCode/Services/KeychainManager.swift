@@ -25,14 +25,15 @@ class KeychainManager: ObservableObject {
     private var memoryCache: [String: String] = [:]
     
     /// Hardware-bound AES-256-GCM key used to seal cached secrets on disk so plaintext is NEVER written to UserDefaults
-    private lazy var sealKey: SymmetricKey = {
-        let machineID = Self.hardwareUUID() ?? "com.dotmini.microcode.sovereign.vault"
+    /// and macOS securityd NEVER pops up modal Keychain password dialogs across ad-hoc binary rebuilds.
+    nonisolated static let hardwareSealKey: SymmetricKey = {
+        let machineID = hardwareUUID() ?? "com.dotmini.microcode.sovereign.vault"
         let material = "microcode.vault.v2.\(machineID)"
         let digest = SHA256.hash(data: Data(material.utf8))
         return SymmetricKey(data: digest)
     }()
     
-    private static func hardwareUUID() -> String? {
+    nonisolated private static func hardwareUUID() -> String? {
         let platformExpert = IOServiceGetMatchingService(
             kIOMainPortDefault,
             IOServiceMatching("IOPlatformExpertDevice")
@@ -50,17 +51,25 @@ class KeychainManager: ObservableObject {
         return nil
     }
     
-    private func encryptSecret(_ plaintext: String) -> Data? {
+    nonisolated static func sealSecret(_ plaintext: String) -> Data? {
         guard let data = plaintext.data(using: .utf8) else { return nil }
-        return try? AES.GCM.seal(data, using: sealKey).combined
+        return try? AES.GCM.seal(data, using: hardwareSealKey).combined
     }
     
-    private func decryptSecret(_ combined: Data) -> String? {
+    nonisolated static func unsealSecret(_ combined: Data) -> String? {
         guard let box = try? AES.GCM.SealedBox(combined: combined),
-              let opened = try? AES.GCM.open(box, using: sealKey) else {
+              let opened = try? AES.GCM.open(box, using: hardwareSealKey) else {
             return nil
         }
         return String(data: opened, encoding: .utf8)
+    }
+    
+    private func encryptSecret(_ plaintext: String) -> Data? {
+        Self.sealSecret(plaintext)
+    }
+    
+    private func decryptSecret(_ combined: Data) -> String? {
+        Self.unsealSecret(combined)
     }
     
     /// Known provider key identifiers
@@ -100,7 +109,7 @@ class KeychainManager: ObservableObject {
     
     // MARK: - CRUD Operations
     
-    /// Store an API key in Keychain (and encrypted seal cache, never plaintext UserDefaults)
+    /// Store an API key in Hardware-Bound AES-256-GCM Sealed Store (zero macOS Keychain password prompts)
     func save(key: String, for provider: ProviderKey) -> Bool {
         guard !key.isEmpty else { return false }
         
@@ -110,38 +119,11 @@ class KeychainManager: ObservableObject {
             UserDefaults.standard.set(sealed, forKey: "km_sealed_\(provider.rawValue)")
         }
         
-        let data = Data(key.utf8)
-        
-        let deleteQuery: [String: Any] = [
-            kSecClass as String: kSecClassGenericPassword,
-            kSecAttrService as String: service,
-            kSecAttrAccount as String: provider.rawValue
-        ]
-        SecItemDelete(deleteQuery as CFDictionary)
-        
-        var query: [String: Any] = [
-            kSecClass as String: kSecClassGenericPassword,
-            kSecAttrService as String: service,
-            kSecAttrAccount as String: provider.rawValue,
-            kSecValueData as String: data,
-            kSecAttrAccessible as String: kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly
-        ]
-        
-        var access: SecAccess?
-        SecAccessCreate("MicroCode" as CFString, nil, &access)
-        if let access = access {
-            query[kSecAttrAccess as String] = access
-        }
-        
-        let status = SecItemAdd(query as CFDictionary, nil)
         initializeRustProvider(provider, key: key)
-        if status != errSecSuccess {
-            print("⚠️ Keychain save status for \(provider.rawValue): \(status) (sealed backup active)")
-        }
         return true
     }
     
-    /// Read an API key from Keychain / Sealed Store
+    /// Read an API key from Hardware-Bound AES-256-GCM Sealed Store
     func read(for provider: ProviderKey) -> String? {
         let cacheKey = "api:\(provider.rawValue)"
         if let mem = memoryCache[cacheKey] {
@@ -165,25 +147,6 @@ class KeychainManager: ObservableObject {
             return str
         }
         
-        let query: [String: Any] = [
-            kSecClass as String: kSecClassGenericPassword,
-            kSecAttrService as String: service,
-            kSecAttrAccount as String: provider.rawValue,
-            kSecReturnData as String: true,
-            kSecMatchLimit as String: kSecMatchLimitOne
-        ]
-        
-        var result: AnyObject?
-        let status = SecItemCopyMatching(query as CFDictionary, &result)
-        
-        if status == errSecSuccess, let data = result as? Data, let str = String(data: data, encoding: .utf8), !str.isEmpty {
-            memoryCache[cacheKey] = str
-            if let sealed = encryptSecret(str) {
-                UserDefaults.standard.set(sealed, forKey: "km_sealed_\(provider.rawValue)")
-            }
-            return str
-        }
-        
         memoryCache[cacheKey] = Self.missingSentinel
         return nil
     }
@@ -193,20 +156,13 @@ class KeychainManager: ObservableObject {
         return save(key: key, for: provider)
     }
     
-    /// Delete an API key from Keychain
+    /// Delete an API key from Sealed Store
     @discardableResult
     func delete(for provider: ProviderKey) -> Bool {
         memoryCache["api:\(provider.rawValue)"] = Self.missingSentinel
         UserDefaults.standard.removeObject(forKey: "km_cached_\(provider.rawValue)")
         UserDefaults.standard.removeObject(forKey: "km_sealed_\(provider.rawValue)")
-        let query: [String: Any] = [
-            kSecClass as String: kSecClassGenericPassword,
-            kSecAttrService as String: service,
-            kSecAttrAccount as String: provider.rawValue
-        ]
-        
-        let status = SecItemDelete(query as CFDictionary)
-        return status == errSecSuccess || status == errSecItemNotFound
+        return true
     }
     
     /// Check if a key exists for a provider
@@ -219,7 +175,7 @@ class KeychainManager: ObservableObject {
         return ProviderKey.allCases.filter { hasKey(for: $0) }
     }
 
-    // MARK: - Integration & SSH Secrets (Keychain + AES-GCM Sealed Backup)
+    // MARK: - Integration & SSH Secrets (Hardware-Bound AES-256-GCM Sealed Vault)
 
     @discardableResult
     func saveIntegrationSecret(_ value: String, account: String) -> Bool {
@@ -231,28 +187,6 @@ class KeychainManager: ObservableObject {
         if let sealed = encryptSecret(value) {
             UserDefaults.standard.set(sealed, forKey: "km_sealed_sec_\(account)")
         }
-        
-        let data = Data(value.utf8)
-        let deleteQuery: [String: Any] = [
-            kSecClass as String: kSecClassGenericPassword,
-            kSecAttrService as String: integrationService,
-            kSecAttrAccount as String: account
-        ]
-        SecItemDelete(deleteQuery as CFDictionary)
-        
-        var addQuery: [String: Any] = [
-            kSecClass as String: kSecClassGenericPassword,
-            kSecAttrService as String: integrationService,
-            kSecAttrAccount as String: account,
-            kSecValueData as String: data,
-            kSecAttrAccessible as String: kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly
-        ]
-        var access: SecAccess?
-        SecAccessCreate("MicroCode" as CFString, nil, &access)
-        if let access = access {
-            addQuery[kSecAttrAccess as String] = access
-        }
-        SecItemAdd(addQuery as CFDictionary, nil)
         return true
     }
 
@@ -273,23 +207,6 @@ class KeychainManager: ObservableObject {
             memoryCache[cacheKey] = decrypted
             return decrypted
         }
-        let query: [String: Any] = [
-            kSecClass as String: kSecClassGenericPassword,
-            kSecAttrService as String: integrationService,
-            kSecAttrAccount as String: account,
-            kSecReturnData as String: true,
-            kSecMatchLimit as String: kSecMatchLimitOne
-        ]
-        var result: AnyObject?
-        if SecItemCopyMatching(query as CFDictionary, &result) == errSecSuccess,
-           let data = result as? Data,
-           let str = String(data: data, encoding: .utf8), !str.isEmpty {
-            memoryCache[cacheKey] = str
-            if let sealed = encryptSecret(str) {
-                UserDefaults.standard.set(sealed, forKey: "km_sealed_sec_\(account)")
-            }
-            return str
-        }
         memoryCache[cacheKey] = Self.missingSentinel
         return nil
     }
@@ -299,13 +216,7 @@ class KeychainManager: ObservableObject {
         memoryCache["sec:\(account)"] = Self.missingSentinel
         UserDefaults.standard.removeObject(forKey: "km_secret_\(account)")
         UserDefaults.standard.removeObject(forKey: "km_sealed_sec_\(account)")
-        let query: [String: Any] = [
-            kSecClass as String: kSecClassGenericPassword,
-            kSecAttrService as String: integrationService,
-            kSecAttrAccount as String: account
-        ]
-        let status = SecItemDelete(query as CFDictionary)
-        return status == errSecSuccess || status == errSecItemNotFound
+        return true
     }
     
     // MARK: - Rust FFI Bridge

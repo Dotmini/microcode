@@ -39,6 +39,43 @@ struct TokenBudget {
     }
 }
 
+// MARK: - TokenMem Optimization Mode
+
+enum TokenMemMode: String, CaseIterable, Codable, Identifiable {
+    case balanced = "Balanced"
+    case ultraSave = "Ultra-Save"
+    case maxRecall = "Max Recall"
+    
+    var id: String { rawValue }
+    
+    var subtitle: String {
+        switch self {
+        case .balanced:
+            return "AST folding, file-read dedup, and cache-aligned 6-turn epochs"
+        case .ultraSave:
+            return "Aggressive AST skeleton windowing and tight tool output budgets"
+        case .maxRecall:
+            return "Full file slices with KV-prefix caching and schema deduplication"
+        }
+    }
+    
+    var maxUnwindowedFileLines: Int {
+        switch self {
+        case .ultraSave: return 360
+        case .balanced: return 600
+        case .maxRecall: return 1400
+        }
+    }
+    
+    var iterativeBudgetMultiplier: Double {
+        switch self {
+        case .ultraSave: return 0.55
+        case .balanced: return 1.0
+        case .maxRecall: return 1.6
+        }
+    }
+}
+
 // MARK: - Token Usage Stats
 
 struct TokenUsageStats: Codable {
@@ -54,13 +91,24 @@ struct TokenUsageStats: Codable {
     var activeProvider: String = ""
     var activeModel: String = ""
     
+    // Per-Layer TokenMem v3 Breakdown
+    var savedBySchemaDedup: Int = 0
+    var savedByFileReadDedup: Int = 0
+    var savedByToolFolding: Int = 0
+    var savedByEpochCompaction: Int = 0
+    
+    var effectiveSavingsPercent: Double {
+        let totalSavedAndCached = savedTokens + cachedTokens
+        let baseline = max(1, inputTokens + savedTokens)
+        return min(99.0, (Double(totalSavedAndCached) / Double(baseline)) * 100.0)
+    }
+    
     var formattedSavings: String {
-        let pct = savedTokens > 0 ? Double(savedTokens) / Double(inputTokens + savedTokens) * 100 : 0
-        return String(format: "%.0f%% saved", pct)
+        return String(format: "%.0f%% saved", effectiveSavingsPercent)
     }
 }
 
-// MARK: - Token Optimizer
+// MARK: - Token Optimizer (TokenMem v3 Engine)
 
 @MainActor
 class TokenOptimizer: ObservableObject {
@@ -68,6 +116,24 @@ class TokenOptimizer: ObservableObject {
     
     @Published var stats = TokenUsageStats()
     @Published var isOptimizing = false
+    @Published var mode: TokenMemMode = {
+        let raw = UserDefaults.standard.string(forKey: "microcode.tokenMemMode") ?? TokenMemMode.balanced.rawValue
+        return TokenMemMode(rawValue: raw) ?? .balanced
+    }() {
+        didSet {
+            UserDefaults.standard.set(mode.rawValue, forKey: "microcode.tokenMemMode")
+        }
+    }
+    
+    struct FileReadCacheEntry {
+        let contentHash: Int
+        let lineCount: Int
+        let timestamp: Date
+        var hitCount: Int
+    }
+    
+    /// Session-scoped file slice deduplication registry (`path#start-end` -> entry)
+    private var fileReadRegistry: [String: FileReadCacheEntry] = [:]
     
     // Stop words for light prose pruning (NEVER include negations, modals, or directional prepositions)
     private let stopWords: Set<String> = [
@@ -511,32 +577,107 @@ class TokenOptimizer: ObservableObject {
         return patterns.contains(where: { trimmed.hasPrefix($0) })
     }
     
-    // MARK: - Reset Stats
+    // MARK: - Reset Stats & Session Deduplication Registry
     
     func resetStats() {
         stats = TokenUsageStats()
+        fileReadRegistry.removeAll()
+        persistStats()
+    }
+    
+    /// Called at the start of each new user prompt turn so intra-loop re-reads of unchanged files are deduplicated
+    func beginTurnLoop() {
+        fileReadRegistry.removeAll()
+    }
+    
+    /// Invalidates cached file-read fingerprints whenever a file is modified on disk
+    func invalidateFileRead(path: String) {
+        let stdPath = (path as NSString).standardizingPath
+        fileReadRegistry = fileReadRegistry.filter { !$0.key.hasPrefix(stdPath + "#") }
+    }
+    
+    /// Checks if the exact file slice was already read in the current agent loop with identical content hash.
+    /// Returns a compact reference stub if unchanged, saving thousands of redundant tokens.
+    func checkDuplicateFileRead(
+        path: String,
+        startLine: Int?,
+        endLine: Int?,
+        contentHash: Int,
+        lineCount: Int,
+        fullTokenEstimate: Int
+    ) -> String? {
+        guard mode != .maxRecall, fullTokenEstimate > 120 else { return nil }
+        let stdPath = (path as NSString).standardizingPath
+        let sliceKey = "\(stdPath)#\(startLine ?? 1)-\(endLine ?? lineCount)"
+        
+        if var existing = fileReadRegistry[sliceKey], existing.contentHash == contentHash {
+            existing.hitCount += 1
+            fileReadRegistry[sliceKey] = existing
+            let stub = "[TokenMem File Cache Hit: \((stdPath as NSString).lastPathComponent) (lines \(startLine ?? 1)-\(endLine ?? lineCount), \(lineCount) total lines) is unchanged since earlier read in this run. Refer to the file content already in context above.]"
+            let saved = max(0, fullTokenEstimate - estimateTokens(stub))
+            stats.savedTokens += saved
+            stats.savedByFileReadDedup += saved
+            updateCompressionRatio()
+            persistStats()
+            return stub
+        }
+        
+        fileReadRegistry[sliceKey] = FileReadCacheEntry(
+            contentHash: contentHash,
+            lineCount: lineCount,
+            timestamp: Date(),
+            hitCount: 0
+        )
+        return nil
+    }
+    
+    /// Records token savings from AST skeleton windowing or tool output folding
+    func recordToolFoldingSavings(savedTokens: Int) {
+        guard savedTokens > 0 else { return }
+        stats.savedTokens += savedTokens
+        stats.savedByToolFolding += savedTokens
+        updateCompressionRatio()
+        persistStats()
+    }
+    
+    /// Records token savings from deduplicating MCP schemas and adaptive ToolScope pruning
+    func recordSchemaOptimization(totalSchemasCount: Int, activeSchemasCount: Int) {
+        let prunedCount = max(0, totalSchemasCount - activeSchemasCount)
+        guard prunedCount > 0 else { return }
+        // Each tool schema averages ~145 tokens across JSON schema declarations
+        let saved = prunedCount * 145
+        stats.savedTokens += saved
+        stats.savedBySchemaDedup += saved
+        updateCompressionRatio()
         persistStats()
     }
 
-    func recordUsage(provider: String, model: String, inputTokens: Int, outputTokens: Int) {
-        stats.inputTokens += inputTokens
-        stats.outputTokens += outputTokens
+    func recordUsage(provider: String, model: String, inputTokens: Int, outputTokens: Int, costOverride: Double? = nil) {
+        stats.inputTokens += max(0, inputTokens)
+        stats.outputTokens += max(0, outputTokens)
         stats.totalRequests += 1
-        stats.totalCost += estimateCost(inputTokens: inputTokens, outputTokens: outputTokens, model: model)
-        stats.compressionRatio = Double(stats.savedTokens) / max(1, Double(stats.inputTokens + stats.savedTokens))
+        stats.totalCost += costOverride ?? estimateCost(inputTokens: inputTokens, outputTokens: outputTokens, model: model)
+        updateCompressionRatio()
         stats.activeProvider = provider
         stats.activeModel = model
         persistStats()
     }
 
     func recordContextCache(hit: Bool, tokens: Int) {
-        if hit {
+        if hit && tokens > 0 {
             stats.cacheHits += 1
             stats.cachedTokens += max(0, tokens)
         } else {
             stats.cacheMisses += 1
         }
+        updateCompressionRatio()
         persistStats()
+    }
+    
+    private func updateCompressionRatio() {
+        let totalSavedAndCached = stats.savedTokens + stats.cachedTokens
+        let baseline = max(1, stats.inputTokens + stats.savedTokens)
+        stats.compressionRatio = min(0.99, Double(totalSavedAndCached) / Double(baseline))
     }
 
     private func persistStats() {
@@ -544,20 +685,20 @@ class TokenOptimizer: ObservableObject {
         UserDefaults.standard.set(data, forKey: statsKey)
     }
     
-    // MARK: - Token Cost Estimation
-    
-    // MARK: - Smart Iterative Context Window for Agent Loops
+    // MARK: - Cache-Aligned Epoch Context Compaction for Agent Loops
     
     /// Compresses tool history dynamically during long-running multi-turn loops.
-    /// Preserves the original goal and the latest 6 messages (3 full turns) in full fidelity,
-    /// while retaining actionable code/error excerpts in older turns.
+    /// Uses Cache-Aligned Epoch Compaction (quantized in blocks of 6 messages) so earlier
+    /// compacted messages stay 100% byte-identical across consecutive turns, preserving
+    /// provider KV-prefix caches (Anthropic, OpenAI, Gemini, DeepSeek).
     func compressIterativeToolHistory(
         _ history: [(role: String, content: String)],
         budget: Int = 120_000
     ) -> [(role: String, content: String)] {
         guard history.count > 8 else { return history }
         
-        let effectiveBudget = max(60_000, min(budget, 180_000))
+        let scaledBudget = Int(Double(budget) * mode.iterativeBudgetMultiplier)
+        let effectiveBudget = max(40_000, min(scaledBudget, 200_000))
         let totalTokens = history.reduce(0) { $0 + estimateTokens($1.content) }
         if totalTokens <= effectiveBudget { return history }
         
@@ -568,12 +709,14 @@ class TokenOptimizer: ObservableObject {
             optimized.append(first)
         }
         
-        // 2. Preserve the latest 6 messages (3 full turns) in 100% fidelity
-        let recentCount = min(6, history.count - 1)
-        let middleTurns = history.dropFirst().dropLast(recentCount)
-        let recentTurns = history.suffix(recentCount)
+        // 2. Cache-Aligned Epoch Tail: Quantize the uncompacted recent tail in blocks of 6 messages
+        // so the boundary between compacted middle turns and verbatim recent turns only advances every 6 messages!
+        let remainingCount = history.count - 1
+        let epochAlignedRecentCount = min(remainingCount, 6 + (remainingCount % 6))
+        let middleTurns = history.dropFirst().dropLast(epochAlignedRecentCount)
+        let recentTurns = history.suffix(epochAlignedRecentCount)
         
-        // 3. Compact older middle turns while keeping file headers, errors, and code excerpts
+        // 3. Compact older middle turns deterministically while keeping file headers, errors, and code excerpts
         for item in middleTurns {
             if item.content.contains(AIStructuredTurnCodec.markerKey) {
                 if item.role == "user" {
@@ -609,13 +752,17 @@ class TokenOptimizer: ObservableObject {
             }
         }
         
-        // 4. Append recent turns with full fidelity
+        // 4. Append recent turns with 100% verbatim fidelity
         for recent in recentTurns {
             optimized.append(recent)
         }
         
         let finalTokens = optimized.reduce(0) { $0 + estimateTokens($1.content) }
-        stats.savedTokens += max(0, totalTokens - finalTokens)
+        let saved = max(0, totalTokens - finalTokens)
+        stats.savedTokens += saved
+        stats.savedByEpochCompaction += saved
+        updateCompressionRatio()
+        persistStats()
         return optimized
     }
 

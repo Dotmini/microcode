@@ -723,8 +723,8 @@ public class TestGeneratorService: ObservableObject {
     // MARK: - Private Helpers
     
     private func currentModelAndProvider() -> (model: String, provider: String) {
-        let configuredProvider = UserDefaults.standard.string(forKey: "aiProvider") ?? "omni"
-        let configuredModel = UserDefaults.standard.string(forKey: "aiModel") ?? StreamableAIProvider.omni.defaultModel
+        let configuredProvider = UserDefaults.standard.string(forKey: "aiProvider") ?? "gemini"
+        let configuredModel = UserDefaults.standard.string(forKey: "aiModel") ?? StreamableAIProvider.gemini.defaultModel
         return (model: configuredModel, provider: configuredProvider)
     }
     

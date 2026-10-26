@@ -335,7 +335,7 @@ public struct AgentSquadPreset: Identifiable, Codable, Hashable, Equatable {
                         id: "sub_sec_agy",
                         typeName: "security_auditor",
                         roleTitle: "Security & Code Verifier",
-                        endpoint: AgentModelEndpoint(authSource: .dotminiCloud, provider: "omni", model: "gemini-2.5-flash"),
+                        endpoint: AgentModelEndpoint(authSource: .subscription, provider: "gemini", model: "gemini-2.5-flash"),
                         isEnabled: true
                     )
                 ]

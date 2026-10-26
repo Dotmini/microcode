@@ -26,6 +26,14 @@ class FileNodeWrapper: NSObject {
 
 // MARK: - Authentic File Tree (NSOutlineView)
 
+private final class VerticalOnlyClipView: NSClipView {
+    override func constrainBoundsRect(_ proposedBounds: NSRect) -> NSRect {
+        var rect = super.constrainBoundsRect(proposedBounds)
+        rect.origin.x = 0
+        return rect
+    }
+}
+
 struct AuthenticFileTree: NSViewRepresentable {
     @Binding var fileTree: [FileNode]
     let revision: UInt64
@@ -38,8 +46,12 @@ struct AuthenticFileTree: NSViewRepresentable {
     
     func makeNSView(context: Context) -> NSScrollView {
         let scrollView = NSScrollView()
+        let clipView = VerticalOnlyClipView()
+        clipView.drawsBackground = false
+        scrollView.contentView = clipView
         scrollView.hasVerticalScroller = true
-        scrollView.hasHorizontalScroller = true
+        scrollView.hasHorizontalScroller = false
+        scrollView.horizontalScrollElasticity = .none
         scrollView.autohidesScrollers = true
         
         let outlineView = NSOutlineView()
@@ -50,11 +62,14 @@ struct AuthenticFileTree: NSViewRepresentable {
         outlineView.delegate = context.coordinator
         outlineView.headerView = nil // No header
         outlineView.rowHeight = 24
+        outlineView.columnAutoresizingStyle = .uniformColumnAutoresizingStyle
+        outlineView.autoresizesOutlineColumn = false
         
-        // Single Column
+        // Single Column locked to scroll view width
         let column = NSTableColumn(identifier: NSUserInterfaceItemIdentifier("MainColumn"))
         column.width = 200
         column.minWidth = 100
+        column.resizingMask = .autoresizingMask
         outlineView.addTableColumn(column)
         outlineView.outlineTableColumn = column
         
@@ -81,6 +96,12 @@ struct AuthenticFileTree: NSViewRepresentable {
         nsView.drawsBackground = backgroundColor.alphaComponent > 0
         nsView.backgroundColor = backgroundColor
         outlineView.backgroundColor = backgroundColor
+        if let column = outlineView.tableColumns.first {
+            let targetWidth = max(100, nsView.contentView.bounds.width)
+            if abs(column.width - targetWidth) > 1 {
+                column.width = targetWidth
+            }
+        }
         
         if context.coordinator.needsReload(revision: revision, currentTreeCount: fileTree.count) {
             context.coordinator.syncTree(fileTree: fileTree, in: outlineView, scrollView: nsView)

@@ -76,6 +76,11 @@ struct AIAgentView: View {
     @State private var showRawMarkdownPlan = false
     @State private var isPlanFullscreen = false
     @AppStorage("microcode_preview_dock_width") private var previewDockWidth: Double = 520
+    @AppStorage("agentChatSidebarWidth") private var chatSidebarWidth: Double = 210
+    @State private var dragStartSidebarWidth: CGFloat? = nil
+    @State private var dragStartPreviewDockWidth: CGFloat? = nil
+    @State private var isHoveringSidebarDivider: Bool = false
+    @State private var isHoveringDockDivider: Bool = false
     @AppStorage("studioAspectRatio") private var studioAspectRatio: String = "16:9"
     @AppStorage("studioResolution") private var studioResolution: String = "1080p"
     @AppStorage("studioDuration") private var studioDuration: String = "5s"
@@ -204,11 +209,11 @@ struct AIAgentView: View {
         if appState.aiProvider == "local" || currentKeyMode == "local" {
             return .local
         }
-        if appState.aiProvider == "omni" || currentKeyMode == "cloud" {
-            return .cloud
-        }
         if currentKeyMode == "subscription" {
             return .subscription
+        }
+        if appState.aiProvider == "omni" && appState.aiModel.lowercased().hasPrefix("omni") {
+            return .cloud
         }
         return .byok
     }
@@ -258,7 +263,11 @@ struct AIAgentView: View {
            !subStr.isEmpty {
             return subStr
         }
-        return appState.aiProvider.isEmpty ? "microcode" : appState.aiProvider
+        let detected = StreamableAIProvider.detect(from: appState.aiModel).rawValue
+        if appState.aiProvider.isEmpty || appState.aiProvider == "omni" {
+            return detected != "omni" ? detected : "microcode"
+        }
+        return appState.aiProvider
     }
     
     private var currentModelDisplayName: String {
@@ -299,26 +308,15 @@ struct AIAgentView: View {
         } else if currentExecutionMode == .local || appState.aiProvider == "local" {
             let modelName = LocalLLMService.shared.availableModels.first(where: { $0.id == appState.aiModel })?.displayName ?? (appState.aiModel.isEmpty ? "Local Model" : appState.aiModel)
             return "Local : \(modelName)"
-        } else if currentKeyMode == "direct" || currentExecutionMode == .byok {
-            let providerName = AIModelCatalog.friendlyProviderName(appState.aiProvider)
-            let modelName: String = {
-                if let modelDef = AIModelCatalog.shared.model(id: appState.aiModel) {
-                    return modelDef.name
-                }
-                if appState.aiModel.isEmpty {
-                    return AIModelCatalog.shared.provider(appState.aiProvider)?.models.first?.name ?? "Select Model"
-                }
-                return AIModelCatalog.formatModelName(appState.aiModel)
-            }()
-            return "\(providerName) : \(modelName)"
         } else {
-            let modelName: String = {
-                if let modelDef = AIModelCatalog.shared.model(id: appState.aiModel) {
-                    return modelDef.name
-                }
-                return appState.aiModel.isEmpty ? "Omni O1X Pro" : AIModelCatalog.formatModelName(appState.aiModel)
-            }()
-            return "Dotmini Cloud : \(modelName)"
+            let modelDef = AIModelCatalog.shared.model(id: appState.aiModel)
+            let fallbackName = AIModelCatalog.shared.provider(appState.aiProvider)?.models.first?.name
+            let resolvedModelName = modelDef?.name ?? (appState.aiModel.isEmpty ? fallbackName : nil)
+            return AIModelCatalog.formatFullDisplayName(
+                provider: appState.aiProvider,
+                modelId: appState.aiModel,
+                modelName: resolvedModelName
+            )
         }
     }
     
@@ -343,11 +341,11 @@ struct AIAgentView: View {
             let hasEmbeddedDock = sessionScope == .editor && (deviceRuntime.showingEmbeddedDeviceDock || previewDock.isDockVisible) && !appState.agenticContextVisible
             let hasRightInspector = appState.agenticContextVisible
             let isPlanActive = isPlanMode || planManager.isPlanVisible
-            let sidebarW: CGFloat = (allowsChatSidebar && agent.showChatSidebar) ? 220 : 0
-            let maxAllowedDockW: CGFloat = max(420, (rootGeo.size.width - sidebarW) * 0.66)
+            let sidebarW: CGFloat = (allowsChatSidebar && agent.showChatSidebar) ? min(300, max(150, CGFloat(chatSidebarWidth))) : 0
+            let maxAllowedDockW: CGFloat = max(460, rootGeo.size.width - sidebarW - 260)
             let targetDockW: CGFloat = previewDock.isExpandedWidth
-                ? max(520, (rootGeo.size.width - sidebarW) * 0.60)
-                : min(maxAllowedDockW, max(360, CGFloat(previewDockWidth)))
+                ? max(520, (rootGeo.size.width - sidebarW) * 0.62)
+                : min(maxAllowedDockW, max(280, CGFloat(previewDockWidth)))
             let dockW: CGFloat = hasEmbeddedDock ? targetDockW : (hasRightInspector ? 320 : 0)
             let mainColumnAvailWidth = rootGeo.size.width - sidebarW - dockW
             // Auto-promote Plan to full main column when available width cannot comfortably fit Chat (min 420) + Plan (min 400) side-by-side
@@ -357,12 +355,52 @@ struct AIAgentView: View {
             )
             
             HStack(spacing: 0) {
-                // Chat Sidebar (Collapsible)
+                // Chat Sidebar (Collapsible & Resizable)
                 if allowsChatSidebar && agent.showChatSidebar {
                     chatSidebar
-                        .frame(width: 220)
+                        .frame(width: sidebarW)
                         .clipped()
-                    Divider()
+                    
+                    ZStack {
+                        Rectangle()
+                            .fill(isHoveringSidebarDivider || dragStartSidebarWidth != nil ? Color.accentColor.opacity(0.14) : Color.clear)
+                        Rectangle()
+                            .fill(isHoveringSidebarDivider || dragStartSidebarWidth != nil ? Color.accentColor : Color.primary.opacity(0.09))
+                            .frame(width: isHoveringSidebarDivider || dragStartSidebarWidth != nil ? 2 : 1)
+                    }
+                    .frame(width: 5)
+                    .contentShape(Rectangle())
+                    .overlay(
+                        Color.clear
+                            .frame(width: 12)
+                            .contentShape(Rectangle())
+                    )
+                    .zIndex(25)
+                    .onHover { hovering in
+                        isHoveringSidebarDivider = hovering
+                        if hovering {
+                            NSCursor.resizeLeftRight.push()
+                        } else if dragStartSidebarWidth == nil {
+                            NSCursor.pop()
+                        }
+                    }
+                    .gesture(
+                        DragGesture(minimumDistance: 1, coordinateSpace: .global)
+                            .onChanged { value in
+                                if dragStartSidebarWidth == nil {
+                                    dragStartSidebarWidth = sidebarW
+                                }
+                                let startW = dragStartSidebarWidth ?? sidebarW
+                                let proposed = startW + value.translation.width
+                                chatSidebarWidth = Double(min(300, max(150, proposed)))
+                            }
+                            .onEnded { _ in
+                                dragStartSidebarWidth = nil
+                                if !isHoveringSidebarDivider {
+                                    NSCursor.pop()
+                                }
+                            }
+                    )
                 }
                 
                 // Main Content
@@ -447,7 +485,6 @@ struct AIAgentView: View {
                                             onRetryAssistantMessage: { msgId in handleRetryAssistantMessage(msgId) },
                                             onDeleteMessage: { msgId, revertFiles in handleDeleteMessage(msgId, revertFiles: revertFiles) }
                                         )
-                                        .equatable()
                                         .environmentObject(appState)
                                         
                                         if let suggestion = agent.suggestedAction {
@@ -462,14 +499,14 @@ struct AIAgentView: View {
                                     }
                                 }
                             }
-                            .frame(minWidth: 320, maxWidth: .infinity, maxHeight: .infinity)
+                            .frame(minWidth: 260, maxWidth: .infinity, maxHeight: .infinity)
                             .clipped()
                             
                             // Right Pane: Implementation Plan Side Panel (Side-by-Side Split View)
                             if isPlanActive {
                                 Divider().background(borderColor)
                                 planSidePanelView
-                                    .frame(minWidth: 340, idealWidth: 420, maxWidth: 520, maxHeight: .infinity)
+                                    .frame(minWidth: 320, idealWidth: 400, maxWidth: 520, maxHeight: .infinity)
                                     .clipped()
                                     .transition(.move(edge: .trailing).combined(with: .opacity))
                             }
@@ -478,7 +515,7 @@ struct AIAgentView: View {
                         .clipped()
                     }
                 }
-                .frame(minWidth: 280, maxWidth: .infinity, maxHeight: .infinity)
+                .frame(minWidth: 260, maxWidth: .infinity, maxHeight: .infinity)
                 .clipped()
 
                 // Preview is a workspace surface, not a success toast from the
@@ -487,32 +524,52 @@ struct AIAgentView: View {
                 // the user immediate feedback beside Chat.
                 if hasEmbeddedDock {
                     // Draggable Split Divider (matching Antigravity side-by-side Code Preview Pane)
-                    Rectangle()
-                        .fill(Color.primary.opacity(0.09))
-                        .frame(width: 1)
-                        .overlay(
-                            Rectangle()
-                                .fill(Color.clear)
-                                .frame(width: 7)
-                                .contentShape(Rectangle())
-                                .onHover { hovering in
-                                    if hovering {
-                                        NSCursor.resizeLeftRight.push()
-                                    } else {
-                                        NSCursor.pop()
-                                    }
+                    ZStack {
+                        Rectangle()
+                            .fill(isHoveringDockDivider || dragStartPreviewDockWidth != nil ? Color.accentColor.opacity(0.14) : Color.clear)
+                        Rectangle()
+                            .fill(isHoveringDockDivider || dragStartPreviewDockWidth != nil ? Color.accentColor : Color.primary.opacity(0.09))
+                            .frame(width: isHoveringDockDivider || dragStartPreviewDockWidth != nil ? 2 : 1)
+                        RoundedRectangle(cornerRadius: 2)
+                            .fill(isHoveringDockDivider || dragStartPreviewDockWidth != nil ? Color.accentColor : Color.secondary.opacity(0.35))
+                            .frame(width: 3, height: 32)
+                    }
+                    .frame(width: 6)
+                    .contentShape(Rectangle())
+                    .overlay(
+                        Color.clear
+                            .frame(width: 14)
+                            .contentShape(Rectangle())
+                    )
+                    .zIndex(30)
+                    .onHover { hovering in
+                        isHoveringDockDivider = hovering
+                        if hovering {
+                            NSCursor.resizeLeftRight.push()
+                        } else if dragStartPreviewDockWidth == nil {
+                            NSCursor.pop()
+                        }
+                    }
+                    .gesture(
+                        DragGesture(minimumDistance: 1, coordinateSpace: .global)
+                            .onChanged { value in
+                                if dragStartPreviewDockWidth == nil {
+                                    dragStartPreviewDockWidth = targetDockW
                                 }
-                                .gesture(
-                                    DragGesture(minimumDistance: 1)
-                                        .onChanged { value in
-                                            if previewDock.isExpandedWidth {
-                                                previewDock.isExpandedWidth = false
-                                            }
-                                            let proposed = CGFloat(previewDockWidth) - value.translation.width
-                                            previewDockWidth = Double(min(maxAllowedDockW, max(340, proposed)))
-                                        }
-                                )
-                        )
+                                if previewDock.isExpandedWidth {
+                                    previewDock.isExpandedWidth = false
+                                }
+                                let startW = dragStartPreviewDockWidth ?? targetDockW
+                                let proposed = startW - value.translation.width
+                                previewDockWidth = Double(min(maxAllowedDockW, max(280, proposed)))
+                            }
+                            .onEnded { _ in
+                                dragStartPreviewDockWidth = nil
+                                if !isHoveringDockDivider {
+                                    NSCursor.pop()
+                                }
+                            }
+                    )
                     embeddedDeviceDock
                         .frame(width: targetDockW)
                         .frame(maxHeight: .infinity)
@@ -739,7 +796,7 @@ struct AIAgentView: View {
                 .help("New Chat")
             }
             .padding(.horizontal, 12)
-            .padding(.vertical, 10)
+            .frame(height: 30)
             
             Divider()
             
@@ -1347,9 +1404,9 @@ struct AIAgentView: View {
                     }
                 }
                 .padding(.horizontal, 8)
-                .padding(.vertical, 4)
+                .frame(height: 30)
             }
-            .frame(height: 32)
+            .frame(height: 30)
             .background(Color(nsColor: appState.appTheme.panelBackground))
         }
     }
@@ -1582,7 +1639,7 @@ struct AIAgentView: View {
             .help("Close Plan Side Panel")
         }
         .padding(.horizontal, 10)
-        .padding(.vertical, 8)
+        .frame(height: 30)
         .background(panelBg)
     }
     
@@ -4885,6 +4942,7 @@ struct AIAgentView: View {
     }
     
     private func presentNativeModelMenu() {
+        Task { await AIModelCatalog.shared.refreshIfNeeded(force: false) }
         let rootMenu = NSMenu(title: "Select AI Model")
         rootMenu.autoenablesItems = false
         
@@ -4892,9 +4950,16 @@ struct AIAgentView: View {
         let subMenu = NSMenu(title: "Subscription")
         subMenu.autoenablesItems = false
         let connected = SubscriptionAuthManager.shared.connectedProviders()
-        let providersToShow = connected.isEmpty ? SubscriptionProviderType.allCases : connected
-        for prov in providersToShow {
-            let isConnected = SubscriptionAuthManager.shared.isConnected(prov)
+        let connectedSet = Set(connected)
+        let unconnected = SubscriptionProviderType.allCases.filter { !connectedSet.contains($0) }
+        let orderedProviders = connected + unconnected
+        var addedSeparatorForUnconnected = false
+        for prov in orderedProviders {
+            let isConnected = connectedSet.contains(prov)
+            if !isConnected && !connected.isEmpty && !addedSeparatorForUnconnected {
+                subMenu.addItem(.separator())
+                addedSeparatorForUnconnected = true
+            }
             let provMenu = NSMenu(title: prov.displayName)
             provMenu.autoenablesItems = false
             if prov == .aipass {
@@ -4915,7 +4980,7 @@ struct AIAgentView: View {
                 groups.music.forEach { musSub.addItem(makeSubscriptionModelMenuItem($0)) }
                 provMenu.addItem(makeSubmenuItem("Audio & Music Generation (\(groups.music.count))", brandKey: "aipass", submenu: musSub))
             } else {
-                for subModel in prov.modelInfos.prefix(32) {
+                for subModel in prov.modelInfos.prefix(100) {
                     provMenu.addItem(makeSubscriptionModelMenuItem(subModel))
                 }
             }
@@ -4955,7 +5020,7 @@ struct AIAgentView: View {
             let hasKey = hasActiveKey(prov.id)
             let provMenu = NSMenu(title: prov.name)
             provMenu.autoenablesItems = false
-            let displayedModels = Array(prov.models.prefix(24))
+            let displayedModels = Array(prov.models.prefix(100))
             for m in displayedModels {
                 let label = m.badge.isEmpty ? m.name : "\(m.name) (\(m.badge))"
                 let isChecked = (currentExecutionMode == .byok && appState.aiProvider == prov.id && appState.aiModel == m.id)
@@ -5082,34 +5147,21 @@ struct AIAgentView: View {
             submenu: acpMenu
         ))
         
-        // 5. Dotmini Cloud (Sovereign AI)
-        let cloudMenu = NSMenu(title: "Dotmini Cloud")
+        // 5. Dotmini Sovereign AI (Strictly Dotmini's own Omni O1X models — never claim third-party models)
+        let cloudMenu = NSMenu(title: "Dotmini Sovereign AI")
         cloudMenu.autoenablesItems = false
         if let omni = AIModelCatalog.shared.provider("omni") {
-            let groups = Self.groupedOmniModels(from: omni.models)
-            let sections: [(String, String, [AIModelDefinition])] = [
-                ("Flagship & Deep Reasoning", "microcode", groups.reasoning),
-                ("Google Gemini", "gemini", groups.gemini),
-                ("Anthropic Claude", "claude", groups.claude),
-                ("OpenAI", "openai", groups.openAI),
-                ("DeepSeek", "deepseek", groups.deepseek),
-                ("Thai AI & Open Source", "typhoon", groups.openSource)
-            ]
-            for (title, secBrand, list) in sections where !list.isEmpty {
-                let secMenu = NSMenu(title: title)
-                secMenu.autoenablesItems = false
-                for m in list {
-                    let isChecked = (currentExecutionMode == .cloud && appState.aiModel == m.id)
-                    secMenu.addItem(makeActionMenuItem(m.name, brandKey: secBrand, checked: isChecked) {
-                        switchToNativeMode(mode: "cloud")
-                        setModel("omni", m.id)
-                    })
-                }
-                cloudMenu.addItem(makeSubmenuItem(title, brandKey: secBrand, submenu: secMenu))
+            let omniModels = omni.models.filter { $0.id.lowercased().hasPrefix("omni") }
+            for m in omniModels {
+                let isChecked = (currentExecutionMode == .cloud && appState.aiModel == m.id)
+                cloudMenu.addItem(makeActionMenuItem(m.name, brandKey: "microcode", checked: isChecked) {
+                    switchToNativeMode(mode: "cloud")
+                    setModel("omni", m.id)
+                })
             }
         }
         rootMenu.addItem(makeSubmenuItem(
-            "Dotmini Cloud (Sovereign AI)",
+            "Dotmini Sovereign AI (Omni O1X)",
             brandKey: "microcode",
             checked: currentExecutionMode == .cloud,
             submenu: cloudMenu
@@ -5256,75 +5308,91 @@ struct AIAgentView: View {
         return model
     }
     
-    // MARK: - Token Stats Badge
+    // MARK: - TokenMem v3 Telemetry & Mode Menu
     
     private var tokenStatsBadge: some View {
         Menu {
-            Text("📊 Token Optimizer Stats").font(.caption)
-            Divider()
-            
             let stats = tokenOptimizer.stats
-            Text("Active: \(stats.activeProvider)/\(stats.activeModel)")
-            Text("Input: \(formatTokenCount(stats.inputTokens))")
-            Text("Output: \(formatTokenCount(stats.outputTokens))")
-            Text("Saved: \(formatTokenCount(stats.savedTokens))")
+            Text("TOKENMEM V3 ENGINE — \(stats.formattedSavings.uppercased())")
+            if !stats.activeModel.isEmpty {
+                Text("Active Model: \(stats.activeProvider)/\(stats.activeModel)")
+            }
+            Divider()
+            
+            Section("Optimization Mode") {
+                ForEach(TokenMemMode.allCases) { modeItem in
+                    Button {
+                        tokenOptimizer.mode = modeItem
+                    } label: {
+                        HStack {
+                            Text("\(modeItem.rawValue) — \(modeItem.subtitle)")
+                            if tokenOptimizer.mode == modeItem {
+                                Image(systemName: "checkmark")
+                            }
+                        }
+                    }
+                }
+            }
             
             Divider()
             
-            Text("Requests: \(stats.totalRequests)")
-            Text("Estimated cost: $\(String(format: "%.4f", stats.totalCost))")
-            Text("Compression: \(String(format: "%.0f%%", stats.compressionRatio * 100))")
-            Text("Context cache: \(stats.cacheHits) hit / \(stats.cacheMisses) miss")
-            Text("Cached: \(formatTokenCount(stats.cachedTokens)) tokens")
+            Section("Session Token Telemetry") {
+                Text("Net Input: \(formatTokenCount(stats.inputTokens)) tokens")
+                Text("Output: \(formatTokenCount(stats.outputTokens)) tokens")
+                Text("Saved (Pruned/Folded): \(formatTokenCount(stats.savedTokens)) tokens")
+                Text("KV-Prefix Cached: \(formatTokenCount(stats.cachedTokens)) tokens (\(stats.cacheHits) hits / \(stats.cacheMisses) misses)")
+                Text("Requests: \(stats.totalRequests) · Est. Cost: $\(String(format: "%.4f", stats.totalCost))")
+            }
             
             Divider()
             
-            // Memory stats
-            let memStats = AgentMemoryService.shared
-            Text("🧠 Memory: \(memStats.memories.count) entries")
-            Text("Topics: \(memStats.topicClusters.count)")
-            Text("Summaries: \(memStats.summaries.count)")
+            Section("6-Layer TokenMem Breakdown") {
+                Text("L1 Tool Schema Dedup: \(formatTokenCount(stats.savedBySchemaDedup)) saved")
+                Text("L2 KV-Prefix Cache Hits: \(formatTokenCount(stats.cachedTokens)) cached")
+                Text("L3 Epoch History Compaction: \(formatTokenCount(stats.savedByEpochCompaction)) saved")
+                Text("L4 File-Read Dedup: \(formatTokenCount(stats.savedByFileReadDedup)) saved")
+                Text("L5 AST & Tool Folding: \(formatTokenCount(stats.savedByToolFolding)) saved")
+                let memStats = AgentMemoryService.shared
+                Text("L6 Semantic Memory: \(memStats.memories.count) entries · \(memStats.topicClusters.count) topics · \(memStats.summaries.count) summaries")
+            }
             
             Divider()
             
-            Button("Reset Stats") {
+            Button("Reset TokenMem Telemetry") {
                 TokenOptimizer.shared.resetStats()
             }
-            Button("Clear Memory") {
+            Button("Clear Semantic Memory") {
                 AgentMemoryService.shared.clearAllMemories()
             }
         } label: {
-            HStack(spacing: 3) {
-                Image(systemName: "bolt.circle.fill")
-                    .font(.system(size: 10))
-                    .foregroundColor(tokenSavingsColor)
+            HStack(spacing: 4) {
+                Image(systemName: "memorychip")
+                    .font(.system(size: 9.5, weight: .medium))
+                    .foregroundColor(.primary.opacity(0.8))
                 
                 let stats = tokenOptimizer.stats
-                if stats.savedTokens > 0 {
-                    Text(stats.formattedSavings)
-                        .font(.system(size: 9, weight: .medium, design: .monospaced))
-                        .foregroundColor(tokenSavingsColor)
+                if stats.savedTokens > 0 || stats.cachedTokens > 0 {
+                    Text("TokenMem \(stats.formattedSavings)")
+                        .font(.system(size: 9.5, weight: .medium, design: .monospaced))
+                        .foregroundColor(.primary.opacity(0.85))
                 } else {
-                    Text("Optimizer")
-                        .font(.system(size: 9, weight: .medium))
+                    Text("TokenMem · \(tokenOptimizer.mode.rawValue)")
+                        .font(.system(size: 9.5, weight: .medium, design: .monospaced))
                         .foregroundColor(.secondary)
                 }
             }
-            .padding(.horizontal, 6)
+            .padding(.horizontal, 7)
             .padding(.vertical, 3)
-            .background(tokenSavingsColor.opacity(0.08))
+            .background(Color.primary.opacity(0.05))
+            .overlay(
+                RoundedRectangle(cornerRadius: 4)
+                    .stroke(Color.primary.opacity(0.09), lineWidth: 1)
+            )
             .cornerRadius(4)
         }
         .menuStyle(.borderlessButton)
         .fixedSize()
-        .help("Token Optimizer — \(TokenOptimizer.shared.stats.formattedSavings) saved")
-    }
-    
-    private var tokenSavingsColor: Color {
-        let ratio = TokenOptimizer.shared.stats.compressionRatio
-        if ratio > 0.3 { return .green }
-        if ratio > 0.1 { return .cyan }
-        return .secondary
+        .help("TokenMem v3 Engine — \(TokenOptimizer.shared.stats.formattedSavings)")
     }
     
     private func formatTokenCount(_ count: Int) -> String {
@@ -5884,7 +5952,7 @@ struct MessageContentParser {
     // Large tool payloads are already retained by the transcript store. Keeping a
     // second copy as a String dictionary key causes avoidable memory growth and
     // makes scrolling a long conversation progressively more expensive.
-    private static let maximumCachedContentCharacters = 24_000
+    private static let maximumCachedContentCharacters = 120_000
     
     // Pre-compiled static regexes to eliminate repeated allocations and compilation on every streamed token
     private static let thoughtRegex: NSRegularExpression? = try? NSRegularExpression(
@@ -5896,7 +5964,7 @@ struct MessageContentParser {
         options: []
     )
     private static let codeRegex: NSRegularExpression? = try? NSRegularExpression(
-        pattern: "```([a-zA-Z0-9\\+\\-\\_\\#]*)[ \\t]*\\r?\\n([\\s\\S]*?)```",
+        pattern: "```([^\\r\\n`]*?)\\r?\\n([\\s\\S]*?)```",
         options: []
     )
     private static let orderedListRegex: NSRegularExpression? = try? NSRegularExpression(
@@ -6149,7 +6217,35 @@ struct MessageContentParser {
         return parseTextContent(text)
     }
     
-    private static func parseCodeBlocks(_ content: String) -> [MessageBlock] {
+    private static func normalizeBlockquoteCodeFences(_ raw: String) -> String {
+        guard raw.contains("```") && raw.contains(">") else { return raw }
+        let lines = raw.components(separatedBy: "\n")
+        var out: [String] = []
+        out.reserveCapacity(lines.count)
+        var insideQuotedFence = false
+        for line in lines {
+            let trimmed = line.trimmingCharacters(in: .whitespaces)
+            if trimmed.hasPrefix(">") {
+                let afterArrow = String(trimmed.dropFirst()).trimmingCharacters(in: .whitespaces)
+                if afterArrow.hasPrefix("```") {
+                    insideQuotedFence.toggle()
+                    out.append(afterArrow)
+                    continue
+                } else if insideQuotedFence {
+                    let stripped = line.replacingOccurrences(of: "^\\s*>\\s?", with: "", options: .regularExpression)
+                    out.append(stripped)
+                    continue
+                }
+            } else if trimmed.hasPrefix("```") && insideQuotedFence {
+                insideQuotedFence = false
+            }
+            out.append(line)
+        }
+        return out.joined(separator: "\n")
+    }
+
+    private static func parseCodeBlocks(_ rawContent: String) -> [MessageBlock] {
+        let content = normalizeBlockquoteCodeFences(rawContent)
         var blocks: [MessageBlock] = []
         
         // Extract code blocks, converting latex/math to LaTeX blocks
@@ -6186,10 +6282,22 @@ struct MessageContentParser {
                 lastEnd = match.range.location + match.range.length
             }
             
-            // Remaining text after last code block
+            // Remaining text after last code block (including unclosed streaming code fence)
             if lastEnd < nsContent.length {
                 let afterText = nsContent.substring(from: lastEnd)
-                blocks.append(contentsOf: parseMathAndTextContent(afterText))
+                if let fenceRange = afterText.range(of: "```") {
+                    let prefixText = String(afterText[..<fenceRange.lowerBound])
+                    if !prefixText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                        blocks.append(contentsOf: parseMathAndTextContent(prefixText))
+                    }
+                    let fenceBody = String(afterText[fenceRange.upperBound...])
+                    let firstNewline = fenceBody.firstIndex(of: "\n")
+                    let lang = firstNewline != nil ? String(fenceBody[..<firstNewline!]).trimmingCharacters(in: .whitespacesAndNewlines) : ""
+                    let code = firstNewline != nil ? String(fenceBody[fenceBody.index(after: firstNewline!)...]) : fenceBody
+                    blocks.append(.code(lang, code.trimmingCharacters(in: .newlines)))
+                } else {
+                    blocks.append(contentsOf: parseMathAndTextContent(afterText))
+                }
             }
         } else {
             // Fallback: simple split
@@ -6415,7 +6523,66 @@ struct MessageContentParser {
 private final class ChatScrollInteractionTracker {
     var lastUserScrollUpTime: Date = .distantPast
     var lastAutoScrollTime: Date = .distantPast
+    var distanceFromBottom: CGFloat = 0
+    var lastMessageCount: Int = 0
+    var lastKnownLastMessageId: String? = nil
+    weak var scrollView: NSScrollView? = nil
+    var boundsObserver: NSObjectProtocol? = nil
     var monitor: Any? = nil
+
+    deinit {
+        if let obs = boundsObserver {
+            NotificationCenter.default.removeObserver(obs)
+        }
+        if let mon = monitor {
+            NSEvent.removeMonitor(mon)
+        }
+    }
+}
+
+private struct ChatScrollViewIntrospector: NSViewRepresentable {
+    let tracker: ChatScrollInteractionTracker
+    let onBottomStateChanged: (Bool) -> Void
+
+    func makeNSView(context: Context) -> NSView {
+        let view = NSView(frame: .zero)
+        DispatchQueue.main.async {
+            attachIfNeeded(from: view)
+        }
+        return view
+    }
+
+    func updateNSView(_ nsView: NSView, context: Context) {
+        if tracker.scrollView == nil {
+            DispatchQueue.main.async {
+                attachIfNeeded(from: nsView)
+            }
+        }
+    }
+
+    private func attachIfNeeded(from view: NSView) {
+        guard let sv = view.enclosingScrollView else { return }
+        guard tracker.scrollView !== sv else { return }
+        tracker.scrollView = sv
+        sv.contentView.postsBoundsChangedNotifications = true
+        if let oldObs = tracker.boundsObserver {
+            NotificationCenter.default.removeObserver(oldObs)
+        }
+        tracker.boundsObserver = NotificationCenter.default.addObserver(
+            forName: NSView.boundsDidChangeNotification,
+            object: sv.contentView,
+            queue: .main
+        ) { [weak sv, weak tracker] _ in
+            guard let sv = sv, let tracker = tracker, let docView = sv.documentView else { return }
+            let docHeight = docView.bounds.height
+            let visibleMaxY = sv.contentView.bounds.maxY
+            let dist = max(0, docHeight - visibleMaxY)
+            tracker.distanceFromBottom = dist
+            if dist <= 36 && Date().timeIntervalSince(tracker.lastUserScrollUpTime) > 0.16 {
+                onBottomStateChanged(true)
+            }
+        }
+    }
 }
 
 struct AgentChatStage: View, Equatable {
@@ -6456,253 +6623,275 @@ struct AgentChatStage: View, Equatable {
     }
     
     var body: some View {
-        ScrollViewReader { proxy in
-            ZStack(alignment: .bottom) {
-                ScrollView {
-                    VStack(spacing: 0) {
-                        if messages.isEmpty && !isLoading && queuedMessages.isEmpty {
-                            VStack(spacing: 20) {
-                                Spacer().frame(height: 40)
-                                
-                                VStack(spacing: 6) {
-                                    Text(domain == .science ? "Science Agent" : "AI Agent")
-                                        .font(.system(size: 16, weight: .semibold))
-                                        .foregroundColor(.primary.opacity(0.8))
-                                    
-                                    Text(domain == .science ? "Analyze evidence, structures, data, and scientific literature" : "Ask anything, write code, debug, or explore ideas")
-                                        .font(.system(size: 12))
-                                        .foregroundColor(.secondary)
-                                        .multilineTextAlignment(.center)
-                                }
-                                
-                                // Quick suggestions
-                                VStack(spacing: 8) {
-                                    ForEach(domain == .science ? [
-                                        "Analyze the scientific evidence in this project",
-                                        "Compare wild-type and mutant structures",
-                                        "Validate the AlphaFold workflow and confidence",
-                                        "Draft a LaTeX research report from project evidence"
-                                    ] : [
-                                        "Explain this code",
-                                        "Find bugs in my project",
-                                        "Refactor for performance",
-                                        "Write unit tests"
-                                    ], id: \.self) { suggestion in
-                                        Button(action: {
-                                            onSuggestionTap?(suggestion)
-                                        }) {
-                                            HStack {
-                                                Text(suggestion)
-                                                    .font(.system(size: 11))
-                                                    .foregroundColor(.primary.opacity(0.7))
-                                                Spacer()
-                                            }
-                                            .padding(.horizontal, 14)
-                                            .padding(.vertical, 10)
-                                            .background(Color.primary.opacity(0.035))
-                                            .cornerRadius(5)
-                                            .overlay(
-                                                RoundedRectangle(cornerRadius: 5)
-                                                    .stroke(Color.secondary.opacity(0.14), lineWidth: 1)
-                                            )
+        GeometryReader { stageGeo in
+            ScrollViewReader { proxy in
+                VStack(spacing: 0) {
+                    ZStack(alignment: .bottom) {
+                        ScrollView {
+                            LazyVStack(spacing: 0) {
+                                if messages.isEmpty && !isLoading && queuedMessages.isEmpty {
+                                    VStack(spacing: 20) {
+                                        Spacer().frame(height: 40)
+                                        
+                                        VStack(spacing: 6) {
+                                            Text(domain == .science ? "Science Agent" : "AI Agent")
+                                                .font(.system(size: 16, weight: .semibold))
+                                                .foregroundColor(.primary.opacity(0.8))
+                                            
+                                            Text(domain == .science ? "Analyze evidence, structures, data, and scientific literature" : "Ask anything, write code, debug, or explore ideas")
+                                                .font(.system(size: 12))
+                                                .foregroundColor(.secondary)
+                                                .multilineTextAlignment(.center)
                                         }
-                                        .buttonStyle(.plain)
-                                    }
-                                }
-                                .frame(maxWidth: 720)
-                                .frame(maxWidth: .infinity)
-                                .padding(.horizontal, 24)
-                                .padding(.top, 8)
-                                
-                                Spacer()
-                            }
-                        } else {
-                            if hasEarlierMessages {
-                                Button("Load earlier messages") {
-                                    AgentService.shared.loadEarlierMessages()
-                                }
-                                .buttonStyle(.borderless)
-                                .font(.system(size: 11, weight: .medium))
-                                .foregroundColor(.secondary)
-                                .padding(.vertical, 12)
-                            }
-                            let lastMessageId = messages.last?.id
-                            ForEach(messages) { message in
-                                RichMessageRow(
-                                    message: message,
-                                    isStreaming: isLoading && message.id == lastMessageId,
-                                    onApplyChange: onApplyChange,
-                                    onRejectChange: onRejectChange,
-                                    onRevert: { onRevertToMessage?(message.id) },
-                                    onEditAndResend: { editedText in onEditAndResendMessage?(message.id, editedText) },
-                                    onRetry: { onRetryAssistantMessage?(message.id) },
-                                    onDelete: { revertFiles in onDeleteMessage?(message.id, revertFiles) }
-                                )
-                                .equatable()
-                                .id(message.id)
-                            }
-                            
-                            if messages.isEmpty && isLoading {
-                                HStack(spacing: 0) {
-                                    Spacer(minLength: 0)
-                                    HStack(spacing: 10) {
-                                        ProgressView()
-                                            .controlSize(.small)
-                                        Text(currentToolExecution ?? "Agent is executing task...")
-                                            .font(.system(size: 12, weight: .medium, design: .monospaced))
-                                            .foregroundColor(.secondary)
+                                        
+                                        // Quick suggestions
+                                        VStack(spacing: 8) {
+                                            ForEach(domain == .science ? [
+                                                "Analyze the scientific evidence in this project",
+                                                "Compare wild-type and mutant structures",
+                                                "Validate the AlphaFold workflow and confidence",
+                                                "Draft a LaTeX research report from project evidence"
+                                            ] : [
+                                                "Explain this code",
+                                                "Find bugs in my project",
+                                                "Refactor for performance",
+                                                "Write unit tests"
+                                            ], id: \.self) { suggestion in
+                                                Button(action: {
+                                                    onSuggestionTap?(suggestion)
+                                                }) {
+                                                    HStack {
+                                                        Text(suggestion)
+                                                            .font(.system(size: 11))
+                                                            .foregroundColor(.primary.opacity(0.7))
+                                                        Spacer()
+                                                    }
+                                                    .padding(.horizontal, 14)
+                                                    .padding(.vertical, 10)
+                                                    .background(Color.primary.opacity(0.035))
+                                                    .cornerRadius(5)
+                                                    .overlay(
+                                                        RoundedRectangle(cornerRadius: 5)
+                                                            .stroke(Color.secondary.opacity(0.14), lineWidth: 1)
+                                                    )
+                                                }
+                                                .buttonStyle(.plain)
+                                            }
+                                        }
+                                        .frame(maxWidth: 720)
+                                        .frame(maxWidth: .infinity)
+                                        .padding(.horizontal, 24)
+                                        .padding(.top, 8)
+                                        
                                         Spacer()
                                     }
-                                    .padding(14)
-                                    .background(Color.primary.opacity(0.04))
-                                    .cornerRadius(8)
-                                    .frame(maxWidth: 880)
-                                    Spacer(minLength: 0)
-                                }
-                                .padding(.horizontal, 12)
-                                .padding(.vertical, 12)
-                            }
-                            
-                            // Render any queued user messages directly in the chat stream so they never appear to vanish
-                            ForEach(queuedMessages) { queued in
-                                HStack(spacing: 0) {
-                                    Spacer(minLength: 0)
-                                    VStack(alignment: .trailing, spacing: 4) {
-                                        HStack(spacing: 0) {
-                                            Spacer(minLength: 48)
-                                            Text(queued.text.count > 500 ? String(queued.text.prefix(500)) + "…" : queued.text)
-                                                .font(Font.custom(appState.agentFontName, size: appState.agentFontSize))
-                                                .foregroundColor(.primary.opacity(0.9))
-                                                .multilineTextAlignment(.leading)
-                                                .lineLimit(6)
-                                                .padding(12)
-                                                .background(Color.orange.opacity(0.14))
-                                                .overlay(
-                                                    RoundedRectangle(cornerRadius: 8)
-                                                        .stroke(Color.orange.opacity(0.35), lineWidth: 1)
-                                                )
-                                                .cornerRadius(8)
-                                                .frame(maxWidth: 600, alignment: .trailing)
+                                } else {
+                                    if hasEarlierMessages {
+                                        Button("Load earlier messages") {
+                                            AgentService.shared.loadEarlierMessages()
                                         }
-                                        HStack(spacing: 8) {
-                                            HStack(spacing: 4) {
-                                                Image(systemName: "clock.fill")
-                                                    .font(.system(size: 9))
-                                                Text("อยู่ในคิว (จะส่งต่ออัตโนมัติ)")
-                                                    .font(.system(size: 10, weight: .medium))
-                                            }
-                                            .foregroundColor(.orange)
-                                            
-                                            Button(action: {
-                                                AgentService.shared.stopGeneration(autoProcessQueue: true)
-                                            }) {
-                                                Text("ส่งทันที (Send Now)")
-                                                    .font(.system(size: 10, weight: .semibold))
-                                                    .foregroundColor(.accentColor)
-                                                    .padding(.horizontal, 6)
-                                                    .padding(.vertical, 2)
-                                                    .background(Color.accentColor.opacity(0.12))
-                                                    .cornerRadius(4)
-                                            }
-                                            .buttonStyle(.plain)
-                                            
-                                            Button(action: {
-                                                AgentService.shared.cancelQueuedMessage(id: queued.id)
-                                            }) {
-                                                Text("ยกเลิก")
-                                                    .font(.system(size: 10))
-                                                    .foregroundColor(.secondary)
-                                            }
-                                            .buttonStyle(.plain)
-                                        }
+                                        .buttonStyle(.borderless)
+                                        .font(.system(size: 11, weight: .medium))
+                                        .foregroundColor(.secondary)
+                                        .padding(.vertical, 12)
                                     }
-                                    .frame(maxWidth: 880, alignment: .trailing)
-                                    Spacer(minLength: 0)
+                                    let lastMessageId = messages.last?.id
+                                    ForEach(messages) { message in
+                                        RichMessageRow(
+                                            message: message,
+                                            isStreaming: isLoading && message.id == lastMessageId,
+                                            onApplyChange: onApplyChange,
+                                            onRejectChange: onRejectChange,
+                                            onRevert: { onRevertToMessage?(message.id) },
+                                            onEditAndResend: { editedText in onEditAndResendMessage?(message.id, editedText) },
+                                            onRetry: { onRetryAssistantMessage?(message.id) },
+                                            onDelete: { revertFiles in onDeleteMessage?(message.id, revertFiles) }
+                                        )
+                                        .equatable()
+                                        .id(message.id)
+                                    }
+                                    
+                                    if messages.isEmpty && isLoading {
+                                        HStack(spacing: 0) {
+                                            Spacer(minLength: 0)
+                                            HStack(spacing: 10) {
+                                                ProgressView()
+                                                    .controlSize(.small)
+                                                Text(currentToolExecution ?? "Agent is executing task...")
+                                                    .font(.system(size: 12, weight: .medium, design: .monospaced))
+                                                    .foregroundColor(.secondary)
+                                                Spacer()
+                                            }
+                                            .padding(14)
+                                            .background(Color.primary.opacity(0.04))
+                                            .cornerRadius(8)
+                                            .frame(maxWidth: 880)
+                                            Spacer(minLength: 0)
+                                        }
+                                        .padding(.horizontal, 12)
+                                        .padding(.vertical, 12)
+                                    }
+                                    
+                                    // Render any queued user messages directly in the chat stream so they never appear to vanish
+                                    ForEach(queuedMessages) { queued in
+                                        HStack(spacing: 0) {
+                                            Spacer(minLength: 0)
+                                            VStack(alignment: .trailing, spacing: 4) {
+                                                HStack(spacing: 0) {
+                                                    Spacer(minLength: 24)
+                                                    Text(queued.text.count > 500 ? String(queued.text.prefix(500)) + "…" : queued.text)
+                                                        .font(Font.custom(appState.agentFontName, size: appState.agentFontSize))
+                                                        .foregroundColor(.primary.opacity(0.9))
+                                                        .multilineTextAlignment(.leading)
+                                                        .lineLimit(6)
+                                                        .padding(12)
+                                                        .background(Color.orange.opacity(0.14))
+                                                        .overlay(
+                                                            RoundedRectangle(cornerRadius: 8)
+                                                                .stroke(Color.orange.opacity(0.35), lineWidth: 1)
+                                                        )
+                                                        .cornerRadius(8)
+                                                        .frame(maxWidth: 600, alignment: .trailing)
+                                                }
+                                                HStack(spacing: 8) {
+                                                    HStack(spacing: 4) {
+                                                        Image(systemName: "clock.fill")
+                                                            .font(.system(size: 9))
+                                                        Text("อยู่ในคิว (จะส่งต่ออัตโนมัติ)")
+                                                            .font(.system(size: 10, weight: .medium))
+                                                    }
+                                                    .foregroundColor(.orange)
+                                                    
+                                                    Button(action: {
+                                                        AgentService.shared.stopGeneration(autoProcessQueue: true)
+                                                    }) {
+                                                        Text("ส่งทันที (Send Now)")
+                                                            .font(.system(size: 10, weight: .semibold))
+                                                            .foregroundColor(.accentColor)
+                                                            .padding(.horizontal, 6)
+                                                            .padding(.vertical, 2)
+                                                            .background(Color.accentColor.opacity(0.12))
+                                                            .cornerRadius(4)
+                                                    }
+                                                    .buttonStyle(.plain)
+                                                    
+                                                    Button(action: {
+                                                        AgentService.shared.cancelQueuedMessage(id: queued.id)
+                                                    }) {
+                                                        Text("ยกเลิก")
+                                                            .font(.system(size: 10))
+                                                            .foregroundColor(.secondary)
+                                                    }
+                                                    .buttonStyle(.plain)
+                                                }
+                                            }
+                                            .frame(maxWidth: 880, alignment: .trailing)
+                                            Spacer(minLength: 0)
+                                        }
+                                        .padding(.horizontal, 12)
+                                        .padding(.vertical, 6)
+                                        .id("queued_\(queued.id.uuidString)")
+                                    }
+                                    
+                                    Color.clear
+                                        .frame(height: 20)
+                                        .id("BOTTOM_CHAT_ANCHOR")
+                                        .background(
+                                            ChatScrollViewIntrospector(tracker: scrollTracker) { reachedBottom in
+                                                if reachedBottom && userScrolledUp {
+                                                    userScrolledUp = false
+                                                }
+                                            }
+                                        )
                                 }
-                                .padding(.horizontal, 12)
-                                .padding(.vertical, 6)
-                                .id("queued_\(queued.id.uuidString)")
                             }
-                            
-                            // Inline plan approval card (Persists throughout plan lifecycle)
-                            if let _ = planManager.currentPlan, !messages.isEmpty {
-                                HStack(spacing: 0) {
-                                    Spacer(minLength: 0)
-                                    PlanApprovalInlineCard(
-                                        planManager: planManager,
-                                        onViewPlan: onViewPlan
-                                    )
-                                    .environmentObject(appState)
-                                    .frame(maxWidth: 880)
-                                    Spacer(minLength: 0)
+                            .frame(width: max(0, stageGeo.size.width))
+                        }
+                        
+                        // Floating "Scroll to latest" button when user scrolls up
+                        if userScrolledUp && !messages.isEmpty {
+                            Button(action: {
+                                userScrolledUp = false
+                                scrollTracker.lastUserScrollUpTime = .distantPast
+                                withAnimation(.easeOut(duration: 0.15)) {
+                                    proxy.scrollTo("BOTTOM_CHAT_ANCHOR", anchor: .bottom)
                                 }
-                                .padding(.horizontal, 28)
-                                .padding(.vertical, 8)
+                            }) {
+                                HStack(spacing: 5) {
+                                    Image(systemName: "arrow.down")
+                                        .font(.system(size: 9.5, weight: .bold))
+                                    Text("Latest messages")
+                                        .font(.system(size: 11, weight: .medium))
+                                }
+                                .foregroundColor(.primary)
+                                .padding(.horizontal, 10)
+                                .padding(.vertical, 5)
+                                .background(Color(nsColor: appState.appTheme.elevatedBackground))
+                                .cornerRadius(14)
+                                .shadow(color: Color.black.opacity(0.18), radius: 4, x: 0, y: 2)
+                                .overlay(
+                                    RoundedRectangle(cornerRadius: 14)
+                                        .stroke(Color.primary.opacity(0.15), lineWidth: 1)
+                                )
                             }
-                            
-                            Color.clear
-                                .frame(height: 1)
-                                .id("BOTTOM_CHAT_ANCHOR")
+                            .buttonStyle(.plain)
+                            .padding(.bottom, 10)
+                            .transition(.opacity.combined(with: .scale(scale: 0.9)))
                         }
                     }
-                    .padding(.bottom, 16)
-                }
-                
-                // Floating "Scroll to latest" button when user scrolls up
-                if userScrolledUp && !messages.isEmpty {
-                    Button(action: {
-                        userScrolledUp = false
-                        scrollTracker.lastUserScrollUpTime = .distantPast
-                        withAnimation(.easeOut(duration: 0.15)) {
-                            proxy.scrollTo("BOTTOM_CHAT_ANCHOR", anchor: .bottom)
+                    
+                    // Inline plan approval card docked cleanly below ScrollView so "Latest messages" never overlaps it
+                    if let _ = planManager.currentPlan, !messages.isEmpty {
+                        HStack(spacing: 0) {
+                            Spacer(minLength: 0)
+                            PlanApprovalInlineCard(
+                                planManager: planManager,
+                                onViewPlan: onViewPlan
+                            )
+                            .environmentObject(appState)
+                            .frame(maxWidth: 880)
+                            Spacer(minLength: 0)
                         }
-                    }) {
-                        HStack(spacing: 5) {
-                            Image(systemName: "arrow.down")
-                                .font(.system(size: 9.5, weight: .bold))
-                            Text("Latest messages")
-                                .font(.system(size: 11, weight: .medium))
-                        }
-                        .foregroundColor(.primary)
-                        .padding(.horizontal, 10)
-                        .padding(.vertical, 5)
-                        .background(Color(nsColor: appState.appTheme.elevatedBackground))
-                        .cornerRadius(14)
-                        .shadow(color: Color.black.opacity(0.18), radius: 4, x: 0, y: 2)
-                        .overlay(
-                            RoundedRectangle(cornerRadius: 14)
-                                .stroke(Color.primary.opacity(0.15), lineWidth: 1)
-                        )
+                        .padding(.horizontal, 12)
+                        .padding(.vertical, 6)
                     }
-                    .buttonStyle(.plain)
-                    .padding(.bottom, 12)
-                    .transition(.opacity.combined(with: .scale(scale: 0.9)))
                 }
-            }
-            .onChange(of: activeChatId) { _ in
+                .onChange(of: activeChatId) { _ in
                 userScrolledUp = false
                 scrollTracker.lastUserScrollUpTime = .distantPast
+                scrollTracker.lastMessageCount = messages.count
+                scrollTracker.lastKnownLastMessageId = messages.last?.id
                 DispatchQueue.main.async {
                     proxy.scrollTo("BOTTOM_CHAT_ANCHOR", anchor: .bottom)
                 }
             }
-            .onChange(of: messages.count) { _ in
-                let isNewUserTurn = messages.last?.role == .user
-                    || (messages.count >= 2 && messages[messages.count - 2].role == .user && messages.last?.id == "streaming" && (messages.last?.content.isEmpty ?? true))
+            .onChange(of: messages.count) { newCount in
+                let didAppend = newCount > scrollTracker.lastMessageCount
+                scrollTracker.lastMessageCount = newCount
+                scrollTracker.lastKnownLastMessageId = messages.last?.id
+                let isNewUserTurn = didAppend && (
+                    messages.last?.role == .user
+                    || (messages.count >= 2 && messages[messages.count - 2].role == .user && messages.last?.id == "streaming")
+                )
                 if isNewUserTurn || !userScrolledUp {
-                    userScrolledUp = false
-                    scrollTracker.lastUserScrollUpTime = .distantPast
+                    if isNewUserTurn {
+                        userScrolledUp = false
+                        scrollTracker.lastUserScrollUpTime = .distantPast
+                    }
                     DispatchQueue.main.async {
                         proxy.scrollTo("BOTTOM_CHAT_ANCHOR", anchor: .bottom)
                     }
                 }
             }
-            .onChange(of: messages.last?.id) { _ in
-                let isNewUserTurn = messages.last?.role == .user
-                    || (messages.count >= 2 && messages[messages.count - 2].role == .user && messages.last?.id == "streaming" && (messages.last?.content.isEmpty ?? true))
+            .onChange(of: messages.last?.id) { newLastId in
+                let changedId = newLastId != scrollTracker.lastKnownLastMessageId
+                scrollTracker.lastKnownLastMessageId = newLastId
+                let isNewUserTurn = changedId && messages.last?.role == .user
                 if isNewUserTurn || !userScrolledUp {
-                    userScrolledUp = false
-                    scrollTracker.lastUserScrollUpTime = .distantPast
+                    if isNewUserTurn {
+                        userScrolledUp = false
+                        scrollTracker.lastUserScrollUpTime = .distantPast
+                    }
                     DispatchQueue.main.async {
                         proxy.scrollTo("BOTTOM_CHAT_ANCHOR", anchor: .bottom)
                     }
@@ -6730,24 +6919,36 @@ struct AgentChatStage: View, Equatable {
             .onChange(of: messages.last?.content) { _ in
                 if !userScrolledUp {
                     let now = Date()
-                    if now.timeIntervalSince(scrollTracker.lastAutoScrollTime) >= 0.07 {
+                    if now.timeIntervalSince(scrollTracker.lastAutoScrollTime) >= 0.08 {
                         scrollTracker.lastAutoScrollTime = now
                         proxy.scrollTo("BOTTOM_CHAT_ANCHOR", anchor: .bottom)
                     }
                 }
             }
             .onAppear {
+                scrollTracker.lastMessageCount = messages.count
+                scrollTracker.lastKnownLastMessageId = messages.last?.id
                 if !messages.isEmpty {
                     proxy.scrollTo("BOTTOM_CHAT_ANCHOR", anchor: .bottom)
                 }
                 if scrollTracker.monitor == nil {
                     let tracker = scrollTracker
                     scrollTracker.monitor = NSEvent.addLocalMonitorForEvents(matching: [.scrollWheel]) { event in
-                        // Positive scrollingDeltaY means scrolling upward toward earlier messages
-                        if event.scrollingDeltaY > 2.5 {
+                        if let sv = tracker.scrollView {
+                            guard event.window === sv.window else { return event }
+                            let localPt = sv.convert(event.locationInWindow, from: nil)
+                            guard sv.bounds.contains(localPt) else { return event }
+                        }
+                        // Ignore momentum/rubber-band bounce so scrolling to the bottom never trips userScrolledUp
+                        let isDirectInput = (event.momentumPhase == [])
+                        if isDirectInput && event.scrollingDeltaY > 0.4 {
                             tracker.lastUserScrollUpTime = Date()
                             if !userScrolledUp {
                                 userScrolledUp = true
+                            }
+                        } else if event.scrollingDeltaY < -0.4 {
+                            if tracker.distanceFromBottom <= 65 && userScrolledUp {
+                                userScrolledUp = false
                             }
                         }
                         return event
@@ -6759,8 +6960,13 @@ struct AgentChatStage: View, Equatable {
                     NSEvent.removeMonitor(monitor)
                     scrollTracker.monitor = nil
                 }
+                if let obs = scrollTracker.boundsObserver {
+                    NotificationCenter.default.removeObserver(obs)
+                    scrollTracker.boundsObserver = nil
+                }
             }
             .clipped()
+            }
         }
     }
 }
@@ -7173,7 +7379,6 @@ struct RichMessageRow: View, Equatable {
                         onRejectChange: onRejectChange
                     )
                     .equatable()
-                    .textSelection(.enabled)
                     .contextMenu {
                         assistantMessageContextMenu
                     }
@@ -7227,7 +7432,6 @@ struct RichMessageRow: View, Equatable {
                 .foregroundColor(.primary.opacity(0.92))
                 .multilineTextAlignment(.leading)
                 .lineLimit(isLongUserMessage && !isUserMessageExpanded ? 14 : nil)
-                .textSelection(.enabled)
                 .fixedSize(horizontal: false, vertical: true)
             
             if isLongUserMessage {
@@ -7584,7 +7788,7 @@ private struct AICellContentHost: View, Equatable {
         let harness = SubAgentHarness.shared
         let isLatestStreaming = isStreaming || (AgentService.shared.isLoading && AgentService.shared.messages.last?.id == message.id)
         return VStack(alignment: .leading, spacing: 12) {
-            ForEach(preToolBlocks) { block in
+            ForEach(Array(preToolBlocks.enumerated()), id: \.offset) { _, block in
                 aiBlockView(block, isLatestStreaming: isLatestStreaming)
             }
             
@@ -7592,7 +7796,7 @@ private struct AICellContentHost: View, Equatable {
                 ToolExecutionStepsView(results: message.toolResults, isStreaming: isLatestStreaming)
             }
             
-            ForEach(postToolBlocks) { block in
+            ForEach(Array(postToolBlocks.enumerated()), id: \.offset) { _, block in
                 aiBlockView(block, isLatestStreaming: isLatestStreaming)
             }
             
@@ -8896,7 +9100,6 @@ struct LaTeXBlockView: View {
                 .font(.system(size: isBlock ? 15 : 13.5, weight: .regular, design: .serif))
                 .foregroundColor(.primary.opacity(0.92))
                 .multilineTextAlignment(isBlock ? .center : .leading)
-                .textSelection(.enabled)
                 .padding(.vertical, isBlock ? 12 : 6)
                 .padding(.horizontal, 14)
             if isBlock { Spacer(minLength: 8) }
@@ -9364,9 +9567,16 @@ fileprivate final class AgentCodeAndDiffCache {
         lock.unlock()
         
         let rawLines = code.components(separatedBy: "\n")
-        let lowerLang = language.lowercased().trimmingCharacters(in: .whitespacesAndNewlines)
+        let trimmedFenceHeader = language.trimmingCharacters(in: .whitespacesAndNewlines)
+        let fenceTokens = trimmedFenceHeader
+            .replacingOccurrences(of: "//", with: " ")
+            .replacingOccurrences(of: ":", with: " ")
+            .split(whereSeparator: { $0.isWhitespace })
+            .map(String.init)
+        let lowerLang = (fenceTokens.first ?? trimmedFenceHeader).lowercased()
         
-        var extractedFile: String? = nil
+        var extractedFile: String? = fenceTokens.dropFirst().first(where: { $0.contains(".") && $0.count <= 80 })
+            ?? (trimmedFenceHeader.contains(".") && trimmedFenceHeader.contains("/") ? trimmedFenceHeader : nil)
         var addCount = 0
         var delCount = 0
         var parsedLines: [AgentParsedDiffBlock.Line] = []
@@ -10703,6 +10913,9 @@ struct ToolActivityItemRow: View {
                     
                 case .generic(let verb, let detail):
                     Button(action: {
+                        if result.toolName == "preview_control" || result.toolName == "ide_browser" {
+                            AppState.shared?.showPreviewInspector(tab: "web")
+                        }
                         withAnimation(.easeInOut(duration: 0.15)) {
                             showDetails.toggle()
                         }
@@ -10733,7 +10946,6 @@ struct ToolActivityItemRow: View {
                     .font(.system(size: 11, design: .monospaced))
                     .foregroundColor(result.success ? .secondary : .red.opacity(0.85))
                     .lineLimit(16)
-                    .textSelection(.enabled)
                     .frame(maxWidth: .infinity, alignment: .leading)
                     .padding(8)
                     .background(Color.black.opacity(0.22))

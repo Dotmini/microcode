@@ -263,7 +263,7 @@ struct PlanApprovalInlineCard: View {
         if let plan = planManager.currentPlan {
             let cleanTitle = cleanedPlanTitle(plan.title)
             VStack(alignment: .leading, spacing: 5) {
-                // Header Row (Compact, Single-Line Formal IDE Header)
+                // Header Row (Compact, Responsive Formal IDE Header)
                 HStack(spacing: 6) {
                     Image(systemName: plan.approvalState == .approved ? "checkmark.circle.fill" : "doc.text")
                         .font(.system(size: 11))
@@ -272,16 +272,18 @@ struct PlanApprovalInlineCard: View {
                     Text("Implementation Plan")
                         .font(.system(size: 11, weight: .semibold))
                         .foregroundColor(.primary)
-                        .fixedSize()
+                        .lineLimit(1)
+                        .layoutPriority(2)
                     
                     if !cleanTitle.isEmpty {
                         Text("— \(cleanTitle)")
                             .font(.system(size: 11))
                             .foregroundColor(.secondary)
                             .lineLimit(1)
+                            .truncationMode(.tail)
                     }
                     
-                    Spacer(minLength: 6)
+                    Spacer(minLength: 4)
                     
                     // Subtle Status Indicator (Minimal Dot + Text)
                     HStack(spacing: 4) {
@@ -292,17 +294,18 @@ struct PlanApprovalInlineCard: View {
                             )
                             .frame(width: 5, height: 5)
                         
-                        Text(plan.approvalState == .approved ? "Approved" : (plan.approvalState == .rejected ? "Rejected" : "Review required"))
+                        Text(plan.approvalState == .approved ? "Approved" : (plan.approvalState == .rejected ? "Rejected" : "Review"))
                             .font(.system(size: 10))
                             .foregroundColor(.secondary)
+                            .lineLimit(1)
                     }
-                    .fixedSize()
+                    .layoutPriority(1)
                     
                     if plan.totalSteps > 0 {
                         Text("• \(plan.totalSteps) steps")
                             .font(.system(size: 9.5))
                             .foregroundColor(.secondary.opacity(0.7))
-                            .fixedSize()
+                            .lineLimit(1)
                     }
                     
                     if let onView = onViewPlan {
@@ -312,6 +315,7 @@ struct PlanApprovalInlineCard: View {
                                     .font(.system(size: 9.5))
                                 Text("Inspect")
                                     .font(.system(size: 10, weight: .medium))
+                                    .lineLimit(1)
                             }
                             .foregroundColor(.secondary)
                             .padding(.horizontal, 6)
@@ -321,6 +325,7 @@ struct PlanApprovalInlineCard: View {
                         }
                         .buttonStyle(.plain)
                         .fixedSize()
+                        .layoutPriority(3)
                         .help("Inspect plan in side panel")
                     }
                     
@@ -689,7 +694,7 @@ struct AgentSquadBuilderSheet: View {
         "qwen": ["qwen-max", "qwen-plus", "qwen2.5-coder-32b-instruct"],
         "kimi": ["kimi-k2-0711-preview"],
         "aipass": ["claude-sonnet-4-6", "gemini-2.5-pro", "gpt-4.1", "deepseek-chat"],
-        "omni": ["gemini-2.5-flash", "claude-sonnet-4-6"],
+        "omni": ["omni-o1x-pro", "omni-o1x-lite"],
         "local": ["qwen2.5-coder:14b", "deepseek-r1:14b", "llama3.3"]
     ]
     

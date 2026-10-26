@@ -300,6 +300,19 @@ final class AIUsageTracker: ObservableObject {
             tokens: record.totalTokens
         )
         
+        // Sync live token & KV prefix cache telemetry into TokenMem (TokenOptimizer)
+        TokenOptimizer.shared.recordUsage(
+            provider: provider,
+            model: model,
+            inputTokens: promptTokens,
+            outputTokens: completionTokens,
+            costOverride: record.estimatedCostUSD
+        )
+        TokenOptimizer.shared.recordContextCache(
+            hit: cachedTokens > 0,
+            tokens: cachedTokens
+        )
+        
         // Memory cap
         if records.count > maxRecordsInMemory {
             records.removeFirst(records.count - maxRecordsInMemory)

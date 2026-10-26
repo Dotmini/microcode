@@ -328,6 +328,8 @@ struct AgenticEditorWorkspace: View {
             }
         }
         .onAppear {
+            PhoneCompanionService.shared.appState = appState
+            PhoneCompanionService.shared.startServerIfNeeded()
             if let workspace = appState.workspaceFolder {
                 agent.setWorkspace(workspace.path)
             }
@@ -750,6 +752,21 @@ struct AgenticEditorWorkspace: View {
             .fixedSize()
             .help("Toggle Preview & Context Inspector (⌘I)")
 
+            // Connect with Phone [📱]
+            Button(action: {
+                appState.settingsSelectedTab = 11
+                appState.showingSettingsDialog = true
+            }) {
+                Image(systemName: "iphone.radiowaves.left.and.right")
+                    .font(.system(size: 12))
+                    .foregroundColor(.secondary)
+                    .frame(width: 28, height: 26)
+                    .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .fixedSize()
+            .help("Connect with Phone via QR Code")
+
             // Settings [⚙]
             Button(action: { appState.showingSettingsDialog = true }) {
                 Image(systemName: "gearshape")
@@ -840,6 +857,9 @@ struct AgenticWorkspaceSidebar: View {
     var body: some View {
         VStack(spacing: 0) {
             sidebarHeader
+            Rectangle()
+                .fill(Color.primary.opacity(0.08))
+                .frame(height: 1)
             
             if isSearchVisible {
                 sidebarSearchBar
@@ -850,8 +870,6 @@ struct AgenticWorkspaceSidebar: View {
             Rectangle()
                 .fill(Color.primary.opacity(0.08))
                 .frame(height: 1)
-                .padding(.horizontal, 10)
-                .padding(.bottom, 2)
             
             ScrollView {
                 LazyVStack(alignment: .leading, spacing: 14) {
@@ -972,27 +990,27 @@ struct AgenticWorkspaceSidebar: View {
             _ = agent.createNewChat(projectPath: ws)
             surface = .agent
         } label: {
-            HStack(spacing: 8) {
+            HStack(spacing: 6) {
                 Image(systemName: "plus")
-                    .font(.system(size: 11, weight: .bold))
+                    .font(.system(size: 10, weight: .semibold))
                 Text("New Conversation")
-                    .font(.system(size: 12, weight: .semibold))
+                    .font(.system(size: 11, weight: .medium))
                 Spacer()
                 Text("⌘N")
-                    .font(.system(size: 10, design: .monospaced))
+                    .font(.system(size: 9.5, design: .monospaced))
                     .foregroundColor(.secondary.opacity(0.7))
             }
-            .padding(.horizontal, 12)
-            .frame(height: 32)
+            .padding(.horizontal, 10)
+            .frame(height: 24)
             .background(
-                RoundedRectangle(cornerRadius: 7, style: .continuous)
-                    .fill(Color.primary.opacity(0.06))
-                    .overlay(RoundedRectangle(cornerRadius: 7, style: .continuous).stroke(Color.primary.opacity(0.08), lineWidth: 1))
+                RoundedRectangle(cornerRadius: 5, style: .continuous)
+                    .fill(Color.primary.opacity(0.05))
+                    .overlay(RoundedRectangle(cornerRadius: 5, style: .continuous).stroke(Color.primary.opacity(0.08), lineWidth: 0.8))
             )
         }
         .buttonStyle(.plain)
-        .padding(.horizontal, 12)
-        .padding(.bottom, 8)
+        .padding(.horizontal, 10)
+        .frame(height: 30)
     }
     
     
@@ -1251,7 +1269,7 @@ struct AgenticWorkspaceSidebar: View {
     // MARK: - Footer
     @ViewBuilder
     private var sidebarFooter: some View {
-        HStack(spacing: 8) {
+        HStack(spacing: 10) {
             Button(action: { appState.showingSettingsDialog = true }) {
                 HStack(spacing: 6) {
                     Image(systemName: "gearshape")
@@ -1265,6 +1283,25 @@ struct AgenticWorkspaceSidebar: View {
             .help("MicroCode Settings")
 
             Spacer()
+
+            Button(action: {
+                appState.settingsSelectedTab = 11
+                appState.showingSettingsDialog = true
+            }) {
+                HStack(spacing: 4) {
+                    Image(systemName: "qrcode")
+                        .font(.system(size: 11))
+                    Text("Phone")
+                        .font(.system(size: 11, weight: .medium))
+                }
+                .foregroundColor(.secondary)
+                .padding(.horizontal, 7)
+                .padding(.vertical, 3)
+                .background(Color.primary.opacity(0.05))
+                .cornerRadius(5)
+            }
+            .buttonStyle(.plain)
+            .help("Connect with Phone via QR Code")
 
             Button(action: { appState.showingSettingsDialog = true }) {
                 Image(systemName: "questionmark.circle")
@@ -1538,7 +1575,7 @@ struct XcodeEditorSidebar: View {
             .help("Project Options")
         }
         .padding(.horizontal, 10)
-        .padding(.vertical, 6)
+        .frame(height: 30)
         .background(Color.primary.opacity(0.02))
     }
 
@@ -2464,10 +2501,10 @@ struct AgenticContextInspector: View {
     private var effectiveInspectorWidth: CGFloat {
         let current = CGFloat(inspectorWidth)
         if appState.sidebarVisible {
-            let maxAllowed: CGFloat = (selectedTab == .preview) ? 460 : 360
-            return max(280, min(maxAllowed, current))
+            let maxAllowed: CGFloat = (selectedTab == .preview) ? 720 : 620
+            return max(260, min(maxAllowed, current))
         }
-        return max(280, min(800, current))
+        return max(260, min(860, current))
     }
 
     var body: some View {
@@ -2475,14 +2512,22 @@ struct AgenticContextInspector: View {
             // Draggable resize splitter divider on leading edge
             ZStack {
                 Rectangle()
-                    .fill(isHoveringSplitter || isDraggingSplitter ? Color.accentColor : Color.primary.opacity(0.08))
-                    .frame(width: isHoveringSplitter || isDraggingSplitter ? 2.5 : 1)
-                Color.clear
-                    .frame(width: 8)
-                    .contentShape(Rectangle())
+                    .fill(isHoveringSplitter || isDraggingSplitter ? Color.accentColor.opacity(0.14) : Color.clear)
+                Rectangle()
+                    .fill(isHoveringSplitter || isDraggingSplitter ? Color.accentColor : Color.primary.opacity(0.09))
+                    .frame(width: isHoveringSplitter || isDraggingSplitter ? 2 : 1)
+                RoundedRectangle(cornerRadius: 2)
+                    .fill(isHoveringSplitter || isDraggingSplitter ? Color.accentColor : Color.secondary.opacity(0.35))
+                    .frame(width: 3, height: 32)
             }
-            .frame(width: 4)
-            .zIndex(10)
+            .frame(width: 6)
+            .contentShape(Rectangle())
+            .overlay(
+                Color.clear
+                    .frame(width: 14)
+                    .contentShape(Rectangle())
+            )
+            .zIndex(30)
             .onHover { hovering in
                 isHoveringSplitter = hovering
                 if hovering {
@@ -2499,8 +2544,8 @@ struct AgenticContextInspector: View {
                             dragStartWidth = Double(effectiveInspectorWidth)
                         }
                         let newW = dragStartWidth - Double(val.translation.width)
-                        let maxAllowed: Double = appState.sidebarVisible ? (selectedTab == .preview ? 460 : 360) : 800
-                        inspectorWidth = max(280, min(maxAllowed, newW))
+                        let maxAllowed: Double = appState.sidebarVisible ? (selectedTab == .preview ? 720 : 620) : 860
+                        inspectorWidth = max(260, min(maxAllowed, newW))
                     }
                     .onEnded { _ in
                         isDraggingSplitter = false
@@ -4458,7 +4503,7 @@ struct EditorTabBar: View {
                 Spacer()
             }
         }
-        .frame(height: 36)
+        .frame(height: 30)
         .background(appState.appTheme.isGlass ? Color.clear : Color(nsColor: appState.appTheme.panelBackground))
     }
 }
@@ -4513,7 +4558,7 @@ struct EditorTab: View {
             .help("Close Tab (⌘W)")
         }
         .padding(.horizontal, 10)
-        .padding(.vertical, 7)
+        .frame(height: 30)
         .background(
             isSelected 
                 ? (appState.appTheme == .extraClear ? Color.white.opacity(0.1) : Color.compat(nsColor: .textBackgroundColor))
@@ -4561,6 +4606,7 @@ struct EditorTab: View {
 struct CodeEditor: View {
     let file: CodeFile
     @EnvironmentObject var appState: AppState
+    @ObservedObject private var collab = CollaborationService.shared
     @State private var text: String
     @State private var updateTask: Task<Void, Never>? = nil
     @State private var markdownRenderMode: Bool = true
@@ -4598,6 +4644,40 @@ struct CodeEditor: View {
                     }
                 }
                 Spacer()
+                
+                if collab.currentSession != nil {
+                    let relPath = collab.normalizeRelativePath(file.path)
+                    let filePeers = collab.participants.filter {
+                        $0.isOnline && $0.userId != collab.localUserId &&
+                        collab.normalizeRelativePath($0.cursorPosition?.filePath ?? "") == relPath
+                    }
+                    Button(action: { appState.showingCollaborationView = true }) {
+                        HStack(spacing: 5) {
+                            Circle()
+                                .fill(Color.green.opacity(0.85))
+                                .frame(width: 5.5, height: 5.5)
+                            if let firstPeer = filePeers.first {
+                                Text("\(firstPeer.displayName) · Ln \(firstPeer.cursorPosition?.line ?? 1)")
+                                    .font(.system(size: 10, weight: .medium, design: .monospaced))
+                                    .foregroundColor(.primary.opacity(0.85))
+                            } else {
+                                Text("Session · \(collab.participants.filter(\.isOnline).count) online")
+                                    .font(.system(size: 10, weight: .medium, design: .monospaced))
+                                    .foregroundColor(.secondary)
+                            }
+                        }
+                        .padding(.horizontal, 7)
+                        .padding(.vertical, 2)
+                        .background(Color.primary.opacity(0.05))
+                        .overlay(
+                            RoundedRectangle(cornerRadius: 4)
+                                .stroke(Color.primary.opacity(0.08), lineWidth: 1)
+                        )
+                        .cornerRadius(4)
+                    }
+                    .buttonStyle(.plain)
+                    .help("Active Team Collaboration Session")
+                }
                 
                 if !activeLineBlameSummary.isEmpty {
                     HStack(spacing: 4) {
@@ -4701,7 +4781,7 @@ struct CodeEditor: View {
                 .fixedSize()
             }
             .padding(.horizontal, 12)
-            .padding(.vertical, 6)
+            .frame(height: 28)
             .background(Color.compat(nsColor: .windowBackgroundColor).opacity(0.5))
             
             Divider()
@@ -4865,7 +4945,7 @@ struct CodeEditor: View {
             appState.dismissCompletions()
         }
         .onChange(of: file.content) { newContent in
-            if !file.isUnsaved { text = newContent }
+            if newContent != text { text = newContent }
         }
         .onChange(of: text) { newValue in
             guard !file.isReadOnly else { return }
@@ -7627,6 +7707,8 @@ struct SettingsView: View {
         (0, "General", "gearshape"),
         (1, "Editor", "text.cursor"),
         (2, "AI & Agent", "sparkles"),
+        (11, "Connect with Phone", "iphone.radiowaves.left.and.right"),
+        (12, "Team Collaboration", "person.2"),
         (9, "Cloud GPU", "cpu"),
         (10, "Skills", "sparkles.rectangle.stack"),
         (8, "MCP Servers", "server.rack"),
@@ -7680,14 +7762,31 @@ struct SettingsView: View {
                             .font(.system(size: 20, weight: .bold))
                         Spacer()
                         HStack(spacing: 8) {
-                            Button("Cancel") { closeSettings() }
-                                .buttonStyle(.bordered)
-                                .controlSize(.small)
-                                .keyboardShortcut(.cancelAction)
-                            Button("Save Changes") { saveAllSettings(); closeSettings() }
-                                .buttonStyle(.bordered)
-                                .controlSize(.small)
-                                .keyboardShortcut(.defaultAction)
+                            Button(action: { closeSettings() }) {
+                                Text("Cancel")
+                                    .font(.system(size: 11.5, weight: .medium))
+                                    .foregroundColor(.secondary)
+                                    .padding(.horizontal, 12)
+                                    .padding(.vertical, 5)
+                                    .background(Color.primary.opacity(0.05))
+                                    .overlay(RoundedRectangle(cornerRadius: 6).stroke(Color.primary.opacity(0.09), lineWidth: 1))
+                                    .cornerRadius(6)
+                            }
+                            .buttonStyle(.plain)
+                            .keyboardShortcut(.cancelAction)
+
+                            Button(action: { saveAllSettings(); closeSettings() }) {
+                                Text("Save Changes")
+                                    .font(.system(size: 11.5, weight: .semibold))
+                                    .foregroundColor(.primary)
+                                    .padding(.horizontal, 14)
+                                    .padding(.vertical, 5)
+                                    .background(Color.primary.opacity(0.10))
+                                    .overlay(RoundedRectangle(cornerRadius: 6).stroke(Color.primary.opacity(0.20), lineWidth: 1))
+                                    .cornerRadius(6)
+                            }
+                            .buttonStyle(.plain)
+                            .keyboardShortcut(.defaultAction)
                         }
                     }
                     .padding(.horizontal, 32)
@@ -7701,6 +7800,8 @@ struct SettingsView: View {
                         if selectedTab == 0 { generalSettingsContent }
                         else if selectedTab == 1 { editorSettingsContent }
                         else if selectedTab == 2 { aiSettingsContent }
+                        else if selectedTab == 11 { PhoneCompanionSettingsView().environmentObject(appState) }
+                        else if selectedTab == 12 { CollaborationView(isEmbeddedInSettings: true) }
                         else if selectedTab == 9 { CloudGPUView() }
                         else if selectedTab == 10 { AgentSkillsView() }
                         else if selectedTab == 8 { mcpSettingsPanel }
@@ -8228,6 +8329,7 @@ struct SettingsView: View {
         case "mistral": return .orange
         case "kimi": return .cyan
         case "perplexity": return .teal
+        case "perch": return .mint
         case "typhoon": return .purple
         case "cerebras": return .pink
         case "together": return .blue
@@ -9334,7 +9436,7 @@ struct SettingsView: View {
         // Load ALL provider keys
         let providers = [
             "gemini", "openai", "anthropic", "deepseek",
-            "openrouter", "groq", "mistral", "kimi", "perplexity", "typhoon",
+            "openrouter", "groq", "mistral", "kimi", "perplexity", "perch", "typhoon",
             "cerebras", "together", "fireworks", "minimax", "nvidia",
             "grok", "qwen", "glm"
         ]
@@ -9442,6 +9544,7 @@ struct SettingsView: View {
         case "mistral": return "MISTRAL_API_KEY"
         case "kimi": return "KIMI_API_KEY"
         case "perplexity": return "PERPLEXITY_API_KEY"
+        case "perch": return "PERCH_API_KEY"
         case "typhoon": return "TYPHOON_API_KEY"
         case "cerebras": return "CEREBRAS_API_KEY"
         case "together": return "TOGETHER_API_KEY"

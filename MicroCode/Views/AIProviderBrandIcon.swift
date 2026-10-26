@@ -95,6 +95,8 @@ struct AIProviderBrandIcon: View {
             return "kimi"
         case "perplexity", "sonar":
             return "perplexity"
+        case "perch", "perchai", "perch_ai", "perchcode", "perch_code":
+            return "perch"
         case "typhoon", "opentyphoon", "scb10x":
             return "typhoon"
         case "cerebras":
@@ -153,6 +155,11 @@ struct AIProviderBrandIcon: View {
         if let cached = iconCache[resolvedKey] {
             return cached
         }
+        if resolvedKey == "perch" {
+            let img = makePerchBrandImage()
+            iconCache[resolvedKey] = img
+            return img
+        }
         guard let base64 = base64Data[resolvedKey],
               let data = Data(base64Encoded: base64),
               let img = NSImage(data: data) else {
@@ -160,6 +167,52 @@ struct AIProviderBrandIcon: View {
         }
         iconCache[resolvedKey] = img
         return img
+    }
+    
+    static func pngData(for provider: String) -> Data? {
+        let resolvedKey = resolveKey(for: provider)
+        if let base64 = base64Data[resolvedKey] ?? base64Data["microcode"],
+           let data = Data(base64Encoded: base64) {
+            return data
+        }
+        return nil
+    }
+
+    private static func makePerchBrandImage() -> NSImage {
+        let size = NSSize(width: 64, height: 64)
+        return NSImage(size: size, flipped: false) { rect in
+            let bgPath = NSBezierPath(roundedRect: rect.insetBy(dx: 2, dy: 2), xRadius: 15, yRadius: 15)
+            let gradient = NSGradient(colors: [
+                NSColor(calibratedRed: 0.05, green: 0.22, blue: 0.24, alpha: 1.0),
+                NSColor(calibratedRed: 0.08, green: 0.56, blue: 0.48, alpha: 1.0)
+            ])
+            gradient?.draw(in: bgPath, angle: -45)
+            NSColor(calibratedRed: 0.25, green: 0.92, blue: 0.78, alpha: 0.45).setStroke()
+            bgPath.lineWidth = 1.5
+            bgPath.stroke()
+
+            let symConfig = NSImage.SymbolConfiguration(pointSize: 30, weight: .bold)
+            if let bird = NSImage(systemSymbolName: "bird.fill", accessibilityDescription: "Perch AI")?.withSymbolConfiguration(symConfig) {
+                let tinted = NSImage(size: bird.size, flipped: false) { sRect in
+                    bird.draw(in: sRect)
+                    NSColor(calibratedRed: 0.65, green: 0.99, blue: 0.89, alpha: 1.0).set()
+                    sRect.fill(using: .sourceAtop)
+                    return true
+                }
+                let drawRect = NSRect(
+                    x: (rect.width - bird.size.width) * 0.5,
+                    y: (rect.height - bird.size.height) * 0.5 + 2,
+                    width: bird.size.width,
+                    height: bird.size.height
+                )
+                tinted.draw(in: drawRect)
+            }
+            // Perch bar beneath the bird
+            let bar = NSBezierPath(roundedRect: NSRect(x: 16, y: 12, width: 32, height: 4), xRadius: 2, yRadius: 2)
+            NSColor(calibratedRed: 0.45, green: 0.96, blue: 0.84, alpha: 0.95).setFill()
+            bar.fill()
+            return true
+        }
     }
     
     /// Returns a sized NSImage suitable for AppKit NSMenuItem.image
@@ -259,8 +312,36 @@ public struct ProgrammingLanguageIconView: View {
         return languageHint.lowercased().trimmingCharacters(in: .whitespacesAndNewlines)
     }
     
+    private var iconLookupFileName: String {
+        let base = URL(fileURLWithPath: fileName).lastPathComponent
+        if base.contains(".") {
+            return base
+        }
+        switch resolvedKey {
+        case "docker": return "Dockerfile"
+        case "npm": return "package.json"
+        case "git": return ".gitignore"
+        case "typescript", "ts": return "index.ts"
+        case "javascript", "js": return "index.js"
+        case "react", "tsx": return "App.tsx"
+        case "jsx": return "App.jsx"
+        case "python", "py": return "main.py"
+        case "rust", "rs": return "main.rs"
+        case "golang", "go": return "main.go"
+        case "kotlin", "kt": return "Main.kt"
+        case "csharp", "cs": return "Program.cs"
+        case "cpp": return "main.cpp"
+        case "objc", "m": return "main.m"
+        case "ruby", "rb": return "main.rb"
+        case "markdown", "md": return "README.md"
+        case "shell", "sh", "bash", "zsh": return "script.sh"
+        default:
+            return resolvedKey.isEmpty ? base : "file.\(resolvedKey)"
+        }
+    }
+    
     public var body: some View {
-        if let themeIcon = ExtensionManager.shared.iconImage(for: URL(fileURLWithPath: fileName).lastPathComponent, isDirectory: false, isExpanded: false) {
+        if let themeIcon = ExtensionManager.shared.iconImage(for: iconLookupFileName, isDirectory: false, isExpanded: false) {
             Image(nsImage: themeIcon)
                 .resizable()
                 .interpolation(.high)

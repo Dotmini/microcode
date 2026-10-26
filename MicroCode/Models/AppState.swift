@@ -1341,15 +1341,16 @@ class AppState: ObservableObject {
         defaults.set(aiProvider, forKey: "aiProvider")
         defaults.set(aiModel, forKey: "aiModel")
 
-        // Set default aiKeyMode only when not previously configured
+        // Set default aiKeyMode and repair stale "cloud" mode when using standard providers (Gemini, Claude, OpenAI, DeepSeek, etc.)
         let savedKeyMode = defaults.string(forKey: "aiKeyMode")
-        if savedKeyMode == nil {
-            if SubscriptionAuthManager.shared.hasAnyConnected {
-                defaults.set("subscription", forKey: "aiKeyMode")
-            } else if hasGemini || hasDeepSeek || hasOpenAI || hasAnthropic {
+        if savedKeyMode == nil || (savedKeyMode == "cloud" && aiProvider != "omni") {
+            let hasDirectKeyForActive = !(apiKeys[aiProvider]?.isEmpty ?? true)
+            if hasDirectKeyForActive || hasGemini || hasDeepSeek || hasOpenAI || hasAnthropic {
                 defaults.set("direct", forKey: "aiKeyMode")
+            } else if SubscriptionAuthManager.shared.hasAnyConnected {
+                defaults.set("subscription", forKey: "aiKeyMode")
             } else {
-                defaults.set("cloud", forKey: "aiKeyMode")
+                defaults.set("direct", forKey: "aiKeyMode")
             }
         }
 
@@ -2546,8 +2547,14 @@ class AppState: ObservableObject {
         guard index >= 0 && index < openFiles.count else { return }
         openFiles[index].decompress()
         currentFileIndex = index
-        currentFile = openFiles[index]
+        let selected = openFiles[index]
+        currentFile = selected
         IdleStateCompactor.shared.recordActivity()
+        if CollaborationService.shared.currentSession != nil {
+            Task {
+                await CollaborationService.shared.updateCursor(filePath: selected.path, line: 1, column: 1)
+            }
+        }
     }
 
     func selectFile(_ file: CodeFile) {
@@ -2692,6 +2699,10 @@ class AppState: ObservableObject {
                     path: editedFile.path,
                     content: content,
                     language: editedFile.language
+                )
+                CollaborationService.shared.notifyLocalFileEdited(
+                    path: editedFile.path,
+                    content: content
                 )
             }
         }

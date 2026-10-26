@@ -637,7 +637,10 @@ final class TelemetryService: ObservableObject {
                 return "Subscription · \(sub.rawValue.capitalized)"
             case "cloud":
                 let prov = (overrideProvider?.isEmpty == false ? overrideProvider! : rawAppProvider)
-                return "Dotmini Cloud · \(Self.prettyProviderName(prov))"
+                if prov.lowercased() == "omni" || prov.lowercased() == "dotmini" {
+                    return "Dotmini Sovereign AI"
+                }
+                return "BYOK · \(Self.prettyProviderName(prov))"
             case "local":
                 let prov = (overrideProvider?.isEmpty == false ? overrideProvider! : rawAppProvider)
                 return "Local LLM · \(Self.prettyProviderName(prov))"

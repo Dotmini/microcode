@@ -146,94 +146,76 @@ final class ElasticComputeFabric: ObservableObject {
     // MARK: - Timer
     private var gpuPollTimer: Timer?
     private var costTimer: Timer?
+    #if canImport(Metal)
+    private lazy var cachedMetalDevice: MTLDevice? = MTLCreateSystemDefaultDevice()
+    #endif
     
     private init() {
         loadCostGuard()
-        discoverLocalGPU()
+        pollGPUStats()
         startGPUPolling()
         startCostTracking()
     }
     
     // MARK: - Local GPU Discovery
     
-    /// Detect local GPU via system_profiler (macOS)
+    /// Detect local GPU via Metal without spawning heavy system_profiler subprocesses on launch
     func discoverLocalGPU() {
-        Task {
-            let process = Process()
-            process.executableURL = URL(fileURLWithPath: "/usr/sbin/system_profiler")
-            process.arguments = ["SPDisplaysDataType", "-json"]
-            let pipe = Pipe()
-            process.standardOutput = pipe
-            
-            do {
-                try process.run()
-                process.waitUntilExit()
-                
-                let data = pipe.fileHandleForReading.readDataToEndOfFile()
-                if let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-                   let displays = json["SPDisplaysDataType"] as? [[String: Any]] {
-                    for display in displays {
-                        let name = display["sppci_model"] as? String ?? "Unknown GPU"
-                        let vramStr = display["spdisplays_vram"] as? String ?? "0"
-                        let vramMB = parseVRAM(vramStr)
-                        
-                        let instance = ComputeInstance(
-                            id: UUID(),
-                            provider: .local,
-                            name: name,
-                            gpuModel: name,
-                            gpuMemoryGB: Double(vramMB) / 1024.0,
-                            cpuCores: ProcessInfo.processInfo.activeProcessorCount,
-                            ramGB: Double(ProcessInfo.processInfo.physicalMemory) / (1024 * 1024 * 1024),
-                            costPerHourUSD: 0.0,
-                            status: .available,
-                            endpoint: "local",
-                            region: "local"
-                        )
-                        
-                        // Remove existing local instances first
-                        instances.removeAll { $0.provider == .local }
-                        instances.insert(instance, at: 0)
-                    }
-                }
-            } catch {
-                NSLog("⚠️ [ComputeFabric] Failed to discover local GPU: \(error)")
-            }
-        }
+        #if canImport(Metal)
+        guard let device = cachedMetalDevice else { return }
+        let vramMB = Int(device.recommendedMaxWorkingSetSize / (1024 * 1024))
+        let instance = ComputeInstance(
+            id: UUID(),
+            provider: .local,
+            name: device.name,
+            gpuModel: device.name,
+            gpuMemoryGB: Double(vramMB) / 1024.0,
+            cpuCores: ProcessInfo.processInfo.activeProcessorCount,
+            ramGB: Double(ProcessInfo.processInfo.physicalMemory) / (1024 * 1024 * 1024),
+            costPerHourUSD: 0.0,
+            status: .available,
+            endpoint: "local",
+            region: "local"
+        )
+        instances.removeAll { $0.provider == .local }
+        instances.insert(instance, at: 0)
+        #endif
     }
     
     // MARK: - GPU Memory Polling (VRAM HUD)
     
     private func startGPUPolling() {
-        gpuPollTimer = Timer.scheduledTimer(withTimeInterval: 5.0, repeats: true) { [weak self] _ in
+        gpuPollTimer = Timer.scheduledTimer(withTimeInterval: 30.0, repeats: true) { [weak self] _ in
             Task { @MainActor [weak self] in
-                self?.pollGPUStats()
+                guard let self = self, self.activeSession != nil else { return }
+                self.pollGPUStats()
             }
         }
     }
     
     private func pollGPUStats() {
-        // On macOS, use Metal to query GPU memory
+        // On macOS, use cached Metal device to query GPU memory
         #if canImport(Metal)
-        if let device = MTLCreateSystemDefaultDevice() {
-            let totalMB: Int
-            let usedMB: Int
-            
-            // Apple Silicon reports unified memory
+        if let device = cachedMetalDevice {
             let totalBytes = device.recommendedMaxWorkingSetSize
             let allocatedBytes = device.currentAllocatedSize
-            totalMB = Int(totalBytes / (1024 * 1024))
-            usedMB = Int(allocatedBytes / (1024 * 1024))
+            let totalMB = Int(totalBytes / (1024 * 1024))
+            let usedMB = Int(allocatedBytes / (1024 * 1024))
             
-            localGPUStats = GPUMemoryStats(
-                totalMB: totalMB,
-                usedMB: usedMB,
-                freeMB: totalMB - usedMB,
-                utilizationPercent: 0, // Not available via Metal API
-                temperatureCelsius: 0, // Not available on macOS
-                gpuName: device.name,
-                driverVersion: "Metal \(device.supportsFamily(.apple9) ? "3" : "2")"
-            )
+            if localGPUStats?.usedMB != usedMB || localGPUStats?.totalMB != totalMB {
+                localGPUStats = GPUMemoryStats(
+                    totalMB: totalMB,
+                    usedMB: usedMB,
+                    freeMB: totalMB - usedMB,
+                    utilizationPercent: 0,
+                    temperatureCelsius: 0,
+                    gpuName: device.name,
+                    driverVersion: "Metal \(device.supportsFamily(.apple9) ? "3" : "2")"
+                )
+            }
+            if instances.isEmpty {
+                discoverLocalGPU()
+            }
         }
         #endif
     }

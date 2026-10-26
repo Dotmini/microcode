@@ -114,13 +114,23 @@ public final class PreviewDockService: ObservableObject {
     
     @Published public var openTabs: [PreviewDockTabItem] = []
     @Published public var activeTabId: String = "web"
-    @Published public var isDockVisible: Bool = false
+    @Published public var isDockVisible: Bool = false {
+        didSet {
+            if isDockVisible && openTabs.isEmpty {
+                ensureDefaultTabsIfEmpty()
+            }
+        }
+    }
     @Published public var isExpandedWidth: Bool = false
     
     // Quick comment dispatched from Image region selection into Agent Chat
     @Published public var pendingRegionComment: String? = nil
     private init() {
-        // Default standard runtime tabs - Web preview first, followed by iOS and Android
+        ensureDefaultTabsIfEmpty()
+    }
+    
+    public func ensureDefaultTabsIfEmpty() {
+        guard openTabs.isEmpty else { return }
         openTabs = [
             PreviewDockTabItem(id: "web", title: "WebApp Preview", icon: "globe", kind: .web, isClosable: true, url: nil),
             PreviewDockTabItem(id: "ios", title: "iOS Sim", icon: "iphone", kind: .ios, isClosable: true, url: nil),
@@ -471,6 +481,7 @@ public final class PreviewDockService: ObservableObject {
         }
 
         if openTabs.isEmpty {
+            ensureDefaultTabsIfEmpty()
             hideDock()
             return
         }
@@ -673,15 +684,19 @@ public final class PreviewHotReloadEngine: ObservableObject {
             injectLiveCSSIntoWebView(fileName: fileName, cssContent: cssText)
         }
 
-        // 3. Trigger App Runtime Auto Hot Reload (iOS Simulator / Android Emulator / Flutter / React Native / macOS)
+        // 3. Trigger App Runtime Auto Hot Reload (iOS Simulator / Android Emulator / Flutter / React Native / macOS / Universal WebApp Preview)
         if isAutoHotReloadEnabled {
             let appSourceExts: Set<String> = [
                 "swift", "m", "mm", "h", "c", "cpp", "storyboard", "xib", "plist",
-                "kt", "kts", "java", "xml", " darts", "dart",
-                "js", "jsx", "ts", "tsx", "json"
+                "kt", "kts", "java", "xml", "dart",
+                "js", "jsx", "ts", "tsx", "json",
+                "py", "cs", "razor", "xaml", "axaml", "ar"
             ]
             if appSourceExts.contains(ext) && !standardized.contains("/.microcode/") {
                 DeviceRuntimeService.shared.scheduleAutoHotReload(changedFilePath: standardized, source: source)
+                if UniversalAppPreviewBridge.shared.isRunning || PreviewDockService.shared.isDockVisible || DeviceRuntimeService.shared.showingEmbeddedDeviceDock {
+                    UniversalAppPreviewBridge.shared.triggerHotReload(savedFilePath: standardized, liveCode: content, reason: source)
+                }
             }
         }
 
@@ -744,6 +759,17 @@ public final class PreviewHotReloadEngine: ObservableObject {
                     language: ext,
                     filePath: standardized
                 )
+            }
+
+            // Trigger UniversalAppPreviewBridge live hot reload for GUI & cross-platform frameworks
+            if ["swift", "py", "dart", "kt", "kts", "java", "cs", "razor", "xaml", "axaml", "ar"].contains(ext) {
+                if UniversalAppPreviewBridge.shared.isRunning || PreviewDockService.shared.isDockVisible || DeviceRuntimeService.shared.showingEmbeddedDeviceDock {
+                    UniversalAppPreviewBridge.shared.triggerHotReload(
+                        savedFilePath: standardized,
+                        liveCode: content,
+                        reason: "Live Typing"
+                    )
+                }
             }
 
             self.lastReloadDurationMs = max(1, Int((CFAbsoluteTimeGetCurrent() - start) * 1000))
@@ -878,7 +904,7 @@ public final class PreviewHotReloadEngine: ObservableObject {
         let CandidateDirs = ["", "src", "app", "lib", "public", "components", "pages", "views", "styles", "assets"]
         let watchedExts: Set<String> = [
             "html", "htm", "css", "scss", "js", "jsx", "ts", "tsx", "vue", "svelte",
-            "swift", "kt", "java", "dart", "py", "md", "svg", "json"
+            "swift", "kt", "kts", "java", "dart", "py", "cs", "razor", "xaml", "axaml", "ar", "md", "svg", "json"
         ]
         let fm = FileManager.default
 

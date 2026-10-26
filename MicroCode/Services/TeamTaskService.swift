@@ -237,7 +237,21 @@ final class TeamTaskService: ObservableObject {
         return context
     }
 
-    private var currentActorName: String { AuthService.shared.currentUser?.displayName ?? "Local user" }
+    var currentActorName: String {
+        let collabName = CollaborationService.shared.localDisplayName.trimmingCharacters(in: .whitespacesAndNewlines)
+        if !collabName.isEmpty { return collabName }
+        return AuthService.shared.currentUser?.displayName ?? NSFullUserName()
+    }
+
+    func applyRemoteTasks(_ remoteTasks: [TeamTask]) {
+        let sorted = remoteTasks.sorted { $0.updatedAt > $1.updatedAt }
+        guard sorted != tasks else { return }
+        tasks = sorted
+        if selectedTaskID == nil || !tasks.contains(where: { $0.id == selectedTaskID }) {
+            selectedTaskID = tasks.first?.id
+        }
+        persist(broadcastToCollab: false)
+    }
 
     private func update(_ taskID: String, event: TeamTaskEvent? = nil, mutation: (inout TeamTask) -> Void) {
         guard let index = tasks.firstIndex(where: { $0.id == taskID }) else { return }
@@ -261,7 +275,10 @@ final class TeamTaskService: ObservableObject {
             .appendingPathComponent("team-tasks.json")
     }
 
-    private func persist() {
+    private func persist(broadcastToCollab: Bool = true) {
+        if broadcastToCollab {
+            CollaborationService.shared.broadcastTeamTasksIfActive(tasks)
+        }
         guard let workspacePath else { return }
         let url = documentURL(for: workspacePath)
         isPersistingLocally = true

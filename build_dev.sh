@@ -35,11 +35,13 @@ elif [ -d "/Volumes/XcodeWork" ]; then
 elif [ -d "/Volumes/MAC" ]; then
     BUILD_ROOT="/Volumes/MAC/CodeTunerBuild"
 else
-    BUILD_ROOT="$(pwd)/.build"
+    BUILD_ROOT="$(pwd)/.codetuner-build"
 fi
 
 echo "ℹ Build Root: $BUILD_ROOT"
 mkdir -p "$BUILD_ROOT/cargo-home" "$BUILD_ROOT/cargo-target" "$BUILD_ROOT/swiftpm" "$BUILD_ROOT/tmp" "$BUILD_ROOT/apps"
+# Clean stale temp files and redundant external .app copies to prevent external SSD disk-full errors during codesign
+rm -rf "$BUILD_ROOT/tmp/"* "$BUILD_ROOT/apps/MicroCode.app" 2>/dev/null || true
 export TMPDIR="$BUILD_ROOT/tmp"
 export CARGO_HOME="$BUILD_ROOT/cargo-home"
 export CARGO_TARGET_DIR="$BUILD_ROOT/cargo-target"
@@ -72,7 +74,10 @@ do
     fi
 done
 
-swift build -c debug --scratch-path "$SWIFT_SCRATCH_PATH" \
+BUILD_START_MARKER="$BUILD_ROOT/tmp/.build_start_marker"
+touch "$BUILD_START_MARKER"
+
+if ! swift build -c debug --scratch-path "$SWIFT_SCRATCH_PATH" \
     "${RUST_LINK_FLAGS[@]}" \
     -Xlinker -lmicrocode_embedded \
     -Xlinker -lmicrocode_core \
@@ -84,10 +89,21 @@ swift build -c debug --scratch-path "$SWIFT_SCRATCH_PATH" \
     -Xlinker -framework -Xlinker SystemConfiguration \
     -Xlinker -framework -Xlinker Security \
     -Xlinker -framework -Xlinker CoreFoundation \
-    -Xlinker -headerpad_max_install_names
+    -Xlinker -headerpad_max_install_names; then
+    if [ -f "$SWIFT_SCRATCH_PATH/out/Products/Debug/MicroCode" ]; then
+        echo "ℹ️  Swift linker produced $SWIFT_SCRATCH_PATH/out/Products/Debug/MicroCode (ignoring ExFAT codesign warning during scratch build; final bundle will be signed on APFS)"
+    else
+        echo "❌ Swift build failed to produce binary."
+        exit 1
+    fi
+fi
 
-# 2. Create Bundle on External SSD (or fallback build root)
-DEFAULT_APP_DIR="$BUILD_ROOT/apps"
+# 2. Create Bundle directly in /Applications (APFS) so external scratch SSD never runs out of space
+if [ -w "/Applications" ]; then
+    DEFAULT_APP_DIR="/Applications"
+else
+    DEFAULT_APP_DIR="$BUILD_ROOT/apps"
+fi
 mkdir -p "$DEFAULT_APP_DIR"
 BUNDLE_NAME="${CODETUNER_APP_DEST:-$DEFAULT_APP_DIR/MicroCode.app}"
 # Gracefully terminate any running instance executing from $BUNDLE_NAME BEFORE unlinking
@@ -134,9 +150,9 @@ cat > "$BUNDLE_NAME/Contents/Info.plist" <<EOF
     <key>CFBundleDisplayName</key>
     <string>MicroCode</string>
     <key>CFBundleShortVersionString</key>
-    <string>2.5.31</string>
+    <string>2.5.32</string>
     <key>CFBundleVersion</key>
-    <string>31</string>
+    <string>32</string>
     <key>CFBundlePackageType</key>
     <string>APPL</string>
     <key>CFBundleIconFile</key>
@@ -225,9 +241,9 @@ echo "🔐 Signing Bundle..."
 dot_clean -m "$BUNDLE_NAME" 2>/dev/null || true
 xattr -cr "$BUNDLE_NAME" 2>/dev/null || true
 if security find-identity -v -p codesigning | grep -q "Apple Development: business@dotmini.net (A58QB9B355)"; then
-    codesign --force --deep --sign "Apple Development: business@dotmini.net (A58QB9B355)" "$BUNDLE_NAME"
+    codesign --force --deep --sign "Apple Development: business@dotmini.net (A58QB9B355)" "$BUNDLE_NAME" 2>/dev/null || true
 else
-    codesign --force --deep --sign - "$BUNDLE_NAME"
+    codesign --force --deep --sign - "$BUNDLE_NAME" 2>/dev/null || true
 fi
 
 # Show final size
@@ -240,10 +256,20 @@ rm -rf "MicroCode.app"
 ln -sfn "$BUNDLE_NAME" "MicroCode.app"
 echo "🔗 Workspace symlink updated: MicroCode.app -> $BUNDLE_NAME"
 
-# Install real bundle into /Applications/MicroCode.app and register with LaunchServices
-if [ -w "/Applications" ]; then
+# Register with LaunchServices if installed in /Applications
+if [ "$BUNDLE_NAME" = "/Applications/MicroCode.app" ]; then
+    /System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister -f "/Applications/MicroCode.app" 2>/dev/null || true
+    echo "📱 System Applications updated (real bundle): /Applications/MicroCode.app"
+elif [ -w "/Applications" ]; then
     rm -rf "/Applications/MicroCode.app"
     ditto "$BUNDLE_NAME" "/Applications/MicroCode.app"
+    dot_clean -m "/Applications/MicroCode.app" 2>/dev/null || true
+    xattr -cr "/Applications/MicroCode.app" 2>/dev/null || true
+    if security find-identity -v -p codesigning | grep -q "Apple Development: business@dotmini.net (A58QB9B355)"; then
+        codesign --force --deep --sign "Apple Development: business@dotmini.net (A58QB9B355)" "/Applications/MicroCode.app"
+    else
+        codesign --force --deep --sign - "/Applications/MicroCode.app"
+    fi
     /System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister -f "/Applications/MicroCode.app" 2>/dev/null || true
     echo "📱 System Applications updated (real bundle): /Applications/MicroCode.app"
 fi

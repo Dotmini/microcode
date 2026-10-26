@@ -4637,8 +4637,8 @@ struct CellSelfHealingBanner: View {
         Do NOT write explanations or conversation.
         """
         
-        let providerStr = UserDefaults.standard.string(forKey: "aiProvider") ?? "omni"
-        let provider = StreamableAIProvider(rawValue: providerStr) ?? .omni
+        let providerStr = UserDefaults.standard.string(forKey: "aiProvider") ?? "gemini"
+        let provider = StreamableAIProvider(rawValue: providerStr) ?? .gemini
         let model = UserDefaults.standard.string(forKey: "aiModel") ?? provider.defaultModel
         let key = UserDefaults.standard.string(forKey: "\(provider.rawValue)_api_key") ?? UserDefaults.standard.string(forKey: "apiKey") ?? ""
         

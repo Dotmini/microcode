@@ -434,9 +434,9 @@ elif [ -f "Package.swift" ]; then
     <key>CFBundleIconFile</key>
     <string>AppIcon</string>
     <key>CFBundleShortVersionString</key>
-    <string>2.5.31</string>
+    <string>2.5.32</string>
     <key>CFBundleVersion</key>
-    <string>31</string>
+    <string>32</string>
     <key>CFBundlePackageType</key>
     <string>APPL</string>
     <key>LSMinimumSystemVersion</key>

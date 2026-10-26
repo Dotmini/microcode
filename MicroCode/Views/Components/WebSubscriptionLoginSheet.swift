@@ -525,7 +525,7 @@ private struct SubscriptionWKWebViewRepresentable: NSViewRepresentable {
                         return
                     }
                     
-                case .openrouter, .groq, .mistral, .kimi, .perplexity, .typhoon,
+                case .openrouter, .groq, .mistral, .kimi, .perplexity, .perch, .typhoon,
                      .qwen, .grok, .cerebras, .together, .fireworks, .minimax, .nvidia:
                     if let webView = webView {
                         DispatchQueue.main.async {
@@ -630,7 +630,7 @@ private struct SubscriptionWKWebViewRepresentable: NSViewRepresentable {
                 })()
                 """
                 
-            case .openrouter, .groq, .mistral, .kimi, .perplexity, .typhoon,
+            case .openrouter, .groq, .mistral, .kimi, .perplexity, .perch, .typhoon,
                  .qwen, .grok, .cerebras, .together, .fireworks, .minimax, .nvidia:
                 let userLabel = parent.provider.shortLabel
                 jsScript = """
@@ -638,6 +638,7 @@ private struct SubscriptionWKWebViewRepresentable: NSViewRepresentable {
                     try {
                         const inputs = Array.from(document.querySelectorAll('input, textarea, code, pre, span'));
                         const patterns = [
+                            /perch-[A-Za-z0-9_-]{20,}/,
                             /sk-or-v1-[A-Za-z0-9]{32,}/,
                             /gsk_[A-Za-z0-9]{32,}/,
                             /pplx-[A-Za-z0-9]{24,}/,

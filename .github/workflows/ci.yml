@@ -181,7 +181,7 @@ jobs:
           elif git describe --tags --abbrev=0 2>/dev/null; then
             VERSION="$(git describe --tags --abbrev=0 | sed 's/^v//')"
           else
-            VERSION="2.5.31"
+            VERSION="2.5.32"
           fi
           BUILD_NUMBER=$(git rev-list --count HEAD)
           SHORT_SHA=$(git rev-parse --short HEAD)

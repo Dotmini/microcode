@@ -13,25 +13,20 @@ import Security
 
 /// Synchronous Keychain access for compute kernels that are not UI actors.
 enum JupyterCredentialStore {
-    private static let cacheKey = "microcode_jupyter_token_v1"
-    private static let query: [String: Any] = [
-        kSecClass as String: kSecClassGenericPassword,
-        kSecAttrService as String: "com.dotmini.microcode.integrations",
-        kSecAttrAccount as String: "jupyter.runtime-token.v1"
-    ]
+    private static let sealedKey = "km_sealed_jupyter_token_v1"
+    private static let legacyCacheKey = "microcode_jupyter_token_v1"
+
     static var token: String {
         get {
-            if let cached = UserDefaults.standard.string(forKey: cacheKey), !cached.isEmpty {
-                return cached
+            if let sealed = UserDefaults.standard.data(forKey: sealedKey),
+               let unsealed = KeychainManager.unsealSecret(sealed),
+               !unsealed.isEmpty {
+                return unsealed
             }
-            var lookup = query
-            lookup[kSecReturnData as String] = true
-            lookup[kSecMatchLimit as String] = kSecMatchLimitOne
-            var result: AnyObject?
-            if SecItemCopyMatching(lookup as CFDictionary, &result) == errSecSuccess, let data = result as? Data {
-                let val = String(decoding: data, as: UTF8.self)
-                UserDefaults.standard.set(val, forKey: cacheKey)
-                return val
+            if let cached = UserDefaults.standard.string(forKey: legacyCacheKey), !cached.isEmpty {
+                UserDefaults.standard.removeObject(forKey: legacyCacheKey)
+                _ = save(cached)
+                return cached
             }
             if let legacy = UserDefaults.standard.string(forKey: "hpcToken"), !legacy.isEmpty, save(legacy) {
                 UserDefaults.standard.removeObject(forKey: "hpcToken")
@@ -40,29 +35,21 @@ enum JupyterCredentialStore {
             return ""
         }
         set {
-            UserDefaults.standard.set(newValue, forKey: cacheKey)
-            if save(newValue) { UserDefaults.standard.removeObject(forKey: "hpcToken") }
+            if save(newValue) {
+                UserDefaults.standard.removeObject(forKey: "hpcToken")
+                UserDefaults.standard.removeObject(forKey: legacyCacheKey)
+            }
         }
     }
+
     @discardableResult private static func save(_ value: String) -> Bool {
         if value.isEmpty {
-            UserDefaults.standard.removeObject(forKey: cacheKey)
-            let status = SecItemDelete(query as CFDictionary)
-            return status == errSecSuccess || status == errSecItemNotFound
+            UserDefaults.standard.removeObject(forKey: sealedKey)
+            UserDefaults.standard.removeObject(forKey: legacyCacheKey)
+            return true
         }
-        UserDefaults.standard.set(value, forKey: cacheKey)
-        let update = [kSecValueData as String: Data(value.utf8)]
-        let status = SecItemUpdate(query as CFDictionary, update as CFDictionary)
-        if status == errSecSuccess { return true }
-        guard status == errSecItemNotFound else { return false }
-        var insert = query
-        insert[kSecValueData as String] = Data(value.utf8)
-        insert[kSecAttrAccessible as String] = kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly
-        var access: SecAccess?
-        SecAccessCreate("MicroCode" as CFString, nil, &access)
-        if let access = access {
-            insert[kSecAttrAccess as String] = access
-        }
-        return SecItemAdd(insert as CFDictionary, nil) == errSecSuccess
+        guard let sealed = KeychainManager.sealSecret(value) else { return false }
+        UserDefaults.standard.set(sealed, forKey: sealedKey)
+        return true
     }
 }

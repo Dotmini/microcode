@@ -79,9 +79,29 @@ struct EmbeddedDeviceDockView: View {
                             .foregroundColor(isActive ? .primary : .secondary)
                         }
 
-                        // "+" Open File Tab button (matching Antigravity right split pane)
-                        Button {
-                            dockService.pickAndOpenFile()
+                        // "+" Open Preview / File Tab menu
+                        Menu {
+                            Button {
+                                dockService.selectTab(id: "web")
+                            } label: {
+                                Label("WebApp Preview (Localhost)", systemImage: "globe")
+                            }
+                            Button {
+                                dockService.selectTab(id: "ios")
+                            } label: {
+                                Label("iOS Simulator", systemImage: "iphone")
+                            }
+                            Button {
+                                dockService.selectTab(id: "android")
+                            } label: {
+                                Label("Android Emulator", systemImage: "candybarphone")
+                            }
+                            Divider()
+                            Button {
+                                dockService.pickAndOpenFile()
+                            } label: {
+                                Label("Open File to Preview…", systemImage: "doc.badge.plus")
+                            }
                         } label: {
                             Image(systemName: "plus")
                                 .font(.system(size: 10.5, weight: .medium))
@@ -89,8 +109,9 @@ struct EmbeddedDeviceDockView: View {
                                 .frame(width: 22, height: 22)
                                 .contentShape(Rectangle())
                         }
-                        .buttonStyle(.plain)
-                        .help("Open file in Preview Split Pane")
+                        .menuStyle(.borderlessButton)
+                        .fixedSize()
+                        .help("Open WebApp Preview, Simulator, or File in Split Pane")
                         
                     }
                     .padding(.horizontal, 4)
@@ -98,8 +119,10 @@ struct EmbeddedDeviceDockView: View {
                 
                 Spacer()
 
-                // Universal Playground-style Hot Reload Control Group
-                hotReloadControlsBar
+                // Universal Playground-style Hot Reload Control Group (hidden on .web tab which has its own unified toolbar)
+                if dockService.activeTab?.kind != .web {
+                    hotReloadControlsBar
+                }
 
                 // Quick action tools (clean, non-overlapping)
                 if dockService.activeTab?.kind == .iOSPhysical {
@@ -293,7 +316,7 @@ struct EmbeddedDeviceDockView: View {
                 }
             }
             .padding(.horizontal, 8)
-            .padding(.vertical, 5)
+            .frame(height: 30)
             .background(canvas)
             
             Divider()
@@ -345,16 +368,58 @@ struct EmbeddedDeviceDockView: View {
                         InteractiveDiffPreviewView(title: title, oldContent: oldContent, newContent: newContent)
                     }
                 } else {
-                    // Empty Drop Zone State
-                    VStack(spacing: 10) {
-                        Image(systemName: "square.dashed")
-                            .font(.system(size: 32))
-                            .foregroundColor(.secondary.opacity(0.35))
-                        Text("Drop a file here to preview")
-                            .font(.system(size: 11, weight: .medium))
-                            .foregroundColor(.secondary.opacity(0.8))
+                    // Quick Preview Hub (shown only if all tabs were cleared)
+                    VStack(spacing: 14) {
+                        Image(systemName: "sparkles.tv")
+                            .font(.system(size: 28, weight: .medium))
+                            .foregroundColor(.accentColor.opacity(0.85))
+                        Text("Live Preview & Device Hub")
+                            .font(.system(size: 13, weight: .semibold))
+                            .foregroundColor(.primary)
+                        Text("Select a runtime surface or drop any file here to preview")
+                            .font(.system(size: 11))
+                            .foregroundColor(.secondary)
+                        HStack(spacing: 8) {
+                            Button {
+                                dockService.selectTab(id: "web")
+                            } label: {
+                                Label("WebApp Preview", systemImage: "globe")
+                                    .font(.system(size: 11, weight: .semibold))
+                                    .padding(.horizontal, 10)
+                                    .padding(.vertical, 6)
+                                    .background(Color.accentColor.opacity(0.16))
+                                    .foregroundColor(.accentColor)
+                                    .cornerRadius(6)
+                            }
+                            .buttonStyle(.plain)
+                            Button {
+                                dockService.selectTab(id: "ios")
+                            } label: {
+                                Label("iOS Sim", systemImage: "iphone")
+                                    .font(.system(size: 11, weight: .medium))
+                                    .padding(.horizontal, 10)
+                                    .padding(.vertical, 6)
+                                    .background(Color.primary.opacity(0.08))
+                                    .cornerRadius(6)
+                            }
+                            .buttonStyle(.plain)
+                            Button {
+                                dockService.pickAndOpenFile()
+                            } label: {
+                                Label("Open File…", systemImage: "doc")
+                                    .font(.system(size: 11, weight: .medium))
+                                    .padding(.horizontal, 10)
+                                    .padding(.vertical, 6)
+                                    .background(Color.primary.opacity(0.08))
+                                    .cornerRadius(6)
+                            }
+                            .buttonStyle(.plain)
+                        }
                     }
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
+                    .onAppear {
+                        dockService.ensureDefaultTabsIfEmpty()
+                    }
                 }
             }
         }
@@ -380,6 +445,7 @@ struct EmbeddedDeviceDockView: View {
             return true
         }
         .onAppear {
+            dockService.ensureDefaultTabsIfEmpty()
             hotReloadEngine.scanWorkspaceForRecentChanges(source: "Startup")
         }
         .onChange(of: appState.workspaceFolder) { _ in

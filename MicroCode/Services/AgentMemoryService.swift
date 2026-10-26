@@ -292,9 +292,12 @@ class AgentMemoryService: ObservableObject {
         var context = "Recalled context from memory:\n"
         var tokenCount = 10 // Header tokens
         
+        let staticDateFormatter = ISO8601DateFormatter()
+        staticDateFormatter.formatOptions = [.withFullDate]
         for (i, memory) in memories.enumerated() {
             let role = memory.role == "user" ? "User" : "AI"
-            let dateStr = formatRelativeDate(memory.timestamp)
+            // Use deterministic YYYY-MM-DD date instead of relative "2m ago" so System Prompt KV-prefix cache never invalidates
+            let dateStr = staticDateFormatter.string(from: memory.timestamp)
             let topicStr = memory.topic.map { " [\($0)]" } ?? ""
             
             // Truncate content to save tokens

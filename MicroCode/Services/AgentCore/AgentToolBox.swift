@@ -139,6 +139,33 @@ class AgentToolBox: ObservableObject {
         tools[tool.name] = tool
     }
     
+    nonisolated static func normalizeToolName(_ rawName: String) -> String {
+        let trimmed = rawName.trimmingCharacters(in: .whitespacesAndNewlines)
+        let lower = trimmed.lowercased()
+        switch lower {
+        case "read_file", "view_file", "read", "cat", "open_file_content", "get_file_contents":
+            return "file_read"
+        case "write_file", "write_to_file", "create_file", "write", "save_file", "overwrite_file":
+            return "file_write"
+        case "edit_file", "str_replace", "str_replace_editor", "str_replace_based_edit_tool", "edit", "replace", "modify_file":
+            return "replace_in_file"
+        case "bash", "run_terminal_cmd", "execute_command", "run_command", "terminal", "exec", "cmd", "sh", "zsh", "run_shell":
+            return "shell"
+        case "list_dir", "list_directory", "ls", "list_files", "dir", "tree":
+            return "list_directory_tree"
+        case "grep", "ripgrep", "rg", "search_files", "search_in_files", "code_search", "grep_files":
+            return "grep_search"
+        case "glob", "find_by_name", "find_files", "search_by_name", "glob_search":
+            return "file_search"
+        case "mkdir", "make_directory":
+            return "create_directory"
+        case "mv", "move_file":
+            return "rename_file"
+        default:
+            return trimmed
+        }
+    }
+
     nonisolated static func normalizeToolParams(_ params: [String: Any]) -> [String: Any] {
         var normalized = params
         for (key, rawVal) in params {
@@ -171,7 +198,7 @@ class AgentToolBox: ObservableObject {
                     continue
                 }
             }
-            if ["path", "directory", "TargetFile", "AbsolutePath", "file_path", "old_path", "new_path", "cwd"].contains(key) {
+            if ["path", "directory", "TargetFile", "AbsolutePath", "file_path", "filepath", "Path", "Directory", "old_path", "new_path", "cwd"].contains(key) {
                 var cleanPath = trimmed
                 if cleanPath.hasSuffix("\"}") {
                     cleanPath = String(cleanPath.dropLast(2))
@@ -184,11 +211,45 @@ class AgentToolBox: ObservableObject {
                 normalized[key] = cleanPath
             }
         }
+
+        // Map cross-provider parameter aliases to MicroCode canonical parameter names
+        let aliasMappings: [(canonical: String, aliases: [String])] = [
+            ("path", ["file_path", "filepath", "TargetFile", "AbsolutePath", "Path", "target_file", "filename"]),
+            ("directory", ["dir", "folder", "search_path", "SearchPath", "Directory", "root_path"]),
+            ("command", ["cmd", "CommandLine", "command_line", "bash_command", "shell_command"]),
+            ("cwd", ["workdir", "working_directory", "working_dir", "Cwd"]),
+            ("old_text", ["old_str", "old_string", "Target", "target", "search", "find_text"]),
+            ("new_text", ["new_str", "new_string", "Replacement", "replacement", "replace_text"]),
+            ("content", ["file_text", "Content", "contents", "new_content"]),
+            ("pattern", ["Query", "Pattern", "glob", "regex", "search_term"]),
+            ("start_line", ["StartLine", "offset", "line_start", "from_line"]),
+            ("end_line", ["EndLine", "limit", "line_end", "to_line"])
+        ]
+        for mapping in aliasMappings {
+            if normalized[mapping.canonical] == nil {
+                for alias in mapping.aliases {
+                    if let val = normalized[alias] {
+                        normalized[mapping.canonical] = val
+                        break
+                    }
+                }
+            }
+        }
+
+        // Coerce integer parameters that may arrive as strings (e.g. from XML/DSML tool calls)
+        for intKey in ["max_depth", "start_line", "end_line", "timeout", "page"] {
+            if let strVal = normalized[intKey] as? String,
+               let parsedInt = Int(strVal.trimmingCharacters(in: .whitespacesAndNewlines)) {
+                normalized[intKey] = parsedInt
+            }
+        }
+
         return normalized
     }
 
-    func execute(_ toolName: String, params: [String: Any]) async throws -> String {
-        var targetTool = tools[toolName]
+    func execute(_ rawToolName: String, params: [String: Any]) async throws -> String {
+        let toolName = Self.normalizeToolName(rawToolName)
+        var targetTool = tools[toolName] ?? tools[rawToolName]
         if targetTool == nil {
             if toolName.hasPrefix("mcp__") {
                 let candidate = toolName.replacingOccurrences(of: "mcp__", with: "mcp__local__")
@@ -199,11 +260,21 @@ class AgentToolBox: ObservableObject {
             }
         }
         guard let tool = targetTool else {
-            throw ToolBoxError.toolNotFound(toolName)
+            throw ToolBoxError.toolNotFound(rawToolName)
         }
         
         let executionWorkspace = workspaceRoot
         var resolvedParams = Self.normalizeToolParams(params)
+        // Default directory/path to workspaceRoot for workspace-wide inspection tools when omitted
+        if let root = workspaceRoot, !root.isEmpty {
+            if ["list_directory_tree", "git_status"].contains(toolName),
+               resolvedParams["path"] == nil && resolvedParams["directory"] == nil {
+                resolvedParams["path"] = root
+            } else if ["grep_search", "file_search", "find_symbol"].contains(toolName),
+                      resolvedParams["directory"] == nil && resolvedParams["path"] == nil {
+                resolvedParams["directory"] = root
+            }
+        }
         let isRemoteTarget: Bool = {
             if case .remote = executionTarget { return true }
             return false
@@ -213,9 +284,23 @@ class AgentToolBox: ObservableObject {
             // Auto-resolve relative paths against local workspaceRoot
             if let root = workspaceRoot {
                 let resolvePath = { (p: String) -> String in
-                    if p.hasPrefix("/") { return p }
-                    if p.hasPrefix("~") { return (p as NSString).expandingTildeInPath }
-                    return (root as NSString).appendingPathComponent(p)
+                    let trimmedP = p.trimmingCharacters(in: .whitespacesAndNewlines)
+                    if trimmedP.isEmpty || trimmedP == "." || trimmedP == "./" {
+                        return root
+                    }
+                    for containerPrefix in ["/workspace/", "/workspace", "/project/", "/project", "/repo/", "/repo"] {
+                        if trimmedP == containerPrefix {
+                            return root
+                        }
+                        if containerPrefix.hasSuffix("/") && trimmedP.hasPrefix(containerPrefix) {
+                            let rel = String(trimmedP.dropFirst(containerPrefix.count))
+                            return rel.isEmpty ? root : (root as NSString).appendingPathComponent(rel)
+                        }
+                    }
+                    if trimmedP.hasPrefix("/") { return trimmedP }
+                    if trimmedP.hasPrefix("~") { return (trimmedP as NSString).expandingTildeInPath }
+                    let cleanRel = trimmedP.hasPrefix("./") ? String(trimmedP.dropFirst(2)) : trimmedP
+                    return (root as NSString).appendingPathComponent(cleanRel)
                 }
                 
                 for key in ["path", "directory", "old_path", "new_path", "cwd"] {
@@ -340,6 +425,11 @@ class AgentToolBox: ObservableObject {
             if cacheable { readCache[cacheKey] = (result, Date()) }
             if isMutatingCall {
                 readCache.removeAll(keepingCapacity: true)
+                if let path = resolvedParams["path"] as? String {
+                    TokenOptimizer.shared.invalidateFileRead(path: path)
+                } else {
+                    TokenOptimizer.shared.beginTurnLoop()
+                }
                 if !isRemoteTarget, let path = resolvedParams["path"] as? String {
                     AutoCommitService.shared.modifiedFiles.insert(path)
                     // Feature #7: 1-Click Secret & API Key Leak Shield audit on modified source files
@@ -616,16 +706,30 @@ class AgentToolBox: ObservableObject {
     // MARK: - JSON Schema Export (for native function calling)
     
     func toolSchemas() -> [[String: Any]] {
-        tools.values.sorted(by: { $0.name < $1.name }).map { tool in
+        // TokenMem Layer 1: Exclude duplicate `mcp__local__*` wrappers when native built-in tools are registered.
+        // The `mcp__local__*` tools remain registered in `tools` for execution compatibility,
+        // but omitting their redundant schemas saves ~6,500 prompt tokens on every turn.
+        let deduplicatedTools = tools.values.filter { tool in
+            guard tool.name.hasPrefix("mcp__local__") else { return true }
+            let baseName = String(tool.name.dropFirst("mcp__local__".count))
+            if tools[baseName] != nil { return false }
+            let coveredPrefixes = ["computer_use_", "device_", "adb_", "ardium_", "cell_", "lsp_", "git_"]
+            if coveredPrefixes.contains(where: { baseName.hasPrefix($0) }) { return false }
+            return true
+        }
+        
+        return deduplicatedTools.sorted(by: { $0.name < $1.name }).map { tool in
             var properties: [String: Any] = [:]
-            var requiredParams: [String] = []
+            var requiredParams: [String: Any] = [:]
+            _ = requiredParams
+            var reqList: [String] = []
             
-            for param in tool.parameters {
+            for param in tool.parameters.sorted(by: { $0.name < $1.name }) {
                 properties[param.name] = [
                     "type": param.type,
                     "description": param.description
                 ] as [String: Any]
-                if param.required { requiredParams.append(param.name) }
+                if param.required { reqList.append(param.name) }
             }
             
             return [
@@ -634,7 +738,7 @@ class AgentToolBox: ObservableObject {
                 "parameters": [
                     "type": "object",
                     "properties": properties,
-                    "required": requiredParams
+                    "required": reqList
                 ] as [String: Any]
             ] as [String: Any]
         }
@@ -1217,6 +1321,11 @@ struct PreviewControlTool: AgentTool {
 
             case "reload", "refresh":
                 runtime.showingEmbeddedDeviceDock = true
+                PreviewDockService.shared.ensureDefaultTabsIfEmpty()
+                if PreviewDockService.shared.activeTab == nil {
+                    PreviewDockService.shared.selectTab(id: "web")
+                }
+                IDEBrowserAutomationService.shared.scanActivePorts()
                 runtime.webRefreshTrigger.toggle()
                 return "✅ Live Preview reload triggered.\(livePreviewDiagnosticsSuffix())"
 
@@ -1266,10 +1375,17 @@ struct PreviewControlTool: AgentTool {
                 return "✅ WebApp Preview viewport set to: \(vp)"
 
             case "status":
+                PreviewDockService.shared.ensureDefaultTabsIfEmpty()
+                IDEBrowserAutomationService.shared.scanActivePorts()
+                let activePorts = IDEBrowserAutomationService.shared.activePortProcesses.map { "\($0.port) (\($0.processName))" }
+                if runtime.showingEmbeddedDeviceDock && PreviewDockService.shared.activeTab == nil {
+                    PreviewDockService.shared.selectTab(id: "web")
+                }
                 let visible = runtime.showingEmbeddedDeviceDock ? "Visible" : "Hidden"
                 let currentMode = runtime.embeddedDockMode.rawValue
                 let currentURL = runtime.targetWebURL?.absoluteString ?? "http://localhost:3000"
-                return "Live Preview Dock: \(visible) | Mode: \(currentMode) | URL: \(currentURL) | Viewport: \(runtime.targetViewport)\(livePreviewDiagnosticsSuffix())"
+                let portsInfo = activePorts.isEmpty ? "None detected yet" : activePorts.joined(separator: ", ")
+                return "Live Preview Dock: \(visible) | Mode: \(currentMode) | URL: \(currentURL) | Active Ports: [\(portsInfo)] | Viewport: \(runtime.targetViewport)\(livePreviewDiagnosticsSuffix())"
 
             default:
                 throw ToolBoxError.invalidParams("Unknown action '\(action)'. Supported: open, close, reload, set_url, switch_mode, set_viewport, status, console_logs, network_logs, inspect, screenshot")
@@ -1721,19 +1837,21 @@ struct FileReadTool: AgentTool {
         
         do {
             let content = try String(contentsOf: url, encoding: .utf8)
-            return formatFileReadContent(content, params: params, fileName: url.lastPathComponent)
+            return await formatFileReadContent(content, params: params, fileName: url.lastPathComponent, fullPath: url.path)
         } catch {
             // Fallback for different encodings
             if let content = try? String(contentsOf: url, encoding: .isoLatin1) {
-                return formatFileReadContent(content, params: params, fileName: url.lastPathComponent)
+                return await formatFileReadContent(content, params: params, fileName: url.lastPathComponent, fullPath: url.path)
             }
             throw error
         }
     }
     
-    private func formatFileReadContent(_ content: String, params: [String: Any], fileName: String) -> String {
+    @MainActor
+    private func formatFileReadContent(_ content: String, params: [String: Any], fileName: String, fullPath: String) -> String {
         let lines = content.components(separatedBy: "\n")
         let totalLines = lines.count
+        let contentHash = content.hashValue
         
         let startParam = (params["start_line"] as? Int) ?? (params["offset"] as? Int) ?? (params["StartLine"] as? Int)
         let endParam = (params["end_line"] as? Int) ?? (params["limit"] as? Int) ?? (params["EndLine"] as? Int)
@@ -1749,23 +1867,75 @@ struct FileReadTool: AgentTool {
             if startIdx < totalLines {
                 let slice = lines[startIdx..<endIdx]
                 let formatted = slice.enumerated().map { "\(startIdx + $0.offset + 1): \($0.element)" }.joined(separator: "\n")
-                return "[File: \(fileName) | Lines \(startIdx + 1)-\(endIdx) of \(totalLines)]\n\n\(formatted)"
+                let fullOutput = "[File: \(fileName) | Lines \(startIdx + 1)-\(endIdx) of \(totalLines)]\n\n\(formatted)"
+                let estTokens = TokenOptimizer.shared.estimateTokens(fullOutput)
+                if let dedupStub = TokenOptimizer.shared.checkDuplicateFileRead(
+                    path: fullPath,
+                    startLine: startIdx + 1,
+                    endLine: endIdx,
+                    contentHash: contentHash,
+                    lineCount: totalLines,
+                    fullTokenEstimate: estTokens
+                ) {
+                    return dedupStub
+                }
+                return fullOutput
             }
         }
         
-        // If file is very large (> 800 lines) and no slice requested, window it smartly
-        if totalLines > 800 {
-            let headSlice = lines.prefix(500).enumerated().map { "\($0.offset + 1): \($0.element)" }.joined(separator: "\n")
-            let tailSlice = lines.suffix(100).enumerated().map { "\(totalLines - 100 + $0.offset + 1): \($0.element)" }.joined(separator: "\n")
-            return """
-            [File: \(fileName) | Total \(totalLines) lines. Showing lines 1-500 and \(totalLines - 99)-\(totalLines). Use start_line/end_line to inspect lines 501-\(totalLines - 100).]
+        // Check whole-file duplicate read within the active run
+        let rawTokenEst = TokenOptimizer.shared.estimateTokens(content)
+        if let dedupStub = TokenOptimizer.shared.checkDuplicateFileRead(
+            path: fullPath,
+            startLine: 1,
+            endLine: totalLines,
+            contentHash: contentHash,
+            lineCount: totalLines,
+            fullTokenEstimate: rawTokenEst
+        ) {
+            return dedupStub
+        }
+        
+        // TokenMem Layer 4: AST Structural Skeleton Windowing for large files read without start_line/end_line
+        let maxUnwindowed = TokenOptimizer.shared.mode.maxUnwindowedFileLines
+        if totalLines > maxUnwindowed {
+            let headCount = min(300, maxUnwindowed - 80)
+            let tailCount = 80
+            let headSlice = lines.prefix(headCount).enumerated().map { "\($0.offset + 1): \($0.element)" }.joined(separator: "\n")
+            let tailSlice = lines.suffix(tailCount).enumerated().map { "\(totalLines - tailCount + $0.offset + 1): \($0.element)" }.joined(separator: "\n")
+            
+            // Extract structural declarations (struct/class/enum/func/MARK) with exact line numbers from the middle section
+            let middleRange = headCount..<(totalLines - tailCount)
+            var outlineLines: [String] = []
+            for idx in middleRange {
+                let trimmed = lines[idx].trimmingCharacters(in: .whitespaces)
+                if trimmed.hasPrefix("func ") || trimmed.hasPrefix("private func ") || trimmed.hasPrefix("public func ") ||
+                   trimmed.hasPrefix("internal func ") || trimmed.hasPrefix("static func ") || trimmed.hasPrefix("mutating func ") ||
+                   trimmed.hasPrefix("struct ") || trimmed.hasPrefix("class ") || trimmed.hasPrefix("enum ") ||
+                   trimmed.hasPrefix("protocol ") || trimmed.hasPrefix("extension ") || trimmed.hasPrefix("actor ") ||
+                   trimmed.hasPrefix("// MARK:") || trimmed.hasPrefix("def ") || trimmed.hasPrefix("async def ") ||
+                   trimmed.hasPrefix("fn ") || trimmed.hasPrefix("pub fn ") || trimmed.hasPrefix("pub struct ") ||
+                   trimmed.hasPrefix("impl ") || trimmed.hasPrefix("export function ") || trimmed.hasPrefix("export class ") {
+                    outlineLines.append("  L\(idx + 1): \(trimmed)")
+                    if outlineLines.count >= 120 { break }
+                }
+            }
+            let outlineBlock = outlineLines.isEmpty
+                ? "... [\(totalLines - headCount - tailCount) lines omitted: lines \(headCount + 1)-\(totalLines - tailCount)] ..."
+                : "[TokenMem AST Symbol Index for lines \(headCount + 1)-\(totalLines - tailCount) — pass start_line & end_line to file_read to inspect any symbol body]:\n" + outlineLines.joined(separator: "\n")
+            
+            let windowedOutput = """
+            [File: \(fileName) | Total \(totalLines) lines. Showing lines 1-\(headCount), AST Symbol Index for lines \(headCount + 1)-\(totalLines - tailCount), and tail lines \(totalLines - tailCount + 1)-\(totalLines).]
             
             \(headSlice)
             
-            ... [\(totalLines - 600) lines omitted: lines 501-\(totalLines - 100)] ...
+            \(outlineBlock)
             
             \(tailSlice)
             """
+            let windowedTokens = TokenOptimizer.shared.estimateTokens(windowedOutput)
+            TokenOptimizer.shared.recordToolFoldingSavings(savedTokens: max(0, rawTokenEst - windowedTokens))
+            return windowedOutput
         }
         
         if content.count > 2_000_000 {

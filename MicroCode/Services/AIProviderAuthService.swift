@@ -42,7 +42,7 @@ struct AIProviderConfig: Identifiable, Codable, Equatable {
 // MARK: - Provider Metadata
 
 enum AIProviderMeta: String, CaseIterable, Identifiable {
-    case openai, anthropic, deepseek, gemini, openrouter, groq, mistral, kimi, perplexity, typhoon, cerebras, together, fireworks, minimax, nvidia, grok, codex, qwen, glm
+    case openai, anthropic, deepseek, gemini, openrouter, groq, mistral, kimi, perplexity, perch, typhoon, cerebras, together, fireworks, minimax, nvidia, grok, codex, qwen, glm
     
     var id: String { rawValue }
     
@@ -57,6 +57,7 @@ enum AIProviderMeta: String, CaseIterable, Identifiable {
         case .mistral: return "Mistral AI & Codestral"
         case .kimi: return "Moonshot AI (Kimi)"
         case .perplexity: return "Perplexity Sonar"
+        case .perch: return "Perch AI"
         case .typhoon: return "SCB 10X Typhoon"
         case .cerebras: return "Cerebras Inference"
         case .together: return "Together AI"
@@ -81,6 +82,7 @@ enum AIProviderMeta: String, CaseIterable, Identifiable {
         case .mistral: return "wind"
         case .kimi: return "moon.stars.fill"
         case .perplexity: return "magnifyingglass.circle.fill"
+        case .perch: return "bird.fill"
         case .typhoon: return "hurricane"
         case .cerebras: return "memorychip.fill"
         case .together: return "square.stack.3d.up.fill"
@@ -105,6 +107,7 @@ enum AIProviderMeta: String, CaseIterable, Identifiable {
         case .mistral: return .orange
         case .kimi: return .cyan
         case .perplexity: return .teal
+        case .perch: return .mint
         case .typhoon: return .purple
         case .cerebras: return .pink
         case .together: return .blue
@@ -129,6 +132,7 @@ enum AIProviderMeta: String, CaseIterable, Identifiable {
         case .mistral: return ""
         case .kimi: return "sk-"
         case .perplexity: return "pplx-"
+        case .perch: return "perch-"
         case .typhoon: return "sk-"
         case .cerebras: return "csk-"
         case .together: return ""
@@ -152,6 +156,7 @@ enum AIProviderMeta: String, CaseIterable, Identifiable {
         case .mistral: return "https://api.mistral.ai/v1"
         case .kimi: return "https://api.moonshot.ai/v1"
         case .perplexity: return "https://api.perplexity.ai"
+        case .perch: return UserDefaults.standard.string(forKey: "perch_base_url") ?? "https://api.perchai.app/v1"
         case .typhoon: return "https://api.opentyphoon.ai/v1"
         case .cerebras: return "https://api.cerebras.ai/v1"
         case .together: return "https://api.together.xyz/v1"
@@ -167,25 +172,26 @@ enum AIProviderMeta: String, CaseIterable, Identifiable {
     
     var defaultModels: [String] {
         switch self {
-        case .openai: return ["o3-mini", "o1", "o1-mini", "gpt-4o", "gpt-4o-mini", "chatgpt-4o-latest", "gpt-4-turbo"]
-        case .anthropic: return ["claude-3-7-sonnet-20250219", "claude-3-5-sonnet-20241022", "claude-3-5-haiku-20241022", "claude-3-opus-20240229"]
-        case .deepseek: return ["deepseek-chat", "deepseek-reasoner"]
-        case .gemini: return ["gemini-2.5-pro", "gemini-2.5-flash", "gemini-2.0-flash", "gemini-2.0-flash-thinking-exp-01-21", "gemini-1.5-pro", "gemini-1.5-flash"]
+        case .openai: return ["gpt-6.1-sol", "gpt-6-sol", "gpt-6-luna", "gpt-6-astra", "gpt-5.6-sol", "gpt-5.4", "gpt-5.3-codex", "o3", "o4-mini", "gpt-4.1", "gpt-4o"]
+        case .anthropic: return ["claude-sonnet-5-5", "claude-opus-5-5", "claude-haiku-5-5", "claude-sonnet-5", "claude-opus-5", "claude-opus-4-8", "claude-sonnet-4-6", "claude-opus-4-6"]
+        case .deepseek: return ["deepseek-flash", "deepseek-v4-pro", "deepseek-chat", "deepseek-reasoner"]
+        case .gemini: return ["gemini-4-argon", "gemini-3.8-pro", "gemini-3.8-flash-tiered", "gemini-3.8-flash", "gemini-3.6-pro", "gemini-3.5-flash", "gemini-3.5-flash-lite", "gemini-2.5-pro", "gemini-2.5-flash"]
         case .openrouter: return ["anthropic/claude-sonnet-4", "google/gemini-2.5-pro", "deepseek/deepseek-r1-0528", "qwen/qwen3-coder"]
         case .groq: return ["llama-3.3-70b-versatile", "llama-3.1-8b-instant", "deepseek-r1-distill-llama-70b", "qwen/qwen3-32b"]
         case .mistral: return ["codestral-latest", "devstral-small-latest", "mistral-large-latest", "mistral-small-latest"]
-        case .kimi: return ["kimi-k2-0711-preview", "kimi-latest", "moonshot-v1-128k"]
+        case .kimi: return ["Kimi-K2.7-Code", "kimi-k2-0711-preview", "kimi-latest", "moonshot-v1-128k"]
         case .perplexity: return ["sonar-reasoning-pro", "sonar-pro", "sonar-reasoning", "sonar"]
-        case .typhoon: return ["typhoon-v2.1-12b-instruct", "typhoon-v2-70b-instruct", "typhoon-v2-r1-70b-preview"]
-        case .cerebras: return ["llama-3.3-70b", "qwen-3-32b", "llama3.1-8b"]
-        case .together: return ["Qwen/Qwen2.5-Coder-32B-Instruct", "deepseek-ai/DeepSeek-R1", "meta-llama/Llama-3.3-70B-Instruct-Turbo"]
-        case .fireworks: return ["accounts/fireworks/models/deepseek-v3", "accounts/fireworks/models/deepseek-r1", "accounts/fireworks/models/qwen2p5-coder-32b-instruct"]
-        case .minimax: return ["MiniMax-M1", "MiniMax-Text-01", "abab6.5s-chat"]
+        case .perch: return ["perch-1-pro", "perch-coder-v2", "perch-1-fast", "perch-reasoning-r1"]
+        case .typhoon: return ["typhoon-v2.5-30b-a3b-instruct", "typhoon-v2.1-12b-instruct", "typhoon-v2-70b-instruct", "typhoon-v2-r1-70b-preview"]
+        case .cerebras: return ["qwen-3-coder-480b", "llama-3.3-70b", "qwen-3-32b", "llama3.1-8b"]
+        case .together: return ["Qwen/Qwen3-235B-A22B-fp8-tput", "deepseek-ai/DeepSeek-R1", "meta-llama/Llama-3.3-70B-Instruct-Turbo"]
+        case .fireworks: return ["accounts/fireworks/models/deepseek-v3", "accounts/fireworks/models/deepseek-r1", "accounts/fireworks/models/qwen3-235b-a22b"]
+        case .minimax: return ["MiniMax-M2.7", "MiniMax-M1", "MiniMax-Text-01"]
         case .nvidia: return ["nvidia/llama-3.1-nemotron-ultra-253b-v1", "deepseek-ai/deepseek-r1", "qwen/qwen2.5-coder-32b-instruct"]
-        case .grok: return ["grok-3", "grok-3-mini", "grok-2-1212"]
-        case .qwen: return ["qwen-max", "qwen-plus", "qwen3-coder-plus", "qwen2.5-coder-32b-instruct"]
-        case .glm: return ["glm-4-plus", "glm-4-0520", "glm-4-air", "codegeex-4", "glm-4-flash"]
-        case .codex: return ["o3-mini", "o1", "gpt-4o", "gpt-4o-mini"]
+        case .grok: return ["grok-4.6", "grok-4", "grok-3", "grok-3-mini"]
+        case .qwen: return ["qwen3-coder-plus", "qwen-max", "qwen-plus", "qwq-plus"]
+        case .glm: return ["glm-5.3-flash", "glm-5.3", "glm-5.2", "glm-5.1", "glm-5-turbo", "glm-5", "glm-4.7"]
+        case .codex: return ["gpt-6.1-sol", "gpt-6-luna", "gpt-5.3-codex", "o3", "o4-mini"]
         }
     }
     
@@ -215,6 +221,7 @@ enum AIProviderMeta: String, CaseIterable, Identifiable {
         case .mistral: return .mistral
         case .kimi: return .kimi
         case .perplexity: return .perplexity
+        case .perch: return .perch
         case .typhoon: return .typhoon
         case .cerebras: return .cerebras
         case .together: return .together
@@ -357,7 +364,7 @@ class AIProviderAuthService: ObservableObject {
                 return try await validateOpenAI(apiKey: apiKey, baseURL: meta.baseURL)
             case .gemini:
                 return try await validateGemini(apiKey: apiKey)
-            case .perplexity, .minimax:
+            case .perplexity, .perch, .minimax:
                 return !apiKey.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
             case .openrouter, .groq, .mistral, .kimi, .typhoon, .cerebras, .together, .fireworks, .nvidia, .grok, .qwen, .glm:
                 return try await validateOpenAI(apiKey: apiKey, baseURL: meta.baseURL)
@@ -403,7 +410,7 @@ class AIProviderAuthService: ObservableObject {
             switch meta {
             case .perplexity, .minimax:
                 return meta.defaultModels
-            case .openai, .codex, .deepseek, .openrouter, .groq, .mistral, .kimi, .typhoon, .cerebras, .together, .fireworks, .nvidia, .grok, .qwen, .glm:
+            case .openai, .codex, .deepseek, .openrouter, .groq, .mistral, .kimi, .perch, .typhoon, .cerebras, .together, .fireworks, .nvidia, .grok, .qwen, .glm:
                 var request = URLRequest(url: URL(string: "\(meta.baseURL)/models")!)
                 request.setValue("Bearer \(apiKey)", forHTTPHeaderField: "Authorization")
                 request.timeoutInterval = 10
@@ -466,56 +473,33 @@ class AIProviderAuthService: ObservableObject {
     // MARK: - Keychain Storage
     
     private func saveKeyToKeychain(_ provider: String, key: String) {
-        // 1. Cache in UserDefaults so recompiled ad-hoc builds never trigger Keychain ACL password prompts
-        UserDefaults.standard.set(key, forKey: "microcode_cached_key_\(provider)")
-        
-        let data = Data(key.utf8)
-        var query: [String: Any] = [
-            kSecClass as String: kSecClassGenericPassword,
-            kSecAttrService as String: keychainService,
-            kSecAttrAccount as String: "apikey_\(provider)",
-            kSecValueData as String: data,
-            kSecAttrAccessible as String: kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly
-        ]
-        var access: SecAccess?
-        SecAccessCreate("MicroCode" as CFString, nil, &access)
-        if let access = access {
-            query[kSecAttrAccess as String] = access
+        // Hardware-Bound AES-256-GCM Sealed Store (0ms, zero OS Keychain password dialogs across rebuilds)
+        UserDefaults.standard.removeObject(forKey: "microcode_cached_key_\(provider)")
+        if let sealed = KeychainManager.sealSecret(key) {
+            UserDefaults.standard.set(sealed, forKey: "km_sealed_aiprovider_\(provider)")
         }
-        SecItemDelete(query as CFDictionary)
-        SecItemAdd(query as CFDictionary, nil)
     }
     
     private func loadKeyFromKeychain(_ provider: String) -> String? {
-        // Fast path: cached locally (0ms, zero OS password dialogs on newly compiled builds)
-        if let cached = UserDefaults.standard.string(forKey: "microcode_cached_key_\(provider)"), !cached.isEmpty {
-            return cached
+        if let sealed = UserDefaults.standard.data(forKey: "km_sealed_aiprovider_\(provider)"),
+           let unsealed = KeychainManager.unsealSecret(sealed),
+           !unsealed.isEmpty {
+            return unsealed
         }
-        
-        let query: [String: Any] = [
-            kSecClass as String: kSecClassGenericPassword,
-            kSecAttrService as String: keychainService,
-            kSecAttrAccount as String: "apikey_\(provider)",
-            kSecReturnData as String: true,
-            kSecMatchLimit as String: kSecMatchLimitOne
-        ]
-        var result: AnyObject?
-        let status = SecItemCopyMatching(query as CFDictionary, &result)
-        if status == errSecSuccess, let data = result as? Data, let str = String(data: data, encoding: .utf8) {
-            UserDefaults.standard.set(str, forKey: "microcode_cached_key_\(provider)")
-            return str
+        // Migrate legacy cached key if present
+        if let cached = UserDefaults.standard.string(forKey: "microcode_cached_key_\(provider)"), !cached.isEmpty {
+            UserDefaults.standard.removeObject(forKey: "microcode_cached_key_\(provider)")
+            if let sealed = KeychainManager.sealSecret(cached) {
+                UserDefaults.standard.set(sealed, forKey: "km_sealed_aiprovider_\(provider)")
+            }
+            return cached
         }
         return nil
     }
     
     private func deleteKeyFromKeychain(_ provider: String) {
         UserDefaults.standard.removeObject(forKey: "microcode_cached_key_\(provider)")
-        let query: [String: Any] = [
-            kSecClass as String: kSecClassGenericPassword,
-            kSecAttrService as String: keychainService,
-            kSecAttrAccount as String: "apikey_\(provider)"
-        ]
-        SecItemDelete(query as CFDictionary)
+        UserDefaults.standard.removeObject(forKey: "km_sealed_aiprovider_\(provider)")
     }
     
     // MARK: - Config Persistence
