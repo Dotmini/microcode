@@ -159,7 +159,7 @@ compile_arch() {
     echo "   🔨 Compiling Swift App..."
     
     # Common flags
-    LINK_FLAGS="-Xlinker -L${RUST_LIB_PATH} -Xlinker -lmicrocode_embedded -Xlinker -L${MICROCORE_LIB_PATH} -Xlinker -lmicrocode_core -Xswiftc -strict-concurrency=minimal -Xswiftc -solver-expression-time-threshold=120"
+    LINK_FLAGS="-Xlinker -L${RUST_LIB_PATH} -Xlinker -lmicrocode_embedded -Xlinker -L${MICROCORE_LIB_PATH} -Xlinker -lmicrocode_core -Xswiftc -strict-concurrency=minimal"
     
     if [ "$DEV_MODE" = "true" ]; then
         swift build -c release --product MicroCode --arch "${ARCH}" ${LINK_FLAGS}

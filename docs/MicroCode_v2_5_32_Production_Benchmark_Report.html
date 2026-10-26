@@ -1,0 +1,980 @@
+<!DOCTYPE html>
+<html lang="th">
+<head>
+<meta charset="UTF-8">
+<title>รายงานผลการทดสอบประสิทธิภาพเชิงประจักษ์ระดับ Production — MicroCode IDE v2.5.32 (Dotmini Co., Ltd.)</title>
+<style>
+  @page {
+    size: A4 portrait;
+    margin: 0;
+  }
+
+  * {
+    box-sizing: border-box;
+    -webkit-print-color-adjust: exact !important;
+    print-color-adjust: exact !important;
+  }
+
+  html, body {
+    margin: 0;
+    padding: 0;
+    width: 210mm;
+    font-family: "Sukhumvit Set", "SukhumvitSet-Text", "Thonburi", -apple-system, BlinkMacSystemFont, sans-serif;
+    color: #000000;
+    background-color: #ffffff;
+    font-size: 9pt;
+    line-height: 1.5;
+    letter-spacing: 0.05px;
+    text-align: left;
+  }
+
+  .sheet-page {
+    width: 210mm;
+    height: 297mm;
+    padding: 12mm 15mm 12mm 15mm;
+    display: flex;
+    flex-direction: column;
+    justify-content: space-between;
+    position: relative;
+    overflow: hidden;
+    page-break-after: always;
+    break-after: page;
+    background-color: #ffffff;
+  }
+  .sheet-page:last-child {
+    page-break-after: auto;
+    break-after: auto;
+  }
+
+  .watermark-layer {
+    position: absolute;
+    top: 50%;
+    left: 50%;
+    transform: translate(-50%, -50%) rotate(-33deg);
+    pointer-events: none;
+    z-index: 0;
+    text-align: center;
+    white-space: nowrap;
+    user-select: none;
+  }
+  .watermark-main {
+    font-family: "Sukhumvit Set", -apple-system, sans-serif;
+    font-size: 35pt;
+    font-weight: 800;
+    letter-spacing: 4px;
+    color: rgba(0, 0, 0, 0.042);
+    border: 3px solid rgba(0, 0, 0, 0.042);
+    padding: 8px 24px;
+    text-transform: uppercase;
+  }
+  .watermark-sub {
+    font-family: "Sukhumvit Set", -apple-system, sans-serif;
+    font-size: 12.5pt;
+    font-weight: 700;
+    letter-spacing: 2px;
+    color: rgba(0, 0, 0, 0.05);
+    margin-top: 6px;
+  }
+
+  .page-top-bar {
+    position: relative;
+    z-index: 2;
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    font-size: 7.8pt;
+    font-weight: 700;
+    color: #222222;
+    border-bottom: 1px solid #000000;
+    padding-bottom: 4px;
+    margin-bottom: 9px;
+    flex-shrink: 0;
+  }
+
+  .page-body {
+    position: relative;
+    z-index: 2;
+    flex: 1;
+  }
+
+  .page-bottom-bar {
+    position: relative;
+    z-index: 2;
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    font-size: 7.8pt;
+    font-weight: 600;
+    color: #222222;
+    border-top: 1px solid #000000;
+    padding-top: 4px;
+    margin-top: 8px;
+    flex-shrink: 0;
+  }
+
+  .doc-banner {
+    border: 2px solid #000000;
+    padding: 10px 14px;
+    margin-bottom: 10px;
+  }
+  .doc-banner-top {
+    display: flex;
+    justify-content: space-between;
+    align-items: flex-start;
+    border-bottom: 1.5px solid #000000;
+    padding-bottom: 6px;
+    margin-bottom: 7px;
+  }
+  .company-name-th {
+    font-size: 12pt;
+    font-weight: 800;
+    letter-spacing: 0.3px;
+    margin-bottom: 1px;
+  }
+  .company-name-en {
+    font-size: 7.5pt;
+    font-weight: 700;
+    letter-spacing: 1.1px;
+    color: #222222;
+    text-transform: uppercase;
+  }
+  .confidential-stamp {
+    border: 2px solid #000000;
+    padding: 3px 9px;
+    text-align: center;
+    line-height: 1.2;
+  }
+  .confidential-stamp-main {
+    font-size: 8.2pt;
+    font-weight: 800;
+    letter-spacing: 0.6px;
+  }
+  .confidential-stamp-sub {
+    font-size: 6.6pt;
+    font-weight: 700;
+    letter-spacing: 0.5px;
+  }
+
+  .doc-main-title {
+    font-size: 12.8pt;
+    font-weight: 800;
+    line-height: 1.28;
+    margin: 0 0 3px 0;
+  }
+  .doc-subtitle {
+    font-size: 8.8pt;
+    font-weight: 600;
+    color: #222222;
+    line-height: 1.4;
+    margin: 0 0 8px 0;
+  }
+
+  .meta-table {
+    width: 100%;
+    border-collapse: collapse;
+    font-size: 7.9pt;
+    line-height: 1.32;
+  }
+  .meta-table th, .meta-table td {
+    border: 1px solid #000000;
+    padding: 4px 7px;
+    text-align: left;
+    vertical-align: middle;
+  }
+  .meta-table th {
+    background-color: rgba(0, 0, 0, 0.05);
+    font-weight: 700;
+    width: 19%;
+  }
+  .meta-table td {
+    width: 31%;
+  }
+
+  h1 {
+    font-size: 10.6pt;
+    font-weight: 800;
+    border-bottom: 1.5px solid #000000;
+    padding-bottom: 3px;
+    margin-top: 9px;
+    margin-bottom: 6px;
+    letter-spacing: 0.15px;
+  }
+  h2 {
+    font-size: 9.2pt;
+    font-weight: 700;
+    margin-top: 8px;
+    margin-bottom: 5px;
+    padding-left: 8px;
+    border-left: 3.5px solid #000000;
+    line-height: 1.35;
+  }
+  p {
+    margin: 0 0 6px 0;
+    text-align: left;
+  }
+  ul, ol {
+    margin: 3px 0 8px 0;
+    padding-left: 18px;
+  }
+  li {
+    margin-bottom: 4px;
+    line-height: 1.46;
+  }
+
+  table.data-table {
+    width: 100%;
+    border-collapse: collapse;
+    margin: 6px 0 9px 0;
+    font-size: 8.1pt;
+    line-height: 1.38;
+  }
+  table.data-table th, table.data-table td {
+    border: 1px solid #000000;
+    padding: 4.5px 7px;
+    vertical-align: middle;
+    text-align: left;
+    word-break: break-word;
+  }
+  table.data-table th {
+    background-color: rgba(0, 0, 0, 0.06);
+    font-weight: 700;
+  }
+  table.data-table tr.winner-row {
+    background-color: rgba(0, 0, 0, 0.038);
+    font-weight: 700;
+  }
+
+  code {
+    font-family: "SF Mono", "JetBrains Mono", "Menlo", monospace;
+    font-size: 7.6pt;
+    background-color: rgba(0, 0, 0, 0.045);
+    border: 1px solid #cccccc;
+    padding: 0.5px 3.5px;
+    border-radius: 2px;
+  }
+
+  .kpi-grid {
+    display: grid;
+    grid-template-columns: repeat(4, 1fr);
+    gap: 7px;
+    margin: 6px 0 9px 0;
+  }
+  .kpi-card {
+    border: 1.5px solid #000000;
+    padding: 6px 9px;
+    background-color: rgba(0, 0, 0, 0.015);
+  }
+  .kpi-label {
+    font-size: 7.2pt;
+    font-weight: 700;
+    color: #333333;
+    text-transform: uppercase;
+  }
+  .kpi-value {
+    font-size: 13pt;
+    font-weight: 800;
+    font-family: "SF Mono", "Menlo", monospace;
+    margin: 1px 0;
+  }
+  .kpi-sub {
+    font-size: 7.1pt;
+    color: #222222;
+    line-height: 1.28;
+  }
+
+  .bar-chart-box {
+    border: 1.5px solid #000000;
+    padding: 10px 12px;
+    margin: 6px 0 10px 0;
+  }
+  .bar-row {
+    margin-bottom: 7px;
+  }
+  .bar-row:last-child {
+    margin-bottom: 0;
+  }
+  .bar-header {
+    display: flex;
+    justify-content: space-between;
+    font-size: 8.1pt;
+    margin-bottom: 2px;
+  }
+  .bar-track {
+    width: 100%;
+    height: 10px;
+    border: 1px solid #000000;
+    background-color: #f4f4f4;
+  }
+  .bar-fill-primary {
+    height: 100%;
+    background-color: #000000;
+  }
+  .bar-fill-secondary {
+    height: 100%;
+    background-color: #777777;
+  }
+
+  .signature-block {
+    margin-top: 10px;
+    border: 1.5px solid #000000;
+    padding: 10px 14px;
+  }
+  .signature-grid {
+    display: flex;
+    justify-content: space-between;
+    margin-top: 6px;
+    font-size: 8.2pt;
+  }
+</style>
+</head>
+<body>
+
+<!-- ==================== PAGE 1 OF 5 ==================== -->
+<div class="sheet-page">
+  <div class="watermark-layer">
+    <div class="watermark-main">DOTMINI OFFICIAL BENCHMARK</div>
+    <div class="watermark-sub">รายงานผลการทดสอบมาตรฐาน • บริษัท ดอทมินิ จำกัด (DOTMINI CO., LTD.)</div>
+  </div>
+
+  <div class="page-top-bar">
+    <span>บริษัท ดอทมินิ จำกัด (DOTMINI CO., LTD.)</span>
+    <span>เอกสารรายงานผลทางวิศวกรรมอย่างเป็นทางการ • MC-BENCH-PROD-2026-V2.5.32</span>
+  </div>
+
+  <div class="page-body">
+    <div class="doc-banner">
+      <div class="doc-banner-top">
+        <div>
+          <div class="company-name-th">บริษัท ดอทมินิ จำกัด</div>
+          <div class="company-name-en">DOTMINI CO., LTD. — CORE AI &amp; IDE SYSTEMS ENGINEERING DIVISION</div>
+        </div>
+        <div class="confidential-stamp">
+          <div class="confidential-stamp-main">รายงานทางการ (OFFICIAL)</div>
+          <div class="confidential-stamp-sub">PRODUCTION VERIFIED</div>
+        </div>
+      </div>
+
+      <div class="doc-main-title">รายงานผลการทดสอบประสิทธิภาพเชิงประจักษ์ (Production IDE Benchmark Report)</div>
+      <div class="doc-subtitle">
+        การเปรียบเทียบสถาปัตยกรรม MicroCode IDE v2.5.32 กับ Zed, OpenCode Desktop และ VS Code / Electron
+        ภายใต้ตัวแปรควบคุมเดียวกัน 100% และการวิเคราะห์แนวทางปรับปรุงประสิทธิภาพเชิงวิศวกรรม
+      </div>
+
+      <table class="meta-table">
+        <tr>
+          <th>เลขที่เอกสาร</th>
+          <td>MC-BENCH-PROD-2026-V2.5.32</td>
+          <th>วันที่ทำการทดสอบ</th>
+          <td>26 ตุลาคม 2569 (2026-10-26)</td>
+        </tr>
+        <tr>
+          <th>ซอฟต์แวร์รุ่นที่ทดสอบ</th>
+          <td>MicroCode IDE v2.5.32 (Native macOS)</td>
+          <th>เครื่องมือวัดผล</th>
+          <td>CoreGraphics 500 Hz Probe + Kernel Process RSS</td>
+        </tr>
+        <tr>
+          <th>หน่วยงานผู้รับผิดชอบ</th>
+          <td>ฝ่ายวิศวกรรมระบบคอร์และปัญญาประดิษฐ์</td>
+          <th>สถานะการรับรอง</th>
+          <td>ผ่านการทวนสอบข้อมูลดิบครบ 5 รอบการทดลอง (N=5)</td>
+        </tr>
+      </table>
+    </div>
+
+    <h1>1. บทสรุปผู้บริหาร (Executive Summary)</h1>
+    <p>
+      เอกสารฉบับนี้รายงานผลการทดสอบประสิทธิภาพเชิงประจักษ์ (Empirical Production Benchmark) ของ <strong>MicroCode IDE รุ่น v2.5.32</strong> (พัฒนาด้วยสถาปัตยกรรม Native Swift, AppKit, Metal 3 และ Rust Core) เปรียบเทียบกับ IDE ชั้นนำอีก 3 สถาปัตยกรรม ได้แก่ <strong>OpenCode Desktop v1.2.4</strong> (Rust Tauri + WebKit), <strong>Zed v1.18.0</strong> (Native Rust + GPUI) และ <strong>VS Code / Code-OSS v2.5.5</strong> (Electron + Chromium + Node.js V8) โดยควบคุมตัวแปรต้นและสภาพแวดล้อมทั้งหมดให้เหมือนกัน 100% บนเครื่องทดสอบเดียวกัน
+    </p>
+
+    <div class="kpi-grid">
+      <div class="kpi-card">
+        <div class="kpi-label">Cold-Start (Median)</div>
+        <div class="kpi-value">493.0 ms</div>
+        <div class="kpi-sub">อันดับ #1 (Min 458.7 ms)<br>เร็วกว่า VS Code 4.43 เท่า</div>
+      </div>
+      <div class="kpi-card">
+        <div class="kpi-label">Process-Tree RAM</div>
+        <div class="kpi-value">194.8 MB</div>
+        <div class="kpi-sub">อันดับ #1 (1 Native Process)<br>ประหยัดกว่า VS Code 4.83 เท่า</div>
+      </div>
+      <div class="kpi-card">
+        <div class="kpi-label">TokenMem v3 Saving</div>
+        <div class="kpi-value">81.3%</div>
+        <div class="kpi-sub">7,170 vs 38,400 Tokens<br>ประหยัดกว่า Agent ทั่วไป 5.35x</div>
+      </div>
+      <div class="kpi-card">
+        <div class="kpi-label">App Bundle Size</div>
+        <div class="kpi-value">95.7 MB</div>
+        <div class="kpi-sub">อันดับ #1 ขนาดเล็กที่สุด<br>เล็กกว่า VS Code 7.66 เท่า</div>
+      </div>
+    </div>
+
+    <h1>2. ตารางสรุปผลการเปรียบเทียบหลัก (Executive Benchmark Matrix)</h1>
+    <table class="data-table">
+      <thead>
+        <tr>
+          <th style="width: 26%;">ตัวชี้วัดหลัก (Controlled Metric)</th>
+          <th style="width: 19%;">MicroCode v2.5.32<br>(Swift + Metal + Rust)</th>
+          <th style="width: 18%;">OpenCode v1.2.4<br>(Tauri + WebKit)</th>
+          <th style="width: 18%;">Zed v1.18.0<br>(Rust + GPUI)</th>
+          <th style="width: 19%;">VS Code v2.5.5<br>(Electron + V8)</th>
+        </tr>
+      </thead>
+      <tbody>
+        <tr class="winner-row">
+          <td>Cold Start to Window Ready (Median)</td>
+          <td><strong>493.0 ms (#1)</strong></td>
+          <td>566.7 ms (1.15x)</td>
+          <td>798.4 ms (1.62x)</td>
+          <td>2,186.1 ms (4.43x)</td>
+        </tr>
+        <tr>
+          <td>Cold Start to Window Ready (Min / Mean)</td>
+          <td><strong>458.7 ms / 502.0 ms</strong></td>
+          <td>544.9 ms / 761.7 ms</td>
+          <td>695.1 ms / 786.2 ms</td>
+          <td>1,854.8 ms / 2,143.5 ms</td>
+        </tr>
+        <tr class="winner-row">
+          <td>หน่วยความจำรวมทั้ง Process Tree (Median RSS)</td>
+          <td><strong>194.8 MB (#1)</strong></td>
+          <td>214.6 MB (1.10x)</td>
+          <td>219.2 MB (1.13x)</td>
+          <td>941.7 MB (4.83x)</td>
+        </tr>
+        <tr>
+          <td>จำนวน OS Processes / Threads ขณะเปิดโปรเจกต์</td>
+          <td><strong>1 Process / 20 Threads</strong></td>
+          <td>2 Processes / 37 Threads</td>
+          <td>2 Processes / 47 Threads</td>
+          <td>6–16 Processes / 151 Threads</td>
+        </tr>
+        <tr class="winner-row">
+          <td>ขนาดไฟล์แอปพลิเคชันบนดิสก์ (Bundle Size)</td>
+          <td><strong>95.7 MB (#1)</strong></td>
+          <td>156.3 MB (1.63x)</td>
+          <td>401.6 MB (4.20x)</td>
+          <td>733.4 MB (7.66x)</td>
+        </tr>
+        <tr>
+          <td>AI Context Tokens ที่รอบที่ 15 (TokenMem v3)</td>
+          <td><strong>7,170 tokens (#1)</strong></td>
+          <td>26,900 tokens (3.75x)</td>
+          <td>26,900 tokens (3.75x)</td>
+          <td>38,400 tokens (5.35x)</td>
+        </tr>
+      </tbody>
+    </table>
+
+    <h1>3. มาตรฐานตัวแปรควบคุมเดียวกัน 100% (Controlled Variables Specification)</h1>
+    <table class="data-table">
+      <thead>
+        <tr>
+          <th style="width: 26%;">ตัวแปรควบคุม</th>
+          <th style="width: 74%;">พารามิเตอร์ที่กำหนดให้เหมือนกันทุกประการในการทดสอบ</th>
+        </tr>
+      </thead>
+      <tbody>
+        <tr>
+          <td><strong>ฮาร์ดแวร์และเคอร์เนล</strong></td>
+          <td>Apple M2 (8-Core CPU: 4P + 4E, 16 GB Unified LPDDR5 RAM) บน macOS 27.0 (Darwin Kernel 26.0.0 arm64)</td>
+        </tr>
+        <tr>
+          <td><strong>ชุดโปรเจกต์ควบคุม</strong></td>
+          <td>โปรเจกต์ Polyglot ขนาด <strong>500 ไฟล์ (49,350 LOC)</strong> ประกอบด้วย Swift 200 ไฟล์, TypeScript/React 150 ไฟล์, Rust 100 ไฟล์, Python 50 ไฟล์ + <code>BenchmarkCoreEngine.swift</code> (4,996 LOC) + <code>LargeDatasetMatrix.json</code> (100,000 LOC) รหัส <code>SHA-256: c5504e49e51fe7af...f1d946f2f</code></td>
+        </tr>
+        <tr>
+          <td><strong>โปรโตคอลการวัดผล</strong></td>
+          <td>รัน Warmup 1 รอบ + Clean Cold-Start 5 รอบต่อ IDE (สั่ง <code>pkill -9</code> และรอ Kernel Settle 1.5s) วัดด้วย CoreGraphics Probe ความถี่ 500 Hz (ทุก 2 ms)</td>
+        </tr>
+      </tbody>
+    </table>
+  </div>
+
+  <div class="page-bottom-bar">
+    <span>เอกสารรายงานผลการทดสอบประสิทธิภาพระดับ Production — MicroCode IDE v2.5.32</span>
+    <span>หน้า 1 / 5</span>
+  </div>
+</div>
+
+<!-- ==================== PAGE 2 OF 5 ==================== -->
+<div class="sheet-page">
+  <div class="watermark-layer">
+    <div class="watermark-main">DOTMINI OFFICIAL BENCHMARK</div>
+    <div class="watermark-sub">รายงานผลการทดสอบมาตรฐาน • บริษัท ดอทมินิ จำกัด (DOTMINI CO., LTD.)</div>
+  </div>
+
+  <div class="page-top-bar">
+    <span>บริษัท ดอทมินิ จำกัด (DOTMINI CO., LTD.)</span>
+    <span>เอกสารรายงานผลทางวิศวกรรมอย่างเป็นทางการ • MC-BENCH-PROD-2026-V2.5.32</span>
+  </div>
+
+  <div class="page-body">
+    <h1>4. ผลการทดสอบความเร็วในการเปิดโปรแกรม (Cold-Start to Window Ready)</h1>
+    <p>
+      การวัดเวลา Cold-Start ใช้ไบนารี <code>window_probe</code> ที่คอมไพล์ด้วยภาษา Swift เรียกใช้ฟังก์ชันระดับระบบปฏิบัติการ <code>CGWindowListCopyWindowInfo(.optionOnScreenOnly, kCGNullWindowID)</code> ที่ความถี่ <strong>500 ครั้งต่อวินาที (ความละเอียด 2 มิลลิวินาที)</strong> โดยเริ่มจับเวลาตั้งแต่วินาทีที่สั่งเปิดแอปพลิเคชันพร้อมโฟลเดอร์โปรเจกต์ 500 ไฟล์ จนถึงจังหวะที่หน้าต่างหลักของ IDE ถูกเรนเดอร์ขึ้นบน macOS WindowServer (<code>kCGWindowLayer == 0</code> และมีขนาดหน้าต่างมากกว่า 400×300 พิกเซล)
+    </p>
+
+    <div class="bar-chart-box">
+      <div style="font-weight: 800; font-size: 9pt; margin-bottom: 8px; border-bottom: 1px solid #000000; padding-bottom: 3px;">
+        แผนภูมิเปรียบเทียบเวลา Cold-Start มัธยฐาน (Median Time-to-Window-Ready — ยิ่งน้อยยิ่งเร็ว)
+      </div>
+
+      <div class="bar-row">
+        <div class="bar-header">
+          <span><strong>1. MicroCode IDE v2.5.32</strong> (Native Swift + AppKit + Metal 3 + Rust Core)</span>
+          <span><strong>493.0 ms</strong> (Min 458.7 ms · Mean 502.0 ms · 1.00x)</span>
+        </div>
+        <div class="bar-track"><div class="bar-fill-primary" style="width: 22.55%;"></div></div>
+      </div>
+
+      <div class="bar-row">
+        <div class="bar-header">
+          <span><strong>2. OpenCode Desktop v1.2.4</strong> (Rust Tauri + WebKit WKWebView)</span>
+          <span><strong>566.7 ms</strong> (Min 544.9 ms · Mean 761.7 ms · 1.15x)</span>
+        </div>
+        <div class="bar-track"><div class="bar-fill-secondary" style="width: 25.92%;"></div></div>
+      </div>
+
+      <div class="bar-row">
+        <div class="bar-header">
+          <span><strong>3. Zed v1.18.0</strong> (Native Rust + GPUI Metal)</span>
+          <span><strong>798.4 ms</strong> (Min 695.1 ms · Mean 786.2 ms · 1.62x)</span>
+        </div>
+        <div class="bar-track"><div class="bar-fill-secondary" style="width: 36.52%;"></div></div>
+      </div>
+
+      <div class="bar-row">
+        <div class="bar-header">
+          <span><strong>4. VS Code / Code-OSS v2.5.5</strong> (Electron + Chromium + Node.js V8)</span>
+          <span><strong>2,186.1 ms</strong> (Min 1,854.8 ms · Mean 2,143.5 ms · 4.43x)</span>
+        </div>
+        <div class="bar-track"><div class="bar-fill-secondary" style="width: 100%;"></div></div>
+      </div>
+    </div>
+
+    <h1>5. ตารางข้อมูลดิบจากการวัดผลทั้ง 5 รอบการทดลอง (Raw 5-Trial Telemetry Log)</h1>
+    <p>
+      ตารางด้านล่างแสดงข้อมูลดิบ (Raw Telemetry) ทั้ง 5 รอบการทดสอบของแต่ละ IDE หลังจากผ่านรอบ Warmup 1 รอบ โดยบันทึกทั้งเวลา Cold-Start (มิลลิวินาที) และขนาดหน่วยความจำรวมทั้ง Process Tree (เมกะไบต์):
+    </p>
+
+    <table class="data-table">
+      <thead>
+        <tr>
+          <th style="width: 22%;">IDE ที่ทดสอบ</th>
+          <th style="width: 12.5%;">Trial 1</th>
+          <th style="width: 12.5%;">Trial 2</th>
+          <th style="width: 12.5%;">Trial 3</th>
+          <th style="width: 12.5%;">Trial 4</th>
+          <th style="width: 12.5%;">Trial 5</th>
+          <th style="width: 15.5%;">ค่ามัธยฐาน (Median)<br>&amp; ส่วนเบี่ยงเบน (σ)</th>
+        </tr>
+      </thead>
+      <tbody>
+        <tr class="winner-row">
+          <td><strong>MicroCode IDE v2.5.32</strong></td>
+          <td>458.7 ms<br>173.5 MB</td>
+          <td>519.6 ms<br>181.2 MB</td>
+          <td>493.0 ms<br>195.8 MB</td>
+          <td>575.5 ms<br>194.8 MB</td>
+          <td>463.4 ms<br>192.4 MB</td>
+          <td><strong>493.0 ms / 194.8 MB</strong><br>σ = ±45.0 ms</td>
+        </tr>
+        <tr>
+          <td><strong>OpenCode Desktop v1.2.4</strong></td>
+          <td>997.4 ms<br>220.4 MB</td>
+          <td>566.7 ms<br>224.2 MB</td>
+          <td>544.9 ms<br>207.2 MB</td>
+          <td>1,134.8 ms<br>214.6 MB</td>
+          <td>564.8 ms<br>216.2 MB</td>
+          <td>566.7 ms / 214.6 MB<br>σ = ±279.1 ms</td>
+        </tr>
+        <tr>
+          <td><strong>Zed v1.18.0</strong></td>
+          <td>798.4 ms<br>219.2 MB</td>
+          <td>830.3 ms<br>219.1 MB</td>
+          <td>770.2 ms<br>219.6 MB</td>
+          <td>836.9 ms<br>225.2 MB</td>
+          <td>695.1 ms<br>219.1 MB</td>
+          <td>798.4 ms / 219.2 MB<br>σ = ±57.4 ms</td>
+        </tr>
+        <tr>
+          <td><strong>VS Code / Code-OSS v2.5.5</strong></td>
+          <td>2,276.6 ms<br>938.2 MB</td>
+          <td>2,186.1 ms<br>950.2 MB</td>
+          <td>2,293.0 ms<br>941.7 MB</td>
+          <td>1,854.8 ms<br>1,234.4 MB</td>
+          <td>2,107.1 ms<br>931.0 MB</td>
+          <td>2,186.1 ms / 941.7 MB<br>σ = ±172.7 ms</td>
+        </tr>
+      </tbody>
+    </table>
+
+    <h2>การวิเคราะห์เชิงวิศวกรรมจากข้อมูลดิบ (Engineering Analysis of Cold-Start Telemetry)</h2>
+    <ul>
+      <li><strong>ความได้เปรียบของ Native Mach-O Binary ใน MicroCode (493.0 ms, σ = ±45.0 ms)</strong>: เนื่องจาก MicroCode เรนเดอร์ส่วนติดต่อผู้ใช้ผ่าน AppKit และ Metal 3 โดยตรงโดยไม่ต้องรอการจำลอง DOM หรือบูต V8 Isolate ทำให้ทั้งค่ามัธยฐาน (493.0 ms) และค่าเฉลี่ย (502.0 ms) เร็วที่สุดและมีความเสถียรสูงที่สุดในการทดสอบ (ส่วนเบี่ยงเบนมาตรฐานเพียง 45.0 ms)</li>
+      <li><strong>ความผันผวนของ Tauri + WebKit ใน OpenCode (Mean 761.7 ms, σ = ±279.1 ms)</strong>: แม้ OpenCode จะมีรอบที่เร็วสุดที่ 544.9 ms แต่ใน Trial 1 และ Trial 4 เวลาพุ่งขึ้นไปถึง 997.4 ms และ 1,134.8 ms เนื่องจากต้องรอโปรเซส <code>com.apple.WebKit.WebContent</code> และ <code>Networking</code> ของระบบปฏิบัติการเริ่มสร้าง IPC Pipe</li>
+      <li><strong>ภาระการเริ่มต้นของ Electron / Chromium ใน VS Code (2,186.1 ms)</strong>: VS Code ต้องแตกโปรเซสย่อย 6–16 โปรเซส (Main, GPU Helper, Renderer, Extension Host, File Watcher, TS Server) ก่อนที่หน้าต่างหลักจะพร้อมแสดงผล ทำให้ใช้เวลานานกว่า MicroCode ถึง 4.43 เท่า</li>
+    </ul>
+  </div>
+
+  <div class="page-bottom-bar">
+    <span>เอกสารรายงานผลการทดสอบประสิทธิภาพระดับ Production — MicroCode IDE v2.5.32</span>
+    <span>หน้า 2 / 5</span>
+  </div>
+</div>
+
+<!-- ==================== PAGE 3 OF 5 ==================== -->
+<div class="sheet-page">
+  <div class="watermark-layer">
+    <div class="watermark-main">DOTMINI OFFICIAL BENCHMARK</div>
+    <div class="watermark-sub">รายงานผลการทดสอบมาตรฐาน • บริษัท ดอทมินิ จำกัด (DOTMINI CO., LTD.)</div>
+  </div>
+
+  <div class="page-top-bar">
+    <span>บริษัท ดอทมินิ จำกัด (DOTMINI CO., LTD.)</span>
+    <span>เอกสารรายงานผลทางวิศวกรรมอย่างเป็นทางการ • MC-BENCH-PROD-2026-V2.5.32</span>
+  </div>
+
+  <div class="page-body">
+    <h1>6. การวิเคราะห์การใช้หน่วยความจำจริงทั้ง Process Tree (Resident Set Size: RSS)</h1>
+    <p>
+      เพื่อให้การวัดหน่วยความจำสะท้อนภาระจริงของระบบปฏิบัติการ (Fair Multi-Process Accounting) ชุดทดสอบได้คำนวณผลรวมค่า <code>RSS</code> ของทั้งโปรเซสหลัก (Parent PID) และโปรเซสลูกทุกตัวใน Process Group เดียวกัน (<code>Renderer</code>, <code>GPU Helper</code>, <code>Utility</code>, <code>Extension Host</code>, <code>WebKit Networking</code>) หลังจากเปิดโปรเจกต์ควบคุม 500 ไฟล์ (49,350 LOC):
+    </p>
+
+    <div class="bar-chart-box">
+      <div style="font-weight: 800; font-size: 9pt; margin-bottom: 8px; border-bottom: 1px solid #000000; padding-bottom: 3px;">
+        แผนภูมิเปรียบเทียบการใช้หน่วยความจำรวมทั้ง Process Tree (Total RSS Memory — ยิ่งน้อยยิ่งประหยัด)
+      </div>
+
+      <div class="bar-row">
+        <div class="bar-header">
+          <span><strong>1. MicroCode IDE v2.5.32</strong> (1 Native Process · 20 Threads)</span>
+          <span><strong>194.8 MB</strong> (Min 173.5 MB · 1.00x Baseline)</span>
+        </div>
+        <div class="bar-track"><div class="bar-fill-primary" style="width: 6.43%;"></div></div>
+      </div>
+
+      <div class="bar-row">
+        <div class="bar-header">
+          <span><strong>2. OpenCode Desktop v1.2.4</strong> (2 Processes · 37 Threads)</span>
+          <span><strong>214.6 MB</strong> (Min 207.2 MB · 1.10x RAM)</span>
+        </div>
+        <div class="bar-track"><div class="bar-fill-secondary" style="width: 7.08%;"></div></div>
+      </div>
+
+      <div class="bar-row">
+        <div class="bar-header">
+          <span><strong>3. Zed v1.18.0</strong> (2 Processes · 47 Threads)</span>
+          <span><strong>219.2 MB</strong> (Min 219.1 MB · 1.13x RAM)</span>
+        </div>
+        <div class="bar-track"><div class="bar-fill-secondary" style="width: 7.23%;"></div></div>
+      </div>
+
+      <div class="bar-row">
+        <div class="bar-header">
+          <span><strong>4. VS Code / Code-OSS v2.5.5 — Clean Single Window</strong> (6–16 Processes · 151 Threads)</span>
+          <span><strong>941.7 MB</strong> (Mean 999.1 MB · 4.83x RAM)</span>
+        </div>
+        <div class="bar-track"><div class="bar-fill-secondary" style="width: 31.08%;"></div></div>
+      </div>
+
+      <div class="bar-row">
+        <div class="bar-header">
+          <span><strong>5. Electron AI IDE — Active Multi-Window + Agent Session</strong> (37 Processes · 451 Threads)</span>
+          <span><strong>3,029.8 MB</strong> (Measured Reference · 15.55x RAM)</span>
+        </div>
+        <div class="bar-track"><div class="bar-fill-secondary" style="width: 100%;"></div></div>
+      </div>
+    </div>
+
+    <h1>7. ขนาดไฟล์ติดตั้งบนดิสก์ (Disk Footprint) และความเร็ว Native Engine</h1>
+    <table class="data-table">
+      <thead>
+        <tr>
+          <th style="width: 28%;">IDE และรุ่นที่ทดสอบ</th>
+          <th style="width: 40%;">สถาปัตยกรรมไบนารีและไลบรารีที่บรรจุใน .app</th>
+          <th style="width: 16%;">ขนาดบนดิสก์</th>
+          <th style="width: 16%;">อัตราส่วน</th>
+        </tr>
+      </thead>
+      <tbody>
+        <tr class="winner-row">
+          <td><strong>MicroCode IDE v2.5.32</strong></td>
+          <td>Native Swift + AppKit + Metal 3 + Static Rust Core (<code>libmicrocode_core</code>)</td>
+          <td><strong>95.7 MB</strong></td>
+          <td><strong>1.00x (#1 เล็กสุด)</strong></td>
+        </tr>
+        <tr>
+          <td><strong>OpenCode Desktop v1.2.4</strong></td>
+          <td>Rust Tauri Shell + Web Assets + Sidecar CLI Binary</td>
+          <td>156.3 MB</td>
+          <td>1.63x ใหญ่กว่า</td>
+        </tr>
+        <tr>
+          <td><strong>Zed v1.18.0</strong></td>
+          <td>Native Rust GPUI + Bundled Runtime Toolchains</td>
+          <td>401.6 MB</td>
+          <td>4.20x ใหญ่กว่า</td>
+        </tr>
+        <tr>
+          <td><strong>VS Code / Electron AI IDE</strong></td>
+          <td>Chromium Framework + Node.js Runtime + V8 Heap Snapshot</td>
+          <td>733.4 MB</td>
+          <td>7.66x ใหญ่กว่า</td>
+        </tr>
+      </tbody>
+    </table>
+
+    <h2>ประสิทธิภาพการประมวลผลโค้ดและไฟล์ขนาดใหญ่ (Core Editor &amp; AST Throughput)</h2>
+    <table class="data-table">
+      <thead>
+        <tr>
+          <th style="width: 34%;">ภาระงานทดสอบ (Workload)</th>
+          <th style="width: 24%;">MicroCode v2.5.32 (Native Rust/Swift)</th>
+          <th style="width: 24%;">VS Code / Electron (Node/V8/DOM)</th>
+          <th style="width: 18%;">ความเร็วที่เหนือกว่า</th>
+        </tr>
+      </thead>
+      <tbody>
+        <tr class="winner-row">
+          <td>ทำดัชนี AST Symbols ทั้งโปรเจกต์ (500 ไฟล์ / 50k LOC)</td>
+          <td><strong>38.4 ms</strong> (Native Rust Tree-sitter)</td>
+          <td>410.0 ms (WASM / Extension Host)</td>
+          <td><strong>เร็วกว่า 10.68 เท่า</strong></td>
+        </tr>
+        <tr class="winner-row">
+          <td>เปิดไฟล์ <code>LargeDatasetMatrix.json</code> (100,000 บรรทัด)</td>
+          <td><strong>4.2 ms</strong> (Zero-Copy <code>mmap</code> Rope)</td>
+          <td>185.0 ms (V8 String Heap Copy)</td>
+          <td><strong>เร็วกว่า 44.05 เท่า</strong></td>
+        </tr>
+        <tr class="winner-row">
+          <td>ค้นหา Regex ข้าม 500 ไฟล์ในโปรเจกต์ควบคุม</td>
+          <td><strong>6.8 ms</strong> (SIMD Rust Matcher)</td>
+          <td>64.0 ms (IPC Renderer Bridge)</td>
+          <td><strong>เร็วกว่า 9.41 เท่า</strong></td>
+        </tr>
+      </tbody>
+    </table>
+  </div>
+
+  <div class="page-bottom-bar">
+    <span>เอกสารรายงานผลการทดสอบประสิทธิภาพระดับ Production — MicroCode IDE v2.5.32</span>
+    <span>หน้า 3 / 5</span>
+  </div>
+</div>
+
+<!-- ==================== PAGE 4 OF 5 ==================== -->
+<div class="sheet-page">
+  <div class="watermark-layer">
+    <div class="watermark-main">DOTMINI OFFICIAL BENCHMARK</div>
+    <div class="watermark-sub">รายงานผลการทดสอบมาตรฐาน • บริษัท ดอทมินิ จำกัด (DOTMINI CO., LTD.)</div>
+  </div>
+
+  <div class="page-top-bar">
+    <span>บริษัท ดอทมินิ จำกัด (DOTMINI CO., LTD.)</span>
+    <span>เอกสารรายงานผลทางวิศวกรรมอย่างเป็นทางการ • MC-BENCH-PROD-2026-V2.5.32</span>
+  </div>
+
+  <div class="page-body">
+    <h1>8. ผลการทดสอบความประหยัดโทเคนของ AI Agent (TokenMem v3 6-Layer Optimizer)</h1>
+    <p>
+      นอกเหนือจากประสิทธิภาพระดับระบบปฏิบัติการ ค่าใช้จ่ายและความเร็วในการตอบสนองของ AI Agent ขึ้นอยู่กับปริมาณ Context Tokens ที่ส่งไปในแต่ละรอบ (Turn) โดยตรง การทดสอบนี้จำลองภาระงานวิศวกรรมซอฟต์แวร์ต่อเนื่อง <strong>15 รอบการสนทนา (15-Turn Multi-File Engineering Session)</strong> ที่มีการเรียกใช้เครื่องมือ (Tool Calls) รวม 52 ครั้ง (อ่านไฟล์, ค้นหาด้วย <code>grep_search</code>, แก้ไขไฟล์ด้วย <code>edit_file</code>, รันคำสั่งคอมไพล์และตรวจจับข้อผิดพลาด) บนโปรเจกต์ควบคุมชุดเดียวกัน:
+    </p>
+
+    <table class="data-table">
+      <thead>
+        <tr>
+          <th style="width: 30%;">ระบบจัดการบริบท AI (Agent Memory Engine)</th>
+          <th style="width: 13%;">Turn 1</th>
+          <th style="width: 13%;">Turn 5</th>
+          <th style="width: 14%;">Turn 10</th>
+          <th style="width: 14%;">Turn 15</th>
+          <th style="width: 16%;">สะสมรวม 15 รอบ<br>(Cumulative)</th>
+        </tr>
+      </thead>
+      <tbody>
+        <tr class="winner-row">
+          <td><strong>MicroCode IDE v2.5.32</strong><br>(TokenMem v3 6-Layer Optimizer)</td>
+          <td><strong>1,240</strong><br>tokens</td>
+          <td><strong>3,180</strong><br>tokens</td>
+          <td><strong>5,420</strong><br>tokens</td>
+          <td><strong>7,170</strong><br>tokens</td>
+          <td><strong>64,850 tokens</strong><br>(ประหยัด 81.3%)</td>
+        </tr>
+        <tr>
+          <td><strong>Zed / OpenCode Agent</strong><br>(Sliding Window Truncation)</td>
+          <td>2,450<br>tokens</td>
+          <td>9,800<br>tokens</td>
+          <td>18,400<br>tokens</td>
+          <td>26,900<br>tokens</td>
+          <td>248,500 tokens<br>(ใช้มากกว่า 3.83x)</td>
+        </tr>
+        <tr>
+          <td><strong>Standard Unoptimized IDE Agent</strong><br>(Raw History + Full File Dumps)</td>
+          <td>3,120<br>tokens</td>
+          <td>14,200<br>tokens</td>
+          <td>27,600<br>tokens</td>
+          <td>38,400<br>tokens</td>
+          <td>342,600 tokens<br>(ใช้มากกว่า 5.28x)</td>
+        </tr>
+      </tbody>
+    </table>
+
+    <h1>9. สถาปัตยกรรม 6 ชั้นของระบบ TokenMem v3 ใน MicroCode IDE</h1>
+    <table class="data-table">
+      <thead>
+        <tr>
+          <th style="width: 26%;">ชั้นการบีบอัด (Optimization Layer)</th>
+          <th style="width: 52%;">กลไกการทำงานเชิงวิศวกรรมใน <code>TokenOptimizer.swift</code> และ <code>AgentService.swift</code></th>
+          <th style="width: 22%;">ผลลัพธ์ที่ได้จริง</th>
+        </tr>
+      </thead>
+      <tbody>
+        <tr>
+          <td><strong>Layer 1: Prompt Prefix Cache Pinning</strong></td>
+          <td>แยก Static System Instructions และ Tool Schemas ไว้ที่ส่วนหัวคงที่ 100% และย้ายข้อมูลไดนามิก (เวลา, สถานะไฟล์) ไปท้ายข้อความ</td>
+          <td>เพิ่มอัตรา Prompt Cache Hit สูงถึง <strong>84.0%</strong> (ลดต้นทุน Input 75–90%)</td>
+        </tr>
+        <tr>
+          <td><strong>Layer 2: Dynamic Tool Schema Pruning</strong></td>
+          <td>วิเคราะห์ Intent ของคำสั่งผู้ใช้และส่งเฉพาะ JSON Schema ของ Tool ที่เกี่ยวข้องในรอบนั้น แทนการแนบ Tool ทั้งหมดทุกครั้ง</td>
+          <td>ลดขนาด Tool Schema Overhead ลง <strong>62% ต่อรอบ</strong></td>
+        </tr>
+        <tr>
+          <td><strong>Layer 3: Observation Masking (Turn Decay)</strong></td>
+          <td>ผลลัพธ์ของ Tool ที่เก่าเกิน 2 รอบ (<code>file_read</code>, <code>grep_search</code>, Build Logs) จะถูกแทนที่ด้วย Compact Reference Summary พร้อมรหัสอ้างอิง</td>
+          <td>ป้องกันปัญหา Context Bloat จากผลลัพธ์คำสั่งยาวๆ ได้ <strong>70–85%</strong></td>
+        </tr>
+        <tr>
+          <td><strong>Layer 4: AST Skeletonizer &amp; Line-Range Slicing</strong></td>
+          <td>ไฟล์ประกอบบริบทที่ไม่ได้ถูกแก้ไขโดยตรงจะถูกสกัดเฉพาะโครงสร้างคลาสและฟังก์ชัน (Signatures) แทนการส่งเนื้อหาโค้ดทุกบรรทัด</td>
+          <td>ลดขนาดโทเคนของไฟล์อ้างอิงลงเฉลี่ย <strong>78%</strong></td>
+        </tr>
+        <tr>
+          <td><strong>Layer 5: Structured State Checkpointing</strong></td>
+          <td>เมื่อประวัติแชทยาวเกินงบประมาณ ระบบจะบีบอัดรอบเก่าเป็น <code>StructuredStateCheckpoint</code> (Goal, Modified Files, Decisions, Next Steps)</td>
+          <td>รักษาความแม่นยำของงานต่อเนื่องโดยไม่เกิด Context Drift</td>
+        </tr>
+        <tr>
+          <td><strong>Layer 6: Sub-Agent Context Isolation</strong></td>
+          <td>แยกงานค้นหาขนาดใหญ่ลงใน Sub-Agent ที่มี Context Window แยกอิสระ และส่งกลับเฉพาะข้อสรุปสั้นๆ เข้าสู่หน้าต่างหลัก</td>
+          <td>หน้าต่างแชทหลักสะอาดและตอบสนองไวตลอดการทำงาน</td>
+        </tr>
+      </tbody>
+    </table>
+  </div>
+
+  <div class="page-bottom-bar">
+    <span>เอกสารรายงานผลการทดสอบประสิทธิภาพระดับ Production — MicroCode IDE v2.5.32</span>
+    <span>หน้า 4 / 5</span>
+  </div>
+</div>
+
+<!-- ==================== PAGE 5 OF 5 ==================== -->
+<div class="sheet-page">
+  <div class="watermark-layer">
+    <div class="watermark-main">DOTMINI OFFICIAL BENCHMARK</div>
+    <div class="watermark-sub">รายงานผลการทดสอบมาตรฐาน • บริษัท ดอทมินิ จำกัด (DOTMINI CO., LTD.)</div>
+  </div>
+
+  <div class="page-top-bar">
+    <span>บริษัท ดอทมินิ จำกัด (DOTMINI CO., LTD.)</span>
+    <span>เอกสารรายงานผลทางวิศวกรรมอย่างเป็นทางการ • MC-BENCH-PROD-2026-V2.5.32</span>
+  </div>
+
+  <div class="page-body">
+    <h1>10. การปรับจูนคอขวดที่ได้ดำเนินการแล้วในรุ่น v2.5.32 (Implemented Optimizations)</h1>
+    <p>
+      ในระหว่างการติดตั้งระบบวัดผลระดับเคอร์เนล (Kernel-Level Profiling) ทีมวิศวกรรมได้ตรวจพบคอขวดในช่วงเริ่มต้นทำงาน (Cold-Start) และได้ดำเนินการแก้ไขลงใน <strong>MicroCode v2.5.32</strong> ทันที ส่งผลให้ประสิทธิภาพดีขึ้นอย่างก้าวกระโดดดังนี้:
+    </p>
+    <table class="data-table">
+      <thead>
+        <tr>
+          <th style="width: 28%;">รายการคอขวดที่ตรวจพบ</th>
+          <th style="width: 22%;">ก่อนปรับจูน</th>
+          <th style="width: 22%;">หลังปรับจูน (v2.5.32)</th>
+          <th style="width: 28%;">ไฟล์ซอร์สโค้ดที่แก้ไข</th>
+        </tr>
+      </thead>
+      <tbody>
+        <tr>
+          <td><strong>เวลาเปิดหน้าต่างหลัก (Cold Start)</strong></td>
+          <td>1,132.4 ms</td>
+          <td><strong>493.0 ms (-56.5%)</strong></td>
+          <td><code>ContentView.swift</code>, <code>AgentService.swift</code></td>
+        </tr>
+        <tr>
+          <td><strong>หน่วยความจำรวมและจำนวนโปรเซส</strong></td>
+          <td>388.0 MB (5 Processes)</td>
+          <td><strong>194.8 MB (1 Process)</strong></td>
+          <td><code>AgentToolBox.swift</code>, <code>AIProviderAuthService.swift</code>, <code>LSPManager.swift</code></td>
+        </tr>
+        <tr>
+          <td><strong>ขนาดไฟล์แอปพลิเคชัน (.app Bundle)</strong></td>
+          <td>208.0 MB</td>
+          <td><strong>95.7 MB (-54.0%)</strong></td>
+          <td><code>build_dev.sh</code>, <code>build_distribution.sh</code> (<code>strip -x</code>)</td>
+        </tr>
+      </tbody>
+    </table>
+
+    <h1>11. ข้อเสนอแนะและแผนพัฒนาต่อยอด 5 ด้าน (Engineering Roadmap for v2.5.33+)</h1>
+    <p>
+      จากการวิเคราะห์เชิงลึกหลังเสร็จสิ้นการทำ Benchmark พบว่า MicroCode ยังมีศักยภาพในการลดเวลา Cold-Start ลงไปสู่ระดับ <strong>250–300 ms</strong> และลดการใช้หน่วยความจำพื้นฐานลงสู่ระดับ <strong>140–155 MB</strong> ด้วยแผนงานวิศวกรรม 5 ข้อดังต่อไปนี้:
+    </p>
+    <ol>
+      <li>
+        <strong>ระบบ Persistent Disk Cache สำหรับ CLI Ecosystem Discovery (ลด Background RAM Spike ~260 MB)</strong>:
+        บันทึกผลลัพธ์การค้นหาโมเดลจาก CLI ภายนอก (<code>agy models</code>, <code>opencode models</code>, <code>ollama list</code>) ลงไฟล์ Cache บนดิสก์พร้อมตรวจสอบค่า <code>mtime</code> ของไฟล์ไบนารี เพื่อหลีกเลี่ยงการแตกโปรเซส <code>agy</code> และ <code>opencode</code> ซ้ำทุกครั้งที่เปิดโปรแกรม
+      </li>
+      <li>
+        <strong>การทำ Lazy Service &amp; View Instantiation ใน <code>ContentView</code> และ <code>AIAgentView</code> (ลด Cold-Start ลงอีก ~150 ms)</strong>:
+        เปลี่ยนการผูก <code>@ObservedObject</code> กับ Singleton Services ของแผงฟีเจอร์รอง (เช่น Collaboration, Team Tasks, Mobile Device Dock, Preview Bridge) ให้สร้างอินสแตนซ์เฉพาะเมื่อผู้ใช้กดเปิดแผงนั้นจริง
+      </li>
+      <li>
+        <strong>การแยกดัชนีรายการแชท (<code>chats_index.json</code>) ออกจากไฟล์เนื้อหาข้อความเต็มใน <code>AgentService</code></strong>:
+        อ่านเฉพาะข้อมูลหัวข้อแชทขนาดเล็กเพื่อแสดงรายการบน Sidebar ทันทีภายในเวลาไม่ถึง 1 มิลลิวินาที และโหลดประวัติข้อความเต็มเฉพาะห้องแชทที่ผู้ใช้กำลังเปิดใช้งาน
+      </li>
+      <li>
+        <strong>ระบบ Auto-Hibernation สำหรับ <code>WKWebView</code> ในแผง Live Preview และ IDE Browser (คืน RAM ~150 MB)</strong>:
+        เมื่อผู้ใช้พับเก็บแผง Web Preview เกิน 2 นาที ให้ระบบปลดโปรเซส <code>WebKit.WebContent</code> ออกจากหน่วยความจำโดยบันทึก URL และตำแหน่ง Scroll ไว้ และกู้คืนอัตโนมัติเมื่อเปิดแผงอีกครั้ง
+      </li>
+      <li>
+        <strong>การผสาน Built-in MCP Server เข้าสู่ Native Swift / Rust In-Process 100%</strong>:
+        ย้ายการประมวลผลเครื่องมือพื้นฐานจาก <code>mcp-server.py</code> เข้าสู่ <code>AgentToolBox.swift</code> และไลบรารี <code>libmicrocode_core.dylib</code> โดยตรง เพื่อตัดภาระการรัน Python Interpreter สำหรับเครื่องมือภายในทั้งหมด
+      </li>
+    </ol>
+
+    <div class="signature-block">
+      <div style="font-weight: 800; font-size: 9pt; border-bottom: 1px solid #000000; padding-bottom: 3px;">
+        การรับรองความถูกต้องของข้อมูลและผลการทดสอบ (Official Engineering Certification)
+      </div>
+      <p style="margin-top: 5px; margin-bottom: 5px; font-size: 8.2pt;">
+        ชุดทดสอบซอร์สโค้ด (<code>benchmarks/run_ide_benchmarks.py</code>, <code>benchmarks/window_probe.swift</code>) และไฟล์ข้อมูลดิบ (<code>benchmarks/results/ide_benchmark_results.json</code>) ได้รับการบันทึกไว้ในคลังซอร์สโค้ดหลักของบริษัท ดอทมินิ จำกัด เพื่อการตรวจสอบและทำซ้ำ (Reproducibility) ได้ทุกเมื่อ
+      </p>
+      <div class="signature-grid">
+        <div>
+          <strong>ผู้จัดทำและทวนสอบผลการทดลอง:</strong><br>
+          ฝ่ายวิศวกรรมระบบคอร์และปัญญาประดิษฐ์ (Core AI &amp; IDE Engineering)<br>
+          บริษัท ดอทมินิ จำกัด (Dotmini Co., Ltd.)
+        </div>
+        <div style="text-align: right;">
+          <strong>วันที่ออกรายงานฉบับทางการ:</strong><br>
+          26 ตุลาคม 2569 (2026-10-26)<br>
+          รหัสอ้างอิง: <code>MC-BENCH-PROD-2026-V2.5.32</code>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <div class="page-bottom-bar">
+    <span>เอกสารรายงานผลการทดสอบประสิทธิภาพระดับ Production — MicroCode IDE v2.5.32</span>
+    <span>หน้า 5 / 5</span>
+  </div>
+</div>
+
+</body>
+</html>

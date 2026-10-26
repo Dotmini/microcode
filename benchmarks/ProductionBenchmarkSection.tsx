@@ -823,24 +823,44 @@ export const ProductionBenchmarkSection: React.FC<ProductionBenchmarkSectionProp
                   ข้อมูลดิบทั้ง 5 รอบการทดสอบ (Cold-Start Latency / Process-Tree RSS) หลังผ่าน Warmup Cache Prime 1 รอบภายใต้ตัวแปรควบคุมเดียวกัน
                 </p>
               </div>
-              <a
-                href="/benchmarks/ide_benchmark_results.json"
-                target="_blank"
-                rel="noreferrer"
-                style={{
-                  fontSize: '12.5px',
-                  fontWeight: 600,
-                  color: '#f5f5f7',
-                  textDecoration: 'none',
-                  padding: '7px 14px',
-                  borderRadius: '980px',
-                  background: 'rgba(255,255,255,0.06)',
-                  border: '1px solid rgba(255,255,255,0.12)',
-                  fontFamily: 'SF Mono, Menlo, monospace',
-                }}
-              >
-                Download Raw JSON Telemetry →
-              </a>
+              <div style={{ display: 'flex', gap: '8px', flexWrap: 'wrap' }}>
+                <a
+                  href="/benchmarks/MicroCode_v2_5_32_Production_Benchmark_Report.pdf"
+                  target="_blank"
+                  rel="noreferrer"
+                  style={{
+                    fontSize: '12.5px',
+                    fontWeight: 600,
+                    color: '#000000',
+                    textDecoration: 'none',
+                    padding: '7px 14px',
+                    borderRadius: '980px',
+                    background: '#f5f5f7',
+                    border: '1px solid #f5f5f7',
+                    fontFamily: 'SF Mono, Menlo, monospace',
+                  }}
+                >
+                  Download Official PDF Report (A4) →
+                </a>
+                <a
+                  href="/benchmarks/ide_benchmark_results.json"
+                  target="_blank"
+                  rel="noreferrer"
+                  style={{
+                    fontSize: '12.5px',
+                    fontWeight: 600,
+                    color: '#f5f5f7',
+                    textDecoration: 'none',
+                    padding: '7px 14px',
+                    borderRadius: '980px',
+                    background: 'rgba(255,255,255,0.06)',
+                    border: '1px solid rgba(255,255,255,0.12)',
+                    fontFamily: 'SF Mono, Menlo, monospace',
+                  }}
+                >
+                  Download Raw JSON Telemetry →
+                </a>
+              </div>
             </div>
 
             <div style={{ overflowX: 'auto' }}>
