@@ -60,6 +60,7 @@ final class LocalEcosystemDiscovery: ObservableObject {
     @Published private(set) var lastScanDate: Date?
     
     private let userDefaultsCacheKey = "microcode_ecosystem_discovered_models_v5"
+    private let launchDate = Date()
     
     private init() {
         loadCachedEngines()
@@ -73,8 +74,11 @@ final class LocalEcosystemDiscovery: ObservableObject {
         engines.flatMap(\.models)
     }
     
-    func refresh() async {
+    func refresh(force: Bool = false) async {
         guard !isScanning else { return }
+        if !force, Date().timeIntervalSince(launchDate) < 3.5, !engines.isEmpty {
+            return
+        }
         self.isScanning = true
         defer {
             self.isScanning = false

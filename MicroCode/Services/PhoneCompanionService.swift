@@ -141,8 +141,7 @@ final class PhoneCompanionService: ObservableObject {
     )
     
     private init() {
-        let savedEnabled = UserDefaults.standard.object(forKey: "microcode.phoneCompanion.enabled") as? Bool ?? true
-        self.isEnabled = savedEnabled
+        self.isEnabled = false
         if let savedMode = UserDefaults.standard.string(forKey: "microcode.phoneCompanion.mode"),
            let mode = PhoneConnectionMode(rawValue: savedMode) {
             self.connectionMode = mode
@@ -153,18 +152,6 @@ final class PhoneCompanionService: ObservableObject {
             let newToken = Self.generateSecureToken()
             self.pairingToken = newToken
             UserDefaults.standard.set(newToken, forKey: "microcode.phoneCompanion.token")
-        }
-        
-        refreshNetworkAddresses()
-        if isEnabled {
-            startServerIfNeeded()
-        }
-        regenerateQRCode()
-        
-        networkRefreshTimer = Timer.scheduledTimer(withTimeInterval: 60.0, repeats: true) { [weak self] _ in
-            Task { @MainActor [weak self] in
-                self?.refreshNetworkAddresses()
-            }
         }
     }
     
@@ -344,8 +331,11 @@ final class PhoneCompanionService: ObservableObject {
     // MARK: - Embedded HTTP Companion Server (NWListener)
     
     func startServerIfNeeded() {
+        guard isEnabled else { return }
         guard !isServerRunning && listener == nil else { return }
+        refreshNetworkAddresses()
         startServer(onPort: 8470)
+        regenerateQRCode()
     }
     
     private func startServer(onPort candidatePort: UInt16, attempt: Int = 0) {

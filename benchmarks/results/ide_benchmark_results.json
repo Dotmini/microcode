@@ -1,0 +1,249 @@
+{
+  "benchmark_suite": "MicroCode Controlled-Variable Production IDE Benchmark v1.0",
+  "controlled_variables": {
+    "hardware": {
+      "cpu_brand": "Apple M2",
+      "cpu_cores_total": 8,
+      "cpu_performance_cores": 4,
+      "cpu_efficiency_cores": 4,
+      "memory_gb": 16,
+      "memory_bytes": 17179869184,
+      "macos_version": "27.0",
+      "macos_build": "26A5388g",
+      "architecture": "arm64",
+      "window_server_poll_hz": 500,
+      "trials_per_ide": 5,
+      "timestamp_utc": "2026-10-26T08:58:24.693256+00:00"
+    },
+    "workspace_fixture": {
+      "workspace_path": "/tmp/microcode_controlled_bench_workspace",
+      "primary_file": "/tmp/microcode_controlled_bench_workspace/src/core/BenchmarkCoreEngine.swift",
+      "large_stress_file": "/tmp/microcode_controlled_bench_workspace/data/LargeDatasetMatrix.json",
+      "source_files_count": 500,
+      "source_lines_count": 49350,
+      "primary_file_lines": 4996,
+      "large_stress_file_lines": 100000,
+      "total_bytes": 12282780,
+      "sha256_manifest": "c5504e49e51fe7af09eac5398dd6573488bb7dc7c1db2d485c0428af1d946f2f"
+    },
+    "isolation_protocol": "Clean process termination before each run; 1 warmup + 5 measured trials per IDE; 500 Hz CoreGraphics WindowServer detection; full process-tree RSS summation."
+  },
+  "ide_results": [
+    {
+      "id": "microcode",
+      "name": "MicroCode IDE",
+      "version": "2.5.32",
+      "engine": "Native Swift + Metal 3 + Rust Core",
+      "ui_framework": "AppKit / SwiftUI / Metal 3",
+      "app_path": "/Applications/MicroCode.app",
+      "bundle_size_mb": 95.7,
+      "trials_count": 5,
+      "cold_start_ms": {
+        "trials": [
+          493.0,
+          576.1,
+          505.5,
+          458.7,
+          476.7
+        ],
+        "median": 493.0,
+        "mean": 502.0,
+        "min": 458.7,
+        "max": 576.1,
+        "stdev": 45.0
+      },
+      "memory_rss_mb": {
+        "trials": [
+          195.7,
+          178.4,
+          173.5,
+          194.8,
+          195.1
+        ],
+        "median": 194.8,
+        "mean": 187.5,
+        "min": 173.5,
+        "max": 195.7,
+        "stdev": 10.69
+      },
+      "process_count_median": 1,
+      "thread_count_median": 20
+    },
+    {
+      "id": "zed",
+      "name": "Zed",
+      "version": "1.18.0",
+      "engine": "Native Rust + GPUI",
+      "ui_framework": "GPUI (Metal Shaders)",
+      "app_path": "/Applications/Zed Preview.app",
+      "bundle_size_mb": 401.6,
+      "trials_count": 5,
+      "cold_start_ms": {
+        "trials": [
+          771.7,
+          798.4,
+          824.2,
+          841.8,
+          695.1
+        ],
+        "median": 798.4,
+        "mean": 786.2,
+        "min": 695.1,
+        "max": 841.8,
+        "stdev": 57.43
+      },
+      "memory_rss_mb": {
+        "trials": [
+          219.6,
+          219.2,
+          217.1,
+          227.6,
+          218.6
+        ],
+        "median": 219.2,
+        "mean": 220.4,
+        "min": 217.1,
+        "max": 227.6,
+        "stdev": 4.12
+      },
+      "process_count_median": 2,
+      "thread_count_median": 47
+    },
+    {
+      "id": "opencode",
+      "name": "OpenCode Desktop",
+      "version": "1.2.4",
+      "engine": "Tauri + WebKit + Rust/Node Sidecar",
+      "ui_framework": "WKWebView (HTML/CSS/JS)",
+      "app_path": "/Applications/OpenCode.app",
+      "bundle_size_mb": 156.3,
+      "trials_count": 5,
+      "cold_start_ms": {
+        "trials": [
+          562.6,
+          1053.1,
+          566.7,
+          1081.2,
+          544.9
+        ],
+        "median": 566.7,
+        "mean": 761.7,
+        "min": 544.9,
+        "max": 1081.2,
+        "stdev": 279.13
+      },
+      "memory_rss_mb": {
+        "trials": [
+          192.2,
+          214.6,
+          214.3,
+          240.7,
+          220.6
+        ],
+        "median": 214.6,
+        "mean": 216.5,
+        "min": 192.2,
+        "max": 240.7,
+        "stdev": 17.33
+      },
+      "process_count_median": 2,
+      "thread_count_median": 37
+    },
+    {
+      "id": "antigravity_ide",
+      "name": "Code-OSS / VS Code Fork (Electron)",
+      "version": "2.5.5",
+      "engine": "Electron + Chromium + V8 + Node.js",
+      "ui_framework": "Chromium DOM / Blink",
+      "app_path": "/Applications/Antigravity IDE.app",
+      "bundle_size_mb": 733.4,
+      "trials_count": 5,
+      "cold_start_ms": {
+        "trials": [
+          1854.8,
+          2197.2,
+          2159.9,
+          2186.1,
+          2319.4
+        ],
+        "median": 2186.1,
+        "mean": 2143.5,
+        "min": 1854.8,
+        "max": 2319.4,
+        "stdev": 172.67
+      },
+      "memory_rss_mb": {
+        "trials": [
+          937.6,
+          1004.4,
+          936.6,
+          1175.1,
+          941.7
+        ],
+        "median": 941.7,
+        "mean": 999.1,
+        "min": 936.6,
+        "max": 1175.1,
+        "stdev": 102.45
+      },
+      "process_count_median": 6,
+      "thread_count_median": 112
+    }
+  ],
+  "active_electron_session_reference": {
+    "name": "Electron AI IDE (Active Multi-Window + Agent Session)",
+    "bundle_size_mb": 471.3,
+    "live_metrics": {
+      "process_count": 37,
+      "thread_count": 451,
+      "total_rss_kb": 3102496,
+      "total_rss_mb": 3029.8
+    }
+  },
+  "engine_and_token_benchmarks": {
+    "workspace_50k_loc_symbol_scan_ms": {
+      "trials": [
+        164.12,
+        53.84,
+        28.91,
+        44.48,
+        41.87
+      ],
+      "median": 44.48,
+      "mean": 66.64
+    },
+    "large_100k_lines_load_ms": {
+      "trials": [
+        24.56,
+        20.42,
+        16.88,
+        15.85,
+        17.16
+      ],
+      "median": 17.16,
+      "mean": 18.97
+    },
+    "ai_token_efficiency_15_turn_task": {
+      "baseline_unoptimized_ide": {
+        "tool_schemas": 11440,
+        "file_reads_in_history": 16800,
+        "terminal_build_logs": 6400,
+        "conversation_and_diffs": 3760,
+        "total_turn15_input_tokens": 38400,
+        "cumulative_15_turns_tokens": 342600
+      },
+      "microcode_tokenmem_v3": {
+        "layer1_tool_scope_tokens": 1980,
+        "layer2_semantic_turn_folding": 1840,
+        "layer3_ast_skeleton_reads": 2420,
+        "layer4_rolling_key_facts": 620,
+        "layer5_delta_read_cache": 310,
+        "layer6_prompt_cache_hit_pct": 84.0,
+        "total_turn15_input_tokens": 7170,
+        "cumulative_15_turns_tokens": 64850,
+        "token_reduction_pct": 81.3,
+        "cumulative_reduction_pct": 81.1
+      }
+    }
+  }
+}

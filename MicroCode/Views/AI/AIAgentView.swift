@@ -582,13 +582,18 @@ struct AIAgentView: View {
         .background(appState.appTheme.isGlass ? Color.clear : Color(nsColor: appState.appTheme.workspaceBackground))
         .onAppear {
             let workspace = scopedWorkspacePath ?? (sessionScope == .editor ? appState.workspaceFolder?.path : nil)
-            agent.activateScope(
-                sessionScope,
-                preferredWorkspace: workspace,
-                restorePersistedWorkspace: restoresPersistedScopeWorkspace
-            )
+            DispatchQueue.main.async {
+                agent.activateScope(
+                    sessionScope,
+                    preferredWorkspace: workspace,
+                    restorePersistedWorkspace: restoresPersistedScopeWorkspace
+                )
+            }
             if sessionScope == .editor {
-                Task { await deviceRuntime.refresh(workspace: appState.workspaceFolder) }
+                Task.detached(priority: .background) {
+                    try? await Task.sleep(nanoseconds: 4_500_000_000)
+                    await deviceRuntime.refresh(workspace: await MainActor.run { appState.workspaceFolder })
+                }
             }
         }
         .onChange(of: appState.workspaceFolder) { newFolder in

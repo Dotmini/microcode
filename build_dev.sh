@@ -236,7 +236,8 @@ if [ -f "$BUILD_ROOT/cargo-target/debug/libmicrocode_embedded.dylib" ]; then
     install_name_tool -add_rpath @executable_path/../Frameworks "$BUNDLE_NAME/Contents/MacOS/MicroCode" 2>/dev/null || true
 fi
 
-# 7. Code Sign Bundle
+# 7. Strip Debug Symbols & Code Sign Bundle
+strip -x "$BUNDLE_NAME/Contents/MacOS/MicroCode" 2>/dev/null || true
 echo "🔐 Signing Bundle..."
 dot_clean -m "$BUNDLE_NAME" 2>/dev/null || true
 xattr -cr "$BUNDLE_NAME" 2>/dev/null || true

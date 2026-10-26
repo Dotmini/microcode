@@ -883,39 +883,38 @@ class AgentService: ObservableObject {
     // MARK: - Init
     
     init() {
-        loadChats()
         activeKernelRunID = UserDefaults.standard.string(forKey: durableRunStorageKey)
-        let lastActiveId = UserDefaults.standard.string(forKey: activeChatStorageKey)
-        if let last = lastActiveId, let matched = chatSessions.first(where: { $0.id == last }) {
-            activeChatId = matched.id
-            messages = loadMessagesForChat(matched, scope: activeScope)
-            if let path = matched.projectPath, !path.isEmpty {
-                setWorkspace(path)
-            }
-        } else if chatSessions.isEmpty {
-            let newChat = ChatSession.create(name: "Chat 1")
-            chatSessions.append(newChat)
-            activeChatId = newChat.id
-        } else if activeChatId == nil {
-            if let first = chatSessions.first {
-                activeChatId = first.id
-                messages = loadMessagesForChat(first, scope: activeScope)
-                if let path = first.projectPath, !path.isEmpty {
-                    setWorkspace(path)
+        // Defer synchronous SQLite/JSON transcript & workspace file I/O until after
+        // the initial window frame is committed to WindowServer for instant cold start.
+        DispatchQueue.main.async { [weak self] in
+            guard let self else { return }
+            self.loadChats()
+            let lastActiveId = UserDefaults.standard.string(forKey: self.activeChatStorageKey)
+            if let last = lastActiveId, let matched = self.chatSessions.first(where: { $0.id == last }) {
+                self.activeChatId = matched.id
+                self.messages = self.loadMessagesForChat(matched, scope: self.activeScope)
+                if let path = matched.projectPath, !path.isEmpty {
+                    self.setWorkspace(path)
+                }
+            } else if self.chatSessions.isEmpty {
+                let newChat = ChatSession.create(name: "Chat 1")
+                self.chatSessions.append(newChat)
+                self.activeChatId = newChat.id
+            } else if self.activeChatId == nil {
+                if let first = self.chatSessions.first {
+                    self.activeChatId = first.id
+                    self.messages = self.loadMessagesForChat(first, scope: self.activeScope)
+                    if let path = first.projectPath, !path.isEmpty {
+                        self.setWorkspace(path)
+                    }
                 }
             }
-        }
-        
-        // Restore active plan for current chat if present, otherwise ensure plan is clear
-        if let activeId = activeChatId,
-           let matched = chatSessions.first(where: { $0.id == activeId }),
-           let plan = matched.activePlan {
-            Task { @MainActor in
+            if let activeId = self.activeChatId,
+               let matched = self.chatSessions.first(where: { $0.id == activeId }),
+               let plan = matched.activePlan {
                 ImplementationPlanManager.shared.currentPlan = plan
                 ImplementationPlanManager.shared.isPlanVisible = (plan.approvalState == .pending)
-            }
-        } else {
-            Task { @MainActor in
+            } else {
                 ImplementationPlanManager.shared.clearPlan()
             }
         }

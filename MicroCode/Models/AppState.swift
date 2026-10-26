@@ -2202,6 +2202,7 @@ class AppState: ObservableObject {
             let content = result.content
             let fileUri = normalizedURL.absoluteString
             Task.detached(priority: .utility) {
+                try? await Task.sleep(nanoseconds: 2_500_000_000)
                 await LSPManager.shared.documentOpened(uri: fileUri, language: language, content: content)
             }
         }

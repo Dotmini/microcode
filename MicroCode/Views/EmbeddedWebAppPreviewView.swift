@@ -237,9 +237,110 @@ struct EmbeddedWebAppPreviewView: View {
     @State private var captureSentFeedback: Bool = false
     
     var body: some View {
+        previewRootContent
+            .background(canvasColor)
+            .onChange(of: browserAutomation.pickedElements.count) { newCount in
+                if newCount == 0 {
+                    inspectPopupDragOffset = .zero
+                    inspectPopupAccumulatedOffset = .zero
+                } else if newCount == 1 {
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) {
+                        isInspectInputFocused = true
+                    }
+                }
+            }
+            .onAppear {
+                detectLocalWorkspaceIndex()
+                resolveInitialURL()
+                browserAutomation.scanActivePorts()
+                universalBridge.refreshDetectedFramework()
+            }
+            .onChange(of: appState.currentFile?.path) { newPath in
+                universalBridge.refreshDetectedFramework(activeFilePath: newPath, activeCode: appState.currentFile?.content)
+            }
+            .onChange(of: browserAutomation.activePortProcesses) { processes in
+                handleActivePortProcessesChange(processes)
+            }
+            .onChange(of: runtime.targetWebURL) { newURL in
+                if let newURL = newURL {
+                    sanitizeAndSetURL(newURL.absoluteString)
+                }
+            }
+            .onChange(of: runtime.webRefreshTrigger) { _ in
+                refreshTrigger = true
+            }
+            .onChange(of: runtime.targetViewport) { newVP in
+                handleTargetViewportChange(newVP)
+            }
+            .onChange(of: runtime.lastDetectedDevServerPort) { newPort in
+                if let port = newPort, runtime.targetWebURL == nil, currentURL?.isFileURL != true {
+                    sanitizeAndSetURL("http://localhost:\(port)")
+                }
+            }
+            .onReceive(NotificationCenter.default.publisher(for: NSNotification.Name("MicroCodeFileSaved"))) { note in
+                handleFileSavedNotification(note)
+            }
+            .onReceive(NotificationCenter.default.publisher(for: NSNotification.Name("MicroCodeEditorFolderOpened"))) { _ in
+                runtime.targetWebURL = nil
+                detectLocalWorkspaceIndex()
+                resolveInitialURL()
+                browserAutomation.scanActivePorts()
+                universalBridge.refreshDetectedFramework()
+            }
+    }
+
+    private func handleActivePortProcessesChange(_ processes: [ActiveLocalPortProcess]) {
+        guard !processes.isEmpty else { return }
+        let preferredPorts = [5173, 5174, 4173, 3000, 8080, 4200, 4321, 8000]
+        let activePorts = Set(processes.map(\.port))
+        let currentPort = currentURL?.port
+        let isDeadLocalhostPort = (currentPort != nil && !activePorts.contains(currentPort!))
+        let isBundlerFileURL = (currentURL?.isFileURL == true && workspaceRequiresDevServer())
+        if isDeadLocalhostPort || isBundlerFileURL || urlString.isEmpty {
+            let wsPort = detectPreferredWorkspacePort()
+            if activePorts.contains(wsPort) {
+                sanitizeAndSetURL("http://localhost:\(wsPort)")
+            } else if let match = preferredPorts.first(where: { activePorts.contains($0) }) ?? processes.first?.port {
+                sanitizeAndSetURL("http://localhost:\(match)")
+            }
+        }
+    }
+
+    private func handleTargetViewportChange(_ newVP: String) {
+        let key = newVP.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        if key.contains("responsive") || key.contains("fluid") {
+            selectedViewport = .responsive
+            customWidth = nil
+        } else if key.contains("macbook") || key.contains("desktop") || key.contains("pc") || key.contains("laptop") {
+            selectedViewport = .macbook
+            showDeviceBezel = true
+        } else if key.contains("ipad") || key.contains("tablet") {
+            selectedViewport = .tablet
+            showDeviceBezel = true
+        } else if key.contains("iphone") || key.contains("mobile") || key.contains("phone") {
+            selectedViewport = .iphone
+            showDeviceBezel = true
+        } else if let match = WebAppViewport.allCases.first(where: { $0.rawValue.lowercased() == key }) {
+            selectedViewport = match
+            if match != .responsive { showDeviceBezel = true }
+        }
+    }
+
+    @ViewBuilder
+    private var previewRootContent: some View {
         VStack(spacing: 0) {
-            // MARK: - Unified Slim Preview Control Bar (Single 30px Row)
-            HStack(spacing: 5) {
+            previewTopControlBar
+            buildLogsDrawerSection
+            runtimeIssueBannerSection
+            Divider()
+            previewInteractiveCanvasSection
+        }
+    }
+
+    @ViewBuilder
+    private var previewTopControlBar: some View {
+        // MARK: - Unified Slim Preview Control Bar (Single 30px Row)
+        HStack(spacing: 5) {
                 // 1. Navigation Controls (< > ↻)
                 HStack(spacing: 2) {
                     Button {
@@ -457,97 +558,7 @@ struct EmbeddedWebAppPreviewView: View {
                 .buttonStyle(.plain)
                 .help("Active Localhost Ports")
                 .popover(isPresented: $showPortRadarPopover, arrowEdge: .bottom) {
-                    VStack(alignment: .leading, spacing: 8) {
-                        HStack {
-                            Image(systemName: "antenna.radiowaves.left.and.right")
-                                .font(.system(size: 11, weight: .semibold))
-                                .foregroundColor(.primary)
-                            Text("Active Localhost Ports")
-                                .font(.system(size: 11, weight: .bold))
-                            Spacer()
-                            Button {
-                                browserAutomation.scanActivePorts()
-                            } label: {
-                                Image(systemName: "arrow.clockwise")
-                                    .font(.system(size: 10))
-                            }
-                            .buttonStyle(.plain)
-                            .help("Rescan listening TCP ports")
-                            if !browserAutomation.activePortProcesses.isEmpty {
-                                Button("Kill All") {
-                                    browserAutomation.killAllDevPortProcesses()
-                                }
-                                .font(.system(size: 9.5, weight: .semibold))
-                                .foregroundColor(.red)
-                                .buttonStyle(.plain)
-                            }
-                        }
-                        Divider()
-                        if browserAutomation.isScanningPorts {
-                            HStack(spacing: 6) {
-                                ProgressView().scaleEffect(0.5)
-                                Text("Scanning listening TCP ports...")
-                                    .font(.system(size: 10))
-                                    .foregroundColor(.secondary)
-                            }
-                            .padding(.vertical, 8)
-                        } else if browserAutomation.activePortProcesses.isEmpty {
-                            Text("No active user localhost servers detected.")
-                                .font(.system(size: 10))
-                                .foregroundColor(.secondary)
-                                .padding(.vertical, 8)
-                        } else {
-                            ScrollView {
-                                VStack(alignment: .leading, spacing: 5) {
-                                    ForEach(browserAutomation.activePortProcesses) { item in
-                                        HStack(spacing: 8) {
-                                            Text(":\(item.port)")
-                                                .font(.system(size: 10.5, weight: .bold, design: .monospaced))
-                                                .foregroundColor(.primary)
-                                                .frame(width: 48, alignment: .leading)
-                                            VStack(alignment: .leading, spacing: 1) {
-                                                Text(item.processName)
-                                                    .font(.system(size: 10, weight: .medium))
-                                                    .lineLimit(1)
-                                                Text("PID \(item.pid)")
-                                                    .font(.system(size: 8.5, design: .monospaced))
-                                                    .foregroundColor(.secondary)
-                                            }
-                                            Spacer()
-                                            Button("Preview") {
-                                                sanitizeAndSetURL("http://localhost:\(item.port)")
-                                                showPortRadarPopover = false
-                                            }
-                                            .font(.system(size: 9.5, weight: .semibold))
-                                            .padding(.horizontal, 6)
-                                            .padding(.vertical, 2)
-                                            .background(Color.primary.opacity(0.12))
-                                            .foregroundColor(.primary)
-                                            .cornerRadius(4)
-                                            .buttonStyle(.plain)
-
-                                            Button {
-                                                browserAutomation.killPortProcess(item)
-                                            } label: {
-                                                Image(systemName: "xmark.octagon.fill")
-                                                    .font(.system(size: 11))
-                                                    .foregroundColor(.secondary)
-                                            }
-                                            .buttonStyle(.plain)
-                                            .help("Kill process \(item.processName) (PID \(item.pid)) on port \(item.port)")
-                                        }
-                                        .padding(.horizontal, 6)
-                                        .padding(.vertical, 4)
-                                        .background(Color.primary.opacity(0.04))
-                                        .cornerRadius(5)
-                                    }
-                                }
-                            }
-                            .frame(maxHeight: 200)
-                        }
-                    }
-                    .padding(10)
-                    .frame(width: 290)
+                    portRadarPopoverContent
                 }
 
                 // 6. Universal Build & Hot-Reload Compact Controls
@@ -678,104 +689,211 @@ struct EmbeddedWebAppPreviewView: View {
                 .menuStyle(.borderlessButton)
                 .fixedSize()
                 .help("Preview Options, Framework Target & Logs")
-            }
-            .padding(.horizontal, 8)
-            .frame(height: 30)
-            .background(canvasColor)
+        }
+        .padding(.horizontal, 8)
+        .frame(height: 30)
+        .background(canvasColor)
+    }
 
-            if universalBridge.showBuildLogsDrawer {
-                Divider()
-                VStack(alignment: .leading, spacing: 4) {
-                    HStack {
-                        Text("UNIVERSAL BUILD & HOT-RELOAD OUTPUT")
-                            .font(.system(size: 9, weight: .bold, design: .monospaced))
-                            .foregroundColor(.secondary)
-                        Spacer()
-                        Button {
-                            universalBridge.toggleLogsDrawer()
-                        } label: {
-                            Image(systemName: "xmark")
-                                .font(.system(size: 8.5))
-                                .foregroundColor(.secondary)
-                        }
-                        .buttonStyle(.plain)
-                    }
-                    ScrollView {
-                        Text(universalBridge.buildLogs.isEmpty ? "No build logs yet. Click 'Build & Preview' to compile and run." : universalBridge.buildLogs)
-                            .font(.system(size: 10, design: .monospaced))
-                            .foregroundColor(.secondary)
-                            .frame(maxWidth: .infinity, alignment: .leading)
-                            .textSelection(.enabled)
-                    }
-                    .frame(height: 92)
-                }
-                .padding(.horizontal, 10)
-                .padding(.vertical, 6)
-                .background(Color.black.opacity(0.18))
-            }
-
-            // Feature #2: Live DOM & Console Error Auto-Healer Banner
-            if browserAutomation.totalRuntimeIssueCount > 0 {
-                Divider()
-                HStack(spacing: 6) {
-                    Image(systemName: "exclamationmark.triangle.fill")
+    @ViewBuilder
+    private var portRadarPopoverContent: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            HStack {
+                Image(systemName: "antenna.radiowaves.left.and.right")
+                    .font(.system(size: 11, weight: .semibold))
+                    .foregroundColor(.primary)
+                Text("Active Localhost Ports")
+                    .font(.system(size: 11, weight: .bold))
+                Spacer()
+                Button {
+                    browserAutomation.scanActivePorts()
+                } label: {
+                    Image(systemName: "arrow.clockwise")
                         .font(.system(size: 10))
-                        .foregroundColor(.orange)
-                    Text("\(browserAutomation.totalRuntimeIssueCount) Error(s)")
-                        .font(.system(size: 9.5, weight: .bold))
-                        .foregroundColor(.orange)
-                        .fixedSize(horizontal: true, vertical: false)
-                    Text(browserAutomation.runtimeErrorEntries.last?.message ?? "Failed network/asset request")
-                        .font(.system(size: 9.5, design: .monospaced))
-                        .foregroundColor(.secondary)
-                        .lineLimit(1)
-                        .truncationMode(.tail)
-                    Spacer(minLength: 4)
-                    Button {
-                        browserAutomation.dispatchAutoHealToAgent(pageURL: urlString)
-                    } label: {
-                        HStack(spacing: 3) {
-                            Image(systemName: "wand.and.stars")
-                                .font(.system(size: 8.5))
-                            Text("Fix in Agent")
-                                .font(.system(size: 9.5, weight: .semibold))
-                        }
-                        .padding(.horizontal, 7)
-                        .padding(.vertical, 2.5)
-                        .background(Color.orange.opacity(0.18))
-                        .foregroundColor(.orange)
-                        .cornerRadius(4)
+                }
+                .buttonStyle(.plain)
+                .help("Rescan listening TCP ports")
+                if !browserAutomation.activePortProcesses.isEmpty {
+                    Button("Kill All") {
+                        browserAutomation.killAllDevPortProcesses()
                     }
+                    .font(.system(size: 9.5, weight: .semibold))
+                    .foregroundColor(.red)
                     .buttonStyle(.plain)
-                    .fixedSize(horizontal: true, vertical: false)
-                    .help("Send all console errors, stack traces, and broken asset URLs to AI Agent to fix")
+                }
+            }
+            Divider()
+            if browserAutomation.isScanningPorts {
+                HStack(spacing: 6) {
+                    ProgressView().scaleEffect(0.5)
+                    Text("Scanning listening TCP ports...")
+                        .font(.system(size: 10))
+                        .foregroundColor(.secondary)
+                }
+                .padding(.vertical, 8)
+            } else if browserAutomation.activePortProcesses.isEmpty {
+                Text("No active user localhost servers detected.")
+                    .font(.system(size: 10))
+                    .foregroundColor(.secondary)
+                    .padding(.vertical, 8)
+            } else {
+                ScrollView {
+                    VStack(alignment: .leading, spacing: 5) {
+                        ForEach(browserAutomation.activePortProcesses) { item in
+                            HStack(spacing: 8) {
+                                Text(":\(item.port)")
+                                    .font(.system(size: 10.5, weight: .bold, design: .monospaced))
+                                    .foregroundColor(.primary)
+                                    .frame(width: 48, alignment: .leading)
+                                VStack(alignment: .leading, spacing: 1) {
+                                    Text(item.processName)
+                                        .font(.system(size: 10, weight: .medium))
+                                        .lineLimit(1)
+                                    Text("PID \(item.pid)")
+                                        .font(.system(size: 8.5, design: .monospaced))
+                                        .foregroundColor(.secondary)
+                                }
+                                Spacer()
+                                Button("Preview") {
+                                    sanitizeAndSetURL("http://localhost:\(item.port)")
+                                    showPortRadarPopover = false
+                                }
+                                .font(.system(size: 9.5, weight: .semibold))
+                                .padding(.horizontal, 6)
+                                .padding(.vertical, 2)
+                                .background(Color.primary.opacity(0.12))
+                                .foregroundColor(.primary)
+                                .cornerRadius(4)
+                                .buttonStyle(.plain)
 
+                                Button {
+                                    browserAutomation.killPortProcess(item)
+                                } label: {
+                                    Image(systemName: "xmark.octagon.fill")
+                                        .font(.system(size: 11))
+                                        .foregroundColor(.secondary)
+                                }
+                                .buttonStyle(.plain)
+                                .help("Kill process \(item.processName) (PID \(item.pid)) on port \(item.port)")
+                            }
+                            .padding(.horizontal, 6)
+                            .padding(.vertical, 4)
+                            .background(Color.primary.opacity(0.04))
+                            .cornerRadius(5)
+                        }
+                    }
+                }
+                .frame(maxHeight: 200)
+            }
+        }
+        .padding(10)
+        .frame(width: 290)
+    }
+
+    @ViewBuilder
+    private var buildLogsDrawerSection: some View {
+        if universalBridge.showBuildLogsDrawer {
+            Divider()
+            VStack(alignment: .leading, spacing: 4) {
+                HStack {
+                    Text("UNIVERSAL BUILD & HOT-RELOAD OUTPUT")
+                        .font(.system(size: 9, weight: .bold, design: .monospaced))
+                        .foregroundColor(.secondary)
+                    Spacer()
                     Button {
-                        browserAutomation.clearRuntimeIssues()
+                        universalBridge.toggleLogsDrawer()
                     } label: {
                         Image(systemName: "xmark")
                             .font(.system(size: 8.5))
                             .foregroundColor(.secondary)
                     }
                     .buttonStyle(.plain)
-                    .help("Clear error badge")
                 }
-                .padding(.horizontal, 10)
-                .padding(.vertical, 4)
-                .background(Color.orange.opacity(0.06))
+                ScrollView {
+                    Text(universalBridge.buildLogs.isEmpty ? "No build logs yet. Click 'Build & Preview' to compile and run." : universalBridge.buildLogs)
+                        .font(.system(size: 10, design: .monospaced))
+                        .foregroundColor(.secondary)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .textSelection(.enabled)
+                }
+                .frame(height: 92)
             }
-            
+            .padding(.horizontal, 10)
+            .padding(.vertical, 6)
+            .background(Color.black.opacity(0.18))
+        }
+    }
+
+    @ViewBuilder
+    private var runtimeIssueBannerSection: some View {
+        if browserAutomation.totalRuntimeIssueCount > 0 {
             Divider()
-            
-            // MARK: - 3. Interactive Web View Canvas
-            GeometryReader { geo in
-                ZStack {
-                    canvasColor
-                    
-                    let availW = geo.size.width
-                    let availH = geo.size.height
-                    
-                    if showDeviceBezel, let spec = selectedViewport.frameSpec(isLandscape: isLandscape) {
+            HStack(spacing: 6) {
+                Image(systemName: "exclamationmark.triangle.fill")
+                    .font(.system(size: 10))
+                    .foregroundColor(.orange)
+                Text("\(browserAutomation.totalRuntimeIssueCount) Error(s)")
+                    .font(.system(size: 9.5, weight: .bold))
+                    .foregroundColor(.orange)
+                    .fixedSize(horizontal: true, vertical: false)
+                Text(browserAutomation.runtimeErrorEntries.last?.message ?? "Failed network/asset request")
+                    .font(.system(size: 9.5, design: .monospaced))
+                    .foregroundColor(.secondary)
+                    .lineLimit(1)
+                    .truncationMode(.tail)
+                Spacer(minLength: 4)
+                Button {
+                    browserAutomation.dispatchAutoHealToAgent(pageURL: urlString)
+                } label: {
+                    HStack(spacing: 3) {
+                        Image(systemName: "wand.and.stars")
+                            .font(.system(size: 8.5))
+                        Text("Fix in Agent")
+                            .font(.system(size: 9.5, weight: .semibold))
+                    }
+                    .padding(.horizontal, 7)
+                    .padding(.vertical, 2.5)
+                    .background(Color.orange.opacity(0.18))
+                    .foregroundColor(.orange)
+                    .cornerRadius(4)
+                }
+                .buttonStyle(.plain)
+                .fixedSize(horizontal: true, vertical: false)
+                .help("Send all console errors, stack traces, and broken asset URLs to AI Agent to fix")
+
+                Button {
+                    browserAutomation.clearRuntimeIssues()
+                } label: {
+                    Image(systemName: "xmark")
+                        .font(.system(size: 8.5))
+                        .foregroundColor(.secondary)
+                }
+                .buttonStyle(.plain)
+                .help("Clear error badge")
+            }
+            .padding(.horizontal, 10)
+            .padding(.vertical, 4)
+            .background(Color.orange.opacity(0.06))
+        }
+    }
+
+    @ViewBuilder
+    private var previewInteractiveCanvasSection: some View {
+        GeometryReader { geo in
+            ZStack {
+                canvasColor
+                let availW = geo.size.width
+                let availH = geo.size.height
+                previewViewportLayer(availW: availW, availH: availH)
+                activeInspectModeBannerLayer(availW: availW)
+                floatingInspectPopoverLayer(availW: availW, availH: availH)
+            }
+        }
+    }
+
+    @ViewBuilder
+    private func previewViewportLayer(availW: CGFloat, availH: CGFloat) -> some View {
+        if showDeviceBezel, let spec = selectedViewport.frameSpec(isLandscape: isLandscape) {
                         // MARK: Authentic Hardware Bezel Mode
                         let maxW = max(60, availW - 16)
                         let maxH = max(60, availH - 16)
@@ -1039,467 +1157,417 @@ struct EmbeddedWebAppPreviewView: View {
                             )
                         }
                     }
-                    
-                    // MARK: - Active Inspect Mode Hint Pill (When No Elements Picked Yet)
-                    if browserAutomation.isInspectMode && browserAutomation.pickedElements.isEmpty {
-                        HStack(spacing: 8) {
-                            Image(systemName: "viewfinder")
-                                .font(.system(size: 11, weight: .semibold))
-                                .foregroundColor(.primary)
-                            Text("MULTI-POINT INSPECT ACTIVE — คลิกเลือกหลายจุดบนหน้าเว็บ, คลิกขวา หรือลากคลุมเพื่อเลือกหลายองค์ประกอบพร้อมกัน")
-                                .font(.system(size: 10.5, weight: .medium))
-                                .foregroundColor(.primary)
-                                .lineLimit(1)
-                            Button {
-                                browserAutomation.toggleInspectMode(false, target: "preview")
-                            } label: {
-                                Text("Exit")
-                                    .font(.system(size: 9.5, weight: .semibold))
-                                    .padding(.horizontal, 7)
-                                    .padding(.vertical, 2.5)
-                                    .background(Color.primary.opacity(0.12))
-                                    .foregroundColor(.primary)
-                                    .cornerRadius(4)
-                            }
-                            .buttonStyle(.plain)
-                        }
-                        .padding(.horizontal, 12)
-                        .padding(.vertical, 7)
-                        .background(
-                            RoundedRectangle(cornerRadius: 7, style: .continuous)
-                                .fill(Color(nsColor: .windowBackgroundColor).opacity(0.96))
-                        )
-                        .overlay(
-                            RoundedRectangle(cornerRadius: 7, style: .continuous)
-                                .stroke(Color.primary.opacity(0.22), lineWidth: 1)
-                        )
-                        .shadow(color: Color.black.opacity(0.28), radius: 10, x: 0, y: 4)
-                        .position(x: availW / 2, y: 26)
-                        .zIndex(998)
-                    }
+    }
 
-                    // MARK: - Floating Contextual Multi-Point Inspect Popover
-                    if let anchor = browserAutomation.pickedElements.first ?? browserAutomation.lastPickedElement,
-                       !browserAutomation.pickedElements.isEmpty {
-                        let selectedCount = browserAutomation.pickedElements.count
-                        let vpW = max(1, CGFloat(anchor.viewportWidth))
-                        let vpH = max(1, CGFloat(anchor.viewportHeight))
-                        let elCenterX = ((CGFloat(anchor.boundsX) + CGFloat(anchor.boundsWidth) * 0.5) / vpW) * availW
-                        let elTopY = (CGFloat(anchor.boundsY) / vpH) * availH
-                        let elBottomY = ((CGFloat(anchor.boundsY) + CGFloat(anchor.boundsHeight)) / vpH) * availH
-                        
-                        let cardW = min(max(320, availW - 24), 440)
-                        let estimatedRowsH = CGFloat(min(selectedCount, 3)) * 54.0
-                        let cardH: CGFloat = 128 + estimatedRowsH
-                        let minX = cardW / 2 + 12
-                        let maxX = max(minX, availW - cardW / 2 - 12)
-                        let baseX = min(max(minX, elCenterX), maxX)
-                        
-                        let prefersBelow = (elBottomY + cardH + 18) <= availH
-                        let rawY = prefersBelow ? (elBottomY + cardH / 2 + 10) : (elTopY - cardH / 2 - 10)
-                        let minY = cardH / 2 + 12
-                        let maxY = max(minY, availH - cardH / 2 - 12)
-                        let baseY = min(max(minY, rawY), maxY)
-                        
-                        let finalX = min(max(minX, baseX + inspectPopupAccumulatedOffset.width + inspectPopupDragOffset.width), maxX)
-                        let finalY = min(max(minY, baseY + inspectPopupAccumulatedOffset.height + inspectPopupDragOffset.height), maxY)
-                        
-                        VStack(alignment: .leading, spacing: 8) {
-                            // 1. Draggable Formal Header Bar
-                            HStack(spacing: 6) {
-                                Image(systemName: "viewfinder")
-                                    .font(.system(size: 11, weight: .semibold))
-                                    .foregroundColor(.primary)
-                                
-                                Text("INSPECT SELECTION")
-                                    .font(.system(size: 10, weight: .bold, design: .monospaced))
-                                    .foregroundColor(.primary)
-                                
-                                Text("\(selectedCount) POINT\(selectedCount == 1 ? "" : "S")")
-                                    .font(.system(size: 9.5, weight: .semibold, design: .monospaced))
-                                    .padding(.horizontal, 6)
-                                    .padding(.vertical, 1.5)
-                                    .background(Color.primary.opacity(0.1))
-                                    .foregroundColor(.secondary)
-                                    .cornerRadius(4)
-                                
-                                Spacer(minLength: 4)
-                                
-                                // Add More Points Toggle
-                                Button {
-                                    browserAutomation.toggleInspectMode(target: "preview")
-                                } label: {
-                                    HStack(spacing: 3.5) {
-                                        Image(systemName: browserAutomation.isInspectMode ? "checkmark.circle.fill" : "plus.viewfinder")
-                                            .font(.system(size: 9.5, weight: .semibold))
-                                        Text(browserAutomation.isInspectMode ? "Picking Active" : "Add Spot")
-                                            .font(.system(size: 9.5, weight: .medium))
-                                    }
-                                    .padding(.horizontal, 7)
-                                    .padding(.vertical, 3)
-                                    .background(browserAutomation.isInspectMode ? Color.primary.opacity(0.18) : Color.primary.opacity(0.07))
-                                    .foregroundColor(.primary)
-                                    .cornerRadius(4)
-                                }
-                                .buttonStyle(.plain)
-                                .help("Toggle continuous multi-point picking on the preview page")
-                                
-                                if selectedCount > 1 {
-                                    Button {
-                                        browserAutomation.clearPickedElement(target: "preview")
-                                    } label: {
-                                        Text("Clear All")
-                                            .font(.system(size: 9.5, weight: .medium))
-                                            .foregroundColor(.secondary)
-                                            .padding(.horizontal, 5)
-                                            .padding(.vertical, 2.5)
-                                            .background(Color.primary.opacity(0.06))
-                                            .cornerRadius(4)
-                                    }
-                                    .buttonStyle(.plain)
-                                    .help("Clear all selected points")
-                                }
-                                
-                                Button {
-                                    browserAutomation.clearPickedElement(target: "preview")
-                                } label: {
-                                    Image(systemName: "xmark")
-                                        .font(.system(size: 10, weight: .semibold))
-                                        .foregroundColor(.secondary)
-                                        .frame(width: 18, height: 18)
-                                }
-                                .buttonStyle(.plain)
-                                .help("Close inspect panel")
-                            }
-                            .contentShape(Rectangle())
-                            .gesture(
-                                DragGesture(minimumDistance: 2)
-                                    .onChanged { val in
-                                        inspectPopupDragOffset = val.translation
-                                    }
-                                    .onEnded { val in
-                                        inspectPopupAccumulatedOffset.width += val.translation.width
-                                        inspectPopupAccumulatedOffset.height += val.translation.height
-                                        inspectPopupDragOffset = .zero
-                                    }
-                            )
-                            
-                            Divider()
-                                .opacity(0.5)
-                            
-                            // 2. Multi-Point Selected Elements List (with Per-Element Specific Note)
-                            ScrollView(.vertical, showsIndicators: true) {
-                                VStack(alignment: .leading, spacing: 6) {
-                                    ForEach(Array(browserAutomation.pickedElements.enumerated()), id: \.element.id) { idx, item in
-                                        VStack(alignment: .leading, spacing: 4) {
-                                            HStack(spacing: 5) {
-                                                Text("#\(idx + 1)")
-                                                    .font(.system(size: 9.5, weight: .bold, design: .monospaced))
-                                                    .padding(.horizontal, 5)
-                                                    .padding(.vertical, 1.5)
-                                                    .background(Color.primary.opacity(0.14))
-                                                    .foregroundColor(.primary)
-                                                    .cornerRadius(3)
-                                                
-                                                Button {
-                                                    browserAutomation.focusPickedElementOnPage(item, target: "preview")
-                                                } label: {
-                                                    Text(item.selector)
-                                                        .font(.system(size: 10.5, weight: .semibold, design: .monospaced))
-                                                        .foregroundColor(.primary)
-                                                        .lineLimit(1)
-                                                        .truncationMode(.middle)
-                                                }
-                                                .buttonStyle(.plain)
-                                                .help("Click to scroll to #\(idx + 1) in preview")
-                                                
-                                                Text(item.rect)
-                                                    .font(.system(size: 9, design: .monospaced))
-                                                    .foregroundColor(.secondary)
-                                                    .lineLimit(1)
-                                                
-                                                if !item.text.isEmpty {
-                                                    Text("· \(item.text)")
-                                                        .font(.system(size: 9.5))
-                                                        .foregroundColor(.secondary)
-                                                        .lineLimit(1)
-                                                        .truncationMode(.tail)
-                                                }
-                                                
-                                                Spacer(minLength: 4)
-                                                
-                                                Button {
-                                                    browserAutomation.removePickedElement(id: item.id, target: "preview")
-                                                } label: {
-                                                    Image(systemName: "xmark")
-                                                        .font(.system(size: 8.5, weight: .semibold))
-                                                        .foregroundColor(.secondary)
-                                                        .frame(width: 16, height: 16)
-                                                        .background(Color.primary.opacity(0.06))
-                                                        .cornerRadius(3)
-                                                }
-                                                .buttonStyle(.plain)
-                                                .help("Remove target #\(idx + 1)")
-                                            }
-                                            
-                                            // Per-element specific instruction field
-                                            TextField(
-                                                selectedCount > 1
-                                                    ? "คำสั่งเฉพาะจุดที่ #\(idx + 1) (เว้นว่างได้หากใช้คำสั่งรวมด้านล่าง)..."
-                                                    : "รายละเอียดเพิ่มเติมสำหรับจุดนี้ (ไม่บังคับ)...",
-                                                text: Binding(
-                                                    get: {
-                                                        guard idx < browserAutomation.pickedElements.count else { return "" }
-                                                        return browserAutomation.pickedElements[idx].note
-                                                    },
-                                                    set: { newValue in
-                                                        guard idx < browserAutomation.pickedElements.count else { return }
-                                                        browserAutomation.pickedElements[idx].note = newValue
-                                                    }
-                                                )
-                                            )
-                                            .textFieldStyle(.plain)
-                                            .font(.system(size: 10.5))
-                                            .padding(.horizontal, 7)
-                                            .padding(.vertical, 4)
-                                            .background(Color.primary.opacity(0.04))
-                                            .cornerRadius(4)
-                                            .overlay(
-                                                RoundedRectangle(cornerRadius: 4)
-                                                    .stroke(Color.primary.opacity(0.1), lineWidth: 1)
-                                            )
-                                        }
-                                        .padding(6)
-                                        .background(Color.primary.opacity(0.04))
-                                        .cornerRadius(5)
-                                        .overlay(
-                                            RoundedRectangle(cornerRadius: 5)
-                                                .stroke(Color.primary.opacity(0.08), lineWidth: 1)
-                                        )
-                                    }
-                                }
-                            }
-                            .frame(maxHeight: selectedCount == 1 ? 64 : min(CGFloat(selectedCount) * 62, 184))
-                            
-                            // 3. Formal Preset Chips (SF Symbols + Clean Text, Zero Emojis)
-                            ScrollView(.horizontal, showsIndicators: false) {
-                                HStack(spacing: 5) {
-                                    ForEach([
-                                        ("paintbrush", "ปรับสีและสไตล์", "ปรับโทนสี พื้นหลัง และสไตล์ของจุดที่เลือกให้เข้ากับธีมและดูเป็นทางการ"),
-                                        ("textformat", "แก้ไขข้อความ", "แก้ไขข้อความในจุดที่เลือก: "),
-                                        ("rectangle.3.group", "จัด Layout / ระยะห่าง", "จัดระเบียบ Layout, ขนาด และระยะห่าง (padding/margin/alignment) ของจุดที่เลือกทั้งหมดให้สมดุลเท่ากัน"),
-                                        ("square.resize", "ปรับขนาดให้เท่ากัน", "ปรับขนาดความกว้าง/ความสูงและสัดส่วนของจุดที่เลือกทั้งหมดให้เท่ากันอย่างเป็นระเบียบ"),
-                                        ("wrench.and.screwdriver", "แก้บั๊ก / การทำงาน", "ตรวจสอบและแก้ไขบั๊กการแสดงผลหรือ Event/State ของจุดที่เลือกทั้งหมด")
-                                    ], id: \.1) { iconName, label, preset in
-                                        Button {
-                                            if label.contains("แก้ไขข้อความ") {
-                                                inspectInstructionText = preset
-                                                isInspectInputFocused = true
-                                            } else {
-                                                browserAutomation.sendPickedElementsToAgent(
-                                                    browserAutomation.pickedElements,
-                                                    instruction: preset,
-                                                    pageURL: urlString,
-                                                    autoSend: true
-                                                )
-                                                inspectInstructionText = ""
-                                            }
-                                        } label: {
-                                            HStack(spacing: 4) {
-                                                Image(systemName: iconName)
-                                                    .font(.system(size: 8.5, weight: .medium))
-                                                    .foregroundColor(.secondary)
-                                                Text(label)
-                                                    .font(.system(size: 9.5, weight: .medium))
-                                                    .foregroundColor(.primary.opacity(0.9))
-                                            }
-                                            .padding(.horizontal, 7)
-                                            .padding(.vertical, 3.5)
-                                            .background(Color.primary.opacity(0.06))
-                                            .cornerRadius(4)
-                                            .overlay(
-                                                RoundedRectangle(cornerRadius: 4)
-                                                    .stroke(Color.primary.opacity(0.1), lineWidth: 1)
-                                            )
-                                        }
-                                        .buttonStyle(.plain)
-                                    }
-                                }
-                            }
-                            
-                            // 4. Batch Prompt Input & Dispatch Actions
-                            HStack(spacing: 6) {
-                                TextField(
-                                    selectedCount > 1
-                                        ? "คำสั่งรวมสำหรับทั้ง \(selectedCount) จุด... (กด Enter ส่งทันที)"
-                                        : "สั่ง AI แก้ไขจุดนี้... (กด Enter ส่งทันที)",
-                                    text: $inspectInstructionText
-                                )
-                                .textFieldStyle(.plain)
-                                .font(.system(size: 11))
-                                .focused($isInspectInputFocused)
-                                .padding(.horizontal, 8)
-                                .padding(.vertical, 5.5)
-                                .background(Color.primary.opacity(0.06))
-                                .cornerRadius(5)
-                                .overlay(
-                                    RoundedRectangle(cornerRadius: 5)
-                                        .stroke(Color.primary.opacity(isInspectInputFocused ? 0.35 : 0.14), lineWidth: 1)
-                                )
-                                .onSubmit {
-                                    browserAutomation.sendPickedElementsToAgent(
-                                        browserAutomation.pickedElements,
-                                        instruction: inspectInstructionText,
-                                        pageURL: urlString,
-                                        autoSend: true
-                                    )
-                                    inspectInstructionText = ""
-                                }
-                                
-                                Button {
-                                    browserAutomation.sendPickedElementsToAgent(
-                                        browserAutomation.pickedElements,
-                                        instruction: inspectInstructionText,
-                                        pageURL: urlString,
-                                        autoSend: false
-                                    )
-                                    inspectInstructionText = ""
-                                } label: {
-                                    Image(systemName: "plus.bubble")
-                                        .font(.system(size: 10.5, weight: .semibold))
-                                        .padding(.horizontal, 7)
-                                        .padding(.vertical, 6)
-                                        .background(Color.primary.opacity(0.08))
-                                        .foregroundColor(.primary)
-                                        .cornerRadius(5)
-                                        .overlay(
-                                            RoundedRectangle(cornerRadius: 5)
-                                                .stroke(Color.primary.opacity(0.12), lineWidth: 1)
-                                        )
-                                }
-                                .buttonStyle(.plain)
-                                .help("Attach all selected points to Chat input without sending immediately")
-                                
-                                Button {
-                                    browserAutomation.sendPickedElementsToAgent(
-                                        browserAutomation.pickedElements,
-                                        instruction: inspectInstructionText,
-                                        pageURL: urlString,
-                                        autoSend: true
-                                    )
-                                    inspectInstructionText = ""
-                                } label: {
-                                    HStack(spacing: 4) {
-                                        Image(systemName: "arrow.up.circle.fill")
-                                            .font(.system(size: 10))
-                                        Text(selectedCount > 1 ? "Send (\(selectedCount))" : "Send")
-                                            .font(.system(size: 10.5, weight: .semibold))
-                                    }
-                                    .padding(.horizontal, 10)
-                                    .padding(.vertical, 6)
-                                    .background(Color.primary)
-                                    .foregroundColor(Color(nsColor: .windowBackgroundColor))
-                                    .cornerRadius(5)
-                                }
-                                .buttonStyle(.plain)
-                                .help("Send all selected points to AI Agent and edit code immediately")
-                            }
-                        }
-                        .padding(10)
-                        .frame(width: cardW)
-                        .background(
-                            RoundedRectangle(cornerRadius: 9, style: .continuous)
-                                .fill(Color(nsColor: .windowBackgroundColor).opacity(0.98))
-                        )
-                        .overlay(
-                            RoundedRectangle(cornerRadius: 9, style: .continuous)
-                                .stroke(Color.primary.opacity(0.22), lineWidth: 1)
-                        )
-                        .shadow(color: Color.black.opacity(0.4), radius: 16, x: 0, y: 6)
-                        .position(x: finalX, y: finalY)
-                        .transition(.scale(scale: 0.96).combined(with: .opacity))
-                        .zIndex(999)
+    @ViewBuilder
+    private func activeInspectModeBannerLayer(availW: CGFloat) -> some View {
+        // MARK: - Active Inspect Mode Hint Pill (When No Elements Picked Yet)
+        if browserAutomation.isInspectMode && browserAutomation.pickedElements.isEmpty {
+            HStack(spacing: 8) {
+                Image(systemName: "viewfinder")
+                    .font(.system(size: 11, weight: .semibold))
+                    .foregroundColor(.primary)
+                Text("MULTI-POINT INSPECT ACTIVE — คลิกเลือกหลายจุดบนหน้าเว็บ, คลิกขวา หรือลากคลุมเพื่อเลือกหลายองค์ประกอบพร้อมกัน")
+                    .font(.system(size: 10.5, weight: .medium))
+                    .foregroundColor(.primary)
+                    .lineLimit(1)
+                Button {
+                    browserAutomation.toggleInspectMode(false, target: "preview")
+                } label: {
+                    Text("Exit")
+                        .font(.system(size: 9.5, weight: .semibold))
+                        .padding(.horizontal, 7)
+                        .padding(.vertical, 2.5)
+                        .background(Color.primary.opacity(0.12))
+                        .foregroundColor(.primary)
+                        .cornerRadius(4)
+                }
+                .buttonStyle(.plain)
+            }
+            .padding(.horizontal, 12)
+            .padding(.vertical, 7)
+            .background(
+                RoundedRectangle(cornerRadius: 7, style: .continuous)
+                    .fill(Color(nsColor: .windowBackgroundColor).opacity(0.96))
+            )
+            .overlay(
+                RoundedRectangle(cornerRadius: 7, style: .continuous)
+                    .stroke(Color.primary.opacity(0.22), lineWidth: 1)
+            )
+            .shadow(color: Color.black.opacity(0.28), radius: 10, x: 0, y: 4)
+            .position(x: availW / 2, y: 26)
+            .zIndex(998)
+        }
+    }
+
+    @ViewBuilder
+    private func floatingInspectPopoverLayer(availW: CGFloat, availH: CGFloat) -> some View {
+        // MARK: - Floating Contextual Multi-Point Inspect Popover
+        if let anchor = browserAutomation.pickedElements.first ?? browserAutomation.lastPickedElement,
+           !browserAutomation.pickedElements.isEmpty {
+            let selectedCount = browserAutomation.pickedElements.count
+            let vpW = max(1, CGFloat(anchor.viewportWidth))
+            let vpH = max(1, CGFloat(anchor.viewportHeight))
+            let elCenterX = ((CGFloat(anchor.boundsX) + CGFloat(anchor.boundsWidth) * 0.5) / vpW) * availW
+            let elTopY = (CGFloat(anchor.boundsY) / vpH) * availH
+            let elBottomY = ((CGFloat(anchor.boundsY) + CGFloat(anchor.boundsHeight)) / vpH) * availH
+            
+            let cardW = min(max(320, availW - 24), 440)
+            let estimatedRowsH = CGFloat(min(selectedCount, 3)) * 54.0
+            let cardH: CGFloat = 128 + estimatedRowsH
+            let minX = cardW / 2 + 12
+            let maxX = max(minX, availW - cardW / 2 - 12)
+            let baseX = min(max(minX, elCenterX), maxX)
+            
+            let prefersBelow = (elBottomY + cardH + 18) <= availH
+            let rawY = prefersBelow ? (elBottomY + cardH / 2 + 10) : (elTopY - cardH / 2 - 10)
+            let minY = cardH / 2 + 12
+            let maxY = max(minY, availH - cardH / 2 - 12)
+            let baseY = min(max(minY, rawY), maxY)
+            
+            let finalX = min(max(minX, baseX + inspectPopupAccumulatedOffset.width + inspectPopupDragOffset.width), maxX)
+            let finalY = min(max(minY, baseY + inspectPopupAccumulatedOffset.height + inspectPopupDragOffset.height), maxY)
+            
+            VStack(alignment: .leading, spacing: 8) {
+                inspectPopoverHeaderView(selectedCount: selectedCount)
+                Divider().opacity(0.5)
+                inspectSelectedElementsListView(selectedCount: selectedCount)
+                inspectPresetChipsScrollView
+                inspectBatchPromptInputRow(selectedCount: selectedCount)
+            }
+            .padding(10)
+            .frame(width: cardW)
+            .background(
+                RoundedRectangle(cornerRadius: 9, style: .continuous)
+                    .fill(Color(nsColor: .windowBackgroundColor).opacity(0.98))
+            )
+            .overlay(
+                RoundedRectangle(cornerRadius: 9, style: .continuous)
+                    .stroke(Color.primary.opacity(0.22), lineWidth: 1)
+            )
+            .shadow(color: Color.black.opacity(0.4), radius: 16, x: 0, y: 6)
+            .position(x: finalX, y: finalY)
+            .transition(.scale(scale: 0.96).combined(with: .opacity))
+            .zIndex(999)
+        }
+    }
+
+    @ViewBuilder
+    private func inspectPopoverHeaderView(selectedCount: Int) -> some View {
+        HStack(spacing: 6) {
+            Image(systemName: "viewfinder")
+                .font(.system(size: 11, weight: .semibold))
+                .foregroundColor(.primary)
+            
+            Text("INSPECT SELECTION")
+                .font(.system(size: 10, weight: .bold, design: .monospaced))
+                .foregroundColor(.primary)
+            
+            Text("\(selectedCount) POINT\(selectedCount == 1 ? "" : "S")")
+                .font(.system(size: 9.5, weight: .semibold, design: .monospaced))
+                .padding(.horizontal, 6)
+                .padding(.vertical, 1.5)
+                .background(Color.primary.opacity(0.1))
+                .foregroundColor(.secondary)
+                .cornerRadius(4)
+            
+            Spacer(minLength: 4)
+            
+            Button {
+                browserAutomation.toggleInspectMode(target: "preview")
+            } label: {
+                HStack(spacing: 3.5) {
+                    Image(systemName: browserAutomation.isInspectMode ? "checkmark.circle.fill" : "plus.viewfinder")
+                        .font(.system(size: 9.5, weight: .semibold))
+                    Text(browserAutomation.isInspectMode ? "Picking Active" : "Add Spot")
+                        .font(.system(size: 9.5, weight: .medium))
+                }
+                .padding(.horizontal, 7)
+                .padding(.vertical, 3)
+                .background(browserAutomation.isInspectMode ? Color.primary.opacity(0.18) : Color.primary.opacity(0.07))
+                .foregroundColor(.primary)
+                .cornerRadius(4)
+            }
+            .buttonStyle(.plain)
+            .help("Toggle continuous multi-point picking on the preview page")
+            
+            if selectedCount > 1 {
+                Button {
+                    browserAutomation.clearPickedElement(target: "preview")
+                } label: {
+                    Text("Clear All")
+                        .font(.system(size: 9.5, weight: .medium))
+                        .foregroundColor(.secondary)
+                        .padding(.horizontal, 5)
+                        .padding(.vertical, 2.5)
+                        .background(Color.primary.opacity(0.06))
+                        .cornerRadius(4)
+                }
+                .buttonStyle(.plain)
+                .help("Clear all selected points")
+            }
+            
+            Button {
+                browserAutomation.clearPickedElement(target: "preview")
+            } label: {
+                Image(systemName: "xmark")
+                    .font(.system(size: 10, weight: .semibold))
+                    .foregroundColor(.secondary)
+                    .frame(width: 18, height: 18)
+            }
+            .buttonStyle(.plain)
+            .help("Close inspect panel")
+        }
+        .contentShape(Rectangle())
+        .gesture(
+            DragGesture(minimumDistance: 2)
+                .onChanged { val in
+                    inspectPopupDragOffset = val.translation
+                }
+                .onEnded { val in
+                    inspectPopupAccumulatedOffset.width += val.translation.width
+                    inspectPopupAccumulatedOffset.height += val.translation.height
+                    inspectPopupDragOffset = .zero
+                }
+        )
+    }
+
+    @ViewBuilder
+    private func inspectSelectedElementsListView(selectedCount: Int) -> some View {
+        ScrollView(.vertical, showsIndicators: true) {
+            VStack(alignment: .leading, spacing: 6) {
+                ForEach(Array(browserAutomation.pickedElements.enumerated()), id: \.element.id) { idx, item in
+                    inspectSelectedElementRow(idx: idx, item: item, selectedCount: selectedCount)
+                }
+            }
+        }
+        .frame(maxHeight: selectedCount == 1 ? 64 : min(CGFloat(selectedCount) * 62, 184))
+    }
+
+    @ViewBuilder
+    private func inspectSelectedElementRow(idx: Int, item: BrowserPickedElement, selectedCount: Int) -> some View {
+        VStack(alignment: .leading, spacing: 4) {
+            HStack(spacing: 5) {
+                Text("#\(idx + 1)")
+                    .font(.system(size: 9.5, weight: .bold, design: .monospaced))
+                    .padding(.horizontal, 5)
+                    .padding(.vertical, 1.5)
+                    .background(Color.primary.opacity(0.14))
+                    .foregroundColor(.primary)
+                    .cornerRadius(3)
+                
+                Button {
+                    browserAutomation.focusPickedElementOnPage(item, target: "preview")
+                } label: {
+                    Text(item.selector)
+                        .font(.system(size: 10.5, weight: .semibold, design: .monospaced))
+                        .foregroundColor(.primary)
+                        .lineLimit(1)
+                        .truncationMode(.middle)
+                }
+                .buttonStyle(.plain)
+                .help("Click to scroll to #\(idx + 1) in preview")
+                
+                Text(item.rect)
+                    .font(.system(size: 9, design: .monospaced))
+                    .foregroundColor(.secondary)
+                    .lineLimit(1)
+                
+                if !item.text.isEmpty {
+                    Text("· \(item.text)")
+                        .font(.system(size: 9.5))
+                        .foregroundColor(.secondary)
+                        .lineLimit(1)
+                        .truncationMode(.tail)
+                }
+                
+                Spacer(minLength: 4)
+                
+                Button {
+                    browserAutomation.removePickedElement(id: item.id, target: "preview")
+                } label: {
+                    Image(systemName: "xmark")
+                        .font(.system(size: 8.5, weight: .semibold))
+                        .foregroundColor(.secondary)
+                        .frame(width: 16, height: 16)
+                        .background(Color.primary.opacity(0.06))
+                        .cornerRadius(3)
+                }
+                .buttonStyle(.plain)
+                .help("Remove target #\(idx + 1)")
+            }
+            
+            TextField(
+                selectedCount > 1
+                    ? "คำสั่งเฉพาะจุดที่ #\(idx + 1) (เว้นว่างได้หากใช้คำสั่งรวมด้านล่าง)..."
+                    : "รายละเอียดเพิ่มเติมสำหรับจุดนี้ (ไม่บังคับ)...",
+                text: Binding(
+                    get: {
+                        guard idx < browserAutomation.pickedElements.count else { return "" }
+                        return browserAutomation.pickedElements[idx].note
+                    },
+                    set: { newValue in
+                        guard idx < browserAutomation.pickedElements.count else { return }
+                        browserAutomation.pickedElements[idx].note = newValue
                     }
+                )
+            )
+            .textFieldStyle(.plain)
+            .font(.system(size: 10.5))
+            .padding(.horizontal, 7)
+            .padding(.vertical, 4)
+            .background(Color.primary.opacity(0.04))
+            .cornerRadius(4)
+            .overlay(
+                RoundedRectangle(cornerRadius: 4)
+                    .stroke(Color.primary.opacity(0.1), lineWidth: 1)
+            )
+        }
+        .padding(6)
+        .background(Color.primary.opacity(0.04))
+        .cornerRadius(5)
+        .overlay(
+            RoundedRectangle(cornerRadius: 5)
+                .stroke(Color.primary.opacity(0.08), lineWidth: 1)
+        )
+    }
+
+    private struct InspectPresetItem: Identifiable {
+        var id: String { label }
+        let iconName: String
+        let label: String
+        let preset: String
+    }
+
+    private var inspectPresetItems: [InspectPresetItem] {
+        [
+            InspectPresetItem(iconName: "paintbrush", label: "ปรับสีและสไตล์", preset: "ปรับโทนสี พื้นหลัง และสไตล์ของจุดที่เลือกให้เข้ากับธีมและดูเป็นทางการ"),
+            InspectPresetItem(iconName: "textformat", label: "แก้ไขข้อความ", preset: "แก้ไขข้อความในจุดที่เลือก: "),
+            InspectPresetItem(iconName: "rectangle.3.group", label: "จัด Layout / ระยะห่าง", preset: "จัดระเบียบ Layout, ขนาด และระยะห่าง (padding/margin/alignment) ของจุดที่เลือกทั้งหมดให้สมดุลเท่ากัน"),
+            InspectPresetItem(iconName: "square.resize", label: "ปรับขนาดให้เท่ากัน", preset: "ปรับขนาดความกว้าง/ความสูงและสัดส่วนของจุดที่เลือกทั้งหมดให้เท่ากันอย่างเป็นระเบียบ"),
+            InspectPresetItem(iconName: "wrench.and.screwdriver", label: "แก้บั๊ก / การทำงาน", preset: "ตรวจสอบและแก้ไขบั๊กการแสดงผลหรือ Event/State ของจุดที่เลือกทั้งหมด")
+        ]
+    }
+
+    @ViewBuilder
+    private var inspectPresetChipsScrollView: some View {
+        ScrollView(.horizontal, showsIndicators: false) {
+            HStack(spacing: 5) {
+                ForEach(inspectPresetItems) { item in
+                    Button {
+                        if item.label.contains("แก้ไขข้อความ") {
+                            inspectInstructionText = item.preset
+                            isInspectInputFocused = true
+                        } else {
+                            browserAutomation.sendPickedElementsToAgent(
+                                browserAutomation.pickedElements,
+                                instruction: item.preset,
+                                pageURL: urlString,
+                                autoSend: true
+                            )
+                            inspectInstructionText = ""
+                        }
+                    } label: {
+                        HStack(spacing: 4) {
+                            Image(systemName: item.iconName)
+                                .font(.system(size: 8.5, weight: .medium))
+                                .foregroundColor(.secondary)
+                            Text(item.label)
+                                .font(.system(size: 9.5, weight: .medium))
+                                .foregroundColor(.primary.opacity(0.9))
+                        }
+                        .padding(.horizontal, 7)
+                        .padding(.vertical, 3.5)
+                        .background(Color.primary.opacity(0.06))
+                        .cornerRadius(4)
+                        .overlay(
+                            RoundedRectangle(cornerRadius: 4)
+                                .stroke(Color.primary.opacity(0.1), lineWidth: 1)
+                        )
+                    }
+                    .buttonStyle(.plain)
                 }
             }
         }
-        .background(canvasColor)
-        .onChange(of: browserAutomation.pickedElements.count) { newCount in
-            if newCount == 0 {
-                inspectPopupDragOffset = .zero
-                inspectPopupAccumulatedOffset = .zero
-            } else if newCount == 1 {
-                DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) {
-                    isInspectInputFocused = true
+    }
+
+    @ViewBuilder
+    private func inspectBatchPromptInputRow(selectedCount: Int) -> some View {
+        HStack(spacing: 6) {
+            TextField(
+                selectedCount > 1
+                    ? "คำสั่งรวมสำหรับทั้ง \(selectedCount) จุด... (กด Enter ส่งทันที)"
+                    : "สั่ง AI แก้ไขจุดนี้... (กด Enter ส่งทันที)",
+                text: $inspectInstructionText
+            )
+            .textFieldStyle(.plain)
+            .font(.system(size: 11))
+            .focused($isInspectInputFocused)
+            .padding(.horizontal, 8)
+            .padding(.vertical, 5.5)
+            .background(Color.primary.opacity(0.06))
+            .cornerRadius(5)
+            .overlay(
+                RoundedRectangle(cornerRadius: 5)
+                    .stroke(Color.primary.opacity(isInspectInputFocused ? 0.35 : 0.14), lineWidth: 1)
+            )
+            .onSubmit {
+                browserAutomation.sendPickedElementsToAgent(
+                    browserAutomation.pickedElements,
+                    instruction: inspectInstructionText,
+                    pageURL: urlString,
+                    autoSend: true
+                )
+                inspectInstructionText = ""
+            }
+            
+            Button {
+                browserAutomation.sendPickedElementsToAgent(
+                    browserAutomation.pickedElements,
+                    instruction: inspectInstructionText,
+                    pageURL: urlString,
+                    autoSend: false
+                )
+                inspectInstructionText = ""
+            } label: {
+                Image(systemName: "plus.bubble")
+                    .font(.system(size: 10.5, weight: .semibold))
+                    .padding(.horizontal, 7)
+                    .padding(.vertical, 6)
+                    .background(Color.primary.opacity(0.08))
+                    .foregroundColor(.primary)
+                    .cornerRadius(5)
+                    .overlay(
+                        RoundedRectangle(cornerRadius: 5)
+                            .stroke(Color.primary.opacity(0.12), lineWidth: 1)
+                    )
+            }
+            .buttonStyle(.plain)
+            .help("Attach all selected points to Chat input without sending immediately")
+            
+            Button {
+                browserAutomation.sendPickedElementsToAgent(
+                    browserAutomation.pickedElements,
+                    instruction: inspectInstructionText,
+                    pageURL: urlString,
+                    autoSend: true
+                )
+                inspectInstructionText = ""
+            } label: {
+                HStack(spacing: 4) {
+                    Image(systemName: "arrow.up.circle.fill")
+                        .font(.system(size: 10))
+                    Text(selectedCount > 1 ? "Send (\(selectedCount))" : "Send")
+                        .font(.system(size: 10.5, weight: .semibold))
                 }
+                .padding(.horizontal, 10)
+                .padding(.vertical, 6)
+                .background(Color.primary)
+                .foregroundColor(Color(nsColor: .windowBackgroundColor))
+                .cornerRadius(5)
             }
-        }
-        .onAppear {
-            detectLocalWorkspaceIndex()
-            resolveInitialURL()
-            browserAutomation.scanActivePorts()
-            universalBridge.refreshDetectedFramework()
-        }
-        .onChange(of: appState.currentFile?.path) { newPath in
-            universalBridge.refreshDetectedFramework(activeFilePath: newPath, activeCode: appState.currentFile?.content)
-        }
-        .onChange(of: browserAutomation.activePortProcesses) { processes in
-            guard !processes.isEmpty else { return }
-            let preferredPorts = [5173, 5174, 4173, 3000, 8080, 4200, 4321, 8000]
-            let activePorts = Set(processes.map(\.port))
-            let currentPort = currentURL?.port
-            let isDeadLocalhostPort = (currentPort != nil && !activePorts.contains(currentPort!))
-            let isBundlerFileURL = (currentURL?.isFileURL == true && workspaceRequiresDevServer())
-            if isDeadLocalhostPort || isBundlerFileURL || urlString.isEmpty {
-                let wsPort = detectPreferredWorkspacePort()
-                if activePorts.contains(wsPort) {
-                    sanitizeAndSetURL("http://localhost:\(wsPort)")
-                } else if let match = preferredPorts.first(where: { activePorts.contains($0) }) ?? processes.first?.port {
-                    sanitizeAndSetURL("http://localhost:\(match)")
-                }
-            }
-        }
-        .onChange(of: runtime.targetWebURL) { newURL in
-            if let newURL = newURL {
-                sanitizeAndSetURL(newURL.absoluteString)
-            }
-        }
-        .onChange(of: runtime.webRefreshTrigger) { _ in
-            refreshTrigger = true
-        }
-        .onChange(of: runtime.targetViewport) { newVP in
-            let key = newVP.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
-            if key.contains("responsive") || key.contains("fluid") {
-                selectedViewport = .responsive
-                customWidth = nil
-            } else if key.contains("macbook") || key.contains("desktop") || key.contains("pc") || key.contains("laptop") {
-                selectedViewport = .macbook
-                showDeviceBezel = true
-            } else if key.contains("ipad") || key.contains("tablet") {
-                selectedViewport = .tablet
-                showDeviceBezel = true
-            } else if key.contains("iphone") || key.contains("mobile") || key.contains("phone") {
-                selectedViewport = .iphone
-                showDeviceBezel = true
-            } else if let match = WebAppViewport.allCases.first(where: { $0.rawValue.lowercased() == key }) {
-                selectedViewport = match
-                if match != .responsive { showDeviceBezel = true }
-            }
-        }
-        .onChange(of: runtime.lastDetectedDevServerPort) { newPort in
-            if let port = newPort, runtime.targetWebURL == nil, currentURL?.isFileURL != true {
-                sanitizeAndSetURL("http://localhost:\(port)")
-            }
-        }
-        .onReceive(NotificationCenter.default.publisher(for: NSNotification.Name("MicroCodeFileSaved"))) { note in
-            handleFileSavedNotification(note)
-        }
-        .onReceive(NotificationCenter.default.publisher(for: NSNotification.Name("MicroCodeEditorFolderOpened"))) { _ in
-            runtime.targetWebURL = nil
-            detectLocalWorkspaceIndex()
-            resolveInitialURL()
-            browserAutomation.scanActivePorts()
-            universalBridge.refreshDetectedFramework()
+            .buttonStyle(.plain)
+            .help("Send all selected points to AI Agent and edit code immediately")
         }
     }
 

@@ -13,6 +13,7 @@ import AppKit
 
 struct ContentView: View {
     @EnvironmentObject var appState: AppState
+    @State private var isWorkspaceMounted: Bool = false
     // File-based flag survives app re-signing / dev rebuilds (unlike @AppStorage)
     @State private var welcomeCompleted: Bool = {
         let flag = FileManager.default.homeDirectoryForCurrentUser
@@ -21,20 +22,34 @@ struct ContentView: View {
     }()
 
     var body: some View {
-        AgenticEditorWorkspace()
-            .environmentObject(appState)
-            .ignoresSafeArea(.all, edges: .top)
-            .overlay(autoHealerOverlay)
-            .overlay(welcomeOverlay)
-            .modifier(PrimarySheetsModifier(appState: appState))
-            .modifier(SecondarySheetsModifier(appState: appState))
-            .modifier(StudioSheetsModifier(appState: appState))
-            .modifier(GlobalKeyboardShortcutsModifier(appState: appState))
-            .alert("MicroCode", isPresented: .constant(appState.alertMessage != nil)) {
-                Button("OK") { appState.alertMessage = nil }
-            } message: {
-                Text(appState.alertMessage ?? "")
+        ZStack {
+            if isWorkspaceMounted {
+                AgenticEditorWorkspace()
+                    .environmentObject(appState)
+                    .ignoresSafeArea(.all, edges: .top)
+                    .overlay(autoHealerOverlay)
+                    .overlay(welcomeOverlay)
+                    .modifier(PrimarySheetsModifier(appState: appState))
+                    .modifier(SecondarySheetsModifier(appState: appState))
+                    .modifier(StudioSheetsModifier(appState: appState))
+                    .modifier(GlobalKeyboardShortcutsModifier(appState: appState))
+            } else {
+                Color(nsColor: appState.appTheme.workspaceBackground)
+                    .ignoresSafeArea()
             }
+        }
+        .onAppear {
+            if !isWorkspaceMounted {
+                DispatchQueue.main.async {
+                    isWorkspaceMounted = true
+                }
+            }
+        }
+        .alert("MicroCode", isPresented: .constant(appState.alertMessage != nil)) {
+            Button("OK") { appState.alertMessage = nil }
+        } message: {
+            Text(appState.alertMessage ?? "")
+        }
         // Keyboard shortcuts
         .onCommand(#selector(NSResponder.selectAll(_:))) { }
         .background(
@@ -329,7 +344,9 @@ struct AgenticEditorWorkspace: View {
         }
         .onAppear {
             PhoneCompanionService.shared.appState = appState
-            PhoneCompanionService.shared.startServerIfNeeded()
+            if PhoneCompanionService.shared.isEnabled {
+                PhoneCompanionService.shared.startServerIfNeeded()
+            }
             if let workspace = appState.workspaceFolder {
                 agent.setWorkspace(workspace.path)
             }

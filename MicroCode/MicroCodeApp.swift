@@ -64,24 +64,26 @@ struct MicroCodeApp: App {
                         await performBackgroundStartup()
                     }
                     
-                    // Handle any files/folders passed via CLI or open -a MicroCode before view appeared
-                    for url in appDelegate.consumePendingOpenURLs() {
-                        handleIncomingDeepLink(url)
-                    }
-                    let args = Array(CommandLine.arguments.dropFirst())
-                    if !args.contains("--acp-server") {
-                        var skipNext = false
-                        for arg in args {
-                            if skipNext { skipNext = false; continue }
-                            if arg == "-NSDocumentRevisionsDebugMode" || arg == "-ApplePersistenceIgnoreState" {
-                                skipNext = true
-                                continue
-                            }
-                            guard !arg.hasPrefix("-") else { continue }
-                            let expanded = (arg as NSString).expandingTildeInPath
-                            if FileManager.default.fileExists(atPath: expanded) {
-                                openLocalFileOrFolder(URL(fileURLWithPath: expanded))
-                                break
+                    // Handle any files/folders passed via CLI or open -a MicroCode after initial window commit
+                    DispatchQueue.main.async {
+                        for url in appDelegate.consumePendingOpenURLs() {
+                            handleIncomingDeepLink(url)
+                        }
+                        let args = Array(CommandLine.arguments.dropFirst())
+                        if !args.contains("--acp-server") {
+                            var skipNext = false
+                            for arg in args {
+                                if skipNext { skipNext = false; continue }
+                                if arg == "-NSDocumentRevisionsDebugMode" || arg == "-ApplePersistenceIgnoreState" {
+                                    skipNext = true
+                                    continue
+                                }
+                                guard !arg.hasPrefix("-") else { continue }
+                                let expanded = (arg as NSString).expandingTildeInPath
+                                if FileManager.default.fileExists(atPath: expanded) {
+                                    openLocalFileOrFolder(URL(fileURLWithPath: expanded))
+                                    break
+                                }
                             }
                         }
                     }

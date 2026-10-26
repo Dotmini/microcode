@@ -72,7 +72,7 @@ class AgentToolBox: ObservableObject {
         registerBuiltinTools()
         Task { @MainActor in
             let initialWs = self.workspaceRoot ?? UserDefaults.standard.string(forKey: "MicroCode.WorkspacePath") ?? FileManager.default.currentDirectoryPath
-            MCPClient.shared.start(workspacePath: initialWs)
+            MCPClient.shared.configure(workspacePath: initialWs)
         }
     }
     

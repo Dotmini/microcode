@@ -241,8 +241,10 @@ class RuntimeManager: ObservableObject {
         // Initialize with all runtime types
         runtimes = RuntimeType.allCases.map { RuntimeStatus(type: $0) }
         
-        // Auto-detect on init
-        detectAll(force: true)
+        // Defer runtime binary probing until after cold-launch window is settled
+        DispatchQueue.main.asyncAfter(deadline: .now() + 4.0) { [weak self] in
+            self?.detectAll(force: false)
+        }
     }
     
     // MARK: - Language Mapping & Environment Helpers

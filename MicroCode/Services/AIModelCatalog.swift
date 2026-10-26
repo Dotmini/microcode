@@ -74,7 +74,7 @@ final class AIModelCatalog: ObservableObject {
         Task { @MainActor [weak self] in
             guard let self else { return }
             self.integrateEcosystemEngines(LocalEcosystemDiscovery.shared.engines)
-            try? await Task.sleep(nanoseconds: 500_000_000)
+            try? await Task.sleep(nanoseconds: 4_000_000_000)
             await self.refreshIfNeeded(force: false)
         }
     }

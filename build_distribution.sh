@@ -159,7 +159,7 @@ compile_arch() {
     echo "   🔨 Compiling Swift App..."
     
     # Common flags
-    LINK_FLAGS="-Xlinker -L${RUST_LIB_PATH} -Xlinker -lmicrocode_embedded -Xlinker -L${MICROCORE_LIB_PATH} -Xlinker -lmicrocode_core -Xswiftc -strict-concurrency=minimal"
+    LINK_FLAGS="-Xlinker -L${RUST_LIB_PATH} -Xlinker -lmicrocode_embedded -Xlinker -L${MICROCORE_LIB_PATH} -Xlinker -lmicrocode_core -Xswiftc -strict-concurrency=minimal -Xswiftc -solver-expression-time-threshold=120"
     
     if [ "$DEV_MODE" = "true" ]; then
         swift build -c release --product MicroCode --arch "${ARCH}" ${LINK_FLAGS}
@@ -169,8 +169,9 @@ compile_arch() {
         SWIFT_CONFIG="release"
     fi
     
-    # Copy Swift Binary
+    # Copy Swift Binary & Strip Debug Symbols for Compact Distribution
     cp ".build/${ARCH}-apple-macosx/${SWIFT_CONFIG}/MicroCode" "${ARCH_BUILD_DIR}/MicroCode"
+    strip -x "${ARCH_BUILD_DIR}/MicroCode" 2>/dev/null || true
     
     # Copy Rust Binary
     cp "backend/target/${RUST_TARGET}/${RUST_CONFIG}/microcode-backend" "${ARCH_BUILD_DIR}/microcode-backend"

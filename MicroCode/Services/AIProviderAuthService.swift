@@ -565,9 +565,10 @@ class AIProviderAuthService: ObservableObject {
             appState.aiModel = active.model
         }
         
-        // Trigger live model catalog refresh with bridged keys
+        // Trigger live model catalog refresh lazily if cache TTL expired
         Task { @MainActor in
-            await AIModelCatalog.shared.refreshIfNeeded(force: true)
+            try? await Task.sleep(nanoseconds: 4_000_000_000)
+            await AIModelCatalog.shared.refreshIfNeeded(force: false)
         }
     }
 }

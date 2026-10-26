@@ -45,6 +45,9 @@ class LSPManager: ObservableObject {
     /// Latest in-memory content per URI for fast local symbol extraction
     private var documentContents: [String: String] = [:]
     
+    /// Startup timestamp used to stagger external LSP binary spawning after cold start
+    private let launchTimestamp = Date()
+    
     private init() {}
     
     // MARK: - API
@@ -103,6 +106,10 @@ class LSPManager: ObservableObject {
         
         let startupTask = Task<LSPClientService?, Never> { @MainActor in
             defer { self.startingClients.removeValue(forKey: serverType) }
+            let elapsed = Date().timeIntervalSince(self.launchTimestamp)
+            if elapsed < 3.0 {
+                try? await Task.sleep(nanoseconds: UInt64((3.0 - elapsed) * 1_000_000_000))
+            }
             guard let _ = await LSPClientService.resolveBinaryAsync(serverType.rawValue, searchPaths: serverType.searchPaths) else {
                 return nil
             }
