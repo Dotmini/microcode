@@ -19,18 +19,19 @@
     margin: 0;
     padding: 0;
     width: 210mm;
-    font-family: "Charter", "Georgia", "Cambria", "Times New Roman", "Sukhumvit Set", serif;
-    color: #111827;
+    font-family: -apple-system, BlinkMacSystemFont, "SF Pro Text", "SF Pro Display", "SF Pro", "Helvetica Neue", Helvetica, Arial, sans-serif;
+    color: #0f172a;
     background-color: #ffffff;
-    font-size: 8.4pt;
-    line-height: 1.52;
+    font-size: 8pt;
+    line-height: 1.45;
     text-rendering: optimizeLegibility;
+    -webkit-font-smoothing: antialiased;
   }
 
   .page-container {
     width: 210mm;
     height: 297mm;
-    padding: 18mm 20mm 16mm 20mm;
+    padding: 14mm 16mm 12mm 16mm;
     display: flex;
     flex-direction: column;
     justify-content: space-between;
@@ -38,291 +39,534 @@
     overflow: hidden;
     page-break-after: always;
     break-after: page;
-    background-color: #ffffff;
-  }
-  .page-container:last-child {
-    page-break-after: auto;
-    break-after: auto;
+    background: #ffffff;
   }
 
-  /* Academic Running Header & Footer */
+  /* Running Header & Footer */
   .running-header {
     display: flex;
     justify-content: space-between;
     align-items: center;
-    border-bottom: 0.5pt solid #cbd5e1;
+    border-bottom: 0.75pt solid #cbd5e1;
     padding-bottom: 4pt;
-    font-family: -apple-system, BlinkMacSystemFont, "SF Pro Text", "Helvetica Neue", sans-serif;
-    font-size: 7.2pt;
-    color: #64748b;
+    font-size: 6.8pt;
+    font-weight: 600;
     text-transform: uppercase;
-    letter-spacing: 0.06em;
+    letter-spacing: 0.6px;
+    color: #64748b;
   }
+
   .running-footer {
     display: flex;
     justify-content: space-between;
     align-items: center;
-    border-top: 0.5pt solid #cbd5e1;
+    border-top: 0.75pt solid #cbd5e1;
     padding-top: 4pt;
-    font-family: -apple-system, BlinkMacSystemFont, "SF Pro Text", "Helvetica Neue", sans-serif;
-    font-size: 7.2pt;
-    color: #64748b;
+    font-size: 6.8pt;
+    font-weight: 500;
+    color: #94a3b8;
   }
 
   .content-area {
     flex: 1;
-    margin: 8pt 0 6pt 0;
+    display: flex;
+    flex-direction: column;
+    justify-content: flex-start;
+    padding: 6pt 0 2pt 0;
   }
 
-  /* Academic Title Block (OpenAI / arXiv Style) */
-  .paper-type-tag {
-    font-family: -apple-system, BlinkMacSystemFont, "SF Pro Text", "Helvetica Neue", sans-serif;
-    font-size: 8pt;
+  /* Title & Author Block */
+  .doc-category {
+    font-size: 7pt;
     font-weight: 700;
+    letter-spacing: 1px;
     text-transform: uppercase;
-    letter-spacing: 0.12em;
-    color: #475569;
-    text-align: center;
-    margin-bottom: 6pt;
-  }
-  .paper-title {
-    font-size: 15.5pt;
-    font-weight: 700;
-    line-height: 1.25;
-    text-align: center;
-    color: #0f172a;
-    letter-spacing: -0.015em;
-    margin: 0 auto 8pt auto;
-    max-width: 90%;
-  }
-  .authors-block {
-    text-align: center;
-    font-size: 8.5pt;
-    color: #334155;
-    margin-bottom: 11pt;
-  }
-  .authors-block .name {
-    font-weight: 600;
-    color: #0f172a;
-  }
-  .authors-block .affiliation {
-    font-size: 7.8pt;
-    color: #64748b;
-    margin-top: 1pt;
-  }
-  .authors-block .contact {
-    font-family: "SF Mono", Menlo, monospace;
-    font-size: 7.2pt;
-    color: #475569;
-    margin-top: 2pt;
+    color: #0066cc;
+    margin-bottom: 2pt;
   }
 
-  /* Formal Abstract (Top/Bottom Horizontal Rules) */
-  .abstract-box {
-    margin: 0 auto 12pt auto;
-    padding: 7pt 12pt;
-    border-top: 1pt solid #0f172a;
-    border-bottom: 1pt solid #0f172a;
-    max-width: 96%;
-    font-size: 7.9pt;
-    line-height: 1.48;
+  .doc-title {
+    font-size: 15pt;
+    font-weight: 800;
+    line-height: 1.2;
+    color: #0f172a;
+    letter-spacing: -0.4px;
+    margin-bottom: 4pt;
+  }
+
+  .doc-authors {
+    font-size: 8pt;
+    font-weight: 600;
     color: #1e293b;
+    margin-bottom: 1.5pt;
+  }
+
+  .doc-affil {
+    font-size: 7pt;
+    color: #64748b;
+    margin-bottom: 5pt;
+  }
+
+  /* Abstract Box */
+  .abstract-box {
+    border-top: 1pt solid #cbd5e1;
+    border-bottom: 1pt solid #cbd5e1;
+    padding: 5.5pt 9pt;
+    background: #f8fafc;
+    border-radius: 4pt;
+    margin-bottom: 7pt;
+    font-size: 7.4pt;
+    line-height: 1.42;
+    color: #334155;
     text-align: justify;
   }
+
   .abstract-box strong.title {
-    font-family: -apple-system, BlinkMacSystemFont, sans-serif;
-    font-weight: 700;
-    text-transform: uppercase;
     font-size: 7.2pt;
-    letter-spacing: 0.08em;
+    font-weight: 800;
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
     color: #0f172a;
     display: block;
-    margin-bottom: 3pt;
-    text-align: center;
+    margin-bottom: 1.5pt;
   }
 
   /* Headings */
   h2.sec-heading {
-    font-family: -apple-system, BlinkMacSystemFont, "SF Pro Display", sans-serif;
-    font-size: 9.8pt;
-    font-weight: 700;
+    font-size: 9.2pt;
+    font-weight: 800;
+    letter-spacing: -0.2px;
     color: #0f172a;
-    letter-spacing: -0.01em;
-    margin: 9pt 0 4pt 0;
-    padding-bottom: 2pt;
+    margin: 5pt 0 3pt 0;
     border-bottom: 0.5pt solid #e2e8f0;
-    text-transform: none;
+    padding-bottom: 1.5pt;
   }
+
   h3.subsec-heading {
-    font-family: -apple-system, BlinkMacSystemFont, sans-serif;
-    font-size: 8.6pt;
-    font-weight: 600;
+    font-size: 8pt;
+    font-weight: 700;
     color: #1e293b;
-    margin: 7pt 0 3pt 0;
+    margin: 4pt 0 2pt 0;
   }
+
   p {
-    margin: 0 0 5pt 0;
+    margin: 0 0 4pt 0;
     text-align: justify;
-    line-height: 1.5;
-  }
-
-  /* Formal Booktabs Tables */
-  table.booktabs {
-    width: 100%;
-    border-collapse: collapse;
-    border-top: 1.25pt solid #0f172a;
-    border-bottom: 1.25pt solid #0f172a;
-    margin: 7pt 0 8pt 0;
-    font-size: 7.6pt;
-    line-height: 1.38;
-  }
-  table.booktabs th {
-    border-bottom: 0.75pt solid #0f172a;
-    padding: 4pt 6pt;
-    font-family: -apple-system, BlinkMacSystemFont, sans-serif;
-    font-weight: 600;
-    text-align: left;
-    color: #0f172a;
-    vertical-align: bottom;
-  }
-  table.booktabs td {
-    padding: 4pt 6pt;
-    border-bottom: 0.25pt solid #e2e8f0;
-    color: #1e293b;
-    vertical-align: middle;
-  }
-  table.booktabs tr:last-child td {
-    border-bottom: none;
-  }
-  table.booktabs tr.highlight-row {
-    background-color: #f8fafc;
-  }
-  table.booktabs tr.highlight-row td {
-    font-weight: 600;
-    color: #0f172a;
-  }
-
-  .caption {
-    font-family: -apple-system, BlinkMacSystemFont, sans-serif;
-    font-size: 7.2pt;
-    color: #475569;
-    margin-top: 2pt;
-    margin-bottom: 7pt;
-    line-height: 1.35;
-  }
-  .caption strong {
-    color: #0f172a;
-  }
-
-  /* Scientific Chart Containers (Academic Vector Style) */
-  .fig-container {
-    background: #fafafa;
-    border: 0.75pt solid #e2e8f0;
-    border-radius: 4pt;
-    padding: 8pt 11pt;
-    margin: 7pt 0 6pt 0;
-  }
-  .fig-title {
-    font-family: -apple-system, BlinkMacSystemFont, sans-serif;
-    font-size: 7.8pt;
-    font-weight: 700;
-    color: #0f172a;
-    margin-bottom: 6pt;
-    display: flex;
-    justify-content: space-between;
-  }
-  .fig-row {
-    margin-bottom: 5pt;
-  }
-  .fig-row:last-child {
-    margin-bottom: 0;
-  }
-  .fig-labels {
-    display: flex;
-    justify-content: space-between;
-    font-family: -apple-system, BlinkMacSystemFont, sans-serif;
-    font-size: 7.3pt;
-    margin-bottom: 2pt;
-  }
-  .fig-labels .name {
-    font-weight: 600;
-    color: #1e293b;
-  }
-  .fig-labels .val {
-    font-family: "SF Mono", Menlo, monospace;
-    font-weight: 700;
-    color: #0f172a;
-  }
-  .fig-bar-track {
-    width: 100%;
-    height: 7.5pt;
-    background: #e2e8f0;
-    border-radius: 2pt;
-    overflow: hidden;
-  }
-  .fig-bar-fill {
-    height: 100%;
-    border-radius: 2pt;
-  }
-  .fill-primary { background: #0f172a; }
-  .fill-accent { background: #2563eb; }
-  .fill-muted { background: #64748b; }
-  .fill-light { background: #94a3b8; }
-
-  /* Callout / Remark Box */
-  .remark-box {
-    border-left: 2pt solid #0f172a;
-    background: #f8fafc;
-    padding: 5pt 9pt;
-    margin: 6pt 0 7pt 0;
-    font-size: 7.6pt;
-    line-height: 1.45;
-    color: #334155;
-  }
-  .remark-box strong {
-    font-family: -apple-system, BlinkMacSystemFont, sans-serif;
-    color: #0f172a;
+    line-height: 1.42;
   }
 
   code {
-    font-family: "SF Mono", Menlo, monospace;
-    font-size: 7.3pt;
+    font-family: "SF Mono", Menlo, Consolas, Monaco, monospace;
+    font-size: 7pt;
     background: #f1f5f9;
-    padding: 0.5pt 2.5pt;
+    padding: 1pt 2.5pt;
     border-radius: 2pt;
+    border: 0.5pt solid #cbd5e1;
     color: #0f172a;
   }
 
-  ul.academic-list {
-    margin: 3pt 0 6pt 0;
-    padding-left: 14pt;
-  }
-  ul.academic-list li {
-    font-size: 7.8pt;
-    line-height: 1.45;
-    color: #334155;
-    margin-bottom: 2.5pt;
-  }
-  ul.academic-list li strong {
-    color: #0f172a;
+  /* Executive Scorecard (Page 1) */
+  .scorecard-grid {
+    display: grid;
+    grid-template-columns: repeat(4, 1fr);
+    gap: 5pt;
+    margin: 4pt 0 7pt 0;
   }
 
-  .stat-badge {
-    display: inline-block;
-    font-family: "SF Mono", Menlo, monospace;
-    font-size: 6.8pt;
+  .scorecard-card {
+    background: #ffffff;
+    border: 1pt solid #e2e8f0;
+    border-radius: 5pt;
+    padding: 5pt 6pt;
+    box-shadow: 0 1pt 2pt rgba(0,0,0,0.02);
+    display: flex;
+    flex-direction: column;
+    justify-content: space-between;
+  }
+
+  .scorecard-card.winner {
+    background: #f0f7ff;
+    border-color: #93c5fd;
+  }
+
+  .scorecard-label {
+    font-size: 6.4pt;
     font-weight: 700;
-    padding: 1pt 4pt;
-    border-radius: 2pt;
+    text-transform: uppercase;
+    letter-spacing: 0.4px;
+    color: #64748b;
   }
-  .badge-best { background: #dcfce7; color: #166534; }
-  .badge-runner { background: #e0f2fe; color: #0369a1; }
-  .badge-heavy { background: #fee2e2; color: #991b1b; }
+
+  .scorecard-card.winner .scorecard-label {
+    color: #0284c7;
+  }
+
+  .scorecard-value {
+    font-size: 13.5pt;
+    font-weight: 800;
+    letter-spacing: -0.4px;
+    color: #0f172a;
+    margin: 2pt 0 1pt 0;
+  }
+
+  .scorecard-card.winner .scorecard-value {
+    color: #0369a1;
+  }
+
+  .scorecard-sub {
+    font-size: 6.4pt;
+    font-weight: 600;
+    color: #16a34a;
+    line-height: 1.25;
+  }
+
+  .scorecard-sub.runner-up {
+    color: #d97706;
+  }
+
+  /* High-Impact Visual Comparison Table/Charts */
+  .vis-chart-box {
+    background: #ffffff;
+    border: 1pt solid #cbd5e1;
+    border-radius: 5pt;
+    padding: 7pt 8pt;
+    margin: 4pt 0 6pt 0;
+  }
+
+  .vis-chart-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    border-bottom: 0.5pt solid #e2e8f0;
+    padding-bottom: 3pt;
+    margin-bottom: 5pt;
+  }
+
+  .vis-chart-title {
+    font-size: 8pt;
+    font-weight: 800;
+    color: #0f172a;
+  }
+
+  .vis-chart-legend {
+    display: flex;
+    gap: 7pt;
+    font-size: 6.6pt;
+    color: #64748b;
+  }
+
+  .legend-chip {
+    display: flex;
+    align-items: center;
+    gap: 3pt;
+  }
+
+  .legend-color {
+    width: 6pt;
+    height: 6pt;
+    border-radius: 1.5pt;
+  }
+
+  /* Row comparison items */
+  .comp-row {
+    display: grid;
+    grid-template-columns: 38mm 1fr 24mm 24mm;
+    align-items: center;
+    gap: 6pt;
+    padding: 3.5pt 0;
+    border-bottom: 0.5pt solid #f1f5f9;
+  }
+
+  .comp-row:last-child {
+    border-bottom: none;
+    padding-bottom: 1pt;
+  }
+
+  .comp-ide-cell {
+    display: flex;
+    flex-direction: column;
+  }
+
+  .comp-ide-name {
+    font-size: 7.4pt;
+    font-weight: 700;
+    color: #0f172a;
+    display: flex;
+    align-items: center;
+    gap: 3pt;
+  }
+
+  .comp-ide-arch {
+    font-size: 6.2pt;
+    color: #64748b;
+  }
+
+  .comp-bar-container {
+    height: 12pt;
+    background: #f1f5f9;
+    border-radius: 3pt;
+    overflow: hidden;
+    display: flex;
+    position: relative;
+  }
+
+  .bar-stage1 {
+    height: 100%;
+    border-radius: 2pt 0 0 2pt;
+  }
+
+  .bar-stage2 {
+    height: 100%;
+    border-radius: 0 2pt 2pt 0;
+    opacity: 0.65;
+  }
+
+  .comp-val-cell {
+    text-align: right;
+    font-family: "SF Mono", Menlo, monospace;
+    font-size: 7.2pt;
+    font-weight: 700;
+    color: #1e293b;
+  }
+
+  .comp-badge-cell {
+    text-align: right;
+  }
+
+  .badge {
+    display: inline-block;
+    padding: 1pt 3.5pt;
+    border-radius: 2pt;
+    font-size: 6.2pt;
+    font-weight: 700;
+    font-family: "SF Mono", Menlo, monospace;
+    white-space: nowrap;
+  }
+
+  .badge-green { background: #dcfce7; color: #15803d; }
+  .badge-blue { background: #e0f2fe; color: #0369a1; }
+  .badge-amber { background: #fef3c7; color: #b45309; }
+  .badge-red { background: #fee2e2; color: #b91c1c; }
+  .badge-slate { background: #f1f5f9; color: #475569; }
+
+  /* Memory RSS Bar Rows */
+  .mem-row {
+    display: grid;
+    grid-template-columns: 42mm 1fr 22mm 26mm;
+    align-items: center;
+    gap: 6pt;
+    padding: 3.5pt 0;
+    border-bottom: 0.5pt solid #f1f5f9;
+  }
+
+  .mem-row:last-child {
+    border-bottom: none;
+    padding-bottom: 1pt;
+  }
+
+  .mem-bar-container {
+    height: 12pt;
+    background: #f1f5f9;
+    border-radius: 3pt;
+    overflow: hidden;
+    position: relative;
+  }
+
+  .mem-bar-fill {
+    height: 100%;
+    border-radius: 3pt;
+  }
+
+  /* Visual Architecture Cards (Page 3) */
+  .arch-cards-grid {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 6pt;
+    margin: 4pt 0 6pt 0;
+  }
+
+  .arch-card {
+    border: 0.75pt solid #cbd5e1;
+    border-radius: 5pt;
+    padding: 6pt 7pt;
+    background: #ffffff;
+  }
+
+  .arch-card.native {
+    border-color: #93c5fd;
+    background: #f0f7ff;
+  }
+
+  .arch-card.electron {
+    border-color: #fecdd3;
+    background: #fff1f2;
+  }
+
+  .arch-card-title {
+    font-size: 7.6pt;
+    font-weight: 800;
+    color: #0f172a;
+    display: flex;
+    justify-content: space-between;
+    margin-bottom: 3pt;
+  }
+
+  .arch-flow-box {
+    background: #ffffff;
+    border: 0.5pt solid #cbd5e1;
+    border-radius: 3pt;
+    padding: 4pt 5pt;
+    font-family: "SF Mono", monospace;
+    font-size: 6.4pt;
+    line-height: 1.35;
+    color: #1e293b;
+    margin-bottom: 3.5pt;
+  }
+
+  .arch-stats-row {
+    display: flex;
+    justify-content: space-between;
+    font-size: 6.6pt;
+    font-weight: 700;
+    color: #334155;
+  }
+
+  /* Booktabs Tables */
+  table.booktabs {
+    width: 100%;
+    border-collapse: collapse;
+    margin: 4pt 0 5pt 0;
+    font-size: 7.2pt;
+    line-height: 1.35;
+  }
+
+  table.booktabs thead tr th {
+    border-top: 1.2pt solid #0f172a;
+    border-bottom: 0.75pt solid #0f172a;
+    padding: 3pt 3.5pt;
+    text-align: left;
+    font-weight: 700;
+    color: #0f172a;
+    background: #f8fafc;
+  }
+
+  table.booktabs tbody tr td {
+    padding: 2.8pt 3.5pt;
+    border-bottom: 0.4pt solid #e2e8f0;
+    color: #334155;
+    vertical-align: middle;
+  }
+
+  table.booktabs tbody tr:last-child td {
+    border-bottom: 1.2pt solid #0f172a;
+  }
+
+  table.booktabs tr.highlight-microcode {
+    background-color: #f0f7ff;
+  }
+
+  table.booktabs tr.highlight-microcode td {
+    color: #0369a1;
+    font-weight: 600;
+  }
+
+  /* Callout Box */
+  .callout-box {
+    background: #f8fafc;
+    border-left: 2.5pt solid #0284c7;
+    border-radius: 0 4pt 4pt 0;
+    padding: 4.5pt 7pt;
+    margin: 4pt 0 5pt 0;
+    font-size: 7.2pt;
+    line-height: 1.4;
+    color: #334155;
+  }
+
+  .callout-box strong {
+    color: #0f172a;
+  }
+
+  /* 2-Column Grid for Layers */
+  .grid-2col {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 5pt;
+    margin: 4pt 0 5pt 0;
+  }
+
+  .layer-card {
+    background: #f8fafc;
+    border: 0.5pt solid #e2e8f0;
+    border-radius: 4pt;
+    padding: 4pt 5.5pt;
+  }
+
+  .layer-card-title {
+    font-size: 7.2pt;
+    font-weight: 700;
+    color: #0f172a;
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    margin-bottom: 1.5pt;
+  }
+
+  .layer-card-desc {
+    font-size: 6.6pt;
+    color: #475569;
+    line-height: 1.32;
+  }
+
+  .caption {
+    font-size: 6.6pt;
+    color: #64748b;
+    margin-top: 1.5pt;
+    margin-bottom: 3.5pt;
+  }
+
+  .caption strong {
+    color: #1e293b;
+  }
+
+  /* Certification Box */
+  .cert-box {
+    border: 1pt solid #0f172a;
+    border-radius: 4pt;
+    background: #ffffff;
+    padding: 6pt 9pt;
+    margin-top: 5pt;
+  }
+
+  .cert-header {
+    font-size: 7.8pt;
+    font-weight: 800;
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+    color: #0f172a;
+    margin-bottom: 2pt;
+  }
+
+  .cert-body {
+    font-size: 7pt;
+    color: #334155;
+    line-height: 1.35;
+    margin-bottom: 4pt;
+  }
+
+  .cert-sig-row {
+    display: flex;
+    justify-content: space-between;
+    align-items: flex-end;
+    border-top: 0.5pt solid #cbd5e1;
+    padding-top: 3pt;
+    font-size: 7pt;
+    color: #475569;
+  }
 </style>
 </head>
 <body>
 
-<!-- ==================== PAGE 1 OF 5 ==================== -->
+<!-- ==================== PAGE 1 OF 5: EXECUTIVE SUMMARY & SCORECARD ==================== -->
 <div class="page-container">
   <div class="running-header">
     <span>Dotmini Technical Report • ISSN / MC-2026-V2.5.32</span>
@@ -330,26 +574,48 @@
   </div>
 
   <div class="content-area">
-    <div class="paper-type-tag">Technical Report • Systems &amp; Software Engineering</div>
-    <h1 class="paper-title">MicroCode: An Empirical Evaluation of Native Mach-O Architecture vs. Web-Runtime IDEs on Gigabyte-Scale Workspaces</h1>
+    <div class="doc-category">Systems &amp; Software Engineering Whitepaper • Apple Silicon Benchmark</div>
+    <div class="doc-title">MicroCode: An Empirical Evaluation of Native Mach-O Architecture vs. Web-Runtime IDEs on Gigabyte-Scale Workspaces</div>
     
-    <div class="authors-block">
-      <div class="name">Tirawat Nantamas &amp; Core Systems Engineering Team</div>
-      <div class="affiliation">Dotmini Software Company Limited • Core AI &amp; Desktop Systems Laboratory</div>
-      <div class="contact">tirawat@dotmini.dev • https://dotmini.dev/microcode • Bangkok, Thailand</div>
-    </div>
+    <div class="doc-authors">Tirawat Nantamas &amp; Core Systems Engineering Team</div>
+    <div class="doc-affil">Dotmini Software Company Limited • Core AI &amp; Desktop Systems Laboratory • Bangkok, Thailand • tirawat@dotmini.dev</div>
 
+    <!-- Executive Abstract -->
     <div class="abstract-box">
-      <strong class="title">Abstract</strong>
-      Modern Integrated Development Environments (IDEs) have increasingly migrated toward web-based shells (Electron and Chromium Embedded Framework), introducing substantial resident memory bloat, process proliferation, and startup latency on enterprise-scale repositories. In this technical report, we present a 100% controlled-variable empirical evaluation comparing <strong>MicroCode IDE v2.5.32</strong> (a native Mach-O executable combining Swift, AppKit, Metal 3, and a statically linked Rust kernel) against <strong>Zed v1.18.0</strong> (native Rust + GPUI), <strong>OpenCode Desktop v1.2.4</strong> (Tauri + WebKit), and <strong>VS Code / Code-OSS v2.5.5</strong> (Electron + Node.js/V8). Testing was conducted on a deterministic <strong>1.17 GB (455,596 LOC, 3,064 files) polyglot Git monorepo</strong> using a 500 Hz CoreGraphics WindowServer probe and kernel-level APFS Virtual File System (VFS) <code>st_atime_ns</code> tracking. MicroCode demonstrates an optimal memory footprint of <strong>194.8 MB RSS</strong> at full steady-state (<em>T</em>+5.5s) with <strong>14 Mach threads</strong> across 2 processes—outperforming VS Code (2,377.8 MB, 18 processes) by <strong>12.21×</strong> and Zed (233.0 MB, 41 threads) by 1.20×. In startup performance, Zed achieves the fastest cold-start to window render at <strong>662.8 ms</strong>, while MicroCode completes full window paint and VFS file loading in <strong>769.9 ms / 998.0 ms</strong> (4.07× faster than VS Code at 4,065.5 ms). Furthermore, MicroCode’s 6-layer TokenMem v3 context engine reduces AI agent input tokens by <strong>88.2%</strong> on realistic 15-turn multi-file engineering workloads.
+      <strong class="title">Executive Abstract</strong>
+      Modern Integrated Development Environments (IDEs) have increasingly migrated toward web-based containers (Electron and Chromium Embedded Framework), introducing substantial resident memory bloat, process proliferation, and startup latency on enterprise-scale repositories. In this technical report, we present a 100% controlled-variable empirical evaluation comparing <strong>MicroCode IDE v2.5.32</strong> (a native Mach-O executable combining Swift, AppKit, Metal 3, and a statically linked Rust kernel) against <strong>Zed v1.18.0</strong> (native Rust + GPUI), <strong>OpenCode Desktop v1.2.4</strong> (Tauri + WebKit), and <strong>VS Code / Code-OSS v2.5.5</strong> (Electron + Node.js/V8). Testing was conducted on a deterministic <strong>1.17 GB (455,596 LOC, 3,064 files) polyglot Git monorepo</strong> using a 500 Hz CoreGraphics WindowServer probe and kernel-level APFS Virtual File System (VFS) <code>st_atime_ns</code> tracking. MicroCode demonstrates an optimal memory footprint of <strong>194.8 MB RSS</strong> at full steady-state (<em>T</em>+5.5s) with <strong>14 Mach threads</strong> across 2 processes—outperforming VS Code (2,377.8 MB, 18 processes) by <strong>12.21×</strong> and Zed (233.0 MB, 41 threads) by 1.20×. In cold startup, Zed achieves the fastest initial window render at <strong>662.8 ms</strong>, while MicroCode completes full window paint and VFS file loading in <strong>769.9 ms / 998.0 ms</strong> (4.07× faster than VS Code at 4,065.5 ms). Furthermore, MicroCode’s 6-layer TokenMem v3 context engine reduces AI agent input tokens by <strong>88.2%</strong> on realistic 15-turn multi-file engineering workloads.
     </div>
 
-    <h2 class="sec-heading">1. Introduction &amp; Experimental Motivation</h2>
+    <!-- Executive Scorecard (High Impact Visual Cards) -->
+    <div class="scorecard-grid">
+      <div class="scorecard-card winner">
+        <div class="scorecard-label">Memory (RSS)</div>
+        <div class="scorecard-value">194.8 MB</div>
+        <div class="scorecard-sub">#1 Lowest Memory<br>12.2× vs VS Code</div>
+      </div>
+      <div class="scorecard-card">
+        <div class="scorecard-label">Cold-Start Window</div>
+        <div class="scorecard-value">769.9 ms</div>
+        <div class="scorecard-sub runner-up">#2 Overall (1.16× Zed)<br>Zed #1 at 662.8 ms</div>
+      </div>
+      <div class="scorecard-card winner">
+        <div class="scorecard-label">Mach Threads</div>
+        <div class="scorecard-value">14</div>
+        <div class="scorecard-sub">#1 Lowest Contention<br>vs 269 in VS Code</div>
+      </div>
+      <div class="scorecard-card winner">
+        <div class="scorecard-label">AI Token Savings</div>
+        <div class="scorecard-value">−88.2%</div>
+        <div class="scorecard-sub">TokenMem v3 Engine<br>$0.23 vs $1.96 / task</div>
+      </div>
+    </div>
+
+    <h2 class="sec-heading">1. Introduction &amp; The Architectural Divide</h2>
     <p>
-      The developer workstation landscape has diverged into two fundamental paradigms: (1) web-runtime containers (e.g., Electron, Chromium DOM, V8 JavaScript VMs) that provide high cross-platform flexibility at the expense of multi-gigabyte memory footprints, and (2) native compiled binaries (Swift/AppKit and Rust/GPUI) that interface directly with the kernel and display server. While benchmarks on trivial workspaces (5–10 files) obscure runtime scaling bottlenecks, enterprise development routinely operates on monorepos containing gigabytes of assets, tens of thousands of source files, and massive Git indexes.
+      The desktop software engineering workstation has diverged into two fundamentally opposed design paradigms: (1) <strong>Web-runtime shells</strong> (Electron, Chromium DOM, Node.js) that offer multi-platform agility at the cost of massive process proliferation and memory bloat; and (2) <strong>Native compiled Mach-O binaries</strong> (Swift/AppKit and Rust/GPUI) that interface directly with the Darwin kernel and Apple Silicon Unified Memory Architecture (UMA).
     </p>
     <p>
-      Earlier evaluations (v1.0) suffered from methodological discrepancies, including deferred frame-0 blank views and truncated <em>T</em>+1.2s observation windows. In this v2.0 benchmark suite, we enforce an uncompromising zero-bias protocol: every IDE is supplied with identical command-line arguments (<code>--args &lt;workspace_dir&gt; &lt;primary_file&gt;</code>) targeting a verified <strong>1.17 GB polyglot monorepo</strong>, and memory telemetry is captured through <em>T</em>+5.5s to encompass all background language servers and file watchers.
+      While synthetic benchmarks on tiny 10-file repositories mask these architectural overheads, commercial software engineering routinely takes place inside multi-gigabyte repositories with deep directory structures, thousands of source files, and heavy background indexing requirements. Earlier benchmarks (v1.0) contained methodology gaps (such as measuring deferred frame-0 windows and short observation periods). In this v2.0 suite, we implement an uncompromising, zero-bias protocol: every IDE opens an identical 1.17 GB polyglot workspace via standard command-line arguments (<code>--args &lt;workspace_dir&gt; &lt;primary_file&gt;</code>), capturing telemetry through <em>T</em>+5.5s to encompass all background language servers and file watchers.
     </p>
 
     <h2 class="sec-heading">2. Controlled Experimental Environment</h2>
@@ -360,8 +626,8 @@
     <table class="booktabs">
       <thead>
         <tr>
-          <th style="width: 25%;">Hardware / Parameter</th>
-          <th style="width: 75%;">Controlled Specification</th>
+          <th style="width: 28%;">Parameter</th>
+          <th style="width: 72%;">Deterministic Specification</th>
         </tr>
       </thead>
       <tbody>
@@ -371,7 +637,7 @@
         </tr>
         <tr>
           <td><strong>Unified Memory</strong></td>
-          <td>16 GB LPDDR5 Unified Memory Architecture (UMA) • 100 GB/s bandwidth</td>
+          <td>16 GB LPDDR5 Unified Memory Architecture (UMA) • 100 GB/s memory bandwidth</td>
         </tr>
         <tr>
           <td><strong>Operating System</strong></td>
@@ -379,11 +645,11 @@
         </tr>
         <tr>
           <td><strong>Monorepo Fixture</strong></td>
-          <td><strong>1.17 GB (1,197.0 MB on disk)</strong> • 3,001 source files • 455,596 LOC across Swift, TS/React, Rust, Python, Go + 9,997-line primary file + 500,000-line JSON dataset (45 MB) + 1.05 GB binary shards • Git initialized (<code>SHA-256: 8c7b3a154d...59c1acf</code>)</td>
+          <td><strong>1.17 GB (1,197.0 MB on disk)</strong> • 3,001 source files • 455,596 LOC across Swift, TS/React, Rust, Python, Go • 9,997-line primary file (<code>BenchmarkCoreEngine.swift</code>) • 500,000-line JSON dataset (45 MB) • 1.05 GB binary shards • Git initialized (SHA-256: <code>8c7b3a154d...59c1acf</code>)</td>
         </tr>
         <tr>
           <td><strong>Kernel Measurement</strong></td>
-          <td>500 Hz CoreGraphics WindowServer probe (2 ms interval) • APFS VFS <code>st_atime_ns</code> tracking</td>
+          <td>500 Hz CoreGraphics WindowServer probe (2 ms sample rate) • APFS VFS <code>st_atime_ns</code> tracking</td>
         </tr>
         <tr>
           <td><strong>Lifecycle Protocol</strong></td>
@@ -400,7 +666,7 @@
   </div>
 </div>
 
-<!-- ==================== PAGE 2 OF 5 ==================== -->
+<!-- ==================== PAGE 2 OF 5: STARTUP LATENCY & VFS READINESS ==================== -->
 <div class="page-container">
   <div class="running-header">
     <span>Dotmini Technical Report • MicroCode Architecture Evaluation</span>
@@ -413,48 +679,89 @@
       To measure true cold-start latency, we decouple the metric into two rigorous milestones: (1) <strong>Window Visible Latency (<em>T</em><sub>win</sub>)</strong>, defined as the duration from process invocation (<code>open -n -a</code>) until the application window is rendered on-screen by the macOS WindowServer (<code>kCGWindowLayer == 0</code>, dimensions ≥ 400 × 300 px), sampled via <code>CGWindowListCopyWindowInfo</code> at 500 Hz; and (2) <strong>VFS Workspace Ready Latency (<em>T</em><sub>ready</sub>)</strong>, defined as the timestamp where the APFS kernel registers that the root workspace directory has been traversed and the 9,997-line primary file (<code>BenchmarkCoreEngine.swift</code>) has been loaded into memory via <code>st_atime_ns</code>.
     </p>
 
-    <!-- Figure 1: Cold Start Latency Comparison -->
-    <div class="fig-container">
-      <div class="fig-title">
-        <span>Figure 1: Cold-Start Window Visible Latency on 1.17 GB Workspace (Median of <em>N</em> = 5 Trials)</span>
-        <span style="font-family: 'SF Mono', Menlo, monospace; font-size: 7.2pt; font-weight: normal;">Lower is Better (ms)</span>
+    <!-- Visual Comparison Chart 1: Clear Data Grid with Dedicated Columns -->
+    <div class="vis-chart-box">
+      <div class="vis-chart-header">
+        <span class="vis-chart-title">Figure 1: Cold-Start Latency Breakdown on 1.17 GB Workspace (Median of N = 5 Trials)</span>
+        <div class="vis-chart-legend">
+          <div class="legend-chip"><span class="legend-color" style="background: #0284c7;"></span> T_win (Window Visible)</div>
+          <div class="legend-chip"><span class="legend-color" style="background: #93c5fd;"></span> T_ready (VFS File Ready)</div>
+        </div>
       </div>
 
-      <div class="fig-row">
-        <div class="fig-labels">
-          <span class="name">Zed v1.18.0 (Native Rust + GPUI)</span>
-          <span class="val">662.8 ms (1.00x)</span>
+      <!-- Zed Row -->
+      <div class="comp-row">
+        <div class="comp-ide-cell">
+          <span class="comp-ide-name">Zed v1.18.0</span>
+          <span class="comp-ide-arch">Native Rust + GPUI</span>
         </div>
-        <div class="fig-bar-track"><div class="fig-bar-fill fill-primary" style="width: 29.27%;"></div></div>
+        <div class="comp-bar-container">
+          <div class="bar-stage1" style="width: 16.3%; background: #ea580c;"></div>
+          <div class="bar-stage2" style="width: 0.1%; background: #fed7aa;"></div>
+        </div>
+        <div class="comp-val-cell">
+          662.8 ms<br><span style="font-size: 6.2pt; color: #64748b;">Ready: 662.9 ms</span>
+        </div>
+        <div class="comp-badge-cell">
+          <span class="badge badge-green">#1 FASTEST (1.00×)</span>
+        </div>
       </div>
 
-      <div class="fig-row">
-        <div class="fig-labels">
-          <span class="name">MicroCode IDE v2.5.32 (Native Swift + Metal 3 + Rust Core)</span>
-          <span class="val">769.9 ms (1.16x vs Zed · 2.94x vs VS Code)</span>
+      <!-- MicroCode Row -->
+      <div class="comp-row" style="background: #f0f7ff; border-radius: 3pt; padding: 3.5pt 4pt;">
+        <div class="comp-ide-cell">
+          <span class="comp-ide-name" style="color: #0369a1;">MicroCode v2.5.32</span>
+          <span class="comp-ide-arch">Swift + Metal 3 + Rust</span>
         </div>
-        <div class="fig-bar-track"><div class="fig-bar-fill fill-accent" style="width: 34.00%;"></div></div>
+        <div class="comp-bar-container">
+          <div class="bar-stage1" style="width: 18.9%; background: #0284c7;"></div>
+          <div class="bar-stage2" style="width: 5.6%; background: #93c5fd;"></div>
+        </div>
+        <div class="comp-val-cell" style="color: #0369a1;">
+          769.9 ms<br><span style="font-size: 6.2pt; color: #0284c7;">Ready: 998.0 ms</span>
+        </div>
+        <div class="comp-badge-cell">
+          <span class="badge badge-blue">#2 (1.16× Zed)</span>
+        </div>
       </div>
 
-      <div class="fig-row">
-        <div class="fig-labels">
-          <span class="name">OpenCode Desktop v1.2.4 (Rust Tauri + WebKit WKWebView)</span>
-          <span class="val">953.0 ms (1.44x)</span>
+      <!-- OpenCode Row -->
+      <div class="comp-row">
+        <div class="comp-ide-cell">
+          <span class="comp-ide-name">OpenCode v1.2.4</span>
+          <span class="comp-ide-arch">Rust Tauri + WebKit</span>
         </div>
-        <div class="fig-bar-track"><div class="fig-bar-fill fill-muted" style="width: 42.09%;"></div></div>
+        <div class="comp-bar-container">
+          <div class="bar-stage1" style="width: 23.4%; background: #0d9488;"></div>
+        </div>
+        <div class="comp-val-cell">
+          953.0 ms<br><span style="font-size: 6.2pt; color: #64748b;">(Window Only)</span>
+        </div>
+        <div class="comp-badge-cell">
+          <span class="badge badge-slate">#3 (1.44×)</span>
+        </div>
       </div>
 
-      <div class="fig-row">
-        <div class="fig-labels">
-          <span class="name">VS Code / Code-OSS v2.5.5 (Electron + Chromium + V8)</span>
-          <span class="val">2,264.1 ms (3.42x)</span>
+      <!-- VS Code Row -->
+      <div class="comp-row">
+        <div class="comp-ide-cell">
+          <span class="comp-ide-name">VS Code v2.5.5</span>
+          <span class="comp-ide-arch">Electron + Chromium + V8</span>
         </div>
-        <div class="fig-bar-track"><div class="fig-bar-fill fill-light" style="width: 100%;"></div></div>
+        <div class="comp-bar-container">
+          <div class="bar-stage1" style="width: 55.7%; background: #e11d48;"></div>
+          <div class="bar-stage2" style="width: 44.3%; background: #fecdd3;"></div>
+        </div>
+        <div class="comp-val-cell" style="color: #b91c1c;">
+          2,264.1 ms<br><span style="font-size: 6.2pt; color: #b91c1c;">Ready: 4,065.5 ms</span>
+        </div>
+        <div class="comp-badge-cell">
+          <span class="badge badge-red">4.07× SLOWER</span>
+        </div>
       </div>
     </div>
-    <div class="caption"><strong>Figure 1:</strong> Cold-start window display latency across 4 IDE architectures opening a 1.17 GB repository.</div>
+    <div class="caption"><strong>Figure 1:</strong> Cold-start window display latency (<em>T</em><sub>win</sub>) and APFS VFS file readiness (<em>T</em><sub>ready</sub>) across 4 IDE architectures opening a 1.17 GB repository.</div>
 
-    <!-- Table 2: 5-Trial Telemetry Log -->
     <h3 class="subsec-heading">3.1 Raw Five-Trial Telemetry &amp; Statistical Variance</h3>
     <p>
       Table 2 details the empirical measurements across all five independent test runs. Each run was preceded by a 1.5-second quiescence period to allow macOS kernel memory allocators and WindowServer window queues to normalize.
@@ -463,36 +770,36 @@
     <table class="booktabs">
       <thead>
         <tr>
-          <th style="width: 22%;">IDE Under Test</th>
-          <th style="width: 12%;">Trial 1</th>
-          <th style="width: 12%;">Trial 2</th>
-          <th style="width: 12%;">Trial 3</th>
-          <th style="width: 12%;">Trial 4</th>
-          <th style="width: 12%;">Trial 5</th>
-          <th style="width: 18%;">Median / Std Dev (σ)</th>
+          <th style="width: 20%;">IDE Under Test</th>
+          <th style="width: 13%;">Trial 1</th>
+          <th style="width: 13%;">Trial 2</th>
+          <th style="width: 13%;">Trial 3</th>
+          <th style="width: 13%;">Trial 4</th>
+          <th style="width: 13%;">Trial 5</th>
+          <th style="width: 15%;">Median / Std Dev (σ)</th>
         </tr>
       </thead>
       <tbody>
-        <tr class="highlight-row">
-          <td><strong>MicroCode v2.5.32</strong><br><span style="font-size: 6.8pt; color: #64748b;"><em>T</em><sub>win</sub> / <em>T</em><sub>ready</sub></span></td>
+        <tr class="highlight-microcode">
+          <td><strong>MicroCode v2.5.32</strong><br><span style="font-size: 6.4pt; color: #64748b;"><em>T</em><sub>win</sub> / <em>T</em><sub>ready</sub></span></td>
           <td>814.7 ms<br>1,035.7 ms</td>
           <td>732.4 ms<br>957.2 ms</td>
           <td>785.3 ms<br>998.0 ms</td>
           <td>769.9 ms<br>974.1 ms</td>
           <td>767.5 ms<br>1,012.2 ms</td>
-          <td><strong>769.9 / 998.0 ms</strong><br><span class="stat-badge badge-best">σ = ±29.9 ms</span></td>
+          <td><strong>769.9 / 998.0 ms</strong><br><span class="badge badge-green">σ = ±29.9 ms</span></td>
         </tr>
         <tr>
-          <td><strong>Zed v1.18.0</strong><br><span style="font-size: 6.8pt; color: #64748b;"><em>T</em><sub>win</sub> / <em>T</em><sub>ready</sub></span></td>
+          <td><strong>Zed v1.18.0</strong><br><span style="font-size: 6.4pt; color: #64748b;"><em>T</em><sub>win</sub> / <em>T</em><sub>ready</sub></span></td>
           <td>674.3 ms<br>674.3 ms</td>
           <td>592.5 ms<br>592.5 ms</td>
           <td>732.1 ms<br>732.1 ms</td>
           <td>609.5 ms<br>609.5 ms</td>
           <td>662.8 ms<br>662.9 ms</td>
-          <td><strong>662.8 / 662.9 ms</strong> <span class="stat-badge badge-best">#1 Fast</span><br>σ = ±55.6 ms</td>
+          <td><strong>662.8 / 662.9 ms</strong> <span class="badge badge-green">#1 Fast</span><br>σ = ±55.6 ms</td>
         </tr>
         <tr>
-          <td><strong>OpenCode v1.2.4</strong><br><span style="font-size: 6.8pt; color: #64748b;"><em>T</em><sub>win</sub> (Window Only)</span></td>
+          <td><strong>OpenCode v1.2.4</strong><br><span style="font-size: 6.4pt; color: #64748b;"><em>T</em><sub>win</sub> (Window Only)</span></td>
           <td>1,022.1 ms</td>
           <td>953.0 ms</td>
           <td>583.1 ms</td>
@@ -501,19 +808,19 @@
           <td><strong>953.0 ms</strong><br>σ = ±174.7 ms</td>
         </tr>
         <tr>
-          <td><strong>VS Code v2.5.5</strong><br><span style="font-size: 6.8pt; color: #64748b;"><em>T</em><sub>win</sub> / <em>T</em><sub>ready</sub></span></td>
+          <td><strong>VS Code v2.5.5</strong><br><span style="font-size: 6.4pt; color: #64748b;"><em>T</em><sub>win</sub> / <em>T</em><sub>ready</sub></span></td>
           <td>2,412.8 ms<br>4,173.8 ms</td>
           <td>2,347.7 ms<br>4,211.5 ms</td>
           <td>2,188.7 ms<br>4,054.7 ms</td>
           <td>2,264.1 ms<br>4,065.5 ms</td>
           <td>2,057.0 ms<br>3,777.6 ms</td>
-          <td><strong>2,264.1 / 4,065.5 ms</strong><br><span class="stat-badge badge-heavy">σ = ±138.9 ms</span></td>
+          <td><strong>2,264.1 / 4,065.5 ms</strong><br><span class="badge badge-red">σ = ±138.9 ms</span></td>
         </tr>
       </tbody>
     </table>
     <div class="caption"><strong>Table 2:</strong> Raw five-trial cold-start latency (<em>T</em><sub>win</sub>) and APFS VFS file readiness (<em>T</em><sub>ready</sub>) on the 1.17 GB workspace.</div>
 
-    <div class="remark-box">
+    <div class="callout-box">
       <strong>Engineering Root-Cause Analysis (Zed vs. MicroCode):</strong>
       Zed achieves the lowest cold-start (662.8 ms) due to its unified GPUI framework, which compiles UI layouts directly into Metal command buffers on background worker threads without constructing intermediate Objective-C/SwiftUI view graphs. MicroCode requires approximately 107 ms to instantiate the root <code>AgenticEditorWorkspace</code> hierarchy before presenting its key window. However, MicroCode achieves the highest consistency (σ = ±29.9 ms vs. Zed's ±55.6 ms) and completes full workspace mounting and 10k-line file rendering in <strong>998.0 ms</strong>—outperforming VS Code (4,065.5 ms) by <strong>4.07×</strong>.
     </div>
@@ -525,7 +832,7 @@
   </div>
 </div>
 
-<!-- ==================== PAGE 3 OF 5 ==================== -->
+<!-- ==================== PAGE 3 OF 5: MEMORY SCALING & PROCESS FOOTPRINT ==================== -->
 <div class="page-container">
   <div class="running-header">
     <span>Dotmini Technical Report • MicroCode Architecture Evaluation</span>
@@ -538,100 +845,140 @@
       Accurately accounting for application memory requires summing the Resident Set Size (RSS) across the entire process tree—including the parent shell, GPU compositors, renderer sub-processes, extension hosts, and embedded language servers. In web-runtime architectures, large workspaces trigger exponential V8 heap expansion as file watchers and search indexes recursively deserialize directory trees into JavaScript objects.
     </p>
 
-    <!-- Figure 2: Steady-State RSS Memory Comparison -->
-    <div class="fig-container">
-      <div class="fig-title">
-        <span>Figure 2: Total Process-Tree Resident Set Size (RSS) at <em>T</em>+5.5s Steady State</span>
-        <span style="font-family: 'SF Mono', Menlo, monospace; font-size: 7.2pt; font-weight: normal;">Lower is Better (MB)</span>
+    <!-- Visual Comparison Chart 2: Steady State RSS Grid -->
+    <div class="vis-chart-box">
+      <div class="vis-chart-header">
+        <span class="vis-chart-title">Figure 2: Total Process-Tree Resident Set Size (RSS) at T+5.5s Steady State</span>
+        <span style="font-size: 6.6pt; color: #64748b;">Lower is Better (Megabytes)</span>
       </div>
 
-      <div class="fig-row">
-        <div class="fig-labels">
-          <span class="name">MicroCode IDE v2.5.32 (2 Processes · 14 Mach Threads)</span>
-          <span class="val">194.8 MB (1.00x Baseline · #1 Lowest Memory)</span>
+      <!-- MicroCode -->
+      <div class="mem-row" style="background: #f0f7ff; border-radius: 3pt; padding: 3.5pt 4pt;">
+        <div class="comp-ide-cell">
+          <span class="comp-ide-name" style="color: #0369a1;">MicroCode v2.5.32</span>
+          <span class="comp-ide-arch">2 Procs · 14 Mach Threads</span>
         </div>
-        <div class="fig-bar-track"><div class="fig-bar-fill fill-primary" style="width: 8.19%;"></div></div>
+        <div class="mem-bar-container">
+          <div class="mem-bar-fill" style="width: 8.2%; background: #0284c7;"></div>
+        </div>
+        <div class="comp-val-cell" style="color: #0369a1;">
+          194.8 MB
+        </div>
+        <div class="comp-badge-cell">
+          <span class="badge badge-green">#1 BEST (1.00×)</span>
+        </div>
       </div>
 
-      <div class="fig-row">
-        <div class="fig-labels">
-          <span class="name">Zed v1.18.0 (2 Processes · 41 Mach Threads)</span>
-          <span class="val">233.0 MB (1.20x Memory)</span>
+      <!-- Zed -->
+      <div class="mem-row">
+        <div class="comp-ide-cell">
+          <span class="comp-ide-name">Zed v1.18.0</span>
+          <span class="comp-ide-arch">2 Procs · 41 Mach Threads</span>
         </div>
-        <div class="fig-bar-track"><div class="fig-bar-fill fill-accent" style="width: 9.80%;"></div></div>
+        <div class="mem-bar-container">
+          <div class="mem-bar-fill" style="width: 9.8%; background: #ea580c;"></div>
+        </div>
+        <div class="comp-val-cell">
+          233.0 MB
+        </div>
+        <div class="comp-badge-cell">
+          <span class="badge badge-slate">1.20× (+38.2 MB)</span>
+        </div>
       </div>
 
-      <div class="fig-row">
-        <div class="fig-labels">
-          <span class="name">OpenCode Desktop v1.2.4 (2 Processes · 47 Mach Threads)</span>
-          <span class="val">493.3 MB (2.53x Memory)</span>
+      <!-- OpenCode -->
+      <div class="mem-row">
+        <div class="comp-ide-cell">
+          <span class="comp-ide-name">OpenCode v1.2.4</span>
+          <span class="comp-ide-arch">2 Procs · 47 Mach Threads</span>
         </div>
-        <div class="fig-bar-track"><div class="fig-bar-fill fill-muted" style="width: 20.75%;"></div></div>
+        <div class="mem-bar-container">
+          <div class="mem-bar-fill" style="width: 20.7%; background: #0d9488;"></div>
+        </div>
+        <div class="comp-val-cell">
+          493.3 MB
+        </div>
+        <div class="comp-badge-cell">
+          <span class="badge badge-amber">2.53× (+298.5 MB)</span>
+        </div>
       </div>
 
-      <div class="fig-row">
-        <div class="fig-labels">
-          <span class="name">VS Code / Code-OSS v2.5.5 (18 Processes · 269 Mach Threads)</span>
-          <span class="val">2,377.8 MB (12.21x Memory · 2.18 GB Excess Bloat)</span>
+      <!-- VS Code -->
+      <div class="mem-row">
+        <div class="comp-ide-cell">
+          <span class="comp-ide-name">VS Code v2.5.5</span>
+          <span class="comp-ide-arch">18 Procs · 269 Mach Threads</span>
         </div>
-        <div class="fig-bar-track"><div class="fig-bar-fill fill-light" style="width: 100%;"></div></div>
+        <div class="mem-bar-container">
+          <div class="mem-bar-fill" style="width: 100%; background: #e11d48;"></div>
+        </div>
+        <div class="comp-val-cell" style="color: #b91c1c;">
+          2,377.8 MB
+        </div>
+        <div class="comp-badge-cell">
+          <span class="badge badge-red">+2,183 MB BLOAT</span>
+        </div>
       </div>
     </div>
     <div class="caption"><strong>Figure 2:</strong> Steady-state process-tree RSS after opening the 1.17 GB monorepo with all background services active.</div>
 
-    <h3 class="subsec-heading">4.1 Gigabyte-Scale Memory Scaling Mechanisms</h3>
-    <p>
-      Table 3 contrasts the algorithmic memory strategies of native compiled code versus the web-runtime model when handling a repository exceeding 1 GB on disk:
-    </p>
+    <!-- Visual Architectural Contrast Diagram -->
+    <h3 class="subsec-heading">4.1 Visual Architecture: Native Mach-O vs. Web-Runtime Container</h3>
+    <div class="arch-cards-grid">
+      <div class="arch-card native">
+        <div class="arch-card-title">
+          <span>MicroCode: Native Compiled Mach-O</span>
+          <span class="badge badge-green">14 THREADS · 194.8 MB</span>
+        </div>
+        <div class="arch-flow-box">
+          [Mach-O Executable (Swift + AppKit)]<br>
+          &nbsp;&nbsp;└── libmicrocode_core (Static Rust C-ABI)<br>
+          &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;└── APFS VFS Zero-Copy mmap (.mappedIfSafe)<br>
+          &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;└── Metal 3 GPU Command Pipeline (Direct UMA)
+        </div>
+        <div class="arch-stats-row">
+          <span>Zero IPC Overhead</span>
+          <span>No Garbage Collector</span>
+          <span>Direct Kernel Syscalls</span>
+        </div>
+      </div>
 
-    <table class="booktabs">
-      <thead>
-        <tr>
-          <th style="width: 26%;">Monorepo Subsystem</th>
-          <th style="width: 37%;">MicroCode v2.5.32 (156.0 MB → 194.8 MB)</th>
-          <th style="width: 37%;">VS Code / Electron (941.7 MB → 2,377.8 MB)</th>
-        </tr>
-      </thead>
-      <tbody>
-        <tr class="highlight-row">
-          <td><strong>File-Tree Indexing (3,064 Files / 1.17 GB)</strong></td>
-          <td>Shallow lazy directory streaming (<code>scanDirectoryBounded</code>) bound directly to <code>NSOutlineView</code>. No recursive heap object allocation.</td>
-          <td>Full-depth directory enumeration across <code>fileWatcher</code> and <code>extensionHost</code>, allocating tens of thousands of V8 heap objects (+1.4 GB).</td>
-        </tr>
-        <tr class="highlight-row">
-          <td><strong>Large File Open (45 MB / 500k Lines)</strong></td>
-          <td>Apple Silicon UMA zero-copy page mapping (<code>.mappedIfSafe</code>) with bounded 2 MB safe preview. Read completes in <strong>15.88 ms</strong>.</td>
-          <td>IPC serialization across process boundaries into V8 Renderer Heap. Unbounded parse causes multi-hundred-megabyte heap duplication (80.76 ms).</td>
-        </tr>
-        <tr class="highlight-row">
-          <td><strong>Workspace-Wide Symbol Search</strong></td>
-          <td>Native SIMD <code>ripgrep</code> execution skipping binary shards via APFS metadata. Median search latency: <strong>12.53 ms</strong> with 0 MB IDE heap bloat.</td>
-          <td>JSON-RPC IPC bridging between search worker daemon and Chromium DOM renderer, incurring substantial string encoding overhead.</td>
-        </tr>
-      </tbody>
-    </table>
-    <div class="caption"><strong>Table 3:</strong> Algorithmic memory and I/O mechanisms governing gigabyte-scale monorepo performance.</div>
+      <div class="arch-card electron">
+        <div class="arch-card-title">
+          <span>VS Code: Electron Web Container</span>
+          <span class="badge badge-red">269 THREADS · 2,378 MB</span>
+        </div>
+        <div class="arch-flow-box">
+          [Chromium Browser Shell (Main Process)]<br>
+          &nbsp;&nbsp;└── IPC Bridge (JSON-RPC string serialization)<br>
+          &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;├── V8 Renderer Process (DOM &amp; HTML Canvas)<br>
+          &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;├── Extension Host (Node.js Heap Deserialization)<br>
+          &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;└── File Watcher Daemon (Recursive In-Memory Tree)
+        </div>
+        <div class="arch-stats-row">
+          <span>18 Separate Processes</span>
+          <span>V8 Heap Fragmentation</span>
+          <span>Heavy IPC Serialization</span>
+        </div>
+      </div>
+    </div>
 
     <h3 class="subsec-heading">4.2 Operating System Resource Footprint</h3>
-    <p>
-      MicroCode's static binary compilation minimizes kernel thread scheduler contention and physical disk footprint:
-    </p>
-
     <table class="booktabs">
       <thead>
         <tr>
-          <th style="width: 25%;">IDE &amp; Architecture</th>
-          <th style="width: 40%;">Binary Composition &amp; Runtime Shell</th>
+          <th style="width: 22%;">IDE &amp; Architecture</th>
+          <th style="width: 44%;">Binary Composition &amp; Runtime Shell</th>
           <th style="width: 17%;">Bundle Size</th>
-          <th style="width: 18%;">Mach Threads (<em>T</em>+5.5s)</th>
+          <th style="width: 17%;">Mach Threads (T+5.5s)</th>
         </tr>
       </thead>
       <tbody>
-        <tr class="highlight-row">
+        <tr class="highlight-microcode">
           <td><strong>MicroCode v2.5.32</strong></td>
           <td>Native Mach-O + AppKit + Metal 3 + Static Rust C-ABI (<code>libmicrocode_core</code>)</td>
-          <td><strong>95.7 MB</strong> <span class="stat-badge badge-best">#1 Smallest</span></td>
-          <td><strong>14 Threads</strong> <span class="stat-badge badge-best">#1 Lowest</span></td>
+          <td><strong>95.7 MB</strong> <span class="badge badge-green">#1 Smallest</span></td>
+          <td><strong>14 Threads</strong> <span class="badge badge-green">#1 Lowest</span></td>
         </tr>
         <tr>
           <td><strong>OpenCode v1.2.4</strong></td>
@@ -662,11 +1009,11 @@
   </div>
 </div>
 
-<!-- ==================== PAGE 4 OF 5 ==================== -->
+<!-- ==================== PAGE 4 OF 5: AI CONTEXT ECONOMICS & TOKENMEM V3 ==================== -->
 <div class="page-container">
   <div class="running-header">
     <span>Dotmini Technical Report • MicroCode Architecture Evaluation</span>
-    <span>AI Context Economics &amp; TokenMem v3</span>
+    <span>AI Context Economics &amp; TokenMem V3</span>
   </div>
 
   <div class="content-area">
@@ -675,16 +1022,15 @@
       Autonomous AI agent performance in modern software engineering is strictly bounded by context window consumption. In long-running multi-file tasks, naive context accumulation causes severe latency degradation, catastrophic cost inflation, and loss of attention (the "needle-in-a-haystack" problem).
     </p>
     <p>
-      To empirically quantify context efficiency, we evaluated a standard <strong>15-turn multi-file engineering workflow</strong> comprising 52 discrete tool calls (file inspections, symbol lookups, compiler executions, and AST refactorings) on the 1.17 GB workspace. Rather than employing simulated estimates, all tokens were computed using BPE tokenization over actual repository files:
+      To empirically quantify context efficiency, we evaluated a standard 15-turn multi-file engineering workflow comprising 52 discrete tool calls (file inspections, symbol lookups, compiler executions, and AST refactorings) on the 1.17 GB workspace. Rather than employing simulated estimates, all tokens were computed using BPE tokenization over actual repository files:
     </p>
 
-    <!-- Table 5: Token Breakdown at Turn 15 -->
     <table class="booktabs">
       <thead>
         <tr>
-          <th style="width: 34%;">Context Component at Turn 15</th>
-          <th style="width: 22%;">Unoptimized Baseline<br><span style="font-size: 6.8pt; color: #64748b;">Raw Dumps + Full History</span></th>
-          <th style="width: 22%;">MicroCode TokenMem v3<br><span style="font-size: 6.8pt; color: #64748b;">6-Layer Context Optimizer</span></th>
+          <th style="width: 32%;">Context Component at Turn 15</th>
+          <th style="width: 22%;">Unoptimized Baseline<br><span style="font-size: 6.4pt; color: #64748b;">Raw Dumps + Full History</span></th>
+          <th style="width: 24%;">MicroCode TokenMem v3<br><span style="font-size: 6.4pt; color: #64748b;">6-Layer Context Optimizer</span></th>
           <th style="width: 22%;">Observed Reduction Ratio</th>
         </tr>
       </thead>
@@ -692,66 +1038,96 @@
         <tr>
           <td><strong>1. Tool JSON Schemas (52 vs. Scoped 9)</strong></td>
           <td>16,432 tokens</td>
-          <td><strong>2,844 tokens</strong></td>
-          <td><strong>−82.7%</strong> (Layer 1 Dynamic Scoping)</td>
+          <td>2,844 tokens</td>
+          <td><span class="badge badge-green">−82.7%</span> (Layer 1 Scoping)</td>
         </tr>
-        <tr class="highlight-row">
+        <tr>
           <td><strong>2. Multi-File Code Ingestion (8 Files)</strong></td>
           <td>42,314 tokens</td>
-          <td><strong>3,755 tokens</strong></td>
-          <td><strong>−91.1%</strong> (Layer 3 AST Skeletonizer)</td>
+          <td>3,755 tokens</td>
+          <td><span class="badge badge-green">−91.1%</span> (Layer 3 Skeleton)</td>
         </tr>
         <tr>
           <td><strong>3. Terminal &amp; Compiler Logs (180 Modules)</strong></td>
           <td>14,758 tokens</td>
-          <td><strong>2,041 tokens</strong></td>
-          <td><strong>−86.2%</strong> (Layer 2 Observation Masking)</td>
+          <td>2,041 tokens</td>
+          <td><span class="badge badge-green">−86.2%</span> (Layer 2 Masking)</td>
         </tr>
-        <tr class="highlight-row">
+        <tr class="highlight-microcode">
           <td><strong>Turn-15 Single-Prompt Input Tokens</strong></td>
-          <td><strong>73,504 tokens</strong></td>
+          <td>73,504 tokens</td>
           <td><strong>8,640 tokens</strong></td>
-          <td><strong>−88.2% (8.51× Reduction)</strong></td>
+          <td><span class="badge badge-green">−88.2% (8.51× Reduction)</span></td>
         </tr>
-        <tr class="highlight-row">
+        <tr class="highlight-microcode">
           <td><strong>15-Turn Cumulative Input Tokens</strong></td>
-          <td><strong>654,185 tokens</strong></td>
+          <td>654,185 tokens</td>
           <td><strong>77,760 tokens</strong></td>
-          <td><strong>−88.1% (576,425 tokens saved)</strong></td>
+          <td><span class="badge badge-green">−88.1% (576,425 saved)</span></td>
         </tr>
       </tbody>
     </table>
     <div class="caption"><strong>Table 5:</strong> BPE token consumption comparison on authentic 1.17 GB repository files across a 15-turn task.</div>
 
-    <h3 class="subsec-heading">5.1 The Six-Layer TokenMem v3 Architecture</h3>
+    <h3 class="subsec-heading">5.1 The Six-Layer TokenMem v3 Visual Architecture</h3>
     <p>
       TokenMem v3 achieves an 88.2% token reduction through a pipelined, deterministic compression architecture:
     </p>
 
-    <ul class="academic-list">
-      <li>
-        <strong>Layer 1: Intent-Driven Tool Schema Scoping:</strong> Analyzes the user's immediate engineering intent and prunes inactive JSON schemas from the model prompt, reducing schema overhead from 16,432 to 2,844 tokens (−82.7%).
-      </li>
-      <li>
-        <strong>Layer 2: Observation Masking &amp; Build Log Decay:</strong> Compresses multi-thousand-line compiler logs into structured diagnostic summaries (preserving only <code>error:</code> and <code>warning:</code> locations), mitigating log bloat by −86.2%.
-      </li>
-      <li>
-        <strong>Layer 3: AST Skeletonization &amp; Bounded Slicing:</strong> Non-target reference files are automatically parsed via Tree-sitter into structural signatures (interfaces, types, and method signatures) rather than raw method bodies (−91.1%).
-      </li>
-      <li>
-        <strong>Layer 4: Rolling Key-Facts Ledger:</strong> Encapsulates architectural constraints and resolved decisions into an immutable <code>StructuredStateCheckpoint</code> (580 tokens), preventing context drift across turns.
-      </li>
-      <li>
-        <strong>Layer 5: Content-Hash Delta Read Cache:</strong> Tracks cryptographic SHA-256 digests of previously ingested buffers; unchanged files emit minimal pointer tokens (290 tokens) rather than redundant full-file payloads.
-      </li>
-      <li>
-        <strong>Layer 6: Prompt Prefix Cache Pinning:</strong> Enforces 100% prefix byte invariance for system instructions and tool definitions, maximizing upstream LLM prompt cache hit rates at <strong>84.0%</strong>.
-      </li>
-    </ul>
+    <!-- 6-Layer Visual Grid -->
+    <div class="grid-2col">
+      <div class="layer-card">
+        <div class="layer-card-title">
+          <span>Layer 1: Intent Tool Schema Scoping</span>
+          <span class="badge badge-green">−82.7%</span>
+        </div>
+        <div class="layer-card-desc">Prunes inactive JSON tool schemas dynamically based on user engineering intent, reducing schema overhead from 16,432 to 2,844 tokens.</div>
+      </div>
 
-    <div class="remark-box">
+      <div class="layer-card">
+        <div class="layer-card-title">
+          <span>Layer 2: Observation Masking &amp; Decay</span>
+          <span class="badge badge-green">−86.2%</span>
+        </div>
+        <div class="layer-card-desc">Compresses multi-thousand-line compiler outputs into concise diagnostic summaries, isolating <code>error:</code> and <code>warning:</code> line locations.</div>
+      </div>
+
+      <div class="layer-card">
+        <div class="layer-card-title">
+          <span>Layer 3: AST Skeletonization via Tree-sitter</span>
+          <span class="badge badge-green">−91.1%</span>
+        </div>
+        <div class="layer-card-desc">Extracts structural type interfaces, protocols, and signatures without injecting bulky method implementation bodies for referenced files.</div>
+      </div>
+
+      <div class="layer-card">
+        <div class="layer-card-title">
+          <span>Layer 4: Rolling Key-Facts Ledger</span>
+          <span class="badge badge-blue">580 Tokens</span>
+        </div>
+        <div class="layer-card-desc">Caps conversational state into an immutable <code>StructuredStateCheckpoint</code>, preventing context drift across prolonged agent loops.</div>
+      </div>
+
+      <div class="layer-card">
+        <div class="layer-card-title">
+          <span>Layer 5: Content-Hash Delta Read Cache</span>
+          <span class="badge badge-green">−92.4%</span>
+        </div>
+        <div class="layer-card-desc">Tracks SHA-256 digests of previously ingested buffers; unchanged files emit 290-token pointer references rather than full redundant payloads.</div>
+      </div>
+
+      <div class="layer-card">
+        <div class="layer-card-title">
+          <span>Layer 6: Prompt Prefix Cache Pinning</span>
+          <span class="badge badge-green">84.0% Hit</span>
+        </div>
+        <div class="layer-card-desc">Enforces strict prefix byte invariance for system instructions and tool definitions, maximizing upstream LLM KV-cache prompt hit rates.</div>
+      </div>
+    </div>
+
+    <div class="callout-box">
       <strong>Economic Impact on Engineering Operations:</strong>
-      On frontier reasoning models (e.g., Claude 3.7 Sonnet / Gemini 2.5 Pro at $3.00 per million input tokens), a 15-turn unoptimized session costs approximately $1.96 per engineering task. Under TokenMem v3, cumulative tokens drop from 654,185 to 77,760, reducing direct API cost to $0.23 (8.51× cost reduction) while cutting inference time-to-first-token (TTFT) by over 70%.
+      On frontier reasoning models (e.g., Claude 3.7 Sonnet / Gemini 2.5 Pro at $3.00 per million input tokens), a 15-turn unoptimized session costs approximately $1.96 per engineering task. Under TokenMem v3, cumulative tokens drop from 654,185 to 77,760, reducing direct API cost to <strong>$0.23 (8.51× cost reduction)</strong> while cutting inference time-to-first-token (TTFT) by over 70%.
     </div>
   </div>
 
@@ -761,7 +1137,7 @@
   </div>
 </div>
 
-<!-- ==================== PAGE 5 OF 5 ==================== -->
+<!-- ==================== PAGE 5 OF 5: ENGINEERING AUDIT & CONCLUSION ==================== -->
 <div class="page-container">
   <div class="running-header">
     <span>Dotmini Technical Report • MicroCode Architecture Evaluation</span>
@@ -783,22 +1159,22 @@
         </tr>
       </thead>
       <tbody>
-        <tr class="highlight-row">
+        <tr>
           <td><strong>Frame-0 Blank View Artifact</strong></td>
           <td><code>ContentView</code> deferred workspace mounting behind <code>isWorkspaceMounted = false</code>, stopping WindowServer timers before UI initialization.</td>
           <td>Re-architected <code>ContentView</code> to mount <code>AgenticEditorWorkspace</code> synchronously on frame 0, rendering sidebar and editor immediately.</td>
         </tr>
-        <tr class="highlight-row">
+        <tr>
           <td><strong>CLI Single-File Break Loop</strong></td>
           <td>Command-line argument loop in <code>MicroCodeApp.swift</code> broke after the first argument, only opening the primary file and skipping the root workspace.</td>
           <td>Implemented <code>openLocalLaunchTargets</code> to ingest both <code>&lt;workspace_dir&gt;</code> and <code>&lt;primary_file&gt;</code> concurrently, matching Zed and VS Code.</td>
         </tr>
-        <tr class="highlight-row">
+        <tr>
           <td><strong>Background Process RAM Spike</strong></td>
           <td><code>LocalEcosystemDiscovery</code> spawned <code>agy models</code> at <em>T</em>+3.5s, invoking an external Electron CLI that bloated RAM to 914.2 MB (105 threads).</td>
           <td>Restricted background CLI discovery to cached model manifests during passive startup, stabilizing steady-state RAM at <strong>194.8 MB</strong>.</td>
         </tr>
-        <tr class="highlight-row">
+        <tr>
           <td><strong>Duplicate Workspace Reload</strong></td>
           <td><code>loadSettings()</code> executed an unconditioned 0.35s timer that reloaded <code>lastWorkspacePath</code> over the active CLI session.</td>
           <td>Added strict guard <code>self.workspaceFolder == nil</code> in <code>AppState.swift</code>, reducing workspace ready latency by 206 ms.</td>
@@ -812,32 +1188,29 @@
       While MicroCode v2.5.32 dominates in resident memory (194.8 MB), thread overhead (14 threads), and AI context economics, it trails Zed in cold-start window display by 107.1 ms (769.9 ms vs. 662.8 ms). To achieve #1 in cold startup, four optimizations are scheduled for v2.5.33:
     </p>
 
-    <ul class="academic-list">
-      <li>
-        <strong>Whole-Module &amp; Link-Time Optimization (Release WMO + LTO):</strong> Deploying full Swift compiler Whole-Module Optimization with dead-strip linkage is projected to reduce AppKit view tree compilation time by 140–180 ms.
-      </li>
-      <li>
-        <strong>Early CLI Argument Traversal in <code>MicroCodeApp.init()</code>:</strong> Initiating asynchronous directory enumeration and zero-copy mmap staging inside <code>App.init()</code> prior to <code>WindowGroup</code> creation will eliminate the remaining delta between <em>T</em><sub>win</sub> and <em>T</em><sub>ready</sub>.
-      </li>
-      <li>
-        <strong>Lazy Secondary Feature Module Instantiation:</strong> Deferring non-critical sub-views (Device Preview Dock, Science Overlay, and Team Collaboration) to post-paint run-loops.
-      </li>
-    </ul>
+    <div class="grid-2col" style="margin-bottom: 3pt;">
+      <div class="layer-card">
+        <div class="layer-card-title">Whole-Module Optimization (Release WMO + LTO)</div>
+        <div class="layer-card-desc">Deploying full Swift compiler Whole-Module Optimization with dead-strip linkage is projected to reduce AppKit view tree compilation time by 140–180 ms.</div>
+      </div>
+      <div class="layer-card">
+        <div class="layer-card-title">Early CLI Argument Traversal in App.init()</div>
+        <div class="layer-card-desc">Initiating asynchronous directory enumeration and zero-copy mmap staging inside <code>App.init()</code> prior to <code>WindowGroup</code> creation will eliminate the delta between <em>T</em><sub>win</sub> and <em>T</em><sub>ready</sub>.</div>
+      </div>
+    </div>
 
     <h2 class="sec-heading">8. Data Availability &amp; Certification Statement</h2>
     <p>
       All benchmark harnesses (<code>benchmarks/run_ide_benchmarks.py</code>), raw telemetry JSON datasets (<code>benchmarks/results/ide_benchmark_results.json</code>), and source trees are committed to the official repository for 100% independent replication.
     </p>
 
-    <!-- Academic Certification Box -->
-    <div class="fig-container" style="background: #ffffff; border-color: #0f172a; margin-top: 8pt; padding: 7pt 10pt;">
-      <div style="font-family: -apple-system, BlinkMacSystemFont, sans-serif; font-size: 7.8pt; font-weight: 700; color: #0f172a; margin-bottom: 3pt;">
-        Official Certification of Engineering Reproducibility
-      </div>
-      <p style="font-size: 7.3pt; color: #334155; margin-bottom: 5pt; line-height: 1.4;">
+    <!-- Official Certification Box -->
+    <div class="cert-box">
+      <div class="cert-header">Official Certification of Engineering Reproducibility</div>
+      <div class="cert-body">
         I hereby certify that the experimental data, kernel traces, and comparative metrics presented in this technical report were obtained under 100% identical hardware, OS, and workspace conditions without synthetic bias or privileged instrumentation.
-      </p>
-      <div style="display: flex; justify-content: space-between; font-family: -apple-system, BlinkMacSystemFont, sans-serif; font-size: 7.3pt; border-top: 0.5pt solid #cbd5e1; padding-top: 4pt; color: #475569;">
+      </div>
+      <div class="cert-sig-row">
         <div>
           <strong>Tirawat Nantamas</strong><br>
           Founder &amp; Chief Technology Officer • Dotmini Software Co., Ltd.
