@@ -45,6 +45,7 @@ extension-host/target/
 backend/.cargo/
 Cargo.lock
 !backend/Cargo.lock
+!microcode_core/Cargo.lock
 
 # ----- Node.js -----
 node_modules/

@@ -16,6 +16,7 @@ class PiPWindowManager {
     static let shared = PiPWindowManager()
     
     private var pipWindow: NSWindow?
+    private var windowDelegate: WindowCloseDelegate?
     private var onCloseCallback: (() -> Void)?
     
     private init() {}
@@ -40,10 +41,13 @@ class PiPWindowManager {
         window.level = .floating
         window.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary]
         window.isReleasedWhenClosed = false
-        window.delegate = WindowCloseDelegate(onClose: { [weak self] in
+        let delegate = WindowCloseDelegate(onClose: { [weak self] in
             self?.onCloseCallback?()
             self?.pipWindow = nil
+            self?.windowDelegate = nil
         })
+        self.windowDelegate = delegate
+        window.delegate = delegate
         
         // Create SwiftUI content
         let contentView = PiPWindowContent(documentURL: documentURL, onClose: { [weak self] in
@@ -66,8 +70,10 @@ class PiPWindowManager {
     }
     
     func close() {
+        pipWindow?.delegate = nil
         pipWindow?.close()
         pipWindow = nil
+        windowDelegate = nil
     }
 }
 
@@ -257,18 +263,19 @@ struct DocumentViewer: View {
     private func loadDroppedFile(from providers: [NSItemProvider]) -> Bool {
         guard let provider = providers.first else { return false }
         
-        provider.loadItem(forTypeIdentifier: UTType.item.identifier, options: nil) { (item, error) in
-            guard let data = item as? Data,
-                  let url = URL(dataRepresentation: data, relativeTo: nil) else {
-                // Try to get URL directly
-                if let url = item as? URL {
-                    DispatchQueue.main.async {
-                        self.documentURL = url
-                    }
+        provider.loadItem(forTypeIdentifier: UTType.item.identifier, options: nil) { (item, _) in
+            if let data = item as? Data,
+               let droppedURL = URL(dataRepresentation: data, relativeTo: nil) {
+                DispatchQueue.main.async {
+                    self.documentURL = droppedURL
                 }
                 return
             }
-            // If needed, handle data-based drops, but file URL drops are standard for Finder
+            if let url = item as? URL {
+                DispatchQueue.main.async {
+                    self.documentURL = url
+                }
+            }
         }
         return true
     }

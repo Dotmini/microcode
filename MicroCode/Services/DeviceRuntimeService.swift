@@ -1786,6 +1786,13 @@ final class DeviceRuntimeService: ObservableObject {
         decodeNextAndroidFrameIfNeeded()
     }
 
+    private struct SendableAndroidPreviewFrame: Sendable {
+        let cgImage: CGImage
+        let thumbWidth: Int
+        let thumbHeight: Int
+        let sourceSize: CGSize
+    }
+
     private func decodeNextAndroidFrameIfNeeded() {
         guard !isDecodingAndroidFrame, let data = pendingAndroidFrame else { return }
         pendingAndroidFrame = nil
@@ -1797,7 +1804,10 @@ final class DeviceRuntimeService: ObservableObject {
             guard let self else { return }
             isDecodingAndroidFrame = false
             if let capture {
-                embeddedAndroidImage = capture.image
+                embeddedAndroidImage = NSImage(
+                    cgImage: capture.cgImage,
+                    size: NSSize(width: capture.thumbWidth, height: capture.thumbHeight)
+                )
                 embeddedAndroidPixelSize = capture.sourceSize
                 embeddedAndroidStatus = "Live · \(Int(capture.sourceSize.width)) × \(Int(capture.sourceSize.height))"
             }
@@ -1849,7 +1859,7 @@ final class DeviceRuntimeService: ObservableObject {
         androidInputSerial = nil
     }
 
-    private nonisolated static func makeAndroidPreview(from data: Data) -> (image: NSImage, sourceSize: CGSize)? {
+    private nonisolated static func makeAndroidPreview(from data: Data) -> SendableAndroidPreviewFrame? {
         guard let source = CGImageSourceCreateWithData(data as CFData, nil),
               let properties = CGImageSourceCopyPropertiesAtIndex(source, 0, nil) as? [CFString: Any],
               let width = properties[kCGImagePropertyPixelWidth] as? CGFloat,
@@ -1865,7 +1875,12 @@ final class DeviceRuntimeService: ObservableObject {
             kCGImageSourceShouldCacheImmediately: false
         ]
         guard let image = CGImageSourceCreateThumbnailAtIndex(source, 0, options as CFDictionary) else { return nil }
-        return (NSImage(cgImage: image, size: NSSize(width: image.width, height: image.height)), CGSize(width: width, height: height))
+        return SendableAndroidPreviewFrame(
+            cgImage: image,
+            thumbWidth: image.width,
+            thumbHeight: image.height,
+            sourceSize: CGSize(width: width, height: height)
+        )
     }
 
     /// Starts the real platform runtime. Errors propagate to Build & Run so a
@@ -1925,8 +1940,10 @@ final class DeviceRuntimeService: ObservableObject {
                 if deviceRuntimeProcess?.isRunning != true {
                     let process = Process()
                     process.executableURL = URL(fileURLWithPath: emulator)
-                    // Launch emulator with native window visible so the user actually sees their Android Emulator running
-                    process.arguments = ["-avd", avdName, "-no-audio", "-no-boot-anim", "-no-metrics", "-crash-report-mode", "disabled", "-gpu", "host", "-cores", "4", "-netdelay", "none", "-netspeed", "full"]
+                    // Launch emulator with native window visible and sane 2048 MB guest RAM cap so QEMU never balloons MicroCode's macOS Coalition to 5+ GB
+                    let configuredRAM = UserDefaults.standard.integer(forKey: "microcode.androidEmulatorMemoryMB")
+                    let guestMemoryMB = String(configuredRAM >= 1536 ? configuredRAM : 2048)
+                    process.arguments = ["-avd", avdName, "-memory", guestMemoryMB, "-no-audio", "-no-boot-anim", "-no-metrics", "-crash-report-mode", "disabled", "-gpu", "host", "-cores", "4", "-netdelay", "none", "-netspeed", "full"]
                     process.standardOutput = FileHandle.nullDevice
                     process.standardError = FileHandle.nullDevice
                     try process.run()
@@ -2030,7 +2047,8 @@ final class DeviceRuntimeService: ObservableObject {
         guard device.platform == .android else { throw ToolBoxError.executionFailed("Choose an Android target for this project.") }
         let serial = try await readyAndroidSerial(for: device)
         let gradle = FileManager.default.fileExists(atPath: project.root.appendingPathComponent("gradlew").path) ? "./gradlew" : "gradle"
-        let result = try await command(gradle, ["installDebug"], directory: project.root)
+        // Use --no-daemon and a 1536m JVM heap cap so Gradle does not leave a 1.2+ GB background Java daemon inside MicroCode's process coalition
+        let result = try await command(gradle, ["installDebug", "--no-daemon", "-Dorg.gradle.jvmargs=-Xmx1536m -XX:MaxMetaspaceSize=512m"], directory: project.root)
         appendOutput(result.output)
         guard let applicationID = androidApplicationID(project.root) else {
             statusMessage = "Installed debug build on \(device.name). Add an applicationId to launch it automatically."

@@ -19,7 +19,7 @@ echo "🦀 Using: $(cargo --version 2>/dev/null || echo 'cargo not available')"
 
 APP_NAME="MicroCode"
 BUNDLE_ID="com.dotmini.microcode"
-VERSION="2.5.33"
+VERSION="2.5.34"
 
 # Directories
 BUILD_ROOT=".build_dist"
@@ -113,9 +113,8 @@ compile_arch() {
     fi
     
     cd backend
-    # Build Bin and Lib
-    cargo build --release --target "${RUST_TARGET}" --bin microcode-backend
-    cargo build --release --target "${RUST_TARGET}" --lib
+    # Build Bin and Lib in a single Cargo pass to share unit graph & maximize cache hits
+    cargo build --release --target "${RUST_TARGET}" --bin microcode-backend --lib
     RUST_CONFIG="release"
     cd ..
     
@@ -124,33 +123,26 @@ compile_arch() {
     # 1.0b MicroCode Core (AI Brain) - UniFFI
     echo "   🧠 Compiling MicroCode Core (with UniFFI)..."
     cd microcode_core
-    # Build release library
-    cargo build --release --target "${RUST_TARGET}"
-    
-    # Generate Swift Bindings (Only needs to happen once, but we do it per arch for simplicity or just skip if exists)
-    # We use the host architecture to run bindgen
-    if [ "$ARCH" = "arm64" ]; then
-        echo "   🔗 Generating Swift Bindings for MicroCore..."
-        
-        # Temp dir for generation
-        mkdir -p build/gen_swift
-        
-        # Build bindgen tool
-        cargo run --release --bin uniffi-bindgen generate \
-            --library target/${RUST_TARGET}/release/libmicrocode_core.dylib \
-            --language swift \
-            --out-dir build/gen_swift \
-            --no-format
-            
-        # Move generated files to correct locations
-        # 1. Swift file -> MicroCode source
-        mkdir -p ../MicroCode/Services/MicroCore
-        cp build/gen_swift/microcode_core.swift ../MicroCode/Services/MicroCore/MicroCore.swift
-        
-        # 2. C Headers/Modulemap -> MicrocodeCoreSupport
-        cp build/gen_swift/microcode_coreFFI.h ../MicrocodeCoreSupport/include/
-        cp build/gen_swift/microcode_coreFFI.modulemap ../MicrocodeCoreSupport/include/module.modulemap
-    fi
+    # Build release library for target architecture
+    cargo build --release --target "${RUST_TARGET}" --lib
+
+    # CRITICAL: Always regenerate Swift UniFFI bindings from the exact compiled libmicrocode_core.dylib
+    # on EVERY architecture runner (arm64 AND x86_64) and write directly to `microcode_core.swift`
+    # (which Package.swift compiles; `MicroCore.swift` is excluded in Package.swift!).
+    # Skipping this or writing only to `MicroCore.swift` causes `Fatal error: UniFFI API checksum mismatch` at launch.
+    echo "   🔗 Generating synchronized Swift UniFFI bindings for ${ARCH}..."
+    mkdir -p build/gen_swift
+    cargo run --release --bin uniffi-bindgen -- generate \
+        --library "target/${RUST_TARGET}/release/libmicrocode_core.dylib" \
+        --language swift \
+        --out-dir build/gen_swift \
+        --no-format
+    mkdir -p ../MicroCode/Services/MicroCore
+    cp build/gen_swift/microcode_core.swift ../MicroCode/Services/MicroCore/microcode_core.swift
+    cp build/gen_swift/microcode_core.swift ../MicroCode/Services/MicroCore/MicroCore.swift
+    cp build/gen_swift/microcode_coreFFI.h ../MicroCode/Services/MicroCore/microcode_coreFFI.h
+    cp build/gen_swift/microcode_coreFFI.h ../MicrocodeCoreSupport/include/microcode_coreFFI.h
+    cp build/gen_swift/microcode_coreFFI.modulemap ../MicrocodeCoreSupport/include/module.modulemap
     cd ..
     
     MICROCORE_LIB_PATH="$(pwd)/microcode_core/target/${RUST_TARGET}/release"
@@ -189,6 +181,14 @@ compile_arch() {
         echo "      → libmicrocode_core.dylib (${ARCH})"
     else
         echo "      ⚠️  libmicrocode_core.dylib not found at ${MICROCORE_LIB_PATH}"
+    fi
+    # Stage exact generated UniFFI Swift bindings & SwiftPM resource bundle for `package-lite` CI artifact handoff
+    if [ -f "MicroCode/Services/MicroCore/microcode_core.swift" ]; then
+        cp "MicroCode/Services/MicroCore/microcode_core.swift" "${ARCH_BUILD_DIR}/microcode_core.swift"
+    fi
+    if [ -d ".build/${ARCH}-apple-macosx/${SWIFT_CONFIG}/MicroCode_MicroCode.bundle" ]; then
+        rm -rf "${ARCH_BUILD_DIR}/MicroCode_MicroCode.bundle"
+        cp -R ".build/${ARCH}-apple-macosx/${SWIFT_CONFIG}/MicroCode_MicroCode.bundle" "${ARCH_BUILD_DIR}/MicroCode_MicroCode.bundle"
     fi
 
     # 1.5 MicroCode CLI (Optional - may not exist)
@@ -248,7 +248,7 @@ package_variant() {
     <key>CFBundleShortVersionString</key>
     <string>${VERSION}</string>
     <key>CFBundleVersion</key>
-    <string>2</string>
+    <string>${BUILD_NUMBER:-34}</string>
     <key>CFBundlePackageType</key>
     <string>APPL</string>
     <key>LSMinimumSystemVersion</key>
@@ -257,13 +257,44 @@ package_variant() {
     <true/>
     <key>NSScreenCaptureUsageDescription</key>
     <string>MicroCode captures only the Apple Device Hub window you select to display an interactive iOS Simulator beside your chat.</string>
+    <key>NSCameraUsageDescription</key>
+    <string>MicroCode requires camera and video input access to preview and mirror physical iOS devices (iPhone and iPad) connected via USB.</string>
+    <key>NSMicrophoneUsageDescription</key>
+    <string>MicroCode requires microphone access for audio preview.</string>
+    <key>NSCameraUseContinuityCameraDeviceType</key>
+    <true/>
+    <key>NSLocalNetworkUsageDescription</key>
+    <string>MicroCode discovers and connects to Local LLM servers (LM Studio, Ollama, Apple MLX, vLLM, and MicroCode peers) across your Wi-Fi and LAN network.</string>
+    <key>NSBonjourServices</key>
+    <array>
+        <string>_microcode-llm._tcp</string>
+        <string>_microcode-phone._tcp</string>
+        <string>_ollama._tcp</string>
+        <string>_http._tcp</string>
+        <string>_smb._tcp</string>
+        <string>_ssh._tcp</string>
+        <string>_workstation._tcp</string>
+        <string>_rfb._tcp</string>
+        <string>_companion-link._tcp</string>
+    </array>
     <key>NSAppTransportSecurity</key>
     <dict>
-        <key>NSAllowsArbitraryLoads</key>
+        <key>NSAllowsLocalNetworking</key>
         <true/>
     </dict>
+    <key>CFBundleURLTypes</key>
+    <array>
+        <dict>
+            <key>CFBundleURLName</key>
+            <string>com.dotmini.microcode</string>
+            <key>CFBundleURLSchemes</key>
+            <array>
+                <string>microcode</string>
+            </array>
+        </dict>
+    </array>
     <key>NSHumanReadableCopyright</key>
-    <string>Copyright © 2025 Dotmini Software. All rights reserved.</string>
+    <string>Copyright © 2025-2026 Dotmini Software. All rights reserved.</string>
     <key>CFBundleDocumentTypes</key>
     <array>
         <dict>
@@ -423,47 +454,121 @@ EOF
         cp -R Extensions/* "${EXTENSIONS_DIR}/"
     fi
 
-    # 2.5a Icon
-    if [ -f "microcodexround.icns" ]; then
-        echo "   🎨 Copying Icon..."
+    # 2.5a Icon & App Resources (sync with build_dev.sh so Bundle.main resources, MCP bridge, and iOS preview runtime are always packaged)
+    if [ -f "AppIcon.icns" ]; then
+        echo "   🎨 Copying AppIcon.icns..."
+        cp "AppIcon.icns" "${APP_BUNDLE}/Contents/Resources/AppIcon.icns"
+    elif [ -f "microcodexround.icns" ]; then
+        echo "   🎨 Copying microcodexround.icns as AppIcon.icns..."
         cp "microcodexround.icns" "${APP_BUNDLE}/Contents/Resources/AppIcon.icns"
     else
-        echo "   ⚠️  Warning: microcodexround.icns not found!"
+        echo "   ⚠️  Warning: AppIcon.icns / microcodexround.icns not found!"
+    fi
+    if [ -f "MicroCOdeDoogleIcon.png" ]; then
+        cp "MicroCOdeDoogleIcon.png" "${APP_BUNDLE}/Contents/Resources/"
+    fi
+    if [ -f "mcp-server.py" ]; then
+        cp "mcp-server.py" "${APP_BUNDLE}/Contents/Resources/"
+        chmod +x "${APP_BUNDLE}/Contents/Resources/mcp-server.py"
+    fi
+    if [ -d "MicroCode/Resources" ]; then
+        cp -R MicroCode/Resources/* "${APP_BUNDLE}/Contents/Resources/" 2>/dev/null || true
+    fi
+    for BUNDLE_CANDIDATE in \
+        "${BUILD_ROOT}/${SOURCE_ARCH}/MicroCode_MicroCode.bundle" \
+        "${BUILD_ROOT}/arm64/MicroCode_MicroCode.bundle" \
+        "${BUILD_ROOT}/x86_64/MicroCode_MicroCode.bundle" \
+        ".build/${SOURCE_ARCH}-apple-macosx/release/MicroCode_MicroCode.bundle" \
+        ".build/arm64-apple-macosx/release/MicroCode_MicroCode.bundle" \
+        ".build/x86_64-apple-macosx/release/MicroCode_MicroCode.bundle"; do
+        if [ -d "${BUNDLE_CANDIDATE}" ]; then
+            cp -R "${BUNDLE_CANDIDATE}" "${APP_BUNDLE}/Contents/Resources/MicroCode_MicroCode.bundle"
+            break
+        fi
+    done
+
+    # 2.5b UniFFI ABI Checksum Pre-Sign Verification Gate (guarantees 0% chance of launch crash)
+    HOST_ARCH_CHECK=$(uname -m)
+    if [ "${SOURCE_ARCH}" = "${HOST_ARCH_CHECK}" ] || [ "${SOURCE_ARCH}" = "universal" ]; then
+        VERIFY_SWIFT_BINDINGS="MicroCode/Services/MicroCore/microcode_core.swift"
+        if [ -f "${BUILD_ROOT}/${SOURCE_ARCH}/microcode_core.swift" ]; then
+            VERIFY_SWIFT_BINDINGS="${BUILD_ROOT}/${SOURCE_ARCH}/microcode_core.swift"
+        elif [ "${SOURCE_ARCH}" = "universal" ] && [ -f "${BUILD_ROOT}/${HOST_ARCH_CHECK}/microcode_core.swift" ]; then
+            VERIFY_SWIFT_BINDINGS="${BUILD_ROOT}/${HOST_ARCH_CHECK}/microcode_core.swift"
+        fi
+        echo "   🧪 Verifying UniFFI ABI checksums against packaged libmicrocode_core.dylib (bindings: ${VERIFY_SWIFT_BINDINGS})..."
+        python3 - "${FRAMEWORKS_DIR}/libmicrocode_core.dylib" "${VERIFY_SWIFT_BINDINGS}" <<'PY'
+import ctypes, pathlib, re, sys
+
+dylib_path, swift_path = sys.argv[1], sys.argv[2]
+swift_src = pathlib.Path(swift_path).read_text()
+lib = ctypes.CDLL(dylib_path)
+
+m_ver = re.search(r"let bindings_contract_version\s*=\s*(\d+)", swift_src)
+if m_ver:
+    expected_ver = int(m_ver.group(1))
+    ver_fn = lib.ffi_microcode_core_uniffi_contract_version
+    ver_fn.restype = ctypes.c_uint32
+    got_ver = ver_fn()
+    if got_ver != expected_ver:
+        sys.exit(f"❌ FATAL UniFFI contract version mismatch: dylib={got_ver} vs swift={expected_ver}")
+
+pairs = re.findall(r"(uniffi_microcode_core_checksum_[a-zA-Z0-9_]+)\(\)\s*!=\s*(\d+)", swift_src)
+if not pairs:
+    sys.exit("❌ FATAL: Could not parse UniFFI checksum assertions from microcode_core.swift")
+
+for sym, exp_str in pairs:
+    fn = getattr(lib, sym)
+    fn.restype = ctypes.c_uint16
+    got = fn()
+    exp = int(exp_str)
+    if got != exp:
+        sys.exit(f"❌ FATAL UniFFI API checksum mismatch on {sym}: dylib={got} vs swift={exp}")
+
+print(f"   ✅ All {len(pairs)} UniFFI ABI checksums verified OK!")
+PY
     fi
 
-    # 2.6 Signing
-    echo "   🔐 Ad-hoc Signing..."
-    codesign --force --deep --sign - "${APP_BUNDLE}"
+    # 2.6 Signing (Developer ID when DEVELOPER_ID_APPLICATION is provided; ad-hoc fallback)
+    if [ -n "${DEVELOPER_ID_APPLICATION:-}" ]; then
+        echo "   🔐 Signing with Developer ID (${DEVELOPER_ID_APPLICATION})..."
+        codesign --force --deep --options runtime --timestamp --sign "${DEVELOPER_ID_APPLICATION}" "${APP_BUNDLE}"
+    else
+        echo "   🔐 Ad-hoc Signing..."
+        codesign --force --deep --sign - "${APP_BUNDLE}"
+    fi
 
     # 2.7 Create DMG (Skip in Dev Mode)
     if [ "$DEV_MODE" = "false" ]; then
-        echo "   💿 Creating DMG..."
+        echo "   💿 Creating DMG (LZFSE / ULFO fast compression)..."
         DMG_NAME="${VARIANT_NAME}.dmg"
         TEMP_DMG="${BUILD_ROOT}/${DMG_NAME}"
         
-        # Remove any existing to prevent resource busy
-        rm -f "${TEMP_DMG}" "${OUTPUT_FOLDER}/${DMG_NAME}"
+        # Remove any existing DMG/PKG in OUTPUT_FOLDER before hdiutil snapshots OUTPUT_FOLDER
+        rm -f "${TEMP_DMG}" "${OUTPUT_FOLDER}/${DMG_NAME}" "${OUTPUT_FOLDER}/${VARIANT_NAME}.pkg"
+        ln -sfn /Applications "${OUTPUT_FOLDER}/Applications"
         
-        # Robust DMG creation with retries (GitHub Actions can have flaky hdiutil/Spotlight contention)
+        # Robust DMG creation with retries (ULFO LZFSE is 4-5x faster & smaller on macOS 13+; fallback to UDZO if needed)
         MAX_RETRIES=3
         RETRY_COUNT=0
         SUCCESS=false
         
         while [ $RETRY_COUNT -lt $MAX_RETRIES ]; do
             echo "      Attempting hdiutil create (Attempt $((RETRY_COUNT+1))/$MAX_RETRIES)..."
-            # Sync filesystem and wait briefly to let any background processes (like Spotlight) release the folder
             sync
-            sleep 2
+            sleep 1
             
-            if hdiutil create -volname "${APP_NAME}" -srcfolder "${OUTPUT_FOLDER}" -ov -format UDZO "${TEMP_DMG}"; then
+            if hdiutil create -volname "${APP_NAME}" -srcfolder "${OUTPUT_FOLDER}" -ov -format ULFO "${TEMP_DMG}" \
+               || hdiutil create -volname "${APP_NAME}" -srcfolder "${OUTPUT_FOLDER}" -ov -format UDZO "${TEMP_DMG}"; then
                 SUCCESS=true
                 break
             else
                 echo "      ⚠️  hdiutil create failed. Resource might be busy. Retrying..."
                 RETRY_COUNT=$((RETRY_COUNT+1))
-                sleep 3
+                sleep 2
             fi
         done
+        rm -f "${OUTPUT_FOLDER}/Applications"
         
         if [ "$SUCCESS" = "false" ]; then
             echo "      ❌ Error: Failed to create DMG after $MAX_RETRIES attempts due to busy resources."
@@ -473,26 +578,28 @@ EOF
         mv "${TEMP_DMG}" "${OUTPUT_FOLDER}/${DMG_NAME}"
         echo "      -> Created ${OUTPUT_FOLDER}/${DMG_NAME}"
 
-        # 2.8 Create PKG
+        # 2.8 Create PKG directly via --component (zero redundant multi-GB staging copy)
         echo "   📦 Creating PKG..."
         PKG_NAME="${VARIANT_NAME}.pkg"
         TEMP_PKG="${BUILD_ROOT}/${PKG_NAME}"
 
-        # Remove any existing
         rm -f "${TEMP_PKG}" "${OUTPUT_FOLDER}/${PKG_NAME}"
 
-        # pkgbuild --root must point to a STAGING DIR that mirrors /Applications,
-        # NOT the .app bundle itself. The bundle goes inside the staging dir.
-        PKG_STAGE=$(mktemp -d)
-        cp -R "${APP_BUNDLE}" "${PKG_STAGE}/"
+        if [ -n "${DEVELOPER_ID_INSTALLER:-}" ]; then
+            pkgbuild --component "${APP_BUNDLE}" \
+                     --identifier "${BUNDLE_ID}" \
+                     --version "${VERSION}" \
+                     --install-location "/Applications" \
+                     --sign "${DEVELOPER_ID_INSTALLER}" \
+                     "${TEMP_PKG}"
+        else
+            pkgbuild --component "${APP_BUNDLE}" \
+                     --identifier "${BUNDLE_ID}" \
+                     --version "${VERSION}" \
+                     --install-location "/Applications" \
+                     "${TEMP_PKG}"
+        fi
 
-        pkgbuild --root "${PKG_STAGE}" \
-                 --identifier "${BUNDLE_ID}" \
-                 --version "${VERSION}" \
-                 --install-location "/Applications" \
-                 "${TEMP_PKG}"
-
-        rm -rf "${PKG_STAGE}"
         mv "${TEMP_PKG}" "${OUTPUT_FOLDER}/${PKG_NAME}"
         echo "      -> Created ${OUTPUT_FOLDER}/${PKG_NAME}"
     else

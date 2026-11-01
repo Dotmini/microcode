@@ -15,7 +15,7 @@ enum BillingTier {
     case enterprise
 }
 
-class BillingService: ObservableObject {
+final class BillingService: ObservableObject, @unchecked Sendable {
     static let shared = BillingService()
     
     // MARK: - Stripe Backend Configuration
@@ -99,8 +99,15 @@ class BillingService: ObservableObject {
     }
     
     func stopComputeSession() {
-        computeTimer?.invalidate()
-        computeTimer = nil
+        if Thread.isMainThread {
+            computeTimer?.invalidate()
+            computeTimer = nil
+        } else {
+            DispatchQueue.main.async { [weak self] in
+                self?.computeTimer?.invalidate()
+                self?.computeTimer = nil
+            }
+        }
     }
     
     // MARK: - Stripe API Integration
@@ -114,8 +121,8 @@ class BillingService: ObservableObject {
     func fetchBalance() async throws {
         guard let token = await currentToken() else { throw URLError(.userAuthenticationRequired) }
         
-        DispatchQueue.main.async { self.isLoading = true }
-        defer { DispatchQueue.main.async { self.isLoading = false } }
+        await MainActor.run { self.isLoading = true }
+        defer { Task { @MainActor [weak self] in self?.isLoading = false } }
         
         guard let url = URL(string: "\(backendBaseURL)/balance") else { throw URLError(.badURL) }
         var request = URLRequest(url: url)
@@ -131,7 +138,7 @@ class BillingService: ObservableObject {
         let decoder = JSONDecoder()
         let result = try decoder.decode(BalanceResponse.self, from: data)
         
-        DispatchQueue.main.async {
+        await MainActor.run {
             self.tokenBalance = result.tokens
             self.currentTier = result.tier == "pro" ? .pro : .free
         }
@@ -159,7 +166,7 @@ class BillingService: ObservableObject {
         let decoder = JSONDecoder()
         let result = try decoder.decode(BalanceResponse.self, from: data)
         
-        DispatchQueue.main.async {
+        await MainActor.run {
             self.tokenBalance = result.tokens
         }
     }

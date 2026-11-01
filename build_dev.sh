@@ -150,9 +150,9 @@ cat > "$BUNDLE_NAME/Contents/Info.plist" <<EOF
     <key>CFBundleDisplayName</key>
     <string>MicroCode</string>
     <key>CFBundleShortVersionString</key>
-    <string>2.5.33</string>
+    <string>2.5.34</string>
     <key>CFBundleVersion</key>
-    <string>33</string>
+    <string>34</string>
     <key>CFBundlePackageType</key>
     <string>APPL</string>
     <key>CFBundleIconFile</key>
@@ -186,8 +186,6 @@ cat > "$BUNDLE_NAME/Contents/Info.plist" <<EOF
     <key>NSAppTransportSecurity</key>
     <dict>
         <key>NSAllowsLocalNetworking</key>
-        <true/>
-        <key>NSAllowsArbitraryLoads</key>
         <true/>
     </dict>
     <key>CFBundleURLTypes</key>

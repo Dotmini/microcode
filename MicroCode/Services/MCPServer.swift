@@ -933,6 +933,49 @@ class MCPServer: ObservableObject {
     
     private func runShellCommand(_ command: String, cwd: String, timeout: Int) async throws -> String {
         return try await withCheckedThrowingContinuation { continuation in
+            final class ShellProcessState: @unchecked Sendable {
+                private let outputLock = NSLock()
+                private let completionLock = NSLock()
+                private var stdout = Data()
+                private var stderr = Data()
+                private var didTimeout = false
+                private var didResume = false
+                private let continuation: CheckedContinuation<String, Error>
+
+                init(continuation: CheckedContinuation<String, Error>) {
+                    self.continuation = continuation
+                }
+
+                func append(_ data: Data, isStdout: Bool) {
+                    outputLock.lock()
+                    if isStdout { stdout.append(data) } else { stderr.append(data) }
+                    outputLock.unlock()
+                }
+
+                func markTimedOut() {
+                    outputLock.lock()
+                    didTimeout = true
+                    outputLock.unlock()
+                }
+
+                func snapshot() -> (stdout: Data, stderr: Data, timedOut: Bool) {
+                    outputLock.lock()
+                    defer { outputLock.unlock() }
+                    return (stdout, stderr, didTimeout)
+                }
+
+                func finish(_ result: Result<String, Error>) {
+                    completionLock.lock()
+                    defer { completionLock.unlock() }
+                    guard !didResume else { return }
+                    didResume = true
+                    switch result {
+                    case .success(let value): continuation.resume(returning: value)
+                    case .failure(let error): continuation.resume(throwing: error)
+                    }
+                }
+            }
+
             let process = Process()
             process.executableURL = URL(fileURLWithPath: "/bin/zsh")
             process.arguments = ["-c", command]
@@ -942,41 +985,19 @@ class MCPServer: ObservableObject {
             let errPipe = Pipe()
             process.standardOutput = pipe
             process.standardError = errPipe
-            let outputLock = NSLock()
-            let completionLock = NSLock()
-            var stdout = Data()
-            var stderr = Data()
-            var didTimeout = false
-            var didResume = false
+            let state = ShellProcessState(continuation: continuation)
             let readers = DispatchGroup()
-
-            func finish(_ result: Result<String, Error>) {
-                completionLock.lock()
-                defer { completionLock.unlock() }
-                guard !didResume else { return }
-                didResume = true
-                switch result {
-                case .success(let value): continuation.resume(returning: value)
-                case .failure(let error): continuation.resume(throwing: error)
-                }
-            }
 
             let timer = DispatchSource.makeTimerSource()
             timer.schedule(deadline: .now() + .seconds(timeout))
             timer.setEventHandler {
-                outputLock.lock()
-                didTimeout = true
-                outputLock.unlock()
+                state.markTimedOut()
                 process.terminate()
             }
             process.terminationHandler = { completedProcess in
                 timer.cancel()
                 readers.notify(queue: .global(qos: .utility)) {
-                    outputLock.lock()
-                    let outData = stdout
-                    let errData = stderr
-                    let timedOut = didTimeout
-                    outputLock.unlock()
+                    let (outData, errData, timedOut) = state.snapshot()
 
                     var output = String(data: outData, encoding: .utf8) ?? ""
                     let errorOutput = String(data: errData, encoding: .utf8) ?? ""
@@ -991,7 +1012,7 @@ class MCPServer: ObservableObject {
                     if output.count > 50000 {
                         output = String(output.prefix(50000)) + "\n...[truncated]"
                     }
-                    finish(.success(output))
+                    state.finish(.success(output))
                 }
             }
 
@@ -1002,15 +1023,13 @@ class MCPServer: ObservableObject {
                     readers.enter()
                     DispatchQueue.global(qos: .utility).async {
                         let data = handle.readDataToEndOfFile()
-                        outputLock.lock()
-                        if isStdout { stdout.append(data) } else { stderr.append(data) }
-                        outputLock.unlock()
+                        state.append(data, isStdout: isStdout)
                         readers.leave()
                     }
                 }
             } catch {
                 timer.cancel()
-                finish(.failure(error))
+                state.finish(.failure(error))
             }
         }
     }

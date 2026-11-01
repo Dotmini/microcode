@@ -631,7 +631,7 @@ struct RichMessageRow: View, Equatable {
                     icon: isCopied ? "checkmark" : "doc.on.doc",
                     label: isCopied ? "คัดลอกแล้ว" : "คัดลอก",
                     tooltip: "คัดลอกข้อความ (Copy message)",
-                    tint: isCopied ? .green : nil
+                    tint: isCopied ? .primary : nil
                 ) {
                     copyTextToClipboard(AgentService.cleanUserPromptText(message.content))
                 }
@@ -656,7 +656,7 @@ struct RichMessageRow: View, Equatable {
                     icon: isCopied ? "checkmark" : "doc.on.doc",
                     label: isCopied ? "คัดลอกแล้ว" : "คัดลอก",
                     tooltip: "คัดลอกคำตอบ (Copy response)",
-                    tint: isCopied ? .green : nil
+                    tint: isCopied ? .primary : nil
                 ) {
                     let clean = AIStructuredTurnCodec.stripThoughtTags(message.content)
                         .trimmingCharacters(in: .whitespacesAndNewlines)
@@ -694,6 +694,13 @@ struct RichMessageRow: View, Equatable {
                 }
                 
                 Spacer(minLength: 0)
+
+                if let telemetry = message.turnTelemetryLabel, !telemetry.isEmpty {
+                    Text(telemetry)
+                        .font(.system(size: 10, weight: .regular, design: .monospaced))
+                        .foregroundColor(.secondary.opacity(0.75))
+                        .padding(.leading, 8)
+                }
             }
         }
         .padding(.top, 2)

@@ -1628,25 +1628,36 @@ final class PhoneCompanionService: ObservableObject {
             ?? IDEBrowserAutomationService.shared.activePortProcesses.first?.port
         let modelLabel = currentModelDisplayLabel()
         
-        let fingerprint = [
+        let activeChatIdStr: String = agent.activeChatId ?? ""
+        let lastMsgIdStr: String = lastMsg?.id ?? ""
+        let lastMsgHash: Int = lastMsg?.content.hashValue ?? 0
+        let lastMsgToolCount: Int = lastMsg?.toolResults.count ?? 0
+        let currentToolStr: String = agent.currentToolExecution ?? ""
+        let planStateStr: String = planMgr.currentPlan?.approvalState.rawValue ?? ""
+        let planCompletedCount: Int = planMgr.currentPlan?.completedSteps ?? 0
+        let pendingReqIdStr: String = toolMgr.pendingRequest?.id.uuidString ?? ""
+        let activePortInt: Int = activePort ?? 0
+
+        let fingerprintParts: [String] = [
             currentWsPath,
-            agent.activeChatId ?? "",
-            "\(agent.chatSessions.count)",
-            "\(agent.projectGroups.count)",
-            "\(agent.messages.count)",
-            lastMsg?.id ?? "",
-            "\(lastMsg?.content.hashValue ?? 0)",
-            "\(lastMsg?.toolResults.count ?? 0)",
-            "\(agent.isLoading)",
+            activeChatIdStr,
+            String(agent.chatSessions.count),
+            String(agent.projectGroups.count),
+            String(agent.messages.count),
+            lastMsgIdStr,
+            String(lastMsgHash),
+            String(lastMsgToolCount),
+            String(agent.isLoading),
             agent.agentPhase.displayText,
-            agent.currentToolExecution ?? "",
-            "\(agent.messageQueue.count)",
+            currentToolStr,
+            String(agent.messageQueue.count),
             modelLabel,
-            planMgr.currentPlan?.approvalState.rawValue ?? "",
-            "\(planMgr.currentPlan?.completedSteps ?? 0)",
-            toolMgr.pendingRequest?.id.uuidString ?? "",
-            "\(activePort ?? 0)"
-        ].joined(separator: "|")
+            planStateStr,
+            String(planCompletedCount),
+            pendingReqIdStr,
+            String(activePortInt)
+        ]
+        let fingerprint = fingerprintParts.joined(separator: "|")
         
         if fingerprint == cachedStateFingerprint, !cachedStateData.isEmpty {
             return cachedStateData

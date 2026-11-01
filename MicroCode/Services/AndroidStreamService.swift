@@ -466,7 +466,7 @@ final class AndroidStreamService: ObservableObject {
         }
     }
 
-    private func readExactBytes(_ conn: NWConnection, length: Int, accumulated: Data = Data(), completion: @escaping (Data?) -> Void) {
+    nonisolated private func readExactBytes(_ conn: NWConnection, length: Int, accumulated: Data = Data(), completion: @escaping (Data?) -> Void) {
         let needed = length - accumulated.count
         guard needed > 0 else {
             completion(accumulated)

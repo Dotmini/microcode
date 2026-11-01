@@ -939,27 +939,52 @@ struct EmbeddedStudioView: View {
                 }
                 Spacer()
                 
-                Button(action: {
-                    if isConnected {
-                        disconnectRealSerial()
-                    } else {
-                        connectRealSerial()
-                    }
-                }) {
-                    Text(isConnected ? "DISCONNECT" : "CONNECT")
-                        .font(.system(size: 9, weight: .bold, design: .monospaced))
-                        .padding(.horizontal, 10)
-                        .padding(.vertical, 5)
-                        .background(selectedPort == nil ? (isDark ? Color.white.opacity(0.04) : Color.black.opacity(0.04)) : (isConnected ? (isDark ? Color.white.opacity(0.15) : Color.black.opacity(0.1)) : (isDark ? Color.white : Color.black)))
-                        .foregroundColor(selectedPort == nil ? (isDark ? Color(white: 0.3) : Color(white: 0.4)) : (isConnected ? (isDark ? .white : .black) : (isDark ? .black : .white)))
-                        .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
-                }
-                .buttonStyle(.plain)
-                .disabled(selectedPort == nil)
+                serialConnectActionButton
             }
             .padding(12)
             .background(isDark ? Color(white: 0.03) : Color(white: 0.92))
         }
+    }
+
+    private var serialConnectActionButton: some View {
+        let title = isConnected ? "DISCONNECT" : "CONNECT"
+        let hasPort = selectedPort != nil
+        let bgColor: Color = {
+            if !hasPort {
+                return isDark ? Color.white.opacity(0.04) : Color.black.opacity(0.04)
+            }
+            if isConnected {
+                return isDark ? Color.white.opacity(0.15) : Color.black.opacity(0.1)
+            }
+            return isDark ? Color.white : Color.black
+        }()
+        let fgColor: Color = {
+            if !hasPort {
+                return isDark ? Color(white: 0.3) : Color(white: 0.4)
+            }
+            if isConnected {
+                return isDark ? .white : .black
+            }
+            return isDark ? .black : .white
+        }()
+
+        return Button(action: {
+            if isConnected {
+                disconnectRealSerial()
+            } else {
+                connectRealSerial()
+            }
+        }) {
+            Text(title)
+                .font(.system(size: 9, weight: .bold, design: .monospaced))
+                .padding(.horizontal, 10)
+                .padding(.vertical, 5)
+                .background(bgColor)
+                .foregroundColor(fgColor)
+                .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
+        }
+        .buttonStyle(.plain)
+        .disabled(!hasPort)
     }
     
     // MARK: - Top Studio Header

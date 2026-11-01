@@ -204,6 +204,105 @@ public class ShadowWorkspaceService: ObservableObject {
         pendingChanges = []
         verificationStatus = .idle
     }
+
+    // MARK: - Lightweight Per-Turn Git Tree Checkpoints (Zero Side Effects on .git/index or HEAD)
+
+    /// Captures a fast, non-destructive Git tree SHA of the current workspace tracked files using an isolated
+    /// temporary `GIT_INDEX_FILE`. Never modifies the user's real `.git/index`, `HEAD`, branches, or reflog.
+    nonisolated public func captureTurnTreeSnapshot(workspaceRoot: String) async -> String? {
+        let trimmedRoot = workspaceRoot.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmedRoot.isEmpty else { return nil }
+        return await Task.detached(priority: .utility) {
+            let rootURL = URL(fileURLWithPath: trimmedRoot, isDirectory: true)
+            guard let gitDirRaw = Self.runGitSync(["rev-parse", "--git-dir"], cwd: rootURL) else {
+                return nil
+            }
+            let gitDirPath = gitDirRaw.hasPrefix("/")
+                ? gitDirRaw
+                : rootURL.appendingPathComponent(gitDirRaw).standardizedFileURL.path
+            let realIndexURL = URL(fileURLWithPath: gitDirPath).appendingPathComponent("index")
+            let tempIndexURL = FileManager.default.temporaryDirectory
+                .appendingPathComponent("mc-turn-idx-\(UUID().uuidString)")
+            defer {
+                try? FileManager.default.removeItem(at: tempIndexURL)
+            }
+            if FileManager.default.fileExists(atPath: realIndexURL.path) {
+                try? FileManager.default.copyItem(at: realIndexURL, to: tempIndexURL)
+            }
+            let env = ["GIT_INDEX_FILE": tempIndexURL.path]
+            _ = Self.runGitSync(["add", "-u"], cwd: rootURL, extraEnv: env)
+            guard let treeSHA = Self.runGitSync(["write-tree"], cwd: rootURL, extraEnv: env),
+                  treeSHA.count == 40,
+                  treeSHA.allSatisfy({ $0.isHexDigit }) else {
+                return nil
+            }
+            return treeSHA
+        }.value
+    }
+
+    /// Restores tracked working-tree files from a previously captured `captureTurnTreeSnapshot` tree SHA
+    /// using an isolated temporary `GIT_INDEX_FILE`, leaving the user's real `.git/index` and `HEAD` untouched.
+    nonisolated public func restoreTurnTreeSnapshot(workspaceRoot: String, treeSHA: String) async -> Bool {
+        let trimmedRoot = workspaceRoot.trimmingCharacters(in: .whitespacesAndNewlines)
+        let cleanSHA = treeSHA.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        guard !trimmedRoot.isEmpty,
+              cleanSHA.count == 40,
+              cleanSHA.allSatisfy({ $0.isHexDigit }) else {
+            return false
+        }
+        return await Task.detached(priority: .userInitiated) {
+            let rootURL = URL(fileURLWithPath: trimmedRoot, isDirectory: true)
+            guard let gitDirRaw = Self.runGitSync(["rev-parse", "--git-dir"], cwd: rootURL) else {
+                return false
+            }
+            let gitDirPath = gitDirRaw.hasPrefix("/")
+                ? gitDirRaw
+                : rootURL.appendingPathComponent(gitDirRaw).standardizedFileURL.path
+            let realIndexURL = URL(fileURLWithPath: gitDirPath).appendingPathComponent("index")
+            let tempIndexURL = FileManager.default.temporaryDirectory
+                .appendingPathComponent("mc-restore-idx-\(UUID().uuidString)")
+            defer {
+                try? FileManager.default.removeItem(at: tempIndexURL)
+            }
+            if FileManager.default.fileExists(atPath: realIndexURL.path) {
+                try? FileManager.default.copyItem(at: realIndexURL, to: tempIndexURL)
+            }
+            let env = ["GIT_INDEX_FILE": tempIndexURL.path]
+            return Self.runGitSync(["checkout", cleanSHA, "--", "."], cwd: rootURL, extraEnv: env) != nil
+        }.value
+    }
+
+    nonisolated private static func runGitSync(
+        _ args: [String],
+        cwd: URL,
+        extraEnv: [String: String] = [:]
+    ) -> String? {
+        let proc = Process()
+        proc.executableURL = URL(fileURLWithPath: "/usr/bin/git")
+        proc.arguments = args
+        proc.currentDirectoryURL = cwd
+        if !extraEnv.isEmpty {
+            var env = ProcessInfo.processInfo.environment
+            for (k, v) in extraEnv {
+                env[k] = v
+            }
+            proc.environment = env
+        }
+        let outPipe = Pipe()
+        let errPipe = Pipe()
+        proc.standardOutput = outPipe
+        proc.standardError = errPipe
+        do {
+            try proc.run()
+            proc.waitUntilExit()
+            guard proc.terminationStatus == 0 else { return nil }
+            let data = outPipe.fileHandleForReading.readDataToEndOfFile()
+            return String(data: data, encoding: .utf8)?
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+        } catch {
+            return nil
+        }
+    }
 }
 
 // MARK: - Models

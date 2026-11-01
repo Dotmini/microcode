@@ -180,6 +180,21 @@ enum StreamableAIProvider: String, CaseIterable {
         if m.contains("llama-3.3-70b-versatile") || m.contains("llama-3.1-8b-instant") || m.contains("groq") { return .groq }
         return .omni
     }
+
+    static func detect(from model: String, baseURL: String) -> StreamableAIProvider {
+        let lowerURL = baseURL.lowercased()
+        if lowerURL.contains("tokenme.limited") { return .tokenme }
+        if lowerURL.contains("openrouter.ai") { return .openrouter }
+        if lowerURL.contains("githubcopilot.com") { return .copilot }
+        if lowerURL.contains("perchai.app") { return .perch }
+        if lowerURL.contains("opentyphoon.ai") { return .typhoon }
+        if lowerURL.contains("groq.com") { return .groq }
+        if lowerURL.contains("together.xyz") { return .together }
+        if lowerURL.contains("fireworks.ai") { return .fireworks }
+        if lowerURL.contains("cerebras.ai") { return .cerebras }
+        if lowerURL.contains("127.0.0.1:20128") { return .ninerouter }
+        return detect(from: model)
+    }
 }
 
 // MARK: - Attachments
@@ -3038,10 +3053,13 @@ final class AIClient: ObservableObject {
             if let usage = json["usage"] as? [String: Any] {
                 let promptTok = usage["prompt_tokens"] as? Int ?? 0
                 let completionTok = usage["completion_tokens"] as? Int ?? 0
-                let cachedTok = (usage["prompt_tokens_details"] as? [String: Any])?["cached_tokens"] as? Int ?? 0
+                let detailsCached = (usage["prompt_tokens_details"] as? [String: Any])?["cached_tokens"] as? Int
+                let hitCached = (usage["prompt_cache_hit_tokens"] as? Int) ?? (usage["cache_read_input_tokens"] as? Int)
+                let cachedTok = detailsCached ?? hitCached ?? 0
+                let resolvedProvider = StreamableAIProvider.detect(from: model, baseURL: baseURL).rawValue
                 Task { @MainActor in
                     AIUsageTracker.shared.record(
-                        provider: StreamableAIProvider.detect(from: model).rawValue,
+                        provider: resolvedProvider,
                         model: model,
                         promptTokens: promptTok,
                         completionTokens: completionTok,
@@ -3639,10 +3657,13 @@ final class AIClient: ObservableObject {
         if let usage = json["usage"] as? [String: Any] {
             let promptTok = usage["prompt_tokens"] as? Int ?? 0
             let completionTok = usage["completion_tokens"] as? Int ?? 0
-            let cachedTok = (usage["prompt_tokens_details"] as? [String: Any])?["cached_tokens"] as? Int ?? 0
+            let detailsCached = (usage["prompt_tokens_details"] as? [String: Any])?["cached_tokens"] as? Int
+            let hitCached = (usage["prompt_cache_hit_tokens"] as? Int) ?? (usage["cache_read_input_tokens"] as? Int)
+            let cachedTok = detailsCached ?? hitCached ?? 0
+            let resolvedProvider = StreamableAIProvider.detect(from: model, baseURL: baseURL).rawValue
             Task { @MainActor in
                 AIUsageTracker.shared.record(
-                    provider: StreamableAIProvider.detect(from: model).rawValue,
+                    provider: resolvedProvider,
                     model: model,
                     promptTokens: promptTok,
                     completionTokens: completionTok,
@@ -3700,16 +3721,31 @@ final class AIClient: ObservableObject {
             let content = msg.first(where: { $0.0 == "text" })?.1 as? String ?? ""
             let trimmed = content.trimmingCharacters(in: .whitespacesAndNewlines)
             guard !trimmed.isEmpty else { continue }
-            if let last = apiMessages.last, (last["role"] as? String) == role, let lastText = last["content"] as? String {
-                apiMessages[apiMessages.count - 1] = ["role": role, "content": lastText + "\n\n" + trimmed]
+            if let last = apiMessages.last,
+               (last["role"] as? String) == role,
+               var blocks = last["content"] as? [[String: Any]],
+               let lastBlockText = blocks.last?["text"] as? String {
+                blocks[blocks.count - 1] = ["type": "text", "text": lastBlockText + "\n\n" + trimmed]
+                apiMessages[apiMessages.count - 1] = ["role": role, "content": blocks]
             } else {
-                apiMessages.append(["role": role, "content": trimmed])
+                apiMessages.append(["role": role, "content": [["type": "text", "text": trimmed]]])
             }
         }
         if apiMessages.isEmpty {
-            apiMessages.append(["role": "user", "content": "Continue with the task."])
+            apiMessages.append(["role": "user", "content": [["type": "text", "text": "Continue with the task."]]])
         } else if apiMessages.first?["role"] as? String == "assistant" {
-            apiMessages.insert(["role": "user", "content": "Please begin."], at: 0)
+            apiMessages.insert(["role": "user", "content": [["type": "text", "text": "Please begin."]]], at: 0)
+        }
+
+        // Anthropic Multi-Turn Dual-Breakpoint Prompt Caching on last 2 user turns
+        let userTurnIndices = apiMessages.indices.filter { (apiMessages[$0]["role"] as? String) == "user" }
+        for targetIdx in userTurnIndices.suffix(2) {
+            if var userBlocks = apiMessages[targetIdx]["content"] as? [[String: Any]], !userBlocks.isEmpty {
+                var lastBlock = userBlocks[userBlocks.count - 1]
+                lastBlock["cache_control"] = ["type": "ephemeral"]
+                userBlocks[userBlocks.count - 1] = lastBlock
+                apiMessages[targetIdx]["content"] = userBlocks
+            }
         }
         
         let effectiveModel = normalizeModelName(model, provider: .anthropic, baseURL: baseURL)

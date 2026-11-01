@@ -37,7 +37,8 @@ struct TokenUsageRecord: Identifiable, Codable, Equatable {
         cachedTokens: Int = 0,
         taskLabel: String = "Chat",
         inputPricePerMillion: Double = 0.0,
-        outputPricePerMillion: Double = 0.0
+        outputPricePerMillion: Double = 0.0,
+        cachedPricePerMillion: Double? = nil
     ) {
         self.id = UUID()
         self.timestamp = Date()
@@ -52,8 +53,9 @@ struct TokenUsageRecord: Identifiable, Codable, Equatable {
         // Calculate estimated cost (guard against cachedTokens > promptTokens when providers report uncached prompt tokens)
         let safeCached = max(0, min(cachedTokens, max(promptTokens, cachedTokens)))
         let uncachedPrompt = max(0, promptTokens - safeCached)
+        let effectiveCachedPrice = cachedPricePerMillion ?? (max(0.0, inputPricePerMillion) * 0.25)
         let inputCost = Double(uncachedPrompt) * max(0.0, inputPricePerMillion) / 1_000_000.0
-        let cachedCost = Double(safeCached) * (max(0.0, inputPricePerMillion) * 0.25) / 1_000_000.0
+        let cachedCost = Double(safeCached) * max(0.0, effectiveCachedPrice) / 1_000_000.0
         let outputCost = Double(max(0, completionTokens)) * max(0.0, outputPricePerMillion) / 1_000_000.0
         self.estimatedCostUSD = max(0.0, inputCost + cachedCost + outputCost)
     }
@@ -119,13 +121,19 @@ struct ModelPricing {
         "o3": ModelPricing(input: 10.00, output: 40.00),
         "o3-mini": ModelPricing(input: 1.10, output: 4.40),
         "o4-mini": ModelPricing(input: 1.10, output: 4.40),
-        // Anthropic
-        "claude-3-5-sonnet": ModelPricing(input: 3.00, output: 15.00),
-        "claude-3-5-haiku": ModelPricing(input: 0.80, output: 4.00),
-        "claude-3-7-sonnet": ModelPricing(input: 3.00, output: 15.00),
-        "claude-3-opus": ModelPricing(input: 15.00, output: 75.00),
+        "gpt-oss-120b": ModelPricing(input: 0.15, output: 0.60, cached: 0.03),
+        // Anthropic (90% cache read discount)
+        "claude-sonnet-4-6": ModelPricing(input: 3.00, output: 15.00, cached: 0.30),
+        "claude-opus-4-6": ModelPricing(input: 15.00, output: 75.00, cached: 1.50),
+        "claude-haiku-4-5": ModelPricing(input: 0.80, output: 4.00, cached: 0.08),
+        "claude-3-5-sonnet": ModelPricing(input: 3.00, output: 15.00, cached: 0.30),
+        "claude-3-5-haiku": ModelPricing(input: 0.80, output: 4.00, cached: 0.08),
+        "claude-3-7-sonnet": ModelPricing(input: 3.00, output: 15.00, cached: 0.30),
+        "claude-3-opus": ModelPricing(input: 15.00, output: 75.00, cached: 1.50),
         
         // Google Gemini
+        "gemini-3.6-flash": ModelPricing(input: 0.15, output: 0.60, cached: 0.0375),
+        "gemini-3.6-pro": ModelPricing(input: 1.25, output: 10.00, cached: 0.3125),
         "gemini-2.5-flash": ModelPricing(input: 0.10, output: 0.40, cached: 0.025),
         "gemini-2.5-pro": ModelPricing(input: 1.25, output: 5.00, cached: 0.3125),
         "gemini-2.0-flash": ModelPricing(input: 0.10, output: 0.40, cached: 0.025),
@@ -134,7 +142,9 @@ struct ModelPricing {
         "gemini-1.5-pro": ModelPricing(input: 1.25, output: 5.00, cached: 0.3125),
         "gemini-1.5-flash": ModelPricing(input: 0.075, output: 0.30, cached: 0.01875),
         
-        // DeepSeek
+        // DeepSeek & TokenMe (9ARM)
+        "deepseek-v4-flash": ModelPricing(input: 0.14, output: 0.28, cached: 0.014),
+        "deepseek-v4": ModelPricing(input: 0.27, output: 1.10, cached: 0.07),
         "deepseek-chat": ModelPricing(input: 0.14, output: 0.28, cached: 0.014),
         "deepseek-coder": ModelPricing(input: 0.14, output: 0.28, cached: 0.014),
         "deepseek-reasoner": ModelPricing(input: 0.55, output: 2.19, cached: 0.14),
@@ -142,6 +152,7 @@ struct ModelPricing {
         "deepseek-v3": ModelPricing(input: 0.14, output: 0.28, cached: 0.014),
         
         // Qwen
+        "qwen3.8-27b": ModelPricing(input: 0.20, output: 0.60, cached: 0.05),
         "qwen-max": ModelPricing(input: 1.60, output: 6.40),
         "qwen-plus": ModelPricing(input: 0.80, output: 3.20),
         "qwen-turbo": ModelPricing(input: 0.30, output: 0.60),
@@ -272,7 +283,8 @@ final class AIUsageTracker: ObservableObject {
             cachedTokens: cachedTokens,
             taskLabel: taskLabel,
             inputPricePerMillion: pricing.inputPerMillion,
-            outputPricePerMillion: pricing.outputPerMillion
+            outputPricePerMillion: pricing.outputPerMillion,
+            cachedPricePerMillion: pricing.cachedInputPerMillion
         )
         
         records.append(record)

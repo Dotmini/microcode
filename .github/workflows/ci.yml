@@ -39,6 +39,7 @@ env:
   MACOSX_DEPLOYMENT_TARGET: "13.0"
   RUST_BACKTRACE: 1
   CARGO_TERM_COLOR: always
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: "true"
 
 jobs:
   # ══════════════════════════════════════════════════════════════════════════
@@ -54,12 +55,12 @@ jobs:
 
       - name: Verify SHA256 checksums
         run: |
-          if [ -f "CHECKSUMS.sha256" ] && [ -f "verify_checksums.sh" ]; then
-            chmod +x verify_checksums.sh
-            ./verify_checksums.sh
-          else
-            echo "⚠️ No checksums found — skipping"
+          if [ ! -f "CHECKSUMS.sha256" ] || [ ! -f "verify_checksums.sh" ]; then
+            echo "❌ CHECKSUMS.sha256 or verify_checksums.sh is missing!"
+            exit 1
           fi
+          chmod +x verify_checksums.sh
+          ./verify_checksums.sh
 
       - name: Scan for hardcoded secrets
         run: |
@@ -131,14 +132,14 @@ jobs:
           echo "✅ Swift compilation check complete"
         continue-on-error: true
 
-      - name: Rust lint
+      - name: Rust check & lint
         run: |
-          if [ -d "backend" ]; then
+          export PATH="$HOME/.cargo/bin:$PATH"
+          if [ -d "backend" ] && command -v cargo &>/dev/null; then
             cd backend
-            cargo check 2>&1 | tail -20
+            cargo check
             cargo clippy --all-targets -- -W clippy::all 2>&1 | tail -30 || true
           fi
-        continue-on-error: true
 
       - name: Check for TODO/FIXME in production code
         run: |
@@ -181,7 +182,7 @@ jobs:
           elif git describe --tags --abbrev=0 2>/dev/null; then
             VERSION="$(git describe --tags --abbrev=0 | sed 's/^v//')"
           else
-            VERSION="2.5.33"
+            VERSION="2.5.34"
           fi
           BUILD_NUMBER=$(git rev-list --count HEAD)
           SHORT_SHA=$(git rev-parse --short HEAD)
@@ -337,6 +338,9 @@ jobs:
 
       - name: "🏗️ Package Lite Universal DMG"
         run: ./build_distribution.sh --mode lite-only
+        env:
+          CI: true
+          BUILD_NUMBER: ${{ needs.build-arch.outputs.build_number }}
 
       - name: Collect Lite DMG and PKG
         run: |
@@ -409,23 +413,28 @@ jobs:
       - name: Integration smoke test
         run: |
           echo "🔥 Running smoke tests..."
+          MISSING=0
           # Verify critical files exist
           for f in Package.swift CHECKSUMS.sha256 LICENSE README.md; do
             if [ -f "$f" ]; then
               echo "  ✅ $f"
             else
               echo "  ❌ $f missing!"
+              MISSING=1
             fi
           done
 
           # Verify build scripts are executable
-          for s in build_distribution.sh generate_checksums.sh verify_checksums.sh; do
+          for s in build_distribution.sh generate_checksums.sh verify_checksums.sh verify_release_ready.sh; do
             if [ -f "$s" ] && [ -x "$s" ]; then
               echo "  ✅ $s (executable)"
             elif [ -f "$s" ]; then
               echo "  ⚠️  $s (not executable)"
             fi
           done
+          if [ "$MISSING" -ne 0 ]; then
+            exit 1
+          fi
 
   # ══════════════════════════════════════════════════════════════════════════
   # Job 5: Auto-Update Checksums (only on main branch push, not tags/PRs)

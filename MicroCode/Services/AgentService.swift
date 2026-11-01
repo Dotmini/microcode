@@ -200,6 +200,9 @@ class AgentService: ObservableObject {
     /// so resumed or continued sessions detect files modified externally underneath them.
     private var trackedFileSnapshots: [String: TimeInterval] = [:]
     private var hasDirtyFileSnapshots: Bool = false
+    /// Stores pre-turn Git tree checkpoints (`git write-tree` via temporary `GIT_INDEX_FILE`) keyed by message ID
+    /// so 1-click revert also restores tracked files mutated via shell scripts without touching `.git/index` or `HEAD`.
+    private var turnGitTreeSnapshots: [String: (workspace: String, treeSHA: String)] = [:]
 
     private func recordWorkspaceFileSnapshot(_ rawPath: String?) {
         guard let rawPath = rawPath, !rawPath.isEmpty else { return }
@@ -1769,6 +1772,13 @@ class AgentService: ObservableObject {
         logActivity(.thinking, "Processing request...")
 
         let userMessage = preparedUserMessage ?? prepareUserTurn(content, createStreamingPlaceholder: true)
+        let turnStartedAt = Date()
+        let usageFloorIndex = AIUsageTracker.shared.records.count
+        if domain == .software, let ws = pinnedWorkspace, !ws.isEmpty {
+            if let treeSHA = await ShadowWorkspaceService.shared.captureTurnTreeSnapshot(workspaceRoot: ws) {
+                turnGitTreeSnapshots[userMessage.id] = (workspace: ws, treeSHA: treeSHA)
+            }
+        }
         
         // P2: Record agent start in Flight Recorder
         FlightRecorder.shared.record(
@@ -3160,14 +3170,28 @@ class AgentService: ObservableObject {
         }
 
         // Finalize the assistant message
+        let currentRecords = AIUsageTracker.shared.records
+        let turnRecordsSlice = Array(currentRecords.dropFirst(min(usageFloorIndex, currentRecords.count)))
+        let telemetryLabel = Self.buildTurnTelemetryLabel(
+            elapsedSeconds: Date().timeIntervalSince(turnStartedAt),
+            records: turnRecordsSlice
+        )
         let assistantMessage = AgentMessageModel(
-            id: UUID().uuidString, role: .assistant, content: finalText,
-            toolResults: allToolResults, pendingChanges: allChanges, timestamp: Date()
+            id: UUID().uuidString,
+            role: .assistant,
+            content: finalText,
+            toolResults: allToolResults,
+            pendingChanges: allChanges,
+            timestamp: Date(),
+            turnTelemetryLabel: telemetryLabel
         )
         
         // Replace streaming placeholder with final on MainActor (strictly isolated to `runChatId` so switching
         // chats or projects mid-run never leaks messages into another conversation!)
         await MainActor.run {
+            if let snap = turnGitTreeSnapshots[userMessage.id] {
+                turnGitTreeSnapshots[assistantMessage.id] = snap
+            }
             let targetId = runChatId ?? activeChatId
             if targetId == activeChatId && runScope == activeScope {
                 messages.removeAll { $0.id == "streaming" }
@@ -4214,10 +4238,24 @@ class AgentService: ObservableObject {
         let slice = Array(messages[targetIdx..<messages.count])
 
         if restoreFiles {
+            let earliestTreeSnapshot = slice.compactMap { turnGitTreeSnapshots[$0.id] }.first
             // Walk backward from newest message to targetIdx so multi-turn edits to the same file restore to the earliest oldContent
             for msg in slice.reversed() {
                 for change in msg.pendingChanges.reversed() where change.status != .rejected {
                     revertFileChangeOnDisk(change)
+                }
+            }
+            if let snap = earliestTreeSnapshot {
+                Task {
+                    let restored = await ShadowWorkspaceService.shared.restoreTurnTreeSnapshot(
+                        workspaceRoot: snap.workspace,
+                        treeSHA: snap.treeSHA
+                    )
+                    if restored {
+                        await MainActor.run {
+                            self.logActivity(.info, "Restored workspace git tree checkpoint (\(snap.treeSHA.prefix(8)))")
+                        }
+                    }
                 }
             }
         }
@@ -4228,6 +4266,9 @@ class AgentService: ObservableObject {
         }
 
         let removedMessageIds = slice.map(\.id)
+        for removedId in removedMessageIds {
+            turnGitTreeSnapshots.removeValue(forKey: removedId)
+        }
         messages.removeSubrange(targetIdx..<messages.count)
 
         if let activeId = activeChatId {
@@ -4263,6 +4304,33 @@ class AgentService: ObservableObject {
             try? change.oldContent.write(to: url, atomically: true, encoding: .utf8)
         }
         AppState.shared?.reloadFileFromDisk(path: change.filePath, forceOverwriteUnsaved: true)
+    }
+
+    nonisolated private static func buildTurnTelemetryLabel(
+        elapsedSeconds: TimeInterval,
+        records: [TokenUsageRecord]
+    ) -> String? {
+        var parts: [String] = []
+        if elapsedSeconds >= 0.1 {
+            parts.append(String(format: "%.1fs", elapsedSeconds))
+        }
+        let totalPrompt = records.reduce(0) { $0 + $1.promptTokens }
+        let totalCompletion = records.reduce(0) { $0 + $1.completionTokens }
+        let totalCached = records.reduce(0) { $0 + $1.cachedTokens }
+        let totalTok = totalPrompt + totalCompletion
+        if totalTok > 0 {
+            let tokLabel: String = totalTok >= 1000
+                ? String(format: "%.1fk tok", Double(totalTok) / 1000.0)
+                : "\(totalTok) tok"
+            parts.append(tokLabel)
+            if totalPrompt > 0 && totalCached > 0 {
+                let pct = min(99, Int((Double(totalCached) / Double(totalPrompt) * 100.0).rounded()))
+                if pct > 0 {
+                    parts.append("\(pct)% cached")
+                }
+            }
+        }
+        return parts.isEmpty ? nil : parts.joined(separator: " · ")
     }
 
     nonisolated private static func normalizedFailureSignature(toolName: String, output: String) -> String {
@@ -5311,14 +5379,24 @@ struct AgentMessageModel: Identifiable {
     let toolResults: [ToolResultModel]
     var pendingChanges: [PendingChangeModel]
     let timestamp: Date
+    var turnTelemetryLabel: String?
     
-    init(id: String, role: MessageRole, content: String, toolResults: [ToolResultModel] = [], pendingChanges: [PendingChangeModel] = [], timestamp: Date = Date()) {
+    init(
+        id: String,
+        role: MessageRole,
+        content: String,
+        toolResults: [ToolResultModel] = [],
+        pendingChanges: [PendingChangeModel] = [],
+        timestamp: Date = Date(),
+        turnTelemetryLabel: String? = nil
+    ) {
         self.id = id
         self.role = role
         self.content = content
         self.toolResults = toolResults
         self.pendingChanges = pendingChanges
         self.timestamp = timestamp
+        self.turnTelemetryLabel = turnTelemetryLabel
     }
     
     enum MessageRole: String, Codable {
